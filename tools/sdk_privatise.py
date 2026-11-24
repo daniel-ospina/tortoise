@@ -2040,7 +2040,53 @@ SWEEP_NAMES = 66
 #: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
 #: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
 #: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
-SWEEP_RESIDUE = (11911, "3e92044bab08cc3d")
+#: ── RE-CUT ON THE `#14506` FOLD (`origin/main` `59a08fdb8b`) — THE MERGE TREE, MEASURED ─────────
+#: `surface-guard` came back RED on this PR at `05c46e24a278`, and the job log names BOTH halves:
+#: `observed: (11912, '73827c80583e139f')` against `pinned: (11911, '3e92044bab08cc3d')`. That
+#: head's own `--check` is GREEN on its own tree (0 typed, 11911), so the red is not a defect in this
+#: branch's bytes: it is the `#14062` recurrence again — the pin is graded on the PULL REQUEST's MERGE
+#: tree, `main` moved four commits under this branch, and the merged tree holds a row NEITHER
+#: parent's pin does.
+#: THREE TREES MEASURED ONE AT A TIME, IN A DETACHED WORKTREE EACH. `--report --base 28ca66878d7c
+#: --top 100000` was run on each, the row sets sorted and `diff`ed (the tuple a re-pin pastes says
+#: nothing about WHICH rows moved), and each tuple listed here is `--repin`'s own output on that tree:
+#:   * `origin/main` `59a08fdb8b` COMMITS `(11910, "adc8229295339239")`, so `main`'s own pin is ONE
+#:     ROW STALE, while its tree derives **(11911, "4ed42694957a174d")**. That stale number is
+#:     `main`'s to repair, not this PR's; it is recorded here so the next reader MEASURES it rather
+#:     than rediscovering it, which is the `#14294` / `#14308` recurrence;
+#:   * this branch's pre-merge head `05c46e24a278` COMMITS `(11911, "3e92044bab08cc3d")` — the
+#:     pin it carried, and honest about the tree it described; it is NOT the pair below, because the
+#:     tree CI grades is the MERGE tree, and no parent can supply that tree's pair;
+#:   * the RESOLVED merge tree derives **(11912, "73827c80583e139f")**, the pair CI observed.
+#: ⛔ THE TWO PARENTS CARRY THE SAME COUNT AND DIFFERENT DIGESTS, which is the precise reason the pin
+#: has a digest half: a count-only gate would have read this fold as "nothing moved" while BOTH sides
+#: had changed the SET. The merged digest equals NEITHER parent's — the proof that a merged tree is a
+#: THIRD tree.
+#: BOTH DIRECTIONS ARE ATTRIBUTED ROW BY ROW, because a net +1 can hide one change each way:
+#:   * main → merged is **+1**, and it is THIS BRANCH's own row: `recorded.update` 1 — the durable
+#:     `claim_unavailable` self-heal's `recorded.update(keep)` in `tortoise/capture_spool.py`, already
+#:     declared by the block above. Nothing else differs in either direction;
+#:   * head → merged is **+1**, and it is `main`'S own: `seen.update` **101 → 102**. The row is
+#:     `tests/test_collision_preflight.py:10584` — `seen.update(kwargs)` inside the `spy` test double
+#:     (`seen: dict[str, object]` at `:10580`) — and it arrived with `7d9e7b99c4` (`#14506`), one of
+#:     the four commits this fold brings.
+#: ⛔ THAT ROW IS DECLARED, NOT REWRITTEN, and the distinction is the one the `reached.update` block
+#: above draws for the opposite case: `reached` was THIS change's own local, so three characters
+#: repaired it; `seen` lives in a PEER's test file that this diff does not touch at all, and editing
+#: another PR's test double to suit a census is the "someone else's code being edited to suit a
+#: counter" that block forbids. It is also the shape the sweep deliberately leaves alone — a local
+#: `dict` accumulator, which no receiver-typed walk can or should reach.
+#: ⛔ A BASE-RELATIVE CENSUS WAS CONSIDERED AND IS NOT ADOPTED HERE. Grading the residue as a DELTA
+#: against the merge base — the shape visual-regression tooling uses, so a base-branch advance cannot
+#: colour a PR's result — would have made this fold's drift invisible; but it changes WHAT THIS GATE
+#: ANSWERS, from "the tree holds exactly N rows" to "this PR moved the count by M", and that is a
+#: recorded decision in this file's own provenance rule ("the pin is graded on PULL REQUESTS only …
+#: re-derived with `--repin` on THIS tree"). Reversing it is a REOPEN against `#14294` / `#14308`,
+#: not something a lane repairing a red may adopt.
+#: `typed references still pointing at a public name: 0` on the merged tree, so the re-cut legitimises
+#: no typed call site; the only movement is one untyped accumulator row, DECLARED. The pair below is
+#: `--repin`'s output on THIS tree, and `--check` exits 0 on it.
+SWEEP_RESIDUE = (11912, "73827c80583e139f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
