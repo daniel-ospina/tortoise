@@ -2819,3 +2819,122 @@ def test_an_UNREADABLE_quarantined_claim_whose_RESTORE_FAILS_is_kept(
     assert survivors, (
         "the only copy of the peer's claim was DELETED when the restore failed")
     assert json.loads(survivors[0].read_text())["token"] == "peer-token"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+def test_a_FIFO_at_the_STATUS_path_cannot_block_the_drain_or_the_health_line(tmp_path):
+    """⛔ THE OTHER PATH OF THE SAME CLASS (review, P1). This diff put
+    `read_capture_status(root)` on the DRAIN path, inside the claimed section (the
+    claim-policy carry-forward reads `status.json` after a pass's POSTs and before
+    `release()`), and the accessor had no `lstat` gate — so a FIFO or socket at the
+    status path blocks `open(2)` FOREVER. The pass then never returns, and nothing
+    releases the claim on that path, so the spool sits claimed until the lease is
+    judged stale; `capture_health_line` reads the same path, so `session health`
+    hangs too instead of reporting the box.
+
+    `drain_claim._read_raw` gates the CLAIM file for exactly this reason (cycle-5 P1,
+    measured as a hang). This is the same rule on the status file.
+
+    MUTATION THAT REDS THIS: drop the `S_ISREG` gate in `read_capture_status` — both
+    reads below then BLOCK and the rows time out under the watchdog instead of
+    asserting.
+    """
+    from tortoise.capture_spool import capture_status_path
+
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    os.mkfifo(capture_status_path(root))
+
+    outcome: list[object] = []
+
+    def _read() -> None:
+        outcome.append(read_capture_status(root))
+        # The health line is the second reader on the same path, and the one an
+        # operator's `tortoise session health` calls.
+        outcome.append(capture_health_line(root).line)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    reader.join(15.0)
+    assert not reader.is_alive(), (
+        "a FIFO at status.json BLOCKED the read — that wedge is held while the drain "
+        "claim is owned, so the spool never drains and `session health` hangs")
+    assert outcome[0] is None, (
+        "a FIFO is not a status record: the answer is 'nothing recorded', got "
+        + repr(outcome[0]))
+    assert isinstance(outcome[1], str) and outcome[1].startswith("capture: "), (
+        "the health line must render while a non-regular object sits at status.json, "
+        "got " + repr(outcome[1]))
+
+
+def test_an_UNREADABLE_regular_claim_is_a_DURABLE_stall_and_a_held_pass_clears_it(
+        tmp_path):
+    """⛔ THE ONE ARM THAT BLOCKS THE DRAIN FOREVER, and it had no surface (review, P2).
+
+    With `drain.claim` at mode `000` and an expired lease: `acquire` answers `None` (a
+    regular claim it could not read is HONOURED, never deleted), `holder()` cannot name
+    it either — the pid and lease ARE the unreadable bytes — so `flush_spool` returned
+    `held_by_claim=True, attempted=0, claim_holder=None` on EVERY pass, wrote nothing
+    durable, and the health line said `capture: DRAINING (1 queued)`. `claim_is_stale`
+    reports the claim reclaimable while the reader cannot reach it, so #14350's row
+    ("a stale claim is re-verifiable, not a permanent block") was unreachable here and
+    nothing told the human who has to look.
+
+    Both directions are asserted, because a fact that cannot be CLEARED is the same
+    defect pointing the other way: a pass that HOLDS the claim has proved the path
+    readable, so it clears the stall.
+
+    MUTATION THAT REDS THIS: delete the `if held is None:` arm's lstat branch (write
+    nothing, as before) — the record then keeps no `claim_unreadable` and the health
+    line reports a healthy box; delete the `claim_unreadable` fields from the
+    `held_claim` clear arm — the stall outlives the drain that proved it false.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    claim_file = drain_claim.claim_path(root)
+    stale = {
+        "version": drain_claim.CLAIM_VERSION,
+        "token": "peer-token",
+        "leg": "pi",
+        "pid": os.getpid(),
+        "host": drain_claim._host(),
+        "started_at": 0.0,
+        "expires_at": 0.0,                    # long expired: reclaimable, if readable
+    }
+    claim_file.write_text(json.dumps(stale), encoding="utf-8")
+    os.chmod(claim_file, 0o000)               # readable by nobody but root
+    post = lambda _payload: PostOutcome(ok=True, status=200, body={})  # noqa: E731
+    try:
+        summary = flush_spool(root, post, now=time.time(), sleep=lambda _s: None)
+        assert summary.held_by_claim is True, (
+            "a regular claim we could not read is a possible HOLDER: fail closed")
+        assert summary.claim_holder is None, (
+            "a holder we cannot read has no nameable pid — that is the gap this test "
+            "is about")
+        assert summary.claim_unreadable is True, (
+            "the pass must SAY the claim is unreadable, not only stay silent about it")
+        recorded = read_capture_status(root)
+        assert recorded is not None and recorded.get("claim_unreadable") is True, (
+            "the stall must be DURABLE: with nothing written, every later pass "
+            "re-derives the same silence and no operator surface names the block — got "
+            + repr(recorded))
+        line = capture_health_line(root).line
+        assert ", drain claim UNREADABLE" in line, (
+            "the operator line must carry the stall; a `DRAINING`-only line describes "
+            "a healthy drain on a box that files nothing: " + repr(line))
+        # ⛔ AND IT MUST NOT FORGE THE OTHER FACT: the exclusion is ON here (a claim
+        # exists), so `NO drain exclusion` would be a false diagnosis.
+        assert "NO drain exclusion" not in line, (
+            "an unreadable claim is a STALLED exclusion, not an absent one: " + repr(line))
+    finally:
+        os.chmod(claim_file, 0o600)
+        claim_file.unlink()
+
+    # Self-heal, through the real passing path: the claim path is free, so this pass
+    # ACQUIRES it — the observation that proves the stall is over.
+    healed = flush_spool(root, post, now=time.time() + 5, sleep=lambda _s: None)
+    assert healed.held_by_claim is False
+    after = read_capture_status(root)
+    assert after is not None and "claim_unreadable" not in after, (
+        "a pass that HELD the claim proved the path readable and must clear the stall, "
+        "got " + repr(after))
