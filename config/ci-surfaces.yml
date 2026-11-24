@@ -82,8 +82,8 @@ version: 1
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ A fast file being REGISTERED is what moves
 # the partition, and re-measured one row at a time on this pool the chain runs: with #14371's
-# `tests/test_14371_offline_embed_json.py` alone it packs six at 836.6 s then five at 836.5 s,
-# #14434's `tests/test_7879_record_chain.py` re-packs it to four at 836.8 s then seven at 836.7 s,
+# `tests/test_14371_offline_embed_json.py` alone it packs six at 836.6 s and five at 836.5 s,
+# #14434's `tests/test_7879_record_chain.py` re-packs it to four at 836.8 s and seven at 836.7 s,
 # and #14220's `tests/test_14186_embedder_seam_batching.py` to the two/nine split above — all three
 # rows at the flat 2.0 s `DEFAULT_FAST_WEIGHT`.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 837.0 s while
