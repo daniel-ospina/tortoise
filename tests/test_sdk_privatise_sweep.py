@@ -2339,7 +2339,9 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     `SOURCE_PATTERNS` bridge, so the changed-file filter answers `surfaces: []` — and a PR that
     edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
     before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
-    `full: false`, 106 test files, THIS FILE ABSENT. `--check` (the required `surface-guard`
+    `full: false`, and only the tier-1 smoke set selected, THIS FILE ABSENT. (The population is
+    `len(manifest["tier1"])`; it moves with every registration and is deliberately not typed —
+    the arm's own failure message computes it.) `--check` (the required `surface-guard`
     step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
     count of typed references that survive, never this suite's arms.
 
@@ -2348,18 +2350,22 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     vacuous-map REFUSAL (an empty map must exit 2 with its own diagnosis — without it a map
     that silently derived nothing still exits 1, but reported as `the residue SET moved off
     its pin`, which sends the reader to the pin instead of to the map), the
-    `SWEEP_NAMES == 66` non-vacuity floor, the map/private-spelling assertions of
-    `test_the_pinned_base_still_derives_the_whole_batch`, the import-shape arm
+    import-shape arm
     `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
     scope-local typing arms and the refspec arms — the WHOLE suite is unselected, so the
-    list is illustrative rather than exhaustive.
+    list is illustrative rather than exhaustive. ⛔ TWO ITEMS ARE DELIBERATELY ABSENT from it:
+    the `SWEEP_NAMES == 66` floor is already graded by `--check` (`VACUOUS CHECK`, exit 2, on
+    every PR), and the map/private-spelling assertions of
+    `test_the_pinned_base_still_derives_the_whole_batch` are NOT recovered by this row — that
+    arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it SKIPS on the `fetch-depth: 1`
+    `test` job the row selects.
     ⛔ THE COST OF THE GAP IS THE GRADED PROSE ITSELF: `_residue_block()`'s own walk is asserted
     against the figure its docstring publishes, so a re-cut that grows or shrinks the `#:` run
     reds that arm — and nothing else does. Without this row the first diff to notice a stale
-    figure is whichever `core`-selecting PR comes next, on rows its author never wrote. (That
-    arm was briefly deleted by `#14439` and restored by `#14474`; the claim here is written
-    against the suite as it is, so it holds either way rather than depending on which landed
-    last.) No population count is restated — this file forbids that.
+    figure is whichever `core`-selecting PR comes next, on rows its author never wrote. The
+    claim is written against the suite AS IT IS — the block and its extent arm are present
+    today — rather than against any episode of them being cut and restored, because naming the
+    wrong commits for such an episode is the ungraded-prose defect this row exists to catch.
 
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
