@@ -502,9 +502,35 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
             store.put_batch(batch)
         return rows
 
+    # ⛔ AND THE SCAN MUST ACTUALLY REQUEUE SOMETHING (#14415 review round 10, P2).
+    # With every item `queued`, `_resume_batch`'s `if moved:` guard is False, so the
+    # resume CAS this test names was NEVER WRITTEN — measured `{'gets': 2,
+    # 'items': 2, 'cas': 0}` — and the estimate survived only because of the test's
+    # own `put_batch` injection. Restoring the pre-fix `SET b.estimate_json=…` from
+    # the caller left the suite green. One DEAD claim makes the scan requeue a row,
+    # so the CAS is reached exactly once.
+    dead = store.get_item(ORG, batch.batch_id, _items[0].item_id)
+    dead.state = BatchItemState.EXTRACTING
+    dead.attempts = 1
+    dead.updated_at = _ancient_stamp()
+    store.put_item(ORG, dead)
+
+    real_cas = store.put_batch_if_state
+    cas_calls = {"n": 0}
+
+    def counting_cas(row, expected):
+        cas_calls["n"] += 1
+        return real_cas(row, expected)
+
     store.get_batch = stale_get  # type: ignore[method-assign]
     store.items = items_then_ack  # type: ignore[method-assign]
-    coord.recover(ORG)
+    store.put_batch_if_state = counting_cas  # type: ignore[method-assign]
+    try:
+        coord.recover(ORG)
+    finally:
+        store.put_batch_if_state = real_cas  # type: ignore[method-assign]
+    assert cas_calls["n"] >= 1, (
+        "the resume compare-and-set was never reached — this test proves nothing")
 
     assert state["items"] >= 2 and state["gets"] >= 2, (
         f"the injected window did not fire — proves nothing: {state}")
@@ -2479,3 +2505,90 @@ def test_a_cancel_cannot_erase_a_settlement_that_landed_first(monkeypatch):
         f"the cancel invented a cancellation stamp over a finished batch: {row.cancelled_at}")
     assert out_batch.state is BatchState.PARTIAL, (
         "the returned row must be the truth, not this call's intent")
+
+
+def test_a_failed_post_runner_read_still_bills_the_spend():
+    """⛔ ROUND-10 REVIEW P1: the post-runner READ was outside every `try`.
+
+    It runs AFTER the runner has spent. One graph read failure there (this module's
+    own measured 1,505 ms probe / the 10 s statement timeout) raised out of
+    `run_item`; `_drain_batch` only logged it, no charge record was set, so
+    `record_item_spend` was never called and `_bill` was never reached — and the
+    row stayed `extracting`, so the claim went stale and a reclaim ran the runner
+    AGAIN. The arms beside this read promise exactly the opposite: a bookkeeping
+    failure is not a lost spend.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+
+    real_get = store.get_item
+    ran = {"done": False}
+
+    def failing_get(org_id, batch_id, item_id):
+        # ⛔ ONLY the read AFTER the runner is made to fail. Failing an earlier one
+        # exercises a different path entirely — measured: with the read failure
+        # armed from the start, `run_item` returned at its liveness guard over a
+        # fresh claim and the runner never ran, so the assertion held over code
+        # that had not executed.
+        if ran["done"]:
+            raise RuntimeError("graph probe timeout")
+        return real_get(org_id, batch_id, item_id)
+
+    def runner(item):
+        ran["done"] = True
+        return ItemOutcome(BatchItemState.INDEXED, tokens_in=900)
+
+    # The row `run_item` is HANDED, so the claim read is the first failing one
+    # only after the runner has run.
+    handed = real_get(ORG, batch.batch_id, items[0].item_id)
+    store.get_item = failing_get  # type: ignore[method-assign]
+    try:
+        out = coord.run_item(ORG, handed, runner)
+    except RuntimeError:
+        raise AssertionError(
+            "a read failure after the runner spent escaped run_item — the spend "
+            "is then on neither the row nor the ledger")
+    finally:
+        store.get_item = real_get  # type: ignore[method-assign]
+
+    assert (out.charge_in, out.charge_out) == (900, 0), (
+        "the spend of a completed runner call was dropped because a read failed: "
+        f"{(out.charge_in, out.charge_out)}")
+
+
+def test_a_cancel_that_stopped_nothing_returns_the_rows_it_read():
+    """⛔ ROUND-10 REVIEW P1: the `not stopped` arm returned the PRE-write snapshot.
+
+    `items` was read before the set-based cancel, so a row the snapshot saw as
+    `queued` was reported `queued` after a drain had settled it `indexed` with
+    60 000 tokens: measured `status: completed`, `complete: true`,
+    `tokens_spent: 0`, `items[0].status: "queued"`, `counts.pending: 1` — payload
+    and route copy both asserting nothing was charged over a charged document.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    # The snapshot `cancel()` takes sees `queued`; the row is settled before its
+    # set-based write runs, so the write matches nothing and `stopped` is False.
+    real_bulk = store.cancel_queued_items
+
+    def settle_then_stop(org_id, batch_id, **kwargs):
+        coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=60_000)
+        return real_bulk(org_id, batch_id, **kwargs)
+
+    store.cancel_queued_items = settle_then_stop  # type: ignore[method-assign]
+    try:
+        cancelled_batch, returned = coord.cancel(ORG, batch.batch_id,
+                                                reason="customer")
+    finally:
+        store.cancel_queued_items = real_bulk  # type: ignore[method-assign]
+
+    assert cancelled_batch.state is BatchState.COMPLETED
+    assert [i.state for i in returned] == [BatchItemState.INDEXED], (
+        "the returned rows are the PRE-write snapshot — a `queued` item reported "
+        f"beside a settled, charged one: {[i.state for i in returned]}")
+    assert sum(i.tokens_in for i in returned) > 0, (
+        "the summary the route renders must carry the spend it reports beside "
+        "`complete: true`")
