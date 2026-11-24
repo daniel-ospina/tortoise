@@ -71,11 +71,11 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `f379299c64d` (`#14472`, this head's own merge base, after the `#14419` B7 cut took the
-# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool) plus
-# this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb packs
-# ten shards at 838.2 s (a, b, c, d, e, f, h, i, j, k) and one shard at 838.1 s (g), so
-# `ceil(838.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# `2cccf90f4dd4` (this head's own fold, on top of the `#14472` merge base after the `#14419` B7 cut
+# took the durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool)
+# plus this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb
+# packs eight shards at 838.4 s (a, b, c, d, e, h, j, k) and three shards at 838.3 s (f, g, i), so
+# `ceil(838.4/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
@@ -166,11 +166,13 @@ version: 1
 # re-derivations produces (measured, this fold). Its derivation and minute are deleted with it, so
 # the block carries exactly ONE `ceil` operand.
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
-# 838.0 s (b, c, d, e, f, g, h, i, j, k) — ⛔ MEASURED ON THIS PR'S REBASED HEAD, which sits on
+# `DEFAULT_FAST_WEIGHT`) the verb split the pool into a slowest shard reading 838.1 seconds (shard `a`)
+# and 838.0 seconds for the other ten — ⛔ MEASURED ON AN EARLIER HEAD, which sat on
 # `main` at `59a08fdb8b40` and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so
-# `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so that head's
+# operand (838.1/60 x 2) rounded up to 28 m too — ⛔ spelled WITHOUT the `ceil(...)` form, so the
+# block carries exactly ONE graded operand: the one at the top of this block, re-derived on this
+# fold's tree, and this sentence is a HISTORICAL record that grades nothing —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
