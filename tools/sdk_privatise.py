@@ -1647,6 +1647,12 @@ SWEEP_NAMES = 66
 #: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
 #: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
 #: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`; `--check` prints an
+#: ⚠️ AND THIS PR (#14480) MOVED IT BY ONE, FROM ITS OWN LINE — stated because the pin's own note
+#: says a count that moves without a named cause is the drift it exists to catch: the durable
+#: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
+#: (`tortoise/capture_spool.py`, the one new untyped `.update(` receiver in this diff), so
+#: `--repin` on this tree prints **(11903, "0a80b03111e58c47")**. Re-derived by RUNNING the tool on
+#: the tree being merged, never by arithmetic on the delta.
 #: observed digest ONLY on its failure path (`observed: (n, digest)` on stderr), never on a
 #: passing run — so a pair quoted from a green tree is `--repin`'s or nothing.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
@@ -1969,7 +1975,7 @@ SWEEP_NAMES = 66
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
 #: tree, never arithmetic on the last pin; `--check` exits 0 on it.
-SWEEP_RESIDUE = (11902, "f904d86cb6ad82f6")
+SWEEP_RESIDUE = (11903, "0a80b03111e58c47")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
