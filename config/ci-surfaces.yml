@@ -54,7 +54,8 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `f635f9e000` (the peer lane's fold, which brought `tests/test_14350_drain_convergence.py`) plus
+# `8bc2c3d0643` (this head's own merge base, eight folds above the `f635f9e000` an earlier cut
+# named) plus
 # this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb packs
 # five shards at 837.7 s (a, c, d, e, k) and six at 837.6 s (b, f, g, h, i, j), so
 # `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
