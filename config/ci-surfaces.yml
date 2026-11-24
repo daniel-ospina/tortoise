@@ -54,32 +54,25 @@ version: 1
 # direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
 # 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
-# parents: a fold that keeps two re-derivations makes the guard read the clause twice, which is a
-# red no reader of the prose can see. On THIS tree — `origin/main` `69dda95ab9f` folded in over
-# `#14565`'s merge base, which brought `#14548`'s residue RATCHET and `#14565`'s reaper-schedule row
-# (`tests/test_14559_reaper_schedule.py`, `core`, flat 2.0 s) — THIS PR's own row
-# (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s `DEFAULT_FAST_WEIGHT`) is
-# the ONE `fast_pool()` addition that is this fold's, and the verb packs the pool into two bins:
-# nine shards at 825.8 s (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so
-# `ceil(825.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: measured with the verb against `origin/main`
-# `69dda95ab9f`'s own map, that tree alone packs eleven shards at 825.6 s — quoted WITHOUT a name
-# list on purpose, because a second clause would parse as a claim about THIS tree and red the
-# guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1331 files at this head against 1330 on `main`, and the ONE addition is
-# this PR's `tests/test_14560_operator_vectors.py`. ⛔ `#14415`'s two rows
-# (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) and `#14559`'s
-# `tests/test_14559_reaper_schedule.py` are `main`'s at this head, NOT this PR's: each was that
-# PR's own addition and each landed before this fold. The name lists above are what the guard
-# COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about this head rather than the per-file letters the fenced span below warns about — a fold
-# re-derives them with the verb; it never carries them. Re-derived with `--emit-push-matrix` on THIS
-# tree, never adjusted by arithmetic from either parent's reading.
+# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
+# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
+# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
+# reader of the prose can see. On THIS tree — `origin/main` `5163c3ee8b6` folded in, carrying
+# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row and `#14574`'s drift-reporter row
+# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s) — plus THIS PR's own row
+# (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s `DEFAULT_FAST_WEIGHT`),
+# the verb packs the pool into two bins: seven shards at 826.0 s (a, f, g, h, i, j, k) and four at
+# 825.9 s (b, c, d, e), so `ceil(826.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
+# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
+# is measurable and small: `fast_pool()` holds 1332 files at this head against 1331 on `main`, and
+# the ONE addition this fold brings is this PR's `tests/test_14560_operator_vectors.py`. ⛔ The
+# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
+# this PR's: each landed before this fold. The name lists are what the guard COMPARES against the
+# live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
+# graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -7795,6 +7788,19 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #14574: the SCHEDULED reader of the same registry — an undeclared Fly secret
+  # used to be invisible until a deploy was attempted (measured 2026-11-21..24: ~2
+  # days and 75+ commits behind a frozen deploy). Registered `core` beside the
+  # guard it reports on (`test_fly_secret_drift.py`), because the subjects it
+  # guards are `.github/workflows/fly-secret-declaration-drift.yml` (which matches
+  # no `SOURCE_PATTERNS` row) and `tools/fly_secret_declaration_report.py` (a
+  # `tools/` path, which `_keep_changed` DROPS — the #12363 silent-drop class, so
+  # the tool also carries a `CORE_ALSO` entry). Without this row `--integrity`
+  # reds (`manifest drift: test_fly_secret_declaration_report.py`). Hermetic: the
+  # workflow is parsed as YAML, its `run:` bodies are executed against a stub `gh`,
+  # and the reporter's Fly read is the gate's own `FLY_SECRETS_FILE` fixture seam —
+  # no Fly call, no credential, no network.
+  - test_fly_secret_declaration_report.py
   # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
   # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
   # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a

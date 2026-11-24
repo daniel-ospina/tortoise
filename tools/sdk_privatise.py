@@ -1685,8 +1685,8 @@ SWEEP_NAMES = 66
 #: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
-#: THIS ONE: after `#14445`'s re-cut and this fold of `origin/main` `2cccf90f4dd4`, `--repin` here
-#: prints (11912, "73827c80583e139f") — see the pin's own note below, which owns this tree's value.
+#: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the `e66997b81e76` fold note owns this tree's pair.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
@@ -2187,8 +2187,8 @@ SWEEP_NAMES = 66
 #: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
 #:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
 #:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
-#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
-#:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
+#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exited 1 on that `main`
+#:     ITSELF (the `#14062` recurrence the blocks above record a sixth time); this branch
 #:     inherits main's row set, not main's number.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
 #:     took with it — 2 rows on `origin/main`, 0 here, and the report row sets are otherwise IDENTICAL
@@ -2216,10 +2216,14 @@ SWEEP_NAMES = 66
 #: census-VISIBLE shapes (#14422: its fifteen statements go through an injected callable, so
 #: `self._query(` matches no door predicate). A FALLING pin cannot hide a new untyped reference,
 #: which is the direction this arm exists to catch; every parent record above stays verbatim.
-#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, KEPT VERBATIM —
-#: the distinct paragraphs this branch's resolution did not already carry (146 lines, in
-#: `main`'s own order, no figure added or moved). The pair below is still `--repin`'s own
-#: output on THIS resolved tree; these lines are the parent's provenance for it.
+#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, CARRIED IN SUBSTANCE
+#: rather than verbatim: the distinct paragraphs this branch's resolution did not already carry
+#: (146 lines, in `main`'s own order). ⛔ A MINORITY OF THEM ARE RESTATED RATHER THAN CARRIED, and
+#: only where the carried line was FALSE OF THIS TREE (#14583 review, P3 — 29 of the restored
+#: lines, e.g. `#14491`→`#14506` and the "three-row" gap that is two). Each such correction is
+#: named where it is applied, in the rebase block below, so these lines are the parent's
+#: PROVENANCE and this block does not claim that no figure moved. The pair below is still
+#: `--repin`'s own output on THIS resolved tree.
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
@@ -2227,7 +2231,7 @@ SWEEP_NAMES = 66
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
 #: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
-#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the note below owns this tree's pair.
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the `e66997b81e76` fold note owns this tree's pair.
 #: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
 #: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
 #: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
@@ -2391,7 +2395,8 @@ SWEEP_NAMES = 66
 #: ⛔ THE 2-ROW GAP BETWEEN THIS PAIR AND THE BRANCH'S OWN PRE-MERGE 11912 IS ATTRIBUTED ROW BY ROW,
 #: not waved through: the branch's pre-merge tree still carried the two `_JSONB_CACHE.update({...})`
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
-#: which is exactly the pair the block above already accounts for.
+#: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
+#: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
 #: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
 #: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
 #: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
@@ -2663,30 +2668,32 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     """The rev the ratchet measures its baseline on, plus a sentence naming which one it is.
 
     The MERGE BASE with `origin/main` is the tree this working change is a diff against, so it is
-    the tree the question "did this change ADD an untyped receiver?" is asked against. A
-    detached `origin/main` resolves no merge base, so `origin/main` itself is the fallback; a
-    clone with no such ref at all returns `None`, and the caller degrades to the recorded pin.
+    the tree the question "did this change ADD an untyped receiver?" is asked against. When no
+    merge base resolves — no common ancestor, or no `origin/main` ref at all (a `fetch-depth: 1`
+    clone is that case; a DETACHED head resolves one fine, measured) — `origin/main` itself is the
+    fallback; a clone with no such ref at all returns `None`, and the caller degrades to the
+    recorded pin.
     ⛔ THAT FALLBACK IS NOT SIMPLY "LOOSER" (#14548 review, P3): the pin is FROZEN, so it is looser
     BELOW itself — growth up to the pin's count passes, and nobody writes the pin any more — and
     STRICTER ABOVE it, where a tree that added nothing still reds because its total is already over
     the pin (a stale clone is exactly that case, and it is the treadmill's signature). Both facts
     are the caller's to print, beside the way out: `--baseline REV`, or fetch `origin/main`.
 
-    ⛔ AND ON A BRANCH THAT HAS FOLDED `origin/main`, A LOCAL `--check` REDS ON ROWS THIS BRANCH DID
-    NOT AUTHOR — STATED BECAUSE IT LOOKS LIKE THE BRANCH'S OWN GROWTH. The merge base is frozen at
-    the point the branch left `main`, while `git diff <merge-base>` on a branch that MERGED `main`
-    carries every one of `main`'s commits since then, so their new receivers are inside the diff and
-    the ratchet charges them to the fold. MEASURED on the `#14548` fold of `origin/main`
-    `10f0107689`: `--check` on the folded feature head reads **11913 now vs 11903** and reds, naming
-    `tests/test_14219_batch_ingest.py` (6 `graph.query`, 2 `graph.delete`), `tests/test_14219_batches_api.py`
-    (1 `seen.update`) and `tortoise/hosted_api.py`'s `proj.g.query` — all of them `main`'s rows, none
-    of them the branch's. On the tree CI actually grades this does not happen: the `pull_request`
-    checkout is the PR's MERGE commit, whose merge base with `origin/main` IS `origin/main`, so both
-    sides carry those rows. Measured as the equivalent invocation — `--check --baseline origin/main`
-    exits **0** with `11913 now vs 11913 on the baseline` — which is the same question the merge tree
-    asks. ⛔ DO NOT “FIX” THIS BY RE-PINNING: under the ratchet the pin is a historical reading and the
-    red is the diff's scope rather than the pin's value, so a fresh pair clears nothing and a branch
-    that reds here should be read against `origin/main` before anyone touches the number.
+    ⛔ A RED HERE CAN BELONG TO A STALE BASELINE RATHER THAN TO THE CHANGE — STATED BECAUSE IT LOOKS
+    EXACTLY LIKE THE BRANCH'S OWN GROWTH. The baseline is the merge base with the LOCAL
+    `origin/main`, so when that ref is OLDER than the `main` tip a fold merged, the merge base is
+    the older commit, `main`'s own rows sit inside `git diff <merge-base>`, and the ratchet charges
+    them to the fold. MEASURED on the `#14548` fold: `--check --baseline b665cbd6198` (the branch
+    point, stale against the `10f0107689` the fold merged) exits **1** with `the untyped-receiver
+    count ROSE by 10: 11903 on the baseline … -> 11913 now`, naming
+    `tests/test_14219_batch_ingest.py` (6 `graph.query`, 2 `graph.delete`),
+    `tests/test_14219_batches_api.py` (1 `seen.update`) and `tortoise/hosted_api.py`'s
+    `proj.g.query` — `main`'s rows, not the branch's. ⛔ FOLDING IN A MAIN TIP ADVANCES THE MERGE
+    BASE RATHER THAN FREEZING IT, so the SAME tree passes on the default run: measured `11913 now vs
+    11913 on the baseline (e627ca89375c, the merge base with origin/main)`, exit 0. The red
+    therefore belongs to the BASELINE'S AGE, and the remedy is `git fetch origin main` (or
+    `--baseline <the main tip you merged>`) — NEVER a re-pin: under the ratchet the pin is a
+    historical reading, so a pasted pair changes nothing here.
     """
     if explicit is not None:
         # ⛔ `is not None`, not truthiness: `--baseline "$BASE_REV"` with the variable UNSET yields

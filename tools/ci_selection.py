@@ -1971,6 +1971,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # either way — so it is not a pin; the manifest row above is what keeps
              # the file classified.)
              "tools/text_gate_13099.py",
+             # #14574: `tools/fly_secret_declaration_report.py` is the reading behind
+             # `.github/workflows/fly-secret-declaration-drift.yml`, and its pins
+             # (`tests/test_fly_secret_declaration_report.py`, registered `core`) are
+             # the only thing that fails if it starts reporting CLEAN on a state it
+             # could not read. `tools/` is in `NON_PYTHON_PREFIXES`, so without this
+             # entry a reporter-only change is filtered out BEFORE the "not matched ->
+             # core" fallback and takes the docs-only early return: the fail-OPEN
+             # direction for this file in particular, since its whole job is to decide
+             # whether a human is told. Pinned by
+             # tests/test_fly_secret_declaration_report.py::test_a_report_tool_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/fly_secret_declaration_report.py"])`
+             # returns `core` AND this suite (the same #1349/#3332/#3616 silent-drop
+             # class as queue_resweep/batch_open/next_work/reap_empty_test_graphs).
+             "tools/fly_secret_declaration_report.py",
              # #13098: the same silent-drop class, one artefact over, and the reason it is
              # worth a third entry for a `.md`: the Cypher census's pins
              # (`tests/test_13098_cypher_inventory.py`, registered `core`) compare the tool's
