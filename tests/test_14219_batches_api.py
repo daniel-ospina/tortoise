@@ -2292,6 +2292,32 @@ def test_a_configured_but_unwritable_root_is_refused_before_the_ack_gate(
     assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
 
 
+def test_a_store_fault_at_acceptance_answers_retry_not_a_misconfiguration(
+        client, monkeypatch):
+    """⛔ A STORE FAULT IS NOT A MISCONFIGURATION (round 23, P2 — measured).
+
+    Every non-`ValueError` fault reaches the generic 503 "retry" arm, but a store
+    READ fault raised through `_BatchIdConflict` (a `ValueError`) rendered as *"Batch
+    storage is unavailable on this server — send items as paths under the configured
+    document storage instead"*: advice that cannot fix a graph timeout, for a body
+    that was perfectly valid, with nothing telling the customer to retry. Same class
+    as the round-13 P2 in `hosted_api.py` (a metering blip whose copy talked about
+    SIGN-IN).
+    """
+    def _fault(*a, **kw):
+        raise ha._batch_ingest._BatchStoreFault("graph probe timeout")
+
+    monkeypatch.setattr(ha._batch_ingest.BatchCoordinator, "submit", _fault)
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    assert r.status_code == 503, r.text[:200]
+    detail = r.json()["detail"]
+    assert detail.startswith("Batch could not be recorded"), (
+        f"a store fault was answered with the storage-misconfiguration copy: {detail}")
+    assert "retry" in detail.lower(), detail
+    assert "send items as paths" not in detail, detail
+
+
 def test_a_root_that_can_be_created_but_not_written_is_refused_before_the_ack_gate(
         client, monkeypatch, tmp_path):
     """⛔ ROUND-18 REVIEW P2: the round-17 pin never reached the WRITE it exists for.

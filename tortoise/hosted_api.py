@@ -17709,38 +17709,44 @@ async def create_batch(body: BatchRequest,
 
     try:
         batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
+    except _batch_ingest._BatchStoreFault as exc:
+        # ⛔ A STORE FAULT IS A RETRY, NOT A MISCONFIGURATION (round 23, P2 —
+        # measured). These used to reach the `ValueError` arm below and tell a
+        # customer with a perfectly valid body to "send items as paths under the
+        # configured document storage" — advice that cannot fix a graph timeout and
+        # never says retry. Same class as the round-13 P2 in this file (a metering
+        # blip whose copy talked about SIGN-IN).
+        _logger.warning("batch acceptance hit a store fault for team %s",
+                        org_id, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Batch could not be recorded — nothing was "
+                                   "accepted; retry.") from exc
     except _batch_ingest._BatchIdConflict:
-        # ⛔ A DIFFERENT FACT NEEDS A DIFFERENT ANSWER (#14415 recut review,
-        # MEDIUM — measured). `_BatchIdConflict` subclasses `ValueError`, so the
-        # arm below used to swallow it — and that arm's copy names a cause the
-        # server cannot know and a remedy that cannot apply: a graph read fault
-        # before the item write (`batch_ingest.py`'s pre-write existence read),
-        # or a create lost to a concurrent writer, was answered
-        # "Batch storage is unavailable — send items as paths", to a caller whose
-        # body already consists of paths. The staging refusal that copy was
-        # written for is refused EARLIER and unconditionally by the write probe
-        # above (`inline_stage_root is None`), so nothing reachable here is that
-        # refusal. 409: the request was fine, nothing was accepted, nothing was
-        # charged — a retry is the right move, and it must be safe to make.
+        # ⛔ THE FAULT HALF IS `_BatchStoreFault` ABOVE; THIS IS THE CONFLICT HALF
+        # (#14415 recut review, MEDIUM — measured). `_BatchIdConflict` subclasses
+        # `ValueError`, so it still reached the staging-refusal arm below and told
+        # a customer with a perfectly valid body to "send items as paths under the
+        # configured document storage" — advice that cannot fix a lost create and
+        # never says retry. `create_batch` passes no `batch_id`, so the reachable
+        # case here is a MINTED id losing its create to a concurrent writer or to
+        # the recovery scan; nobody wrote anything the caller must tidy up, so the
+        # answer is "nothing was accepted, retry" — 409, because the request
+        # itself was fine and resending it is safe.
         _logger.warning(
-            "batch acceptance refused for team %s (id not provably free)",
-            org_id, exc_info=True)
+            "batch acceptance lost its create for team %s", org_id, exc_info=True)
         raise HTTPException(
             status_code=409,
             detail="This batch could not be recorded just now — nothing was "
                    "accepted and nothing was charged; retry.") from None
-    except ValueError:
-        # Belt-and-braces only: the staging refusal this arm was written for is
-        # now refused BEFORE acceptance by the write probe above. Anything that
-        # still reaches here is bad input the layer rejected, so it must not be
-        # reported as the server missing its storage configuration (a 503 tells
-        # a caller with a valid body to retry for ever — #14219 review).
-        _logger.warning("batch acceptance rejected for team %s", org_id,
-                        exc_info=True)
-        raise HTTPException(
-            status_code=400,
-            detail="The batch request was rejected — nothing was accepted."
-            ) from None
+    except ValueError as exc:
+        # The staging refusal (inline text with nowhere durable to put it). The
+        # route pre-gates this above, so this arm is belt-and-braces; it stays a
+        # 503 because it IS a server missing its configuration, not a bad request.
+        raise HTTPException(status_code=503,
+                            detail="Batch storage is unavailable on this "
+                                   "server — send items as paths under the "
+                                   "configured document storage instead."
+                            ) from exc
     except Exception:
         _logger.exception("batch acceptance failed for team %s", org_id)
         raise HTTPException(status_code=503,
@@ -53786,7 +53792,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (728 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

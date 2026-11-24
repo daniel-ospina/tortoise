@@ -8,9 +8,11 @@ acceptance, and the docstring says which.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import threading
+from unittest import mock
 
 import pytest
 
@@ -3418,13 +3420,21 @@ def test_a_read_fault_while_deciding_ownership_refuses_and_deletes_nothing():
 
     store = _FaultyReadStore()
     coord = BatchCoordinator(store)
-    # The EXCEPTION TYPE is not the point — the DELETION is. Asserted on the store, so
-    # this fails for the right reason whichever way the fault surfaces: without the
-    # guard the fault escapes into `submit`'s rollback, which discards the id.
-    with pytest.raises((ValueError, RuntimeError)):
+    # ⛔ THE EXCEPTION IS CAUGHT HERE ON PURPOSE. `pytest.raises` around the call
+    # makes the DISCARD assertion unreachable under the mutant (the fault escapes
+    # first), so the pin would go red for the wrong reason and would go GREEN over a
+    # live deletion the moment anything else stopped the fault escaping. Catching it
+    # means the assertions below are what decides — round 23, P2, measured.
+    raised: BaseException | None = None
+    try:
         # No inline contents: staging would fail first and never reach the arm.
         coord.submit(ORG, ["/d/a.md"], batch_id="owned-by-someone-else")
-
+    except BaseException as exc:          # asserted below, never swallowed
+        raised = exc
+    assert raised is not None, "the ownership fault was not refused at all"
+    assert isinstance(raised, RuntimeError), (
+        "a store fault must be its own retryable type, not the caller-error "
+        f"copy: {raised!r}")
     assert store.discarded == [], (
         "a READ FAULT was answered by discarding the batch id — the call could not "
         f"know who owned it: {store.discarded}")
@@ -3447,8 +3457,15 @@ def test_a_write_fault_on_the_takeover_refuses_and_keeps_the_batch():
         def __init__(self) -> None:
             super().__init__()
             self.discarded: list[str] = []
+            self.bids: list[str] = []
+            self.cas_attempts = 0
+
+        def put_items(self, org_id, items):
+            self.bids.append(items[0].batch_id)
+            return super().put_items(org_id, items)
 
         def put_batch_if_state(self, *a, **kw):
+            self.cas_attempts += 1
             raise RuntimeError("graph statement timeout (write)")
 
         def discard(self, org_id, batch_id):
@@ -3457,15 +3474,24 @@ def test_a_write_fault_on_the_takeover_refuses_and_keeps_the_batch():
 
     store = _FaultyCasStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/d/a.md"])
-
+    # Caught on purpose — see the note in the read-fault pin above.
+    returned = None
+    try:
+        returned = coord.submit(ORG, ["/d/a.md"])
+    except BaseException as exc:          # asserted below, never swallowed
+        returned = exc
     assert store.discarded == [], (
         "a WRITE FAULT on the takeover was answered by discarding the batch "
         f"row: {store.discarded}")
-    assert store.get_batch(ORG, batch.batch_id) is not None, (
+    bid = store.bids[0]
+    assert store.get_batch(ORG, bid) is not None, (
         "the batch row was deleted by a fault it has nothing to do with")
-    assert [i.item_id for i in store.items(ORG, batch.batch_id)] == [
-        i.item_id for i in items]
+    assert store.items(ORG, bid), "the item rows were deleted with it"
+    assert not isinstance(returned, BaseException), (
+        f"the record should speak after a retried write fault: {returned!r}")
+    assert store.cas_attempts == 2, (
+        f"the takeover write was not retried once ({store.cas_attempts} attempts) "
+        "— the identity (estimate, corpus_name) is written by this call only")
 
 
 def test_a_read_fault_before_the_item_write_refuses_and_writes_nothing():
@@ -3494,13 +3520,143 @@ def test_a_read_fault_before_the_item_write_refuses_and_writes_nothing():
 
     store = _FaultyPreWriteReadStore()
     coord = BatchCoordinator(store)
-    with pytest.raises(ValueError, match="could not be shown to be free"):
+    raised: BaseException | None = None
+    try:
         coord.submit(ORG, ["/d/a.md"], batch_id="b-pre-write")
+    except BaseException as exc:          # asserted below, never swallowed
+        raised = exc
 
+    assert raised is not None, "the pre-write read fault was not refused at all"
     assert store.discarded == [], (
         f"a fault before any write still discarded the id: {store.discarded}")
     assert store.items(ORG, "b-pre-write") == [], (
         "the item rows were written despite the refusal")
+
+
+def test_a_staging_fault_does_not_discard_a_rivals_id(tmp_path):
+    """⛔ THE ROLLBACK IS SCOPED TO WHAT THIS CALL WROTE (round 23, P2 — measured).
+
+    The staging loop runs BEFORE any ownership is known. A disk fault there used to
+    reach `submit`'s `except Exception`, whose `discard(org_id, bid)` deletes the row
+    a RIVAL created in the window the pre-check cannot close — the same unrecoverable
+    deletion the three guarded calls remove, one call earlier. Measured before the
+    guard: `discarded: ['b-race']`, and the rival's row was gone.
+    """
+    class _StagingFaultStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discarded: list[str] = []
+            self.reads = 0
+
+        def get_batch(self, org_id, batch_id):
+            # The pre-check misses; the rival's row appears immediately after it.
+            self.reads += 1
+            if self.reads == 1:
+                return None
+            super().put_batch(Batch(batch_id=batch_id, org_id=org_id,
+                                    state=BatchState.RUNNING,
+                                    created_at="2026-01-01T00:00:00+00:00",
+                                    updated_at="2026-01-01T00:00:00+00:00"))
+            return super().get_batch(org_id, batch_id)
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _StagingFaultStore()
+    coord = BatchCoordinator(store)
+
+    calls = {"n": 0}
+
+    def _flaky_stage(base, bid, name, text):
+        """Writes the FIRST document for real, then runs out of disk."""
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("no space left on device")
+        directory = os.path.join(base, "_batches", bid)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"{name}.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    with mock.patch.object(bi_module, "stage_text", _flaky_stage):
+        raised: BaseException | None = None
+        try:
+            coord.submit(ORG, ["/d/a.md", "/d/b.md"], contents=["one", "two"],
+                         stage_base=str(tmp_path), batch_id="b-race")
+        except BaseException as exc:      # asserted below, never swallowed
+            raised = exc
+
+    assert raised is not None, "a disk fault was not refused"
+    assert store.discarded == [], (
+        "a DISK FAULT was answered by discarding a rival's batch id — nothing of "
+        f"ours had been written at that point: {store.discarded}")
+    assert store.get_batch(ORG, "b-race") is not None, "the rival's row is gone"
+    written = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert written == [], (
+        "the staging fault left the first document on disk for ever: "
+        f"{[str(p) for p in written]}")
+
+
+def test_a_refusal_after_staging_unlinks_the_bytes_it_wrote(tmp_path):
+    """⛔ A REFUSAL MUST NOT LEAK THE PAYLOAD IT STAGED (round 23, P2 — measured).
+
+    The pre-write refusal arm skips the rollback by design, so nothing else unlinks
+    the documents the staging loop already wrote: with inline text and a persistent
+    store fault, every client retry leaked one full payload, permanently — there is
+    no sweeper for `_batches/` anywhere in `tortoise/`, `tools/` or `services/`.
+    """
+    class _NoRowReadStore(InMemoryBatchStore):
+        """The FIRST read (submit's pre-check, above the `try`) succeeds; the
+        in-`try` pre-write read — the one that runs AFTER staging — faults."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads == 1:
+                return None
+            raise RuntimeError("graph probe timeout")
+
+    store = _NoRowReadStore()
+    coord = BatchCoordinator(store)
+    with contextlib.suppress(BaseException):
+        coord.submit(ORG, ["/d/a.md", "/d/b.md"], contents=["aaa", "bbb"],
+                     stage_base=str(tmp_path), batch_id="b-leak")
+
+    assert store.reads >= 2, f"the fault never reached the staged arm ({store.reads})"
+    leftovers = list(tmp_path.rglob("*"))
+    files = [p for p in leftovers if p.is_file()]
+    assert files == [], (
+        "the refusal left the caller's documents on disk for ever: "
+        f"{[str(p) for p in files]}")
+
+
+def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
+    """⛔ `customer_copy(0.0)` PROMISED "1 hour" FOR ANY SIZE BATCH (round 23, P1).
+
+    A record whose estimate never landed (the takeover's identity write faulted, so
+    it kept the recovery scan's blank adoption) was ACKed with "completion expected
+    in 1 hour" beside the caller's own `estimated_hours: 12.5`. A duration the record
+    does not carry must not appear in the copy at all.
+    """
+    blank = bi_module.Batch(batch_id="b1", org_id="o", state=bi_module.BatchState.RESUMING,
+                     created_at="2026-01-01T00:00:00+00:00",
+                     updated_at="2026-01-01T00:00:00+00:00")
+    body = bi_module.acceptance_receipt(blank, [], status_url="/v1/batches/b1")
+    assert "hour" not in body["message"].lower(), (
+        f"the record carries no duration but the copy names one: {body['message']}")
+    assert "expected in" not in body["message"].lower(), body["message"]
+    # …and a record that DOES carry one still says it.
+    priced = bi_module.Batch(batch_id="b2", org_id="o", state=bi_module.BatchState.RESUMING,
+                      created_at="2026-01-01T00:00:00+00:00",
+                      updated_at="2026-01-01T00:00:00+00:00",
+                      estimate={"estimated_hours": 12.5})
+    assert "13 hours" in bi_module.acceptance_receipt(
+        priced, [], status_url="/v1/batches/b2")["message"]
 
 
 def test_a_caller_supplied_id_that_was_adopted_is_still_a_conflict():
