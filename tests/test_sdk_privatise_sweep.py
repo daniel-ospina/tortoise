@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2010 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2016 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -314,14 +314,16 @@ def _residue_block() -> str:
     — and the LATER fold of `origin/main` `2cccf90f4dd4` kept both sides' blocks once more (this
     lane's copy read 1930, the peer re-cut's copy 1931) and brought that peer's own `#14445`
     `SWEEP_RESIDUE` re-cut — the `#:` lines that attribute it are prose in the same run. ⛔ THAT
-    FOLD'S FIRST RESOLUTION DID NOT keep it: it replaced BOTH sides' records with one new paragraph,
-    which deleted the peer's `(11911, "4ed42694957a174d")` reading and left the surviving sentence
-    pointing at a note no longer in the file — against this block's own rule a few hundred lines
-    above (`BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them).
-    A fresh review caught it; the peer's paragraph is restored above the later one, marked with the
-    tree it names. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE at 1953
-    rather than inherited from either side, and that fold's pair was re-derived by RUNNING `--repin`
-    on BOTH trees
+    FOLD'S FIRST RESOLUTION DID NOT keep either: it replaced BOTH sides' records with one new
+    paragraph. That deleted the branch's own `(11911, "3e92044bab08cc3d")` merge-tree reading AND
+    the peer's `(11911, "4ed42694957a174d")` one, and left the surviving sentence pointing at a note
+    no longer in the file — against this block's own rule a few hundred lines above (`BOTH SIDES'
+    RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them). Two fresh review
+    rounds caught it; BOTH records are restored — each marked with the tree it names — above the
+    later paragraph, so the claim in this sentence is now true of the resolved file rather than
+    only of the peer's half. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE
+    at 1959 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
+    `--repin` on BOTH trees
     (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
     — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
     with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
@@ -340,8 +342,10 @@ def _residue_block() -> str:
     — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks once more (each side
     had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
     prose), and the resolution keeps both verbatim rather than trimming the run to one side's
-    reading — so the figure above is RE-MEASURED by this walk on the RESOLVED file at
-    2010, never inherited from either side's published `1953` or `1954`,
+    reading — so the figure above is RE-MEASURED by this walk on the RESOLVED FILE, never inherited
+    from either side's published `1953` or `1954`: that resolution first walked 2010, and the peer's
+    two P2 repairs then restored a six-line record INSIDE the same run, so the figure above is the
+    FINAL reading of the resolved file and neither intermediate numeral is published here,
     and the pair did NOT follow the run: `--repin` on this resolved tree prints
     `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this fold
     adds no row — the 11912 this branch carried sat 2 above it only while the branch still held

@@ -2039,6 +2039,12 @@ SWEEP_NAMES = 66
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut.
 #:
+#: ⛔ #14445's FIRST fold — this lane's own, `a2f165b0ba47`: ⛔ THIS PIN WAS RE-DERIVED ON THE **MERGE
+#: TREE**, not carried from either side of the `origin/main` integration: `--repin` HERE prints
+#: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
+#: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
+#: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
+#:
 #: ⛔ #14445 RE-CUT IT ON `main`'s BEHALF — a deliberate re-pin, `--repin`'s own output and never
 #: arithmetic on the last one. `main` pinned (11910, "adc8229295339239") while its OWN tree derives
 #: (11911, "4ed42694957a174d") at `59a08fdb8b40`, so the required `surface-guard` leg was red ON
@@ -2048,7 +2054,7 @@ SWEEP_NAMES = 66
 #: each. The row arrived with `#14506` on `main`: a `seen: dict[str, object] = {}` accumulator's
 #: `.update(kwargs)` inside a `subprocess.Popen` spy — the ordinary-word receiver class this pin
 #: REPORTS rather than refuses. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by this re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
+#: so no typed call site is legitimised by this re-cut. ⛔ THAT TREE IS `main`'s, NOT THIS ONE'S.
 #:
 #: ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
 #: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. `main` pins (11911, "3e92044bab08cc3d")
