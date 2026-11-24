@@ -17422,13 +17422,20 @@ async def create_batch(body: BatchRequest,
         # `except HTTPException: raise` (written for BATCH_ESTIMATE_UNAVAILABLE)
         # re-raised. So a metering blip refused a legitimate POST with a message
         # about SIGN-IN, including the case the comment below says must proceed,
-        # and it spent sign-in capacity on a registry read — which
-        # `_cp_offload`'s/#3718's own contract forbids. `_graph_offload` is the
-        # documented lane for a registry read; its bound miss is caught here and
-        # becomes the UNKNOWN the two-case policy already knows how to weigh.
+        # and it spent sign-in capacity on a registry read — which #3718's
+        # contract forbids. `_graph_offload` is the documented lane for a registry
+        # read; its bound miss is caught here and becomes the UNKNOWN the
+        # two-case policy already knows how to weigh.
+        # ⛔ THE OFFLOAD'S OWN REFUSAL IS CAUGHT HERE, NOT AT THE OUTER HANDLER.
+        # `_graph_offload` fails CLOSED (a bound miss / saturated pool raises
+        # `graph_unavailable`), and the outer `except HTTPException: raise` exists
+        # for THIS block's own priced 503 — so letting the seam's exception reach it
+        # would refuse the batch anyway, just with a different 503 copy. A refused
+        # read is the same fact as a reported fault: UNKNOWN, and the asymmetry
+        # below decides (refuse only where the figure is load-bearing).
         try:
             usage = await _graph_offload(lambda: _usage_reader(org_id),
-                                         op="batch_usage")
+                                        op="batch_usage")
         except Exception:
             _logger.warning("batch estimate: usage read refused by the offload",
                             exc_info=True)
@@ -53665,7 +53672,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (730 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

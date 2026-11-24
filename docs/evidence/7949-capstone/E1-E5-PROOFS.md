@@ -170,16 +170,18 @@ observed]`, reported as `GREEN with steps not observed in the run: …`. (Those 
 cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
 inside this one PR, once in the commit that had just re-pointed them.)
 
-⚠️ **The two numbers above are not read by the bundle sweep — a separate pin reads
-them.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
-sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
-`tools/*.py` cite and the bare `:N` continuations above are invisible to it. They are
-pinned by phrase instead, in `test_the_bare_continuation_cites_name_what_they_say`,
-which requires each number to sit on the sentence that names it AND requires the line
-it points at to carry the symbol claimed there; the two claims stated as quoted RULES
-are held against the gate's text by the same pin, so a renamed message cannot leave the
-quote behind. Stated here so "swept" is never read into a number nothing re-checks: a
-**new** `tools/*.py` number in this document is unguarded until it earns a row there.
+⚠️ **The two numbers above are not read by the bundle sweep — and, since the B4 cut,
+not read by anything.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches
+only the three sources this bundle prints numbers for (`sdk.py`, `edges.py`,
+`extractor_v2.py`), so a `tools/*.py` cite and the bare `:N` continuations above are
+invisible to it. They USED to be pinned by phrase, in
+`test_the_bare_continuation_cites_name_what_they_say` — which required each number to sit
+on the sentence that names it AND required the line it points at to carry the symbol
+claimed there, so a renamed message could not leave the quote behind. ⛔ THAT PIN WAS CUT
+(test-bureaucracy batch B4, 2026-11-23): no arm reads these two numbers now, so re-derive
+them by hand against `tools/capstone_verdict_check.py` before you rely on them. Stated
+here so "swept" is never read into a number nothing re-checks: a **new** `tools/*.py`
+number in this document is unguarded until it earns a row there.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —

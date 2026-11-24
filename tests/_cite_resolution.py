@@ -74,37 +74,6 @@ def anchor_lines(source_lines, anchor: str, kind: str = "line") -> list[int]:
     return [n for n, text in enumerate(source_lines, 1) if anchor in text]
 
 
-def cite_holds(source_lines, number: int, anchors, kind: str = "line") -> bool:
-    """Does line `number` satisfy EVERY anchor? (all-of: a pair claims both)
-
-    ⛔ `kind` is VALIDATED here too, not only in `anchor_lines`. An unknown kind must
-    never fall through to the `a in text` branch: that is the WEAKEST check, so a
-    typo'd kind (`"exact "`, `"Span"`) would make the pass/fail decision silently
-    laxer — a false PASS on the one comparison a pin exists for — while the failure
-    message raised. One contract, both halves.
-    """
-    if kind not in ANCHOR_KINDS:
-        raise ValueError(f"unknown anchor kind {kind!r}; one of {ANCHOR_KINDS}")
-    if not anchors:
-        raise ValueError(
-            "a cite needs at least one anchor — an empty tuple would satisfy the "
-            "`all(...)` below VACUOUSLY and pass every cite it was handed")
-    blank = [a for a in anchors if not a.strip()]
-    if blank:
-        raise ValueError(
-            f"anchor(s) {blank!r} are empty or whitespace — `'' in text` is true on "
-            "EVERY line, so a blank anchor would pass every cite it was handed")
-    if not 1 <= number <= len(source_lines):
-        return False
-    text = source_lines[number - 1]
-    return all(
-        (text.lstrip().startswith(a) if kind == "def"
-         else text.strip() == a if kind == "exact"
-         else a in text)
-        for a in anchors
-    )
-
-
 def locate_hint(source_lines, anchor: str, kind: str = "line",
                 cited: int | None = None) -> str:
     """Where `anchor` actually lives, phrased to be pasted into a failure message.
@@ -143,46 +112,3 @@ def locate_hint(source_lines, anchor: str, kind: str = "line",
     more = ("" if len(found) <= _MAX_OTHER_CANDIDATES + 1
             else f", and {len(found) - _MAX_OTHER_CANDIDATES - 1} more")
     return f"is on {len(found)} lines ({shown}{more})"
-
-
-def cite_failure(doc_label: str, source_label: str, number: int, source_lines,
-                 anchors, *, kind: str = "line", what: str = "") -> str | None:
-    """`None` when the cite holds; otherwise the message that names BOTH lines.
-
-    `anchors` is a tuple: the cite is checked against ALL of them (a pair cite
-    claims both symbols are on that line — the `all` rule `#10214` review fixed).
-    `what` is the passage's own name for the thing cited (`the entry point`,
-    `the references writer`), so the message reads as a sentence about the claim
-    rather than about a substring.
-    """
-    if isinstance(anchors, str):
-        anchors = (anchors,)
-    if cite_holds(source_lines, number, anchors, kind):
-        return None
-    subject = f" ({what})" if what else ""
-    if number < 1:
-        return (f"{doc_label} cites {source_label}:{number}{subject}, which is not a "
-                f"line of {source_label} at all (lines are 1..{len(source_lines)}) — "
-                f"the number counts a different revision, or it names the wrong file")
-    if number > len(source_lines):
-        return (f"{doc_label} cites {source_label}:{number}{subject}, which is PAST "
-                f"THE END of {source_label} ({len(source_lines)} lines) — the number "
-                f"counts a different revision, or it names the wrong file")
-    got = source_lines[number - 1].strip()
-    hints = [f"`{a}` {locate_hint(source_lines, a, kind, number)}" for a in anchors]
-    # ⛔ The re-point instruction is only TRUE when EVERY anchor resolves SOMEWHERE
-    # (#13033 review P2). It used to be `any(...)`, which appended "re-point the cite to
-    # that line" to a pair cite whose SECOND anchor appears NOWHERE — contradicting, in
-    # one message, the "re-verify the PASSAGE rather than re-pointing the number" tail
-    # that the same message had just printed for that anchor. `all` is the minimal
-    # correct gate; the residual it does not close is a pair whose two anchors resolve
-    # on DIFFERENT lines (no single line satisfies both), which no caller constructs —
-    # `_pin_row_failures` passes a one-element tuple — so it is named here, not guessed at.
-    # ⛔ The instruction is appended only when it is TRUE, because the message has to
-    # carry the next ACTION: for a renamed symbol the action is to re-verify the passage
-    # (a re-pointed number would bury a false claim), and appending it to the
-    # `appears NOWHERE` case told a fixer to do both at once.
-    resolved = all(anchor_lines(source_lines, a, kind) for a in anchors)
-    return (f"{doc_label} cites {source_label}:{number}{subject}, and that line reads "
-            f"{got!r}. The thing it names " + "; ".join(hints)
-            + (" — re-point the cite to that line (do not delete it)" if resolved else ""))

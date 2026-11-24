@@ -707,13 +707,13 @@ class BatchStore(Protocol):
     def discard(self, org_id: str, batch_id: str) -> None:
         """Remove a batch's item rows (the rollback of a rejected acceptance).
 
-        ⛔ DECLARED, because `submit`'s ROLLBACK calls it (#14415 review round 14,
+        ⛔ DECLARED, because `submit`'s ROLLBACK calls it (#14415 review round 15,
         P3). It existed only on the two concrete stores, so a store written to this
         Protocol raised `AttributeError` inside the `except Exception` that logs
-        "could not be rolled back" — and then the item rows SURVIVED, which is the
-        BLOCKING-2 defect exactly: a 503 saying "nothing was accepted; retry" over
-        rows the resume scan adopts and drains, and then the retry ingests them
-        again. A narrow contract is only narrow if every call on it is in here.
+        "could not be rolled back" — and the item rows then SURVIVED, which is
+        BLOCKING-2 exactly: a 503 saying "nothing was accepted; retry" over rows the
+        resume scan adopts and drains, and then the retry ingests them again. A
+        narrow contract is only narrow if every call on it is in here.
         """
         ...
 
@@ -1149,33 +1149,37 @@ class GraphBatchStore:
         acceptance. A blind `SET` (what `put_batch` does) overwrote the ACK's
         `estimate`/`corpus_name` with an orphan snapshot's empties.
 
-        Returns True only when THIS call created the row (the `created_at` it just
-        wrote came back), so the caller knows whether it may trust its own object
-        or must re-read.
+        Returns True only when THIS call created the row, so the caller knows
+        whether it may trust its own object or must re-read.
+
+        ⛔ A PER-CALL TOKEN, NOT `created_at` (#14415 review cycle 2, MEDIUM). The
+        verdict compared `b.created_at` to ours — and the caller is `_resume_batch`,
+        which derives that stamp from `orphan_items[0].updated_at`, so two adoptions
+        of ONE orphan row pass the SAME stamp and the second read as CREATED over a
+        row it did not write (MEASURED on the live engine: a pre-existing row with an
+        equal stamp returns it). A value only THIS call can produce is the only
+        sound test of "did I create it", and it also removes the `not rows`
+        fail-open. The token is written only by `ON CREATE SET`, so it never appears
+        on a reused row.
         """
+        token = uuid.uuid4().hex
         rows = self._q(
             f"MERGE (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "ON CREATE SET b.state=$state, b.created_at=$created, "
             "    b.updated_at=$updated, b.estimate_json=$estimate, "
             "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason, "
-            "    b.corpus_name=$corpus "
-            # ⛔ RETURN WHAT TELLS CREATION FROM REUSE (#14415 review round 12,
-            # P3). It returned `b.state` and compared THAT, which is TRUE for a
-            # pre-existing row whose stored state string equals the caller's — the
-            # exact concurrent shape this is used in, where two adoptions of one
-            # orphan row both pass `RESUMING`. The caller then trusted its own
-            # object instead of re-reading. `created_at` is written only by
-            # `ON CREATE SET`, so comparing it to ours is a creation test.
-            "RETURN b.created_at",
+            "    b.corpus_name=$corpus, b.create_token=$token "
+            "RETURN b.create_token",
             {"bid": batch.batch_id, "org": batch.org_id,
              "state": str(batch.state), "created": batch.created_at,
              "updated": batch.updated_at,
              "estimate": _json_dumps(batch.estimate),
              "cancelled_at": batch.cancelled_at,
              "cancel_reason": batch.cancel_reason,
-             "corpus": batch.corpus_name},
+             "corpus": batch.corpus_name,
+             "token": token},
         )
-        return not rows or str(rows[0][0] or "") == str(batch.created_at or "")
+        return bool(rows) and str(rows[0][0] or "") == token
 
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
@@ -1298,7 +1302,16 @@ class GraphBatchStore:
         self._q(
             f"UNWIND $rows AS row "
             f"MERGE (i:{ITEM_LABEL} {{id:row.iid, batch_id:row.bid, "
-            "org_id:row.org}) "
+            # ⛔ THE `f` PREFIX IS LOAD-BEARING (#14415 review cycle 2, BLOCKING).
+            # This line closes the escaped `{{` opened on the line above, so as a
+            # PLAIN literal its `}}` reached FalkorDB verbatim: `... row.org}}) SET
+            # ...` → `Invalid input '}': expected ')'`. MEASURED on the docker lane
+            # against the brand-new bulk write — EVERY acceptance failed, while the
+            # hermetic suite stayed green because the brace guard sees a BALANCED
+            # statement (two closes for two opens) and a fake `query` accepts any
+            # string. This is the round-9 defect, reintroduced by the round-13 bulk
+            # rewrite that replaced the per-item loop.
+            f"org_id:row.org}}) "
             "SET i.ref=row.ref, i.name=row.name, i.staged_path=row.staged, "
             "    i.state=row.state, i.reason=row.reason, "
             "    i.content_key=row.key, i.tokens_in=row.tin, "

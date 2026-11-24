@@ -352,9 +352,12 @@ def test_a_batch_that_never_ran_is_not_relabelled_resuming():
       * "never report it at all" is refuted by the batch still being RETURNED by
         the scan, which is what makes a later pass visit it.
 
-    Measured as unpinned before this test: reinstating the pre-fix
-    `if moved or any(not i.terminal for i in items):` left all 87 tests in this
-    file green (#14415 review round 14, MEDIUM).
+    Measured as unpinned before this test: reinstating the pre-fix INNER condition
+    (`if moved or any(i.state is BatchItemState.QUEUED for i in items):` — the outer
+    gate was and is `if moved or any(not i.terminal for i in items):`) left every
+    test in this file green (#14415 review round 14, MEDIUM; re-worded in cycle 2,
+    LOW, because the first cut of this sentence named the OUTER gate, which the
+    change never touched, and a test count the file no longer carries).
     """
     store = InMemoryBatchStore()
     batch, items = BatchCoordinator(store).submit(ORG, ["/a.md", "/b.md"])
@@ -538,6 +541,15 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
                 "overage_tokens": 0, "overage_usd": 0.0}
     batch, items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
                                 corpus_name="handbook", estimate=estimate)
+    # ⛔ MODEL THE REAL CRASH, not just a stubbed read (#14415 cycle-2, HIGH).
+    # The first cut left the batch ROW in the store and only made `get_batch`
+    # answer `None`, so `put_batch_if_absent` found the row PRESENT and returned
+    # False — `_resume_batch` then re-read the row the ACK wrote and its CAS carried
+    # the REAL estimate, which is why reverting the fix left this test green
+    # (measured: the whole file green). The shape being pinned is a submit that
+    # wrote its ITEM rows and died before its batch row, so the row must genuinely
+    # be absent here.
+    del store._batches[(ORG, batch.batch_id)]
     # A dead claim, old enough that the resume window takes it — this is what
     # makes the scan call the CAS at all.
     stale_item = store.get_item(ORG, batch.batch_id, items[0].item_id)
@@ -552,6 +564,7 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
 
     def counting_cas(b, expected, _real=real_cas):
         state["cas"] += 1
+        state["caller_estimate"] = dict(b.estimate)
         return _real(b, expected)
 
     def stale_get(org_id, batch_id):
@@ -582,6 +595,10 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
     assert state["cas"] >= 1, (
         "the resume compare-and-set never ran, so this test cannot see the very "
         f"write it exists for (the first cut of it was vacuous for this reason): {state}")
+    assert state.get("caller_estimate") == {}, (
+        "the CAS was reached with a NON-empty caller estimate, so the write under "
+        "test is not the one this fixture means to pin — a later reordering could "
+        f"restore the vacuous shape silently: {state}")
     after = real_get(ORG, batch.batch_id)
     assert after is not None
     assert after.estimate == estimate, (
@@ -1909,6 +1926,14 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
         Batch(batch_id="batch_absent", org_id=ORG, state=BatchState.RESUMING,
               created_at="2026-01-01T00:00:00+00:00",
               updated_at="2026-01-01T00:00:00+00:00"))
+    # ⛔ AND THE BULK ACCEPTANCE WRITE (#14415 review cycle 2, BLOCKING). `put_items`
+    # is the round-13 replacement for the per-item loop, and this pin — whose
+    # docstring claims "every statement `GraphBatchStore` can emit" — never drove
+    # it. MEASURED: its closing `}}` sat on a PLAIN literal line, so `UNWIND … MERGE
+    # (i:…}}) SET …` reached FalkorDB verbatim and EVERY acceptance failed with
+    # `Invalid input '}': expected ')'` — the round-9 defect reintroduced, green
+    # here because the braces are BALANCED and a fake `query` accepts any string.
+    store.put_items(ORG, items)
     return pairs
 
 
@@ -2056,6 +2081,11 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     # landing over the cancel, so that is what is asserted.
     coord.recover(ORG)
 
+    assert fired["done"], (
+        "the interleaving never fired — the test proves nothing (#14415 review "
+        "cycle 2, MEDIUM: this was the one sibling whose instrumentation was "
+        "unasserted, so a reordering that stops the scan reaching the CAS leaves it "
+        "green while it stops pinning the write it exists for)")
     row = store.get_batch(ORG, batch.batch_id)
     assert row.state is BatchState.CANCELLED, (
         "the resume scan overwrote the customer's cancel")
@@ -2145,6 +2175,54 @@ def test_the_graph_store_speaks_real_cypher():
         assert BatchCoordinator(store).recover(ORG) == []
         store.discard(ORG, batch.batch_id)
         assert store.list_recent_batches(ORG) == []
+
+        # ⛔ THE ADOPTION PATH, ON THE ENGINE (#14415 review cycle 2, HIGH). The
+        # `MERGE … ON CREATE SET` that rounds 11-13 spent their effort on was never
+        # EXECUTED here — the `recover()` above only ever saw a row that existed —
+        # so a blind `SET` in its place left every test green. This is the orphan
+        # shape: ITEM rows with no batch row, exactly what a submit that died before
+        # its `put_batch` leaves behind.
+        orphan_batch, orphan_items = coord.submit(ORG, ["/live-orphan.md"])
+        store.discard(ORG, orphan_batch.batch_id)
+        store.put_item(ORG, BatchItem(
+            batch_id=orphan_batch.batch_id, item_id=orphan_items[0].item_id,
+            ref=orphan_items[0].ref, name=orphan_items[0].name,
+            state=BatchItemState.QUEUED,
+            updated_at="2020-01-01T00:00:00+00:00"))
+        assert BatchCoordinator(store).recover(ORG) == [orphan_batch.batch_id]
+        adopted = store.get_batch(ORG, orphan_batch.batch_id)
+        assert adopted is not None, (
+            "`MERGE … ON CREATE SET` did not create the adopted row on the engine "
+            "— the orphan items are unreachable and the batch is never driven")
+        assert store.pending_batches(ORG) == [orphan_batch.batch_id]
+        assert [i.item_id for i in store.items(ORG, orphan_batch.batch_id)] == [
+            orphan_items[0].item_id]
+        store.discard(ORG, orphan_batch.batch_id)
+
+        # ⛔ AND THE ARM `MERGE` ALONE CANNOT SHOW: a create-if-absent over a row
+        # that ALREADY EXISTS. `MERGE` matches, so `ON CREATE SET` runs nothing —
+        # while a blind `SET` overwrites the row with the caller's orphan snapshot,
+        # which is the acceptance-erasing write rounds 11-12 fixed. Proven here
+        # because the raced interleaving cannot be staged on an engine: the
+        # acceptance is written first, deliberately.
+        kept, kept_items = coord.submit(ORG, ["/live-kept.md"],
+                                        corpus_name="handbook",
+                                        estimate={"items": 1,
+                                                  "estimated_tokens": 64799})
+        created = store.put_batch_if_absent(Batch(
+            batch_id=kept.batch_id, org_id=ORG, state=BatchState.RESUMING,
+            created_at=kept_items[0].updated_at,
+            updated_at=kept_items[0].updated_at))
+        assert created is False, (
+            "creating over an EXISTING row reported CREATED — the caller then "
+            "trusts its orphan-shaped object instead of re-reading the ACK")
+        survivor = store.get_batch(ORG, kept.batch_id)
+        assert survivor.estimate.get("estimated_tokens") == 64799, (
+            "the create-if-absent BLANKED an acceptance's estimate on the engine — "
+            f"this is the round-11 erasure: {survivor.estimate!r}")
+        assert survivor.corpus_name == "handbook", (
+            f"the create-if-absent blanked corpus_name: {survivor.corpus_name!r}")
+        store.discard(ORG, kept.batch_id)
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
@@ -2841,7 +2919,8 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
             self.cyphers.append(cypher)
 
             class _Res:
-                result_set: list = []
+                def __init__(self) -> None:
+                    self.result_set: list = []
 
             return _Res()
 
@@ -2856,15 +2935,23 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
     assert "UNWIND $rows AS row" in rec.cyphers[0], rec.cyphers[0][:200]
 
 
-def test_the_create_if_absent_reports_creation_not_state_equality():
-    """⛔ ROUND-12 REVIEW P3: the verdict compared STATE, not existence.
+def test_the_create_if_absent_reports_creation_only_for_this_call():
+    """⛔ THE VERDICT MUST BE A FACT ONLY THIS CALL CAN PRODUCE (#14415 cycle-2, MEDIUM).
 
-    It returned `b.state` and compared that, which is TRUE for a pre-existing row
-    whose stored state equals the caller's — the exact concurrent shape it is used
-    in, where two adoptions of one orphan row both pass `RESUMING`. The caller then
-    trusted its own object (created_at from the orphan item) instead of re-reading.
-    `created_at` is written only by `ON CREATE SET`, so the created timestamp is a
-    creation test.
+    Two earlier cuts of this verdict were both wrong, in the same direction:
+
+    * it returned `b.state` and compared that — TRUE for a pre-existing row whose
+      state string equals the caller's, and the caller is `_resume_batch`, where
+      two adoptions of ONE orphan row both pass `RESUMING`;
+    * it then compared `b.created_at` — and `_resume_batch` derives that stamp from
+      `orphan_items[0].updated_at`, so the SAME two adoptions also pass the same
+      stamp and the second still read as CREATED. MEASURED on the live engine
+      before this fix: a pre-existing row with an equal stamp returns it, so the
+      old comparison answers `created: True` over a row it did not write.
+
+    The creation test is therefore a per-call token, written only by
+    `ON CREATE SET`: a value a reused row cannot carry. An empty RETURN is also
+    NOT evidence of creation — the old `not rows or …` failed OPEN.
     """
     from tortoise.batch_ingest import GraphBatchStore
 
@@ -2873,22 +2960,50 @@ def test_the_create_if_absent_reports_creation_not_state_equality():
                   updated_at="2026-01-01T00:00:00+00:00")
 
     class _Rec:
-        def __init__(self, rows):
-            self.rows = rows
+        """Echoes `echo`; `echo="__mine__"` replays the caller's own token."""
+
+        def __init__(self, echo: str) -> None:
+            self.echo = echo
             self.cyphers: list[str] = []
+            self.params: list[dict] = []
 
         def __call__(self, cypher, params=None, **kw):
             self.cyphers.append(cypher)
-            rows = self.rows
+            self.params.append(dict(params or {}))
+            token = (self.params[-1].get("token") if self.echo == "__mine__"
+                     else self.echo)
 
             class _Res:
-                result_set = rows
+                def __init__(self) -> None:
+                    self.result_set = [[token]]
 
             return _Res()
 
-    created = _Rec([["2026-01-01T00:00:00+00:00"]])
-    assert GraphBatchStore(created).put_batch_if_absent(batch) is True
-    reused = _Rec([["2025-12-31T00:00:00+00:00"]])
+    created = _Rec("__mine__")
+    assert GraphBatchStore(created).put_batch_if_absent(batch) is True, (
+        "the row THIS call created was not reported as created")
+    stmt = created.cyphers[-1]
+    assert "ON CREATE SET" in stmt and "b.create_token=$token" in stmt, (
+        f"the create-if-absent lost its creation marker: {stmt[:200]}")
+
+    # ⛔ THE CASE THE PREVIOUS CUT COULD NOT SEE: the reused row carries the SAME
+    # created_at the caller derived from its orphan items, and a token that is not
+    # ours. Only the token can tell those apart.
+    reused = _Rec("0193f4aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert GraphBatchStore(reused).put_batch_if_absent(batch) is False, (
-        "a pre-existing row whose state string matches the caller's was reported "
-        "as CREATED — the caller then trusts its own object")
+        "a pre-existing row was reported as CREATED — the caller then trusts its "
+        "own (orphan-shaped) object instead of re-reading what the ACK wrote")
+
+    class _Empty(_Rec):
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            self.params.append(dict(params or {}))
+
+            class _Res:
+                def __init__(self) -> None:
+                    self.result_set: list = []
+
+            return _Res()
+
+    assert GraphBatchStore(_Empty("__mine__")).put_batch_if_absent(batch) is False, (
+        "an empty RETURN was read as 'I created it' — the verdict fails open")

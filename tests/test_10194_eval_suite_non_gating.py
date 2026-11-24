@@ -234,16 +234,14 @@ def _expected_legs(manifest: dict) -> set[str]:
     from the manifest's `a`..`k` sequence, leaves this file 8 passed). Label
     spelling is therefore pinned by the seams that would refuse a merge:
     `test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes` for
-    the `test (a)`/`test (b)` names the rail subtracts (and NOT a rename past the
-    first two labels — measured green), and
+    the `test (a)`/`test (b)` names the rail subtracts AND for the `a`..`i`
+    positional sequence it builds (it calls `shard_labels(9)`), and
+    `test_ci_selection.py::test_every_file_rides_exactly_one_shard_at_s_greater_than_two`
+    for the partition at S=5, and
     `test_ci_selection.py::test_push_legs_partitions_every_classified_file`
-    for the positional `a`..`k` sequence a matrix is built from — ELEVEN labels,
-    matching `fast_shards: 11`. ⛔ The nine-shard stability arm that used to hold
-    the "rename past the last label" measurement went with the durations-map
-    arithmetic cut, so that measurement is no longer re-derived anywhere; the
-    `a`..`i` / NINE-shard wording it left behind was already stale against
-    `fast_shards: 11` on `main` and is corrected here rather than carried
-    through the rewrite of this paragraph.
+    for a file that falls out of every leg.
+    (The S=9 `test_shard_count_is_stable_regardless_of_the_selection_size` arm
+    this paragraph used to cite was cut in the B7 test-bureaucracy cut, 2026-11-23.)
     What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
