@@ -14,8 +14,14 @@ These tests pin the fixed contract:
 
 1. a filing class pushes exactly ONCE per incident lifecycle, and the message
    names the issue (attribution);
-2. a new EPISODE (the incident was resolved) pushes exactly once more — an
-   episode end releases the window, so a new episode is never folded;
+2. a new EPISODE (the incident was resolved) pushes exactly once more — a
+   COMPLETED episode end releases the window, so a new episode after one is not
+   folded. "Never folded" would be the over-claim this file's siblings remove:
+   an end whose release gate HOLDS (a `SKIPPED_WINDOW` close — the first clean
+   window, or a sibling kind answering `SKIPPED_WINDOW` in the same call, the
+   flag being per CALL) and an end the engine never OBSERVES (an out-of-band
+   `abuse_unsuspend` or a manual `flag_clear`) both leave the window armed, and
+   the new episode is FOLDED into it;
 3. a measurement class (R3/R4/R8) files nothing BY DESIGN (#10156's ACTIVITY
    register) and delivers a bounded digest instead of one message per window;
 4. when the incident channel cannot be built at all the human is STILL told — the
