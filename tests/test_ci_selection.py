@@ -22053,6 +22053,52 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     return claims
 
 
+def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
+    """The bullet/paragraph holding `pos` — a verdict belongs to the block it is IN.
+
+    A distance window alone reaches into the neighbouring bullet: measured on the plan
+    ledger, `test_split_rejects_non_list`'s "**SURVIVES** (never cut)" was read as
+    carrying the PREVIOUS bullet's cut verdict, i.e. a clean record charged with a
+    contradiction it never states. Blocks are the unit a reader uses (a `- ` bullet, a
+    blank-line paragraph), so they are the unit the verdict is searched in.
+    """
+    starts = [i for i in (text.rfind(sep, 0, pos) for sep in ("\n\n", "\n- ", "\n* "))
+              if i != -1]
+    lo = (max(starts) + 1) if starts else 0
+    ends = [i for i in (text.find(sep, pos) for sep in ("\n\n", "\n- ", "\n* "))
+            if i != -1]
+    return lo, (min(ends) if ends else len(text))
+
+
+def _arm_names_in(text: str) -> set[str]:
+    """Every backticked arm-shaped token in `text`; a wrapped name is joined."""
+    names = {m.group(1) for m in _CUT_CLAIM_NAME_RE.finditer(text)}
+    names |= {m.group(1) + m.group(2) for m in _CUT_CLAIM_WRAPPED_RE.finditer(text)}
+    return {n for n in names if _CUT_CLAIM_ARM_RE.match(n)}
+
+
+def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -> bool:
+    """Is THIS name's restoration recorded in the passage around its verdict?
+
+    ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT. A distance-only window (±`_CUT_CLAIM_RESTORED_SPAN`)
+    let ONE `RESTORED by #14481` defuse EVERY CUT verdict in the window: measured on the
+    plan ledger, a false "CUT" on a live arm stayed green only because another arm's
+    restoration label sat 325 characters away — the false-PASS class this pin exists to
+    forbid, one level down. So the rule is positional AND attributive: between the
+    verdict's name and the restoration marker there may be no OTHER arm name, or the
+    marker is read as belonging to that other arm and does not defuse this one.
+    """
+    lo = max(0, start - _CUT_CLAIM_RESTORED_SPAN)
+    hi = end + _CUT_CLAIM_RESTORED_SPAN
+    for marker in _CUT_CLAIM_RESTORED_RE.finditer(text[lo:hi]):
+        marker_start = lo + marker.start()
+        between = (text[end:marker_start] if marker_start >= end
+                   else text[lo + marker.end():start])
+        if not (_arm_names_in(between) - {name}):
+            return True
+    return False
+
+
 def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     """`(offset, name, contradicts)` for every CUT verdict on a name in `text`.
 
@@ -22063,16 +22109,22 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     filter can never drop a name this file defines.
 
     A verdict is CONSIDERED when the word `CUT` sits within `_CUT_CLAIM_WINDOW`
-    characters of the name, FORWARD OR BACKWARD. Both orders are in the class this
-    pin exists for — "`test_x`, cut by #14439" and "CUT: `test_x`" — and the
-    forward-only first cut read the second as no verdict at all, i.e. CLEAN over
-    exactly the prose it was written to catch.
+    characters of the name, FORWARD OR BACKWARD, **inside the same bullet or
+    paragraph** (see the block-bounds helper below). Both orders are in the class this pin
+    exists for — "`test_x`, cut by #14439" and "CUT: `test_x`" — and the forward-only
+    first cut read the second as no verdict at all, i.e. CLEAN over exactly the
+    prose it was written to catch; an unbounded backward window then charged a
+    clean bullet with its neighbour's verdict, which is the false RED this bound
+    removes.
 
     `contradicts` is True only when this file DEFINES that name and no ATTRIBUTED
     restoration ("RESTORED by `#14481`", "restored by <sha>") is recorded within
-    `_CUT_CLAIM_RESTORED_SPAN` on either side: that is the pair no reviewer should
-    have to catch, because the tree, not the prose, is the authority for what is
-    graded. A bare `restored` does not defuse — see `_CUT_CLAIM_RESTORED_RE`.
+    `_CUT_CLAIM_RESTORED_SPAN` on either side AND bound to THIS name — no other arm
+    name may sit between the verdict and the marker, or the marker is another arm's
+    (see `_cut_claim_restoration_defuses`; the unbound version was a measured false
+    PASS). That is the pair no reviewer should have to catch, because the tree, not
+    the prose, is the authority for what is graded. A bare `restored` does not
+    defuse — see `_CUT_CLAIM_RESTORED_RE`.
     """
     claims = []
     found = [(m, m.group(1)) for m in _CUT_CLAIM_NAME_RE.finditer(text)]
@@ -22081,16 +22133,15 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     for m, name in sorted(found, key=lambda pair: pair[0].start()):
         if not _cut_claim_is_claim(name, live):
             continue
-        forward = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
-        backward = text[max(0, m.start() - _CUT_CLAIM_WINDOW):m.start()]
-        if not (_CUT_CLAIM_VERDICT_RE.search(forward)
-                or _CUT_CLAIM_VERDICT_RE.search(backward)):
+        block_lo, block_hi = _claim_block_bounds(text, m.start())
+        window = text[max(block_lo, m.start() - _CUT_CLAIM_WINDOW):
+                      min(block_hi, m.end() + _CUT_CLAIM_WINDOW)]
+        if not _CUT_CLAIM_VERDICT_RE.search(window):
             continue
-        span = text[max(0, m.start() - _CUT_CLAIM_RESTORED_SPAN):
-                    m.end() + _CUT_CLAIM_RESTORED_SPAN]
         claims.append((m.start(), name,
                        name in live
-                       and not _CUT_CLAIM_RESTORED_RE.search(span)))
+                       and not _cut_claim_restoration_defuses(
+                           text, m.start(), m.end(), name)))
     return claims
 
 
@@ -22143,6 +22194,23 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "the claim filter rejects names this file DEFINES, so a record calling one CUT "
         "would pass unseen — a false PASS at the filter, which is the class this pin "
         f"forbids: {dropped!r}")
+    # ⛔ BOUND TO ITS NAME: one passage, two arms, one restoration — the OTHER arm's
+    # restoration must not defuse this arm's verdict. Measured false PASS before the
+    # binding: a live arm's false verdict stayed green off a label 325 characters away.
+    mixed = ("- `test_a_arm` was CUT by #14419 and remains gone.\n"
+             "- `test_b_arm` was CUT by #14439 and RESTORED by `#14481`.\n")
+    got = {n: c for _o, n, c in _cut_claims_in(mixed, {"test_a_arm", "test_b_arm"})}
+    assert got == {"test_a_arm": True, "test_b_arm": False}, (
+        f"a restoration must attach to ITS name, not to its neighbourhood: {got!r}")
+
+    # ⛔ AND A VERDICT BELONGS TO ITS OWN BULLET: the next bullet's "never cut" must not
+    # inherit this one's verdict — the measured false RED this bound removes.
+    bullets = ("- `test_c_arm` — CUT (B7).\n"
+               "- `test_d_arm` — **SURVIVES** (never cut).\n")
+    got = {n: c for _o, n, c in _cut_claims_in(bullets, {"test_c_arm", "test_d_arm"})}
+    assert got == {"test_c_arm": True}, (
+        f"a verdict must not leak into the next bullet: {got!r}")
+
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
         "these records call an arm CUT while `tests/test_ci_selection.py` defines "
