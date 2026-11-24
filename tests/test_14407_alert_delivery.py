@@ -263,6 +263,12 @@ def test_a_reminder_over_a_number_less_sentinel_says_which_state_it_is(monkeypat
     assert "could not be read" not in reminder, (
         "the number-less arm borrowed the RAISE arm's string — a reader is told the "
         f"read failed when it did not: {reminder!r}")
+    # Round 5, P2: the sentence also said "the issue comment trail is the recurrence
+    # record", naming a record that cannot exist in an arm whose own clause says
+    # there is no issue number. The pointer is now arm-conditional and pinned here.
+    assert "issue comment trail" not in reminder, (
+        "the reminder points at a comment trail on an incident it just said has no "
+        f"issue: {reminder!r}")
     notify.reset_abuse_delivery_for_tests()
 
 

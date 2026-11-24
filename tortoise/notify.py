@@ -648,8 +648,15 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # crossing would re-arm the ledger and page a reminder, so the 24h reminder
     # window would degenerate back into one message per crossing.
     #
-    # The no-channel shape keeps the old behaviour below (the ledger is local
-    # and is the ONLY delivery there is, so an ended episode must re-arm it).
+    # The no-channel shape re-arms the ledger on EVERY confirmed episode end
+    # (below), because the ledger is local and is the ONLY delivery there is —
+    # with no store there is no `skipped_window` gate to hold it. ⛔ THE BOUND
+    # THAT FOLLOWS IS PER EPISODE, NOT PER 24h, and every claim about this path
+    # says so (round 5, P2): a rule that flaps pages once per episode — measured
+    # 12 messages in 36 h over 24 alternating evaluations — while a continuously
+    # breaching org stays at the one-per-window bound. Pre-fix the flapping rate
+    # was one per CROSSING; that is what this shape improves, and the improvement
+    # is not the store path's per-24h ceiling.
     store, reason = _abuse_alert_store()
     if store is None:
         for kind in _episode_delivery_kinds():
@@ -974,8 +981,16 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         attribution=(f"Still open — {ref}. One reminder per "
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
                                      "while the episode stays open; repeats "
-                                     "inside that window are folded (the issue "
-                                     "comment trail is the recurrence record)."),
+                                     "inside that window are folded"
+                                     # ⛔ ONLY the arm that NAMES an issue may
+                                     # point at its comment trail (round 5, P2):
+                                     # the two number-less arms say in the same
+                                     # sentence that there is no issue number, so
+                                     # a pointer to "the issue comment trail"
+                                     # referenced a record that does not exist —
+                                     # the over-claiming class this PR removes.
+                                     + (" (the issue comment trail is the "
+                                        "recurrence record)." if number else ".")),
                         folded=folded)):
                     # A failed send must not consume the reminder window.
                     release_abuse_delivery(kind, subject)
@@ -1083,7 +1098,10 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "
-        "per subject until the incident channel is repaired (#14407).",
+        "per subject, RE-ARMED by a confirmed episode end — a continuously "
+        "breaching org stays at that ceiling, while a rule that flaps pages "
+        "once per episode rather than once per detection, and never silent "
+        "(#14407).",
         kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
     if not _send_abuse(bot_token, chat_id, _abuse_message(
             kind, org_id, details,
