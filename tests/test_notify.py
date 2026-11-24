@@ -418,9 +418,16 @@ def test_abuse_incident_is_filed_while_the_backup_sweep_is_off(monkeypatch):
         def __init__(self):
             self.opened = []
 
-        def open_incident(self, kind, org_id="", detail=None):
+        def open_incident_state(self, kind, org_id="", detail=None, writer=None):
+            from tortoise.alert_store import OpenOutcome
             self.opened.append((kind, org_id, detail))
-            return True
+            return OpenOutcome.FILED
+
+        # kept for the pre-#14407 call shape: a store that only implements
+        # ``open_incident`` must NOT be read as "filed" (the boolean squashes
+        # DEDUP into False, which would re-arm the delivery window).
+        def open_incident(self, kind, org_id="", detail=None):
+            raise AssertionError("abuse must ask for the OUTCOME, not the bool")
 
     store = _Store()
     monkeypatch.setattr(notify, "telegram_send",
@@ -434,7 +441,10 @@ def test_abuse_incident_is_filed_while_the_backup_sweep_is_off(monkeypatch):
                         {"rule": "point_create", "count": 501})
 
     assert [k for k, _, _ in store.opened] == ["abuse_review_needed"]
-    assert store.opened[0][1] == "team_123", store.opened
+    # #14407: the subject is RULE-SCOPED (the incident body is create-once, so a
+    # shared subject would let R1 own the record for R2's whole lifecycle), and
+    # the push carries the rule + count the triager needs.
+    assert store.opened[0][1] == "team_123:point_create", store.opened
 
 
 def test_operator_suspend_notification_leg_is_still_wired(monkeypatch):
