@@ -297,6 +297,9 @@ def _residue_block() -> str:
     pin: this branch's blob read **1858** on its own tree, `main`'s still read **1808**, and the
     RESOLVED run is the figure above, **1869** (1858 + this fold's own 11 `#:` lines, which record
     the `+1` row that commit added and name it) — re-derived by this walk, never inherited.
+    — and `#14395`'s own fix lane re-cut this run to **1774** on ITS tree, and `main`'s re-walk of its
+    merged tree read **1808** — both kept here as that side's own history and NEITHER carried: the
+    figure above is re-walked on THIS tree, and this tree merges `origin/main` `989765162fbc`.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
