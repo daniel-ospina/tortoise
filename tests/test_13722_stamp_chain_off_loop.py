@@ -61,7 +61,13 @@ run-time guard in #14528:
    ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it", and the
    difference is deliberate: a fixer disables a leg by making the guard false, so
    `[]` / `{}` / `{*()}` are as dead as `False` even though CPython evaluates them
-   at run time (`dis` folds only a literal constant such as `False` / `0` / `()`).
+   at run time. ⛔ "FOLDED" IS NOT THE CRITERION EITHER, and the earlier phrasing
+   of this paragraph ("`dis` folds only a literal constant such as
+   `False` / `0` / `()`") was false on the interpreter it names (review P3 at
+   `b6d7bc716`, measured): CPython 3.12.3 also drops the body for `-0.0`,
+   `not True`, `True and False` and `0 if True else 1`. What survives to run time
+   is precisely the COLLECTION literals (`[]`, `{}`, `{*()}`) plus a run-time
+   operand (`_x and False`) — which is why the pin grades "always false" instead.
    Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
    (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
    signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
@@ -696,10 +702,12 @@ def _statically_false(
 
     ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it". A fixer
     disables a leg by making the guard false, and `[]`/`{}`/`{*()}` are just as
-    dead as `False` even though CPython evaluates them at run time (`dis` folds only
-    a literal constant such as `False`/`0`/`()`); grading them is what makes the arm
-    catch the disable a fixer actually writes. `_literal_truth` is the one place
-    that decides, so `not X` and `X` cannot disagree.
+    dead as `False` even though CPython evaluates them at run time. It DOES fold
+    more than a bare constant (`-0.0`, `not True`, `True and False`), so "folded"
+    is not the criterion either — the empty COLLECTION literals are what survive
+    to run time, and grading them is what makes the arm catch the disable a fixer
+    actually writes. `_literal_truth` is the one place that decides, so `not X`
+    and `X` cannot disagree.
     """
     return _literal_truth(test, bound) is False
 
@@ -2032,6 +2040,15 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # unreachable (empty iterable) AND the call sits in the clause, so dropping
         # the clause walk stops the target being visited at all and this row reds.
         (["def f():", "    [x for _ in () if (g(),)]"], ["()"]),
+        # ⛔ AND A CALL IN A `while` TEST OR A `match` CASE GUARD, not in the guarded
+        # body (review P2 at `b6d7bc716`, measured): each of those node types walks
+        # its own test/guard, and deleting either walk left the whole suite green
+        # until these two rows existed (the `if` test walk was already pinned by the
+        # `not True` else rows). The `()` outer guard is what makes the inner call
+        # dead — under a live outer guard there is nothing to report either way.
+        (["def f():", "    if ():", "        while g():", "            pass"], ["()"]),
+        (["def f():", "    if ():", "        match _x:",
+          "            case _ if g():", "                pass"], ["()"]),
         # …and the same for a comprehension's own `iter`: pushing its guard before
         # walking it reports `g()` inside `(0 if g() else 0)`, which RUNS.
         (["def f():", "    [x for _ in (0 if g() else 0)]"], []),
