@@ -397,7 +397,8 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     `reads = 0`** — the assertion passed while the regression it names was
     happening. So:
 
-    * `parses` counts `_declared_types_for_dir_state` — THE parse — and is the assertion
+    * `parses` counts `_declared_types_from_chunks` — THE parse, shared by the
+      directory reader and the resident one (#4625) — and is the assertion
       that matters: one per plan build, never one per bound parameter (the
       regressed shape measured ~180 for this plan);
     * `reads` counts `_read_migrations_state` as a cross-check on the column map, which
@@ -416,21 +417,24 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     # returns `(sql, complete)`. `_read_migrations` is a `[0]` wrapper over it, so
     # patching that would count nothing.
     real_reads = rp._read_migrations_state
-    # ⛔ `_declared_types_for_dir_state` is the primitive (#4625): it returns
-    # `(map, complete)` and `_declared_types_for_dir` is a `[0]` wrapper over it,
-    # so patching the wrapper would count nothing.
-    real_parse = rp._declared_types_for_dir_state
+    # ⛔ THE PARSE IS NOW `_declared_types_from_chunks` (#4625, fourth round). The
+    # resident `jsonb` reader parses the schema entry's CERTIFIED SQL rather than
+    # re-reading the directory, so a directory-parse counter would read 0 and this
+    # pin would pass for the wrong reason. `_declared_types_from_chunks` is THE
+    # parse on both paths (the directory reader feeds it one chunk per file), so
+    # counting it is the same subject one seam over.
+    real_parse = rp._declared_types_from_chunks
 
     def _counting_reads(migrations_dir=None):
         reads.append(1)
         return real_reads(migrations_dir)
 
-    def _counting_parse(migrations_dir):
+    def _counting_parse(chunks):
         parses.append(1)
-        return real_parse(migrations_dir)
+        return real_parse(chunks)
 
     monkeypatch.setattr(rp, "_read_migrations_state", _counting_reads)
-    monkeypatch.setattr(rp, "_declared_types_for_dir_state", _counting_parse)
+    monkeypatch.setattr(rp, "_declared_types_from_chunks", _counting_parse)
     rp._jsonb_cache_clear()
     rp._release_schema_cache()
     tenant = _tenant()

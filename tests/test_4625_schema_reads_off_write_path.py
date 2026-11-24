@@ -533,21 +533,28 @@ def test_a_partial_jsonb_read_does_not_freeze_the_name_set(monkeypatch, tmp_path
         rp._release_schema_cache()
 
 
-def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
+def test_an_edit_under_a_resolved_schema_cannot_split_the_three_readers(
         monkeypatch, tmp_path):
-    """The jsonb memo must be certified by the jsonb read (#4625 review, F2).
+    """The residents parse the SAME certified bytes, so they cannot disagree (#4625).
 
-    `_entry_sql_state` answers `(sql, True)` WITHOUT READING when the SQL is
-    already memoised, and a batch that binds no string parameter memoises the SQL
-    and never reaches `jsonb_columns()`. So certifying the jsonb parse with THAT
-    flag is not a statement about the jsonb parse at all: a migration removed
-    after the SQL memo was taken then yields a SHORT name set which is stored for
-    the life of the process — an UNBOUNDED window, not the microseconds a
-    certify-then-parse comment describes.
+    This is the shape that made an earlier revision of this fix write a value
+    UNENCODED: `table_columns()` / `refused_props_names()` answer from the schema
+    entry's memoised SQL, so an EDIT or a REMOVAL under an already-resolved entry
+    leaves them on the old parse — while a `jsonb_columns()` that RE-READ the
+    directory saw the new tree. The column stayed in the column map, the `jsonb`
+    name left the name set, and `_jsonb_or_scalar` then bound that parameter on the
+    wrong side of the encoding rule (measured: `payload` in the map, absent from
+    the set, `_jsonb_or_scalar("payload", "raw string")` returning the raw string,
+    no error anywhere) — the `22P02` row-drop class this module documents.
 
-    FALSIFIER (executed): certify with `_entry_sql_state`'s flag instead of
-    `_jsonb_columns_for_dir_state`'s and this test reds — the short set is
-    memoised instead of the shrink being refused.
+    ⛔ `jsonb_columns()` is NOT called before the mutations: an earlier cut called
+    it in a "before" assertion, which memoised the name set and made every arm
+    below pass for the wrong reason (the memo, not the parse). The only thing
+    resolved first is the SQL, which is exactly the state a parameter-free batch
+    leaves behind.
+
+    FALSIFIER (executed): restore `names = _jsonb_columns_for_dir(entry["base"])`
+    on the resident path and the REMOVAL arm below reds.
     """
     source = _real_migrations()
     tree = tmp_path / "migrations"
@@ -557,32 +564,60 @@ def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
     monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
     rp._release_schema_cache()
     try:
-        # …the SQL memo is taken here, and `jsonb_columns` is NOT consulted — the
-        # exact shape a parameter-free batch leaves behind.
-        assert "point" in rp.table_columns()
-        assert "jsonb_columns" not in rp._resident_entry()["parsed"]
-        # …now the tree goes partial BEHIND the memoised SQL.
+        # …the SQL memo is taken here; the jsonb name set is NOT.
+        before_map = rp.table_columns()
+        assert "payload" in before_map.get("journal_event", ()), (
+            "the fixture does not carry the `jsonb` column this pin is about")
+
+        # (1) REMOVAL under the resolved entry.
         (tree / _PARTIAL_JSONB_OMITTED).unlink()
-        # ⛔ A SHRINK UNDER A RESOLVED SCHEMA IS REFUSED, not answered short and
-        # not memoised (#4625 review, third round). `table_columns()` keeps
-        # answering from the certified bytes, so a SHORT name set here would leave
-        # the two readers disagreeing — the column retained, the `jsonb` name lost
-        # — and `_jsonb_or_scalar` would bind that parameter UNENCODED, the 22P02
-        # row-drop class. Pre-#4625 the same removal raised out of
-        # `table_columns()`; a loud refusal is what to keep.
-        with pytest.raises(rp.RecordProjectionError, match="already-resolved"):
-            rp.jsonb_columns()
-        assert "jsonb_columns" not in rp._resident_entry()["parsed"], (
-            "the jsonb name set was memoised from a short parse — every parameter "
-            "bound to the missing declaration is then encoded on the wrong side of "
-            "the rule, silently. Certify the jsonb parse with the completeness of "
-            "ITS OWN read, and refuse when a resolved schema shrinks.")
-        # …and it heals with no refresh verb once the file is back.
-        shutil.copy(source / _PARTIAL_JSONB_OMITTED, tree / _PARTIAL_JSONB_OMITTED)
         assert "payload" in rp.jsonb_columns(), (
-            "a short jsonb name set survived the file being restored")
+            "a REMOVAL under an already-resolved schema changed the `jsonb` name "
+            "set while the column map kept the column: the resident readers are "
+            "reading different things, so a value bound to that column is written "
+            "on the wrong side of the encoding rule — silently, the 22P02 class. "
+            "Parse the certified SQL, like the other two readers.")
+        shutil.copy(source / _PARTIAL_JSONB_OMITTED, tree / _PARTIAL_JSONB_OMITTED)
+
+        # (2) …and the refresh VERB is what sees a change: re-resolve, then the
+        # same removal IS visible (the documented trade, pinned from the other
+        # side — a verb that does not actually re-resolve is the failure).
+        (tree / _PARTIAL_JSONB_OMITTED).unlink()
+        rp._release_schema_cache()
+        with pytest.raises(rp.RecordProjectionError, match="not on disk"):
+            rp.table_columns()
+        assert "payload" not in rp.jsonb_columns(), (
+            "after `_release_schema_cache()` the removal should be VISIBLE — if "
+            "it is not, the verb does not re-resolve the jsonb reader either")
     finally:
         rp._release_schema_cache()
+
+
+def test_the_two_parse_paths_agree_on_the_real_tree():
+    """The directory parse and the concatenated-SQL parse must not diverge.
+
+    The resident readers parse the certified SQL as ONE chunk; `column_types()` and
+    the explicit-directory mode parse ONE CHUNK PER FILE (comments stripped per
+    file). They must answer the same thing, or a caller that moves between the two
+    modes silently changes what the schema is believed to say — the #11075
+    contract, one layer down. Pinned here so a future divergence REDS instead of
+    shipping.
+
+    FALSIFIER (executed): strip comments AFTER joining rather than per file, in a
+    `/tmp` copy, and this test still passes (the two are equivalent today) — what
+    it reds on is a real semantic change to either path, e.g. dropping the
+    `ALTER … ALTER COLUMN … TYPE` shape from `_declared_types_from_chunks`.
+    """
+    tree = _real_migrations()
+    per_file = rp._declared_types_for_dir(tree)
+    joined = rp._declared_types_from_chunks(
+        [rp._strip_sql_comments(
+            "\n".join((tree / name).read_text(encoding="utf-8")
+                      for name in rp.RECORD_MIGRATIONS))])
+    assert per_file == joined, (
+        "the per-file parse and the concatenated-SQL parse disagree about the "
+        "record schema — the resident `jsonb` reader and `column_types()` would "
+        "then answer differently for the same tree")
 
 
 def test_an_incomplete_read_never_reaches_the_sql_memo(monkeypatch, tmp_path):

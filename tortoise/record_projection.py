@@ -2108,9 +2108,14 @@ def _resident_entry() -> dict[str, Any]:
     after the first consult.
 
     ⚠️ `_migrations_dir()` is called INSIDE the lock and exactly once per
-    process: it probes both candidate locations (:func:`_complete` is a
-    `stat` per registered migration), so calling it per record was itself part
-    of the measured cost. It stays a zero-argument, patch-by-name seam for
+    RESOLUTION (not once per process, and never per record): it probes both
+    candidate locations (:func:`_complete` is a `stat` per registered migration),
+    so calling it per record was itself part of the measured cost. Other callers
+    resolve it independently — `tortoise/hosted_api.py` does at IMPORT time for
+    `/health`'s `migrations_source`/head pair (#10447), `column_types(None)`,
+    `_read_migrations(None)` and both `RecordProjectionError` message paths do at
+    their own call sites — which is fine (it is a cheap resolution, and none of
+    them is the record write), but "exactly once per process" was simply false. It stays a zero-argument, patch-by-name seam for
     `tests/test_health_build_identity_10447.py`; a patched resolver is honoured
     by the NEXT resolution, i.e. after :func:`_release_schema_cache`.
 
@@ -2326,11 +2331,10 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     caller deriving an answer FROM THEM needs. (An earlier revision of this
     paragraph claimed the flag was "this call's, not the entry's", which is FALSE
     for the memoised branch: no read happens there at all.)
-    ⛔ WHICH MAKES IT THE WRONG FLAG FOR A CALLER THAT PARSES SOMETHING ELSE:
-    `jsonb_columns` re-reads the directory through its own parser, so it certifies
-    with `_jsonb_columns_for_dir_state`'s flag — thread B memoising a complete read
-    between A's read and A's memo makes `entry["sql"] is not None` true while A's
-    own read was short (measured: the losing race stored A's short map).
+    ⛔ AND IT IS THE FLAG EVERY RESIDENT READER GATES ON, because every resident
+    reader (the column map, the refusal carve-out AND the `jsonb` name set) parses
+    THESE SAME BYTES — that is what stops the three from ever disagreeing once the
+    tree changes underneath a resolved entry.
 
     The healthy path is untouched: a first read that finds a complete tree still
     memoises, so a warm process keeps its zero-filesystem-operations property.
@@ -2793,14 +2797,42 @@ def _declared_types_for_dir_state(
     the stat this loop already performs, costs nothing and cannot disagree with
     the map it returns.
     """
-    found: dict[str, dict[str, str]] = {}
+    chunks: list[str] = []
     complete = True
     for name in RECORD_MIGRATIONS:
         path = migrations_dir / name
         if not path.exists():
             complete = False
             continue
-        sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        chunks.append(_strip_sql_comments(path.read_text(encoding="utf-8")))
+    return _declared_types_from_chunks(chunks), complete
+
+
+def _declared_types_from_chunks(chunks: list[str]) -> dict[str, dict[str, str]]:
+    """THE parse, over already comment-stripped SQL chunks in file order.
+
+    One implementation serves the DIRECTORY reader and the RESIDENT one (#4625
+    review, fourth round). The resident `jsonb_columns()` cannot afford a second,
+    independent parse: it and `table_columns()`/`refused_props_names()` would then
+    read DIFFERENT things — the others answer from the schema entry's memoised
+    SQL, while a re-reading jsonb reader sees an edited or removed file — and the
+    two could disagree about a column's declared type with nothing red. That
+    disagreement is the `22P02` row-drop class this module documents: the column
+    map keeps the column (so the writer puts the value in a column) while the
+    `jsonb` name set has lost it (so the value is bound UNENCODED).
+
+    ⛔ `chunks` is a LIST so the caller controls the boundaries: the directory
+    reader passes ONE CHUNK PER FILE (comments stripped per file, which is what a
+    migration's DOWN direction requires), the resident reader passes the whole
+    certified SQL as ONE chunk (already joined, stripped once). The two are
+    equivalent for the append-only history here — a comment cannot span a file
+    boundary, and a global position ordering is the file ordering the loop below
+    already relies on — and `tests/test_4625_schema_reads_off_write_path.py` pins
+    them EQUAL on the real tree, so a future divergence reds instead of
+    silently changing how one column is encoded.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for sql in chunks:
         # (position, table, column, type-or-None-for-a-drop)
         ops: list[tuple[int, str, str, str | None]] = []
         for match in _TABLE_RE.finditer(sql):
@@ -2830,7 +2862,7 @@ def _declared_types_for_dir_state(
                 here.pop(column, None)
             else:
                 here[column] = type_name
-    return found, complete
+    return found
 
 
 def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
@@ -2843,22 +2875,7 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
     cannot delete a column that is `jsonb` in ANOTHER record table; flattened to
     names at the end (the one caller is handed a column name and nothing else).
     """
-    return _jsonb_columns_for_dir_state(migrations_dir)[0]
-
-
-def _jsonb_columns_for_dir_state(
-        migrations_dir: Path) -> tuple[frozenset[str], bool]:
-    """`(the jsonb names, whether EVERY registered migration was read)`.
-
-    The completeness half exists for the RESIDENT memo (#4625 review, F2): the
-    names come from this reader's own parse, so the flag that certifies them must
-    come from the same parse. Certifying them with a flag from a DIFFERENT read
-    (`_entry_sql_state`'s, which answers `True` without reading anything once the
-    SQL is memoised) let a tree whose migration was removed AFTER the SQL memo was
-    taken store a short name set for the life of the process — measured, and the
-    window is unbounded rather than the microseconds an earlier comment claimed.
-    """
-    declared, complete = _declared_types_for_dir_state(migrations_dir)
+    declared = _declared_types_for_dir_state(migrations_dir)[0]
     if not declared:
         # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
         # answer this function can give: it silently stops the #9548 encoding
@@ -2878,7 +2895,7 @@ def _jsonb_columns_for_dir_state(
         for table, columns in declared.items()
         for column, type_name in columns.items()
         if type_name == "jsonb"
-    ), complete
+    )
 
 
 def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]]:
@@ -2949,45 +2966,35 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     entry = _resident_entry()
     names = entry["parsed"].get("jsonb_columns")
     if names is None:
-        names, complete = _jsonb_columns_for_dir_state(entry["base"])
-        # ⛔ MEMOISE ONLY WHEN THIS CALL'S OWN PARSE WAS COMPLETE (#4625 review,
-        # the same rule as `table_columns` and `refused_props_names`).
-        # `_jsonb_columns_for_dir` fails CLOSED on a tree with no record table at
-        # all, but it cannot see a tree that is merely MISSING one migration —
-        # that yields a shorter, plausible name set (a `jsonb` column added by a
-        # forward migration would be read as a scalar and JSON-quoted, or a
-        # narrowed one as a container: silent corruption, no error). Memoising it
-        # would freeze that for the life of the process.
-        # ⛔ THE FLAG MUST COME FROM THIS PARSE, not from `_entry_sql_state`: that
-        # one answers `True` WITHOUT READING when the SQL is already memoised (a
-        # batch that bound no string parameter memoises the SQL and skips this
-        # reader entirely), so certifying this parse with it let a migration
-        # removed AFTER the SQL memo be frozen as a short name set — the window is
-        # unbounded, not the microseconds an earlier revision of this comment
-        # claimed. `_jsonb_columns_for_dir_state` reports its own read's
-        # completeness from the same `exists()` that skipped each absent file.
-        if not complete and entry["sql"] is not None:
-            # ⛔ A SHRINK UNDER AN ALREADY-RESOLVED SCHEMA IS REFUSED, NOT ANSWERED
-            # SHORT (#4625 review, third round). The SQL memo is only ever taken
-            # from a COMPLETE read, so `entry["sql"] is not None` is proof this
-            # process resolved a complete schema — and `table_columns()` /
-            # `refused_props_names()` keep answering from those certified bytes.
-            # This reader is the only one that re-reads, so answering a SHORT set
-            # here would leave a MIXED state nothing reds: the column map keeps the
-            # column while the `jsonb` name set loses it, and `_jsonb_or_scalar`
-            # then binds a value the schema declares `jsonb` as a RAW string — the
-            # `22P02` row-drop class this module documents (measured: `payload`
-            # present in the column map, absent from the name set, and the string
-            # parameter written unencoded). Pre-#4625 the same removal raised
-            # loudly out of `table_columns()`, and a loud refusal is what to keep.
+        # ⛔ THE RESIDENT PATH PARSES THE CERTIFIED SQL, NOT THE DIRECTORY (#4625
+        # review, fourth round). This reader used to re-read the files through its
+        # own parser, and that made it the ONE reader that could disagree with
+        # `table_columns()` / `refused_props_names()`: those answer from the schema
+        # entry's memoised SQL, so an EDIT or a REMOVAL under an already-resolved
+        # entry left the column map on the old parse while a re-reading jsonb map
+        # saw the new tree — the column kept, the `jsonb` name lost (or the other
+        # way round), and `_jsonb_or_scalar` then binds that parameter on the wrong
+        # side of the encoding rule. Measured: `payload` still in the column map,
+        # gone from the name set, `_jsonb_or_scalar("payload", "raw string")`
+        # returning the raw string, no error anywhere. Sharing the certified bytes
+        # makes the documented trade ("an edit is seen by the next RESOLUTION, not
+        # by the next record") true for ALL THREE READERS instead of two, and it
+        # costs ZERO filesystem operations: the SQL is already in memory.
+        sql, complete = _entry_sql_state(entry)
+        declared = _declared_types_from_chunks([_strip_sql_comments(sql)]) if sql else {}
+        if not declared:
             raise RecordProjectionError(
-                "the record migrations changed under an already-resolved schema: "
-                f"not every registered migration could be read in {entry['base']}, "
-                "but this process had already resolved a COMPLETE schema from it, "
-                "so the column map and the jsonb name set would disagree and a "
-                "value bound to the missing declaration would be written "
-                "UNENCODED. Call `record_projection._release_schema_cache()` to "
-                "re-resolve.")
+                "the record schema is not on disk — no CREATE TABLE for any "
+                f"record table was found in {entry['base']}. The jsonb encoding "
+                "rule reads the DECLARED column types from those files, and an "
+                "empty answer would silently stop serialising a scalar bound to a "
+                "jsonb column — the row-drop class #9548 exists to end.")
+        names = frozenset(
+            column
+            for table, columns in declared.items()
+            for column, type_name in columns.items()
+            if type_name == "jsonb"
+        )
         if complete:
             entry["parsed"]["jsonb_columns"] = names
     return names
