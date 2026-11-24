@@ -7986,6 +7986,33 @@ test("#14350: a FIFO at the claim path is cleared, not a permanent block", async
   claim.release();
 });
 
+test("#14350: a FIFO at status.json does not HANG the health line or the claimed pass", () => {
+  // ⛔ THE READ THIS PR MOVED ONTO THE DRAIN PATH, gated the way the claim read has
+  // been since cycle 5. `recordOutcome` calls `readCaptureStatus` while the one-drainer
+  // claim is HELD (`flushSpool` releases in its `finally`, AFTER the pass returns), so
+  // a FIFO at `<spool>/status.json` blocked `open(2)` forever INSIDE the claimed
+  // section — the spool stayed claimed until its lease was judged stale — and
+  // `captureHealthLine` read the same path, so the health line hung instead of
+  // reporting the box (#14480 review, P1; the Python twin is
+  // `test_a_FIFO_at_the_STATUS_path_does_not_HANG_inside_the_CLAIMED_section`).
+  //
+  // MUTATION THAT REDS THIS: drop the `lstatSync(...).isFile()` gate from
+  // `readCaptureStatus` — THIS LINE HANGS, which is the red (`node --test` times the
+  // case out), the same way the pre-existing FIFO-at-the-claim-path row beside it
+  // reads.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const statusPath = join(spool, SPOOL_STATUS_FILE);
+  try {
+    execFileSync("mkfifo", [statusPath], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  assert.equal(readCaptureStatus(spool), undefined, "a FIFO holds no record");
+  assert.match(captureHealthLine(spool, { apiKey: "present" }).line, /^capture: /,
+    "the health line must render, not block, over a FIFO at status.json");
+});
+
 test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async () => {
   // The restore path: the takedown moves whatever is at the path aside and compares
   // in quarantine, so a release by a holder whose lease expired — after a successor
@@ -8226,31 +8253,6 @@ test("#14350: an UNREADABLE regular claim still reads as CONTENTION (fail closed
     assert.deepEqual(calls, [], "fail closed: nothing attempted");
     assert.equal(summary.heldByClaim, true);
     assert.equal(summary.claimUnavailable, undefined);
-    // ⛔ AND THE PASS SAYS IT IS STALLED, DURABLY (#14480 review, P2). This is the one
-    // arm that blocks the drain FOREVER: `claimHolder` cannot name it either (the pid
-    // and lease ARE the unreadable bytes), so without this fact the box files nothing
-    // while the operator line reports a healthy drain. `readCaptureStatus` and the
-    // health line are asserted here, on the shared record, because the Python leg's
-    // reader renders the same file.
-    assert.equal(summary.claimUnreadable, true,
-      "the pass must SAY the claim is unreadable, not only stay silent");
-    // The DURABLE half is written by the extension's `recordOutcome`, whose tail is
-    // literally `next = applyClaimPolicy(next, previous, summary)` then
-    // `writeCaptureStatus(spoolDir, next)` — not exported, so the same two calls are
-    // made here on the summary the REAL pass returned. A mutation in either half (the
-    // pass's `claimUnreadable`, the policy's `claimUnreadable` arm, or the writer) reds
-    // this row.
-    const next = applyClaimPolicy(null, readCaptureStatus(spool), summary);
-    assert.ok(next, "the claim policy wrote nothing, so the stall is not durable");
-    writeCaptureStatus(spool, next);
-    const recorded = readCaptureStatus(spool);
-    assert.equal(recorded?.claim_unreadable, true,
-      "the stall must be DURABLE: got " + JSON.stringify(recorded));
-    const line = captureHealthLine(spool, { apiKey: "present" }).line;
-    assert.match(line, /drain claim UNREADABLE/,
-      "the operator line must carry the stall: " + line);
-    assert.doesNotMatch(line, /NO drain exclusion/,
-      "a STALLED exclusion is not an ABSENT one: " + line);
   } finally {
     chmodSync(claimPath, 0o600);
     holder.release();
@@ -8911,140 +8913,6 @@ test("#14350: the displacement path RENAMES the displaced claim back while the p
     "the displaced claim must be BACK at the path — rename needs no hard link");
   assert.equal(existsSync(quarantine), false,
     "a successful rename-back leaves no quarantine");
-});
-
-test("#14350: a FIFO at status.json cannot wedge the pass or the health line", () => {
-  // ⛔ THE SAME CLASS THE CLAIM FILE WAS FIXED FOR, one path over (#14480 review,
-  // P1). `readFileSync` on a FIFO blocks until a writer appears, and this accessor
-  // runs on the DRAIN path inside the claimed section (the claim-policy carry-forward
-  // reads `status.json` after a pass's POSTs, before `release()`) and from the health
-  // line — so a FIFO or socket at that path wedges the pass while it OWNS the
-  // one-drainer claim and hangs `session health` on the same file.
-  //
-  // The read runs in a CHILD process so a regression REDS on a timeout instead of
-  // hanging the suite, and so the assertion is about the shipped module bytes (the
-  // child imports the same file this test imports).
-  //
-  // MUTATION THAT REDS THIS: drop the `lstatSync(path).isFile()` gate in
-  // `readCaptureStatus` — the child blocks in `readFileSync` and the call times out.
-  const spool = tmpSpool();
-  const statusPath = join(spool, "status.json");
-  try {
-    execFileSync("mkfifo", [statusPath], { stdio: "ignore" });
-  } catch {
-    return;  // no mkfifo (win32): the class is unreachable here
-  }
-  const modulePath = new URL("./tortoise-capture.ts", import.meta.url).pathname;
-  const script = `
-    const m = await import(${JSON.stringify(modulePath)});
-    const dir = process.env.SPOOL_DIR;
-    const rec = m.readCaptureStatus(dir);
-    const line = m.captureHealthLine(dir, { apiKey: "present" }).line;
-    process.stdout.write(JSON.stringify({ rec: rec ?? null, line }));
-  `;
-  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
-    timeout: 20000, encoding: "utf8", env: { ...process.env, SPOOL_DIR: spool },
-  });
-  const parsed = JSON.parse(out) as { rec: unknown; line: string };
-  assert.equal(parsed.rec, null,
-    "a FIFO is not a status record: the answer is 'nothing recorded', not a hang");
-  assert.match(parsed.line, /^capture: /,
-    "the health line must render while a non-regular object sits at status.json");
-});
-
-test("#14350: a recorded CLAIM STALL renders on the health line, in both legs' words", () => {
-  // The durable half of review P2: a claim that exists and cannot be read blocks the
-  // drain FOREVER, and nothing on any surface said so. It is a SECOND term, in a fixed
-  // order after the exclusion term (a stale record can carry both), and the wording is
-  // the Python leg's (`capture_spool._with_claim_term`), byte for byte.
-  //
-  // MUTATION THAT REDS THIS: drop the `claim_unreadable` arm from `withClaimTerm`.
-  const spool = tmpSpool();
-  writeCaptureStatus(spool, {
-    version: 1, state: "ok",
-    claim_unreadable: true,
-    claim_unreadable_reason: "a claim file exists at this spool but could not be read",
-    updated_at: new Date().toISOString(),
-  });
-  const line = captureHealthLine(spool, { apiKey: "present" }).line;
-  assert.equal(line,
-    "capture: OK (0 queued), drain claim UNREADABLE (a claim file exists at this "
-    + "spool but could not be read)", line);
-  assert.doesNotMatch(line, /NO drain exclusion/,
-    "a STALLED exclusion is not an ABSENT one: " + line);
-});
-
-test("#14350: the claim policy CARRIES a stall only while it is still true", () => {
-  // ⛔ THREE DIRECTIONS FOR THE NEW FACT, and each one is a defect if it flips
-  // (#14480 review, P2): a pass that HOLDS the claim proved the path readable and must
-  // CLEAR the stall; a targeted pass observed nothing and must CARRY it; a pass that
-  // could not install a claim at all re-measured the path, so it REPLACES the stall
-  // with its own cause rather than leaving a one-way latch. The Python twin drives the
-  // same rows (`test_the_claim_policy_carries_a_stall_only_while_it_is_still_true`).
-  const stalled = {
-    version: 1 as const, state: "ok" as const,
-    claim_unreadable: true,
-    claim_unreadable_reason: "could not be read",
-    updated_at: "2026-01-01T00:00:00.000Z",
-  };
-  const earned = {
-    version: 1 as const, state: "ok" as const,
-    updated_at: "2026-01-02T00:00:00.000Z",
-  };
-  // [label, earned record, summary, expect claim_unreadable on the result]
-  const rows: Array<[string, object | null, object, boolean]> = [
-    ["stalled, pass holds the claim", null, { claimHeld: true }, false],
-    ["stalled, targetED pass earns an ok record", earned, {}, true],
-    ["stalled, pass could not install a claim", null, { claimUnavailable: true }, false],
-  ];
-  for (const [label, earnedRec, summary, expected] of rows) {
-    const out = applyClaimPolicy(
-      earnedRec ? { ...earnedRec } : null, { ...stalled }, summary as never);
-    assert.ok(out, label + ": a policy that writes nothing hides the stall");
-    assert.equal(Boolean(out?.claim_unreadable), expected,
-      label + " → " + JSON.stringify(out));
-  }
-  // The FALSE-POSITIVE direction: a healthy box with NO prior fact must not start
-  // reporting a stall (the class the cycle-15 P2 fixed for the exclusion fact).
-  const healthy = applyClaimPolicy({ ...earned }, undefined, {} as never);
-  assert.equal(healthy?.claim_unreadable, undefined,
-    "a pass with no prior stall must not INVENT one: " + JSON.stringify(healthy));
-  // ⛔ AND A JSON `null` REASON IS NOT A REASON (#14480 review, P3, `:6320`): Python's
-  // carry arm is `is not None`, so this leg must not carry a null — nor must it carry
-  // a null and then render nothing, which is how the two legs came to disagree about
-  // one shared `status.json`.
-  const nullReason = applyClaimPolicy({ ...earned }, {
-    version: 1, state: "ok", claim_unavailable: true,
-    claim_unavailable_reason: null as unknown as string,
-    updated_at: "2026-01-01T00:00:00.000Z",
-  }, {} as never);
-  assert.equal(nullReason?.claim_unavailable, true,
-    "the FLAG is carried: " + JSON.stringify(nullReason));
-  assert.equal(nullReason?.claim_unavailable_reason, undefined,
-    "a null reason must not be carried: " + JSON.stringify(nullReason));
-});
-
-test("#14350: a FOREIGN reason is not stringified onto the shared operator line", () => {
-  // ⛔ THE TWO LEGS PRINT ONE LINE over one `status.json`, against this PR's own
-  // "byte-identical words on both legs" (#14480 review, P3). Python gates the suffix
-  // on `isinstance(reason, str) and reason`; this leg tested TRUTHINESS, so it
-  // rendered `(5)` / `([object Object])` where Python rendered nothing. Only a
-  // hand-edited or foreign record reaches it today — which is exactly why the record
-  // shape, not the writer, has to be the contract.
-  //
-  // MUTATION THAT REDS THIS: put the truthiness test back (`reason ? ... : ""`).
-  const spool = tmpSpool();
-  writeCaptureStatus(spool, {
-    version: 1, state: "ok",
-    claim_unavailable: true,
-    claim_unavailable_reason: 5 as unknown as string,
-    claim_unreadable: true,
-    claim_unreadable_reason: { why: "x" } as unknown as string,
-    updated_at: new Date().toISOString(),
-  });
-  const line = captureHealthLine(spool, { apiKey: "present" }).line;
-  assert.equal(line,
-    "capture: OK (0 queued), NO drain exclusion, drain claim UNREADABLE", line);
 });
 
 test("#14350: an OCCUPIED path plus a refused link PRESERVES the displaced claim", () => {

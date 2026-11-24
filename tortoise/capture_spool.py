@@ -649,17 +649,6 @@ class FlushSummary:
     #: finding).
     claim_unavailable: bool = False
     claim_unavailable_reason: str | None = None
-    #: #14480: a claim EXISTS at the claim path but its bytes could not be read, so
-    #: this pass HONOURED it and attempted nothing (never a delete, never an
-    #: unclaimed pass). Distinct from ``claim_unavailable`` in the one way that
-    #: matters to an operator: the exclusion is not OFF here, it is STALLED — the
-    #: claim belongs to somebody, and no pass can run until it is read or removed.
-    #: Without a durable field this arm blocked the drain FOREVER while the health
-    #: line reported a healthy box (review, P2): the claim is unreadable, so
-    #: `holder()` cannot name it either, and the reason reached only a discarded
-    #: stderr.
-    claim_unreadable: bool = False
-    claim_unreadable_reason: str | None = None
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -3651,16 +3640,31 @@ def read_capture_status(root: Path) -> dict | None:
     failing on a torn file. A record we cannot UNDERSTAND is not a marker
     either; :func:`capture_health_line` re-validates every field it trusts.
 
-    ⛔ ``lstat`` FIRST — the same gate :func:`tortoise.drain_claim._read_raw` puts on
-    the CLAIM file, for the same measured reason: reading a FIFO (or a socket) blocks
-    in ``open(2)`` until a writer appears. This accessor is on the DRAIN path, inside
-    the claimed section (the claim-policy carry-forward reads ``status.json`` after a
-    pass's POSTs and before ``release()``), so an object of that class at the status
-    path wedge the pass while it HELD the one-drainer claim — and ``capture_health_line``
-    reads the same path, so `tortoise session health` hung too (review, P1). A
-    non-regular object is nothing we wrote and nothing we can read: it is "no usable
-    record" here, never a crash, and the next successful write replaces it (the write
-    is ``rename``-based, which replaces the object rather than blocking on it).
+    ⛔ ``lstat`` FIRST, AND ONLY A REGULAR FILE IS READ. This read sits on the
+    DRAIN path — ``_record_capture_status`` calls it at the tail of
+    ``_flush_claimed``, i.e. while the one-drainer claim is HELD — so a FIFO (or
+    a socket) at ``status.json`` used to block ``open(2)`` FOREVER *inside the
+    claimed section*. ``claim.release()`` runs in ``flush_spool``'s ``finally``
+    after ``_flush_claimed`` returns, so the spool stayed CLAIMED until the lease
+    was judged stale, and ``capture_health_line`` blocked on the same path —
+    ``tortoise session health`` hung instead of reporting the box. The
+    ``contextlib.suppress(Exception)`` at the call site cannot help: a block is
+    not an exception. It is the same object class ``drain_claim._read_raw``
+    already gates on the CLAIM file (cycle-5 P1), applied to the status file this
+    diff is what put on the drain path (#14480 review, P1 — measured: a FIFO here
+    never returned).
+
+    ⚠️ STATED RESIDUAL: the ``lstat`` → ``read_text`` sequence has a REPLACE WINDOW,
+    and CERT C ``FIO32`` ("Prevent Blocking on Special Files") names it — the check
+    and the open are two syscalls, so an object swapped for a FIFO between them still
+    blocks. The race-free form is ``open(O_RDONLY|O_NONBLOCK)`` then ``fstat`` the
+    FD, which is what ``xz``'s ``file_io.c`` does for exactly this reason. It is left
+    unadopted HERE deliberately, not by omission: ``drain_claim._read_raw`` gates the
+    CLAIM file the same way and the two legs of this feature must be one mechanism (a
+    second, stronger gate on one path is a divergence a later reader would have to
+    re-derive); the exposure is a local writer replacing the box's own ``status.json``
+    with a FIFO, which is already a box-takeover primitive. Filed as a stated residual
+    rather than silently widened — ``fifo(7)`` and CERT ``FIO32`` are the sources.
     """
     path = capture_status_path(root)
     try:
@@ -3978,10 +3982,18 @@ def capture_health_line(
         _spool_health_line(root, api_key=api_key, bounds=bounds), root)
 
 
-def _with_claim_term(health: CaptureHealth, recorded: dict | None) -> CaptureHealth:
-    """Append the durable claim fact to WHICHEVER verdict was chosen.
+#: The operator-line term for the one claim arm that blocks PERMANENTLY. One
+#: constant, because the two legs render the same sentence about the same spool
+#: (`withClaimTerm`'s `UNREADABLE_CLAIM_TEXT` on the Pi leg) and the cross-leg
+#: parity test compares the FULL line byte for byte.
+_UNREADABLE_CLAIM_TEXT = "a regular file exists but could not be read"
 
-    ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
+
+def _with_claim_term(health: CaptureHealth, recorded: dict | None,
+                     root: Path) -> CaptureHealth:
+    """Append the claim-axis facts to WHICHEVER verdict was chosen.
+
+    ⛔ IT IS A TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
     F1). The claim axis is a fact about the SPOOL ROOT — it stays true whatever the
     queue is doing — so a `SATURATED` box whose claim path is broken must read
     BOTH, exactly as a quota-blocked one must. Applying it only to the final
@@ -3989,23 +4001,47 @@ def _with_claim_term(health: CaptureHealth, recorded: dict | None) -> CaptureHea
     durable fact was introduced for (a capacity 429 with a backlog: `state: blocked`
     AND a broken claim path) is one of those early returns — so the fact was
     invisible for the whole duration of the block, which for quota may be forever.
-    The PIPELINE is still the only place it is decided: this function adds a term,
+    The PIPELINE is still the only place it is decided: this function adds terms,
     it does not reorder `UNREADABLE > BLOCKED > SATURATED > INACTIVE > DRAINING`.
+
+    ⛔ TWO TERMS, TWO DIFFERENT KINDS OF FACT, and they must not be merged:
+
+    * ``NO drain exclusion`` — DURABLE and about a PAST pass: a pass ran without the
+      one-drainer claim, and the reason reaches no one unless it is recorded
+      (the firing hook discards stderr).
+    * ``drain claim UNREADABLE`` — LIVE and about the PRESENT state: a regular claim
+      file exists that this process cannot read, so every pass honours a holder it
+      cannot name, attempts nothing, and the spool stops moving until a human
+      looks. That residual had no surface AT ALL — the box read
+      ``capture: DRAINING (n queued)``, which describes a working drain (#14480
+      review, P2). It is probed, never recorded: see
+      :func:`drain_claim.claim_path_unreadable` for why durability would be the
+      WRONG answer here (it can go stale, and the probe cannot).
+
+    Order is fixed so the rendered line is byte-identical on both legs.
     """
+    # Imported HERE, like every other `drain_claim` use in this module (`flush_spool`
+    # imports it inside the function for the same reason): the health surface is not
+    # on the capture path, so a module-level import would make every capture pay for
+    # it. The module is already in `sys.modules` by the time a health line runs.
+    from tortoise import drain_claim
+
+    terms: list[str] = []
     if recorded is not None and recorded.get("claim_unavailable"):
         reason = recorded.get("claim_unavailable_reason")
+        # ⛔ A NON-STRING REASON RENDERS NO REASON ON *BOTH* LEGS. The shared
+        # `status.json` can be hand-edited or written by a foreign producer, and the
+        # Pi leg's truthiness test against this leg's `isinstance(…, str)` rendered
+        # `…, NO drain exclusion (5)` / `([object Object])` there and
+        # `…, NO drain exclusion` here — two different sentences about ONE spool
+        # (#14480 review, P3).
         suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
-        health = health._replace(line=f"{health.line}, NO drain exclusion{suffix}")
-    if recorded is not None and recorded.get("claim_unreadable"):
-        # A SECOND term, in a FIXED order after the first, because the two are
-        # different facts about the same axis and a stale record can carry both:
-        # "the exclusion is OFF" (this pass ran beside others) and "the exclusion
-        # is ON but nobody can read it" (this pass could not run at all).
-        reason = recorded.get("claim_unreadable_reason")
-        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
-        health = health._replace(
-            line=f"{health.line}, drain claim UNREADABLE{suffix}")
-    return health
+        terms.append(f"NO drain exclusion{suffix}")
+    if drain_claim.claim_path_unreadable(root):
+        terms.append(f"drain claim UNREADABLE ({_UNREADABLE_CLAIM_TEXT})")
+    if not terms:
+        return health
+    return health._replace(line=f"{health.line}, {', '.join(terms)}")
 
 
 def _spool_health_line(
@@ -4051,7 +4087,7 @@ def _spool_health_line(
             CaptureHealth(
                 "unreadable", 0, None,
                 f"capture: UNREADABLE (cannot list {_entries_dir(root)})"),
-            recorded)
+            recorded, root)
     queued, scan_metas, unreadable_bytes, unreadable_count = scan
     # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
     # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
@@ -4066,8 +4102,7 @@ def _spool_health_line(
         # queue, so an empty spool does not make it untrue — and erasing it here
         # would make the next capture on a broken box report a healthy drain.
         keep = {k: v for k, v in (previous or {}).items()
-                if k in ("claim_unavailable", "claim_unavailable_reason",
-                         "claim_unreadable", "claim_unreadable_reason")}
+                if k in ("claim_unavailable", "claim_unavailable_reason")}
         if keep:
             recorded.update(keep)
         write_capture_status(root, recorded)
@@ -4097,7 +4132,7 @@ def _spool_health_line(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
             f"{_refusal_label(recorded.get('reason'))})",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -4110,11 +4145,11 @@ def _spool_health_line(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
                 f"{queued} queued, refusing new captures)",
-                unrecorded), recorded)
+                unrecorded), recorded, root)
         return _with_claim_term(CaptureHealth(
             "saturated", queued, None,
             f"capture: SATURATED ({queued} queued, refusing new captures)",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
@@ -4122,7 +4157,7 @@ def _spool_health_line(
         return _with_claim_term(CaptureHealth(
             "inactive", queued, None,
             f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     verdict = (
         CaptureHealth("draining", queued, None, f"capture: DRAINING ({queued} queued)", unrecorded)
         if queued > 0
@@ -4133,7 +4168,7 @@ def _spool_health_line(
     # parity test — a divergence here is invisible to everyone except a human who
     # ran the other leg. It goes through `_with_claim_term` like every earlier
     # verdict: the term is an ADDED FACT, not a precedence state.
-    return _with_claim_term(verdict, recorded)
+    return _with_claim_term(verdict, recorded, root)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
@@ -4255,31 +4290,6 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         record["claim_unavailable"] = True
         record["claim_unavailable_reason"] = (
             summary.claim_unavailable_reason or "the spool root cannot hold a claim")[:300]
-        # ⛔ THIS ARM RE-MEASURED THE CLAIM PATH, so a recorded STALL does not survive
-        # it: the unreadable object it described is not what is there any more (a pass
-        # that reached this arm could not link a claim at all). Carrying it would be a
-        # one-way latch — the same defect, pointing the other way (#14480 review, P2).
-        record.pop("claim_unreadable", None)
-        record.pop("claim_unreadable_reason", None)
-        record["updated_at"] = _now_iso()
-    elif summary.claim_unreadable:
-        # ⛔ A CLAIM THAT EXISTS AND CANNOT BE READ IS A **STALLED** DRAIN, and the
-        # stall has to be durable for the same reason the exclusion fact is: this arm
-        # returns before a single entry is attempted, so there is no earned record to
-        # decorate, and the pid/lease that `holder()` renders is exactly what cannot be
-        # read — the operator line could say nothing at all. The shape it produced was
-        # the one #14350's acceptance row forbids: `claim_is_stale` reports the claim
-        # RECLAIMABLE while the reader cannot reach it, the box files nothing, and
-        # `capture: DRAINING (1 queued)` describes a healthy drain (review, P2).
-        #
-        # Written through THIS function (one policy, one writer) rather than beside it:
-        # the clearing and carry-forward arms below treat the two claim facts alike, so
-        # a pass that HOLDS the claim clears it and a targeted pass preserves it.
-        record = dict(record if record is not None else (prior or {"version": 1, "state": "ok"}))
-        record["claim_unreadable"] = True
-        record["claim_unreadable_reason"] = (
-            summary.claim_unreadable_reason
-            or "a claim file exists at this spool but could not be read")[:300]
         record["updated_at"] = _now_iso()
     elif held_claim:
         # ⛔ AND A PASS THAT HELD THE CLAIM CLEARS IT EVEN IF IT ATTEMPTED NOTHING.
@@ -4291,34 +4301,22 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         # there is something to clear; `state`/`reason`/`status` are untouched, so the
         # quota-survives-an-empty-pass rule still holds.
         has_fact = prior is not None and (prior.get("claim_unavailable")
-                                          or prior.get("claim_unavailable_reason")
-                                          or prior.get("claim_unreadable")
-                                          or prior.get("claim_unreadable_reason"))
+                                          or prior.get("claim_unavailable_reason"))
         if record is None and has_fact:
             record = dict(prior)
         if has_fact:
             record.pop("claim_unavailable", None)
             record.pop("claim_unavailable_reason", None)
-            record.pop("claim_unreadable", None)
-            record.pop("claim_unreadable_reason", None)
             record["updated_at"] = _now_iso()
-    elif record is not None and prior is not None and (
-            prior.get("claim_unavailable") or prior.get("claim_unavailable_reason")
-            or prior.get("claim_unreadable") or prior.get("claim_unreadable_reason")):
+    elif record is not None and prior is not None and (prior.get("claim_unavailable")
+                                                       or prior.get("claim_unavailable_reason")):
         # The pass did not ask for the claim (a targeted pass) and did not report the
         # exclusion as unavailable, so it has NO standing to clear the fact: carry it
         # onto the record it earned. `updated_at` stays this pass's, because the state
         # half of the record IS this pass's observation.
-        #
-        # ONE arm for BOTH claim facts, not two: they are carried for the same reason
-        # and a record can hold both (a box whose exclusion was off yesterday and whose
-        # claim is now unreadable), so arm-per-field would silently drop the second.
-        for flag, reason in (("claim_unavailable", "claim_unavailable_reason"),
-                             ("claim_unreadable", "claim_unreadable_reason")):
-            if prior.get(flag) or prior.get(reason):
-                record[flag] = True
-                if prior.get(reason) is not None:
-                    record[reason] = prior[reason]
+        record["claim_unavailable"] = True
+        if prior.get("claim_unavailable_reason") is not None:
+            record["claim_unavailable_reason"] = prior["claim_unavailable_reason"]
 
     if record is not None:
         write_capture_status(root, record)
@@ -4452,17 +4450,6 @@ def flush_spool(
                     summary.claim_holder = (
                         "a claim file exists at this spool but could not be read "
                         "(pid unknown) — nothing attempted")
-                    # ⛔ AND IT IS A DURABLE STALL, not only a console line: this arm
-                    # returns before `_flush_claimed`, so `_record_capture_status` is
-                    # never reached on the one path where the drain can be blocked
-                    # FOREVER (review, P2). Same policy function, called from the only
-                    # place this pass gets to write: the record keeps its state and
-                    # gains the fact, and a later pass that HOLDS the claim clears it.
-                    summary.claim_unreadable = True
-                    summary.claim_unreadable_reason = (
-                        "a claim file exists at this spool but could not be read "
-                        "— the drain is stalled until it can be")
-                    _record_capture_status(root, summary, held_claim=False)
                     return summary
                 summary.claim_unavailable = True
                 summary.claim_unavailable_reason = (
@@ -4483,34 +4470,6 @@ def flush_spool(
             # contention path, where the hook's stderr is discarded (review finding).
             held = holder(root)
             summary.claim_holder = held.line(root) if held is not None else None
-            if held is None:
-                # ⛔ A HOLDER WE CANNOT NAME MAY BE A CLAIM WE CANNOT READ, and that
-                # is the ONE arm that blocks the drain FOREVER: `acquire` answers None
-                # (a regular claim it could not read is honoured, never deleted), so
-                # no pass ever runs, `claim_is_stale(None, …)` reports the claim
-                # RECLAIMABLE while the reader cannot reach it, and the health line
-                # said `capture: DRAINING (1 queued)` on a box that files nothing.
-                # Nothing durable named the stall, and `holder()` cannot either — the
-                # pid/lease ARE the unreadable bytes (review, P2).
-                #
-                # lstat rather than an exception type, because `held is None` is also
-                # the BENIGN case: a holder that released in the window. Only a regular
-                # object still sitting at the path is a claim nobody can read; an
-                # absent path is a lost race that the next pass retries.
-                try:
-                    mode = os.lstat(claim_path(root)).st_mode
-                except OSError:
-                    mode = 0
-                if stat.S_ISREG(mode):
-                    summary.claim_unreadable = True
-                    summary.claim_unreadable_reason = (
-                        "a claim file exists at this spool but could not be read "
-                        "— the drain is stalled until it can be")
-                    # The same policy function the tail calls, from the only place this
-                    # pass gets to write: it keeps the recorded state and DECORATES the
-                    # stall onto it, so nothing is erased (the reason this arm used to
-                    # write nothing at all).
-                    _record_capture_status(root, summary, held_claim=False)
             return summary
     try:
         return _flush_claimed(

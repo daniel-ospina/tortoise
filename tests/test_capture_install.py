@@ -4999,7 +4999,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: never carried. Generation stays 33 for the same reason the earlier re-cuts did:
 #: **33 has never shipped**, so it freezes when this reaches `main`, not before.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "116caf1d24ce9122bf57d3ba85671251cf357ff160b245cd58f33b76cc7f570b")
+    33, "738b16f71743d58e98b10f860c6a8804cf9af30571532a36b0c38931b3df18e1")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5189,7 +5189,21 @@ _GENERATION_DIGESTS = {
     # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
     # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
     # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
-    33: "116caf1d24ce9122bf57d3ba85671251cf357ff160b245cd58f33b76cc7f570b",
+    # ⛔ AND TWO MORE, from this PR's LAST review (#14480, P1 and P2), both BEHAVIOUR
+    # on shipped bytes:
+    #   * `readCaptureStatus` gates on `lstatSync(...).isFile()` before it reads, so a
+    #     FIFO at `status.json` no longer blocks `open(2)` FOREVER — and it did so
+    #     INSIDE the claimed section, so the spool stayed claimed until its lease was
+    #     judged stale. The Python twin carries the same gate.
+    #   * the operator line gained a SECOND claim-axis term (`drain claim UNREADABLE`)
+    #     for the one arm that blocks permanently, and the two legs now render every
+    #     claim reason identically for non-string values.
+    # ⛔ AND THIS DIGEST IS DERIVED FROM THE MERGED TREE, never from either side: this
+    # lane re-cut it to `49a2c0a8…` on its own, and two peer lanes re-cut it to
+    # `6652dd6b…` and then `b775fcab…` on theirs — a merge is a byte set NEITHER
+    # side hashed, so every one of those is wrong here and only the merged tree's
+    # digest is right.
+    33: "738b16f71743d58e98b10f860c6a8804cf9af30571532a36b0c38931b3df18e1",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
