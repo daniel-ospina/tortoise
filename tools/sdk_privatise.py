@@ -2216,10 +2216,14 @@ SWEEP_NAMES = 66
 #: census-VISIBLE shapes (#14422: its fifteen statements go through an injected callable, so
 #: `self._query(` matches no door predicate). A FALLING pin cannot hide a new untyped reference,
 #: which is the direction this arm exists to catch; every parent record above stays verbatim.
-#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, KEPT VERBATIM —
-#: the distinct paragraphs this branch's resolution did not already carry (146 lines, in
-#: `main`'s own order, no figure added or moved). The pair below is still `--repin`'s own
-#: output on THIS resolved tree; these lines are the parent's provenance for it.
+#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, CARRIED IN SUBSTANCE
+#: rather than verbatim: the distinct paragraphs this branch's resolution did not already carry
+#: (146 lines, in `main`'s own order). ⛔ A MINORITY OF THEM ARE RESTATED RATHER THAN CARRIED, and
+#: only where the carried line was FALSE OF THIS TREE (#14583 review, P3 — 29 of the restored
+#: lines, e.g. `#14491`→`#14506` and the "three-row" gap that is two). Each such correction is
+#: named where it is applied, in the rebase block below, so these lines are the parent's
+#: PROVENANCE and this block does not claim that no figure moved. The pair below is still
+#: `--repin`'s own output on THIS resolved tree.
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
