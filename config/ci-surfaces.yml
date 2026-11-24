@@ -80,17 +80,16 @@ version: 1
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs three shards at 837.9 s (a, c, k) and eight at
-# 837.8 s (b, d, e, f, g, h, i, j) — ⛔ MEASURED ON THIS BRANCH'S HEAD, which folded `main` at
-# `2f38053601` and adds this PR's own registration; that parent alone emits five/six at
-# 837.7/837.6 and `da4b76a5851c` a seven/four at 837.5/837.4, so the split quoted here belongs
-# to no `main` sha and the attribution is not allowed to imply one — so
-# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
+# 838.0 s (b, c, d, e, f, g, h, i, j, k) — ⛔ MEASURED ON THIS PR'S REBASED HEAD, which sits on
+# `main` at `59a08fdb8b40` and adds this PR's own registration only
+# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so
+# `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
@@ -3192,6 +3191,24 @@ surfaces:
   #   printf 'tortoise/commitments.py\ntortoise/state_intent.py\n' \
   #     | python tools/ci_selection.py --event pull_request --changed-files -
   - test_13557_13558_reachable_reads.py
+  # #14033 (PR #14491 review, P1): the cue-set widening's routing table — the two phrasings
+  # #14033 names that this change routes, the four content questions it says must NOT route, the
+  # phrasings that must keep the relevance read (including the deferred vague-adverb tail, held
+  # back until the `tortoise_search` HANDLER DOCSTRING moves with it — not the served
+  # `ToolDefinition.description`, which carries no state-routing sentence), and the falsifier rows for
+  # each new guard
+  # (both `is_predicate` guards and its start anchor, both `list_what` guards). `core` for the same
+  # reason the sibling above gives: the module it guards
+  # (`tortoise/state_intent.py`) is a `core` trigger, so a diff to it must actually run the pins.
+  # MEASURED before this row, on this branch: `--integrity` printed
+  #   `❌ manifest drift: ['test_14033_state_cue_gap.py']`
+  # (the required `manifest-integrity` leg, red on the reviewed head) and `select()` over
+  # `tortoise/state_intent.py` returned ~956 files containing the sibling above and NOT this one —
+  # i.e. the guard was selected by NO leg on ANY diff. Verify with:
+  #   python3 tools/ci_selection.py --integrity
+  #   printf 'tortoise/state_intent.py\n' \
+  #     | python3 tools/ci_selection.py --event pull_request --changed-files -
+  - test_14033_state_cue_gap.py
   # #13634 follow-up: the "declared priors are the open decision in #9063" claim — the refusal
   # message in `tortoise/sdk.py` and the v3.38 changelog entry (via `docs/ONTOLOGY-CHANGELOG.md`).
   # `classify_test_file` is EXACT membership over the surfaces, so an unregistered file is selected by
@@ -15873,6 +15890,12 @@ durations:
   test_13674_embedder_load_bound_and_reclaim.py: 9.5
   test_13829_cache_cap_at_fold.py: 0.8
   test_14002_record_only_journal.py: 65.8
+  # #14033 (new file, PR #14491): the ENTRY RULE applies — the value is the header's flat
+  # `DEFAULT_FAST_WEIGHT`, not a local reading (a hand-picked number is this host's wall clock, and
+  # `fast_pool()` feeds the shard balancer). `--integrity` cannot see a missing row, so this line is
+  # what records the weight. What it covers, hermetically: `detect_state_question` driven over six
+  # string tables in `tortoise/state_intent.py` — no DB, no graph, no embedder, no model.
+  test_14033_state_cue_gap.py: 2.0
   test_9559_blocked_release_conditions.py: 0.7
   test_capstone_state_value_13038.py: 0.2
   test_embedding_boundary_8419_8430.py: 5.0

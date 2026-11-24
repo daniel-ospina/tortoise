@@ -1794,8 +1794,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$'],
-    # ── #14429 (`test_spool_drain_rehearsal.py`) — the spool-drain rehearsal, and why
-    #    none of these three spellings can reach a server ────────────────────────────
+    # ── #14429 (for #14232) — the spool-drain rehearsal, and why none of these three
+    #    spellings can reach a server ─────────────────────────────────────────────────
     # #14429 added seven mutation sites and no rows here, which redded THIS census on
     # `main` (measured at 84f0d4440f03: `test (b)`'s only failure was
     # `test_uri_env_mutations_declared.py::test_uri_env_mutations_declared`). The ten
@@ -1814,8 +1814,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #         :389 alone): the call proceeds PAST the gate and then dies on the stubbed
     #         `_mode_knobs` assertion, so again nothing connects.
     #   :568, :590, :614, :649, :676  each runs with `_stub_one_mode`, which replaces the
-    #         mode's work with a stub — the URI selects a branch of the acceptance path
-    #         and no server is contacted.
+    #         mode's work with a stub (`test_spool_drain_rehearsal.py:529`, whose own
+    #         docstring says it drives `_run`'s tail "without a graph, a server or a
+    #         drain") — the URI selects a branch of the acceptance path and no server
+    #         is contacted. ⛔ NOT "a throwaway graph this box serves": the URI's host
+    #         and port are never dialled on these five rows.
     # Every site uses `monkeypatch`, so no lane state leaks. The literals are anchored to
     # these exact values on purpose: a FUTURE, different URI in this file must red until
     # it is triaged here, which is the whole point of the census.
