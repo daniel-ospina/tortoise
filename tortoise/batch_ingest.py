@@ -687,6 +687,22 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        """ADD to a row's token totals WHERE THE ROW LIVES; returns the row.
+
+        ⛔ ADDITIVE, NOT READ-MODIFY-WRITE (#14415 review round 5, P3). A caller
+        that reads the total, adds, and writes it back loses one accumulation
+        whenever two callers read before either writes — and that is exactly the
+        shape of `_bill`, the settle path's own recorder: it writes tokens with
+        NO state change, so the state compare that serialises `advance` does not
+        serialise it, and two replicas can both lose their compare and then both
+        read the same total. A RELATIVE `SET` cannot lose an increment, so no
+        compare is needed at all. ``None`` means the row is gone.
+        """
+        ...
+
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
                           expected_attempts: int | None = None) -> bool:
@@ -805,6 +821,22 @@ class InMemoryBatchStore:
             rows = [b for (o, _), b in self._batches.items() if o == org_id]
         rows.sort(key=lambda b: b.created_at, reverse=True)
         return [_copy_batch(b) for b in rows[:limit]]
+
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        # Atomic under the same lock `put_item` uses: read and add in ONE hold,
+        # so no other writer can interleave a read between them.
+        with self._lock:
+            bucket = self._items.get((org_id, batch_id))
+            row = bucket.get(item_id) if bucket else None
+            if row is None:
+                return None
+            row.tokens_in = max(0, row.tokens_in) + max(0, int(tokens_in))
+            row.tokens_out = max(0, row.tokens_out) + max(0, int(tokens_out))
+            if updated_at:
+                row.updated_at = updated_at
+            return _copy_item(row)
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
         with self._lock:
@@ -1035,6 +1067,35 @@ class GraphBatchStore:
                 cancel_reason=r[6] or "",
                 corpus_name=(r[7] or "") if len(r) > 7 else ""))
         return out
+
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        """⛔ A RELATIVE `SET`, never a read-then-write (#14415 review round 5, P3).
+
+        `MATCH ... SET i.tokens_in = coalesce(i.tokens_in, 0) + $tin` does the
+        addition in the database, so two concurrent accumulations BOTH apply.
+        A read-modify-write would let them read the same total and lose one — the
+        row then disagrees with the ledger, which is a receipt that under-reports
+        the bill.
+
+        `MATCH`, deliberately NOT `MERGE`: a MERGE here would CREATE the row it
+        failed to match, resurrecting a row that was deleted or never existed.
+        """
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
+            "SET i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
+            "    i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
+            "    i.updated_at = $updated "
+            "RETURN i.id",
+            {"iid": item_id, "bid": batch_id, "org": org_id,
+             "tin": max(0, int(tokens_in)), "tout": max(0, int(tokens_out)),
+             "updated": updated_at or self._now()})
+        if not rows:
+            return None
+        # Read back through the ONE row projection, so this cannot drift from
+        # `get_item`'s field list.
+        return self.get_item(org_id, batch_id, item_id)
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
         self._q(
@@ -1337,8 +1398,8 @@ def record_item_spend(org_id: str, *, tokens_in: int = 0,
     double-charges a retried item (measured: pass 1 `queued` with 100 tokens, pass
     2 `indexed` with 100 → 200 on the meter while the status surface said 100)
     and re-charges a row a peer settled. :meth:`BatchCoordinator.run_item` puts
-    exactly the landed call's figures on ``item.charge_tokens``, which is not
-    persisted, so the same spend cannot be charged twice.
+    exactly the landed call's figures on ``item.charge_in``/``charge_out``,
+    which are not persisted, so the same spend cannot be charged twice.
 
     ``calls=0``: a batch item is NOT a capture call, and this layer has no
     measured price for one. That keeps ``capture_calls`` (the denominator that
@@ -2014,13 +2075,16 @@ class BatchCoordinator:
         spend is real) and the row is left as it was, which is the visible form of
         the loss rather than a silent one.
 
-        ⚠️ DECLARED RESIDUAL: this is a read-modify-write against a state-based
-        compare-and-set, so two writers that both read before either writes could
-        lose one accumulation. It is not reachable from today's call sites (every
-        token-carrying write through `advance` changes state, and the state CAS
-        then serialises the pair), but a caller that passes tokens on a
-        state-preserving edge would make it reachable — a counter column, or a
-        second CAS on the token total, is the fix.
+        ⛔ THE ACCUMULATION IS ADDITIVE IN THE STORE (#14415 review round 5, P3).
+        It used to be a read-modify-write — `item.tokens_in = row.tokens_in + d`
+        then an unconditional `put_item` — and the paragraph that stood here
+        called that unreachable "from today's call sites". THIS function is a call
+        site: it writes tokens with NO state change and never goes through
+        `advance`, so the state compare that serialises the settle path does not
+        serialise it, and two replicas that both lost their compare could each
+        read the same total and write it back, losing one accumulation and
+        leaving `tokens_spent` below the ledger — the bill/receipt disagreement
+        round 8 closed. `add_item_tokens` does the addition WHERE THE ROW LIVES.
         """
         tokens_in = max(0, int(tokens_in or 0))
         tokens_out = max(0, int(tokens_out or 0))
@@ -2028,11 +2092,15 @@ class BatchCoordinator:
         item.charge_out = tokens_out
         if not (tokens_in or tokens_out):
             return item
-        item.tokens_in = max(0, item.tokens_in) + tokens_in
-        item.tokens_out = max(0, item.tokens_out) + tokens_out
         item.updated_at = self._now()
         try:
-            self._store.put_item(org_id, item)
+            settled = self._store.add_item_tokens(
+                org_id, item.batch_id, item.item_id,
+                tokens_in=tokens_in, tokens_out=tokens_out,
+                updated_at=item.updated_at)
+            if settled is not None:
+                item.tokens_in = max(0, settled.tokens_in)
+                item.tokens_out = max(0, settled.tokens_out)
         except Exception:
             _logger.warning("batch spend not recorded on item %s (team %s): the "
                             "ledger is charged, the row's total is short",
@@ -2170,8 +2238,9 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def abandon_dead_claims(self, org_id: str, batch_id: str, *,
-                            reclaim_after: float | None = None) -> None:
+    def abandon_dead_claims(
+            self, org_id: str, batch_id: str, *,
+            reclaim_after: float | None = None) -> None:
         """Settle a CANCELLED batch's claims that NO runner is holding.
 
         ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
@@ -2201,20 +2270,32 @@ class BatchCoordinator:
         and `_resume_batch` do; the re-scan returns and settles it once it is
         stale, which is the ONE rule this file states.
 
-        ``reclaim_after`` is how a caller states what it knows: ``None`` means
-        "nothing I know of is running these claims" (a process start, where every
-        claim belongs to a dead predecessor), and a number means "a claim younger
-        than this may belong to a live peer" — the recovery re-scan passes
-        :data:`BATCH_RECLAIM_AFTER_S`. ⚠️ DECLARED RESIDUAL: the in-process drain
-        path still passes ``None``, so it settles a claim a PEER REPLICA may be
-        holding — the same 15-minute-window-not-a-lease residual this module
-        already declares, and the reason the window exists at all.
+        ⛔ THE WINDOW APPLIES ON **EVERY** ARM, INCLUDING "BOOT" (#14415 review
+        round 9, HIGH, then round 10 HIGH). The first cut of this fix let a
+        caller pass ``None`` for "nothing I know of is running" — and the caller
+        used it on a tenant's FIRST scan in the process. That premise is false on
+        a rolling deploy: the first scan of the NEW replica runs while the OLD
+        replica is still inside the runner (measured: claim age 0.00 s, settled,
+        the peer's `indexed` became unreachable, its 730 tokens billed and the
+        document dropped — the exact defect the arm was added to close). "First
+        scan" is not "boot" either: `_BATCH_SCAN` evicts, and an evicted tenant
+        re-enters that arm mid-life. So the window is not optional here: a FRESH
+        claim is never touched by ANY caller, and it is settled by a later scan
+        once it is stale — which is the ONE rule this file states, with no
+        exception left to get wrong.
         """
+        # ⛔ RESOLVED AT CALL TIME, not bound at import (review round 11, LOW):
+        # the default used to capture `BATCH_RECLAIM_AFTER_S`'s value when the
+        # module loaded, so a test or an operator that narrowed the knob moved the
+        # sibling arms and left THIS one at 900 s — the one place where the "ONE
+        # rule" was spelled two different ways. `recover()`'s `stale_after_s`
+        # already uses this sentinel.
+        window = float(BATCH_RECLAIM_AFTER_S if reclaim_after is None
+                       else reclaim_after)
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
-                if (reclaim_after is not None
-                        and _age_seconds(item.updated_at) < reclaim_after):
+                if _age_seconds(item.updated_at) < window:
                     continue
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",
@@ -2232,8 +2313,7 @@ class BatchCoordinator:
     def recover(self, org_id: str, *,
                 live_batches: Collection[str] | Callable[[str], bool] = (),
                 stale_after_s: float | None = None,
-                limit: int = 50, offset: int = 0,
-                settle_fresh_claims: bool = True) -> list[str]:
+                limit: int = 50, offset: int = 0) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -2330,10 +2410,9 @@ class BatchCoordinator:
                 # would destroy the outcome of work that is still running.
                 continue
             try:
-                moved = self._resume_batch(
-                    org_id, batch_id, reclaim_after=reclaim_after,
-                    stamp=stamp,
-                    settle_fresh_claims=settle_fresh_claims)
+                moved = self._resume_batch(org_id, batch_id,
+                                           reclaim_after=reclaim_after,
+                                           stamp=stamp)
             except Exception:
                 _logger.exception("batch %s: recovery of this batch failed; "
                                   "continuing the scan", batch_id)
@@ -2343,8 +2422,7 @@ class BatchCoordinator:
         return resumed
 
     def _resume_batch(self, org_id: str, batch_id: str, *,
-                      reclaim_after: float, stamp: str,
-                      settle_fresh_claims: bool) -> bool | None:
+                      reclaim_after: float, stamp: str) -> bool | None:
         """Re-open ONE batch. Returns ``True`` when reported, ``None`` when not.
 
         Split out of :meth:`recover` so ONE batch's read fault cannot abort the
@@ -2374,9 +2452,8 @@ class BatchCoordinator:
             # resolved — an inert row). At boot nothing is running, so its claim
             # is void: settle it ``cancelled``, without inventing token counts for
             # a run we cannot observe.
-            self.abandon_dead_claims(
-                org_id, batch_id,
-                reclaim_after=None if settle_fresh_claims else reclaim_after)
+            self.abandon_dead_claims(org_id, batch_id,
+                                     reclaim_after=reclaim_after)
             return None
         # ⛔ The `resuming` write below is a compare-and-set against the states a
         # resume may legally start from (review round 5, P1 — the third

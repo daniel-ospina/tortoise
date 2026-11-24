@@ -9,6 +9,7 @@ acceptance, and the docstring says which.
 from __future__ import annotations
 
 import os
+import re
 import threading
 
 import pytest
@@ -19,6 +20,7 @@ from tortoise.batch_ingest import (
     BATCH_ITEMS_IN_FLIGHT,
     BATCH_LABEL,
     BATCH_RECLAIM_AFTER_S,
+    ITEM_LABEL,
     OVERAGE_USD_PER_MILLION_TOKENS,
     PROVIDER_MECHANICS_WORDS,
     SECONDS_PER_DOCUMENT,
@@ -397,6 +399,18 @@ def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG, batch.batch_id)
     # …the process dies here, leaving /a.md mid-flight inside a cancelled batch.
+    # `stale_after_s=0` states the boot case explicitly: this process is gone, so
+    # ITS claim is void no matter how young the stamp looks. (The default window
+    # is for a PEER's claim, which a status poll cannot prove dead — see
+    # `abandon_dead_claims`.)
+    assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == []
+    # ⛔ The claim is aged FIRST: the reclaim window applies to every caller
+    # (#14415 review round 10), so a 0 s claim is deliberately left alone and a
+    # later scan settles it. This test is about the row not stranding, which is
+    # what the stale claim proves.
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
     assert BatchCoordinator(store).recover(ORG) == []
     after = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
     assert after["/a.md"].state is BatchItemState.CANCELLED
@@ -1651,47 +1665,83 @@ def test_every_emitted_statement_is_brace_balanced():
     """
     seen = _every_store_statement()
     assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
-    bad = [s for s in seen if "{{" in s or "}}" in s
-           or s.count("{") != s.count("}")]
+    # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
+    # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
+    # leaves the braces balanced and emits the literal text `{attempts_clause}`,
+    # which only the ENGINE rejects (`'attempts_clause' not defined`) — and in a
+    # lane with no FalkorDB the engine-dependent test skips, so this guard is the
+    # only protection there. A surviving placeholder is the same class as a
+    # doubled brace: a statement this module did not mean to emit.
+    bad = [s for s in seen
+           if "{{" in s or "}}" in s
+           or s.count("{") != s.count("}")
+           # ⛔ CASE-INSENSITIVE AND DOTTED (#14415 review round 12, LOW): the
+           # first predicate was lower-case only, so `{ITEM_LABEL}` — a spelling
+           # this module does use in other f-strings — would have survived it.
+           # Inert today (every other interpolation sits on a line that also
+           # carries a literal `{`, caught by the arm above), which is exactly
+           # why a guard that over-claims its coverage gets fixed before it is
+           # relied on.
+           or re.search(r"\{[A-Za-z_][A-Za-z0-9_.]*\}", s)]
     assert not bad, (
-        "a statement this module emits is malformed Cypher (unbalanced or "
-        f"doubled braces): {bad[0] if bad else ''}")
+        "a statement this module emits is malformed Cypher (unbalanced, doubled "
+        f"braces, or an un-interpolated placeholder): {bad[0] if bad else ''}")
     assert any("state:$expect}" in s for s in seen), (
         "the compare-and-set statement was not reached — the assertion above "
         "would be vacuous")
+    # The predicate's own reach: it must name an un-interpolated label too, or its
+    # prose ("a surviving {placeholder}") is wider than its coverage.
+    assert re.search(r"\{[A-Za-z_][A-Za-z0-9_.]*\}",
+                     "MATCH (i:Ingest {{x:1}} {{ITEM_LABEL}})"), (
+        "the placeholder predicate does not catch an upper-case label")
 
 
 def test_a_rescan_never_settles_a_fresh_claim_of_a_cancelled_batch():
     """⛔ HIGH: `abandon_dead_claims` released a claim that was SECONDS old.
 
     `recover()` is not a boot-only hook — it is a throttled re-scan re-entered
-    from every batch read — so on a second replica it settled the FIRST
-    replica's live in-flight row `cancelled` (measured: claim age 0.0 s against a
-    900 s window). The live runner's outcome could then not be applied, so
-    `run_item`'s terminal arm billed the spend and dropped the document: the
-    customer charged for work the cancel copy promised to keep.
+    from every batch read, and on a ROLLING DEPLOY a new replica's first scan
+    runs while the old replica is still inside the runner. An earlier cut let a
+    "first scan in this process" settle fresh claims, on the theory that a first
+    scan means every claim belongs to a dead predecessor; measured false (claim
+    age 0.00 s), and the live runner's outcome then became unreachable so its 730
+    tokens were billed for a dropped document.
+
+    ⛔ SO THE WINDOW IS THE ONLY ARM: every caller leaves a FRESH claim alone, and
+    a LATER scan settles it once it is stale. Both halves are asserted below,
+    because an earlier version of this test called no windowed scan at all — it
+    passed with the age check deleted.
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     # TWO items: `cancel()` records the cancellation only when it can settle a
     # queued sibling (`/b.md`); with every item in flight it leaves the row
-    # `running` and the in-flight work alone, which is the documented behaviour
-    # for "their result is kept".
+    # `running` and the in-flight work alone ("their result is kept").
     batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG, batch.batch_id)
     assert store.get_batch(ORG, batch.batch_id).state is BatchState.CANCELLED
+
+    # 1. A FRESH claim survives a full scan, however many times it runs.
+    for _ in range(3):
+        BatchCoordinator(store).recover(ORG)
     live = store.get_item(ORG, batch.batch_id, items[0].item_id)
     assert live.state is BatchItemState.EXTRACTING, (
-        "a re-scan settled a FRESH claim: the peer holding it loses its outcome "
-        "and the customer is billed for a dropped document")
+        "a scan settled a FRESH claim: the peer holding it loses its outcome and "
+        "the customer is billed for a dropped document")
 
-    # …and the boot pass (the default: nothing this process knows of is running)
-    # still settles it, so the row cannot strand non-terminal for ever.
+    # 2. The SAME claim, once stale, is settled by the same call — otherwise the
+    #    row would strand non-terminal for ever and "no settlement" would be a
+    #    different bug wearing this fix's clothes.
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
     BatchCoordinator(store).recover(ORG)
     settled = store.get_item(ORG, batch.batch_id, items[0].item_id)
-    assert settled.state is BatchItemState.CANCELLED
+    assert settled.state is BatchItemState.CANCELLED, (
+        "a STALE claim was not settled — the cancelled batch strands its row")
     assert settled.tokens_in == 0 and settled.tokens_out == 0
+    assert store.pending_batches(ORG) == []
 
 
 def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
@@ -1812,6 +1862,78 @@ def test_the_graph_store_speaks_real_cypher():
         assert BatchCoordinator(store).recover(ORG) == []
         store.discard(ORG, batch.batch_id)
         assert store.list_recent_batches(ORG) == []
+    finally:
+        graph.query("MATCH (n) DETACH DELETE n")
+        graph.delete()
+
+
+def test_the_store_statements_carry_the_tenant_filter():
+    """⛔ NOTHING PINNED THE ROW-LEVEL TENANT FILTER (#14415 review round 12).
+
+    Measured by the reviewer: deleting `org_id:$org` from `get_batch`,
+    `put_batch_if_state` and `items` left **139 of 139** batch tests green — the
+    live test used one org, and no hermetic test read the statements. Hosted mode
+    gives each org its own graph, so this filter is defence in depth rather than
+    the only guard (and `_batch_org_root`'s path bound IS pinned) — but the layer
+    where it is implemented had zero protection, so a refactor that dropped it
+    would read another tenant's batch with nothing red.
+
+    Two halves: the statements must NAME the parameter (hermetic, so it holds in a
+    lane with no FalkorDB), and the live engine must refuse a foreign org
+    (semantics, in :func:`test_a_foreign_org_cannot_reach_a_batch`).
+    """
+    seen = _every_store_statement()
+    filtered = [s for s in seen
+                if s.lstrip().startswith(("MATCH", "MERGE"))
+                and (BATCH_LABEL in s or ITEM_LABEL in s)]
+    assert filtered, "no statement names a batch label — the assertion is vacuous"
+    missing = [s for s in filtered if "org_id:$org" not in s]
+    assert not missing, (
+        f"{len(missing)} statement(s) do not filter by tenant: {missing[0]}")
+
+
+def test_a_foreign_org_cannot_reach_a_batch():
+    """The live half of the tenant-filter pin — real engine, two orgs."""
+    from urllib.parse import urlparse
+
+    from _live_utils import _skip_unless_live_uri
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+    from falkordb import FalkorDB
+
+    parsed = urlparse(uri.replace("docker://", "http://"))
+    db = FalkorDB(host=parsed.hostname, port=parsed.port,
+                  password=parsed.username or None)
+    graph = db.select_graph(
+        f"{parsed.path.strip('/') or 'tortoise'}_batch_tenant_probe")
+    graph.query("MATCH (n) DETACH DELETE n")
+
+    def _query(cypher, params=None, timeout=None):
+        return graph.query(cypher, params or {}, timeout=timeout)
+
+    try:
+        store = GraphBatchStore(_query)
+        coord = BatchCoordinator(store)
+        owner, foreign = "org-owner", "org-foreign"
+        batch, items = coord.submit(owner, ["/tenant.md"])
+
+        assert store.get_batch(foreign, batch.batch_id) is None
+        assert store.get_item(foreign, batch.batch_id, items[0].item_id) is None
+        assert store.items(foreign, batch.batch_id) == []
+        assert store.pending_batches(foreign) == []
+        assert store.batch_counts(foreign, [batch.batch_id])[batch.batch_id][
+            "total"] == 0
+        for call in (lambda: BatchCoordinator(store).status(
+                         foreign, batch.batch_id),
+                     lambda: BatchCoordinator(store).cancel(
+                         foreign, batch.batch_id)):
+            with pytest.raises(KeyError):
+                call()
+        # …and the owner's row is untouched by any of that.
+        assert store.get_batch(owner, batch.batch_id).state is BatchState.ACCEPTED
+        assert len(store.items(owner, batch.batch_id)) == 1
+        store.discard(owner, batch.batch_id)
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
