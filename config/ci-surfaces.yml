@@ -64,12 +64,7 @@ version: 1
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
 # (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
 # `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
-# the split below is `main`'s reading too.
-# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the durations
-# map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
-# against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
-# THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
-# ⛔ THIS BRANCH'S OWN READING WAS HERE and is
+# the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
@@ -112,10 +107,10 @@ version: 1
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
-# is why `main` alone emits this same split. ⛔ A restatement here would be graded as a second claim;
-# the WHY — that the split is 0.1 s wide, that the NAME SETS are what move rather than the minute,
-# and that only the `est_seconds` partition can catch a carried figure — is stated ONCE, in the
-# "ONE CLAUSE" paragraph below. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# is why `main` alone emits this same split. ⛔ THE WHY IS NOT RECITED HERE: the "why the minute
+# cannot be the operand, and why a restatement would be graded as a second claim" reasoning is in
+# the "ONE CLAUSE" paragraph below, and stating it here as well would make its own "ONCE" false —
+# which is the defect this line exists to stop repeating. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
@@ -128,9 +123,6 @@ version: 1
 # `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is a registration that MOVED the
 # NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
 # its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
-# at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
-# was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
-# six/five graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # at 28 m. ⛔ Stated at the sha it
 # was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
 # rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
@@ -145,8 +137,7 @@ version: 1
 # ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
-# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
-# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0362). A carried ratio in a graded sentence is
+# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361, rounded to the printed 2.04). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
