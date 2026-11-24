@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2019 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2032 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -355,6 +355,12 @@ def _residue_block() -> str:
     adds no row — the 11912 this branch carried sat 2 above it only while the branch still held
     the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on this branch's pre-merge
     tree, 0 on `origin/main`), and that pair is what adopting main's deletion removes,
+    — and THIS PR'S OWN TEST CUT THEN MOVED THE PAIR DOWN, 11910 -> `11903`, on a tree that is
+    neither of the fold's parents: `tests/test_dod_5090_probe.py` loses 270 cases, and that file's
+    own residue rows go 8 -> 1 (`edits_for` on each side, not differenced from the two pins), so
+    the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
+    fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
+    the extent moved with the pair here instead of only with a merge,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
