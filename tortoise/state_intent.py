@@ -169,21 +169,35 @@ _ENDING_WORDS = (
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are two:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are four:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
 #:   (`is the onboarding flow retired?`), so no word list separates them without
 #:   becoming the noun→route assignment #13128 refuses;
 #: * `all|some|any|no` are left in the run on purpose — each is also an ordinary
-#:   noun modifier (`is the all hands meeting cancelled`), so refusing them would
-#:   cost measured recall to close a spelling this list cannot close cleanly;
-#: * so are the NUMERALS (`is the two factor login abandoned`): a number is an
-#:   ordinary modifier, and `one|two|…` as a clause subject is the rarer reading.
-#: One word of the subject NP. ⛔ A hyphen or an apostrophe is an ordinary spelling
-#: INSIDE a head noun (`company's`, `all-hands`, `e-mail`), not a clause boundary —
-#: a `[a-z0-9]+` run refuses those spellings and answers `0 rows`, because the
-#: relevance read excludes terminal statuses.
+#:   noun MODIFIER, and the cost is visible only in a non-head slot where it
+#:   really does the modifying: `is the onboarding all hands meeting cancelled`
+#:   routes at this head and refuses once `all` is a stop word. (A head-slot
+#:   example would prove nothing: the stop never applies to word one.);
+#: * so are the NUMERALS, for the same reason and in the same slot — the modifier
+#:   use is `is the onboarding two day workshop cancelled` (which refuses once a
+#:   numeral is a stop word), and the clause-subject spelling it keeps is
+#:   `is the report one team archived`;
+#: * AND THE SUBJECT NEED NOT NAME A RECORD AT ALL: a yes/no question about a
+#:   TIME SPAN — `is the quarter ended`, `is the deadline ended`, `is the sprint
+#:   ended` — routes, and the ended population answers a calendar question with
+#:   our ended records. No word list separates `quarter` from a record name
+#:   without becoming the same noun→route assignment, so this is disclosed rather
+#:   than closed; the tail anchor still refuses the windowed spellings
+#:   (`is the quarter ended in Q3`).
+#:
+#: One word of the subject NP.
+
+#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
+#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
+#: refuses those spellings and answers `0 rows`, because the relevance read
+#: excludes terminal statuses.
 _NP_WORD = r"[a-z0-9][a-z0-9'-]*"
 
 _NP_STOP = (
@@ -491,8 +505,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `is the policy when a booking is cancelled` all refuse. The tail anchor, the
     # NP bound, the NP stop and the start anchor are each pinned by a falsifier
     # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
-    # of `NOT_SELECTED` cannot exercise any of them, because `^is` never reaches
-    # it.
+    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
+    # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
     # flow retired?`, `are our endpoints deprecated` and `were the claims
     # retracted` are the same question in another tense/number, and refusing them

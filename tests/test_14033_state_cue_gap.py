@@ -263,8 +263,11 @@ def test_the_five_guards_inside_is_predicate_are_each_load_bearing():
       a zero relative with a BARE-NOUN subject (`is the claim finance retracted`)
       is lexically identical to a two-word head noun plus a predicate, so it
       routes, and so does one with a bare quantifier subject (`is the plan some
-      team abandoned`) — see the module's ``_NP_STOP`` note for both;
-    * relaxing the START anchor (`^is` → `(?:^|\\b)is`) routes the two NESTED
+      team abandoned`), and so does a TIME SPAN that names no record
+      (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
+      four residuals;
+    * relaxing the START anchor (`^(?:is|are|was|were)` →
+      `(?:^|\\b)(?:is|are|was|were)`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
       else in this file moves. That anchor was the clause with no falsifier
       (PR #14491 review, round 3): the shape is a yes/no question that OPENS the
