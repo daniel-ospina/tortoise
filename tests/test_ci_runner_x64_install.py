@@ -4323,18 +4323,18 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: Every citation whose target sits AT OR BELOW the insert moved DOWN by 25; the ones above it did
 #: not. Re-derive each from the workflow, never offset the old number by the insert's size.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4816", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4808-4810", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3230", ("cache: pip",)),
+    ("python-ci.yml:4838", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2957-2964", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4828-4830", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3242", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
     # adding it here is what puts a new citation under the pin instead of beside it. Each span is
     # anchored on `path:` as well as `uses:`, so a bare `uses: actions/cache@v4` line (there are
     # several in this workflow) cannot satisfy it from the wrong step.
-    ("python-ci.yml:2942-2946", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
-    ("python-ci.yml:2985-2987", ("actions/cache@v4", "path: ~/.cache/huggingface")),
-    ("python-ci.yml:3547-3549", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:2950-2954", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
+    ("python-ci.yml:2995-2997", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:3563-3565", ("actions/cache@v4", "path: ~/.cache/huggingface")),
 )
 
 #: The citation shape the completeness arm below reads — a line number or a line RANGE.

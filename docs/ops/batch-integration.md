@@ -1253,8 +1253,8 @@ contended box — holds the fold's required legs PENDING with nothing to answer 
 `docs/ops/ci-runner-x64.md` records for every pool-only departure (`:806-817`); and the pool is
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
-ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2105`) and one of them
-killed the canary at its **27m shard watchdog**, a 32m12s job wall (`python-ci.yml:2172`) — the same
+ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2111`) and one of them
+killed the canary at its **27m shard watchdog**, a 32m12s job wall (`python-ci.yml:2178`) — the same
 failure this section cites as the reason the `canary_producer` row is exempt. A priority mechanism
 that routes a fold onto a slower or stalled class makes the fold slower, which is the opposite of its
 purpose. Declare the class

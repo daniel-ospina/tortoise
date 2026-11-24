@@ -1568,9 +1568,10 @@ def test_title_and_telegram_text_pass_the_publication_boundary():
     """#3293: the SAME boundary rule as the issue body, on the other two sinks.
 
     A subject (`org_id`) is app-controlled and lands in BOTH the public issue
-    TITLE and the Telegram push, so the scrub is pinned on each. No *detail* is
-    carried by the Telegram text today — the sink is scrubbed so a future caller
-    cannot add one unredacted.
+    TITLE and the Telegram push, so the scrub is pinned on each. A *detail* IS
+    carried by the Telegram text today — #14407 interpolates the caller's short
+    ``detail["context"]`` token — so that arm is pinned here too: the sink is
+    scrubbed so a caller cannot add a publication-unsafe token and publish it.
     """
     ch = _FakeChannels()
     store = _store(ch)
@@ -1581,6 +1582,24 @@ def test_title_and_telegram_text_pass_the_publication_boundary():
     # …and an ordinary alert is byte-identical (the scrub is not a rewriter).
     assert store._title("STALE", "team_a", {}) == "[DR] STALE — team_a"
     assert store._telegram_text("STALE", "team_a", {}, 1) == \
+        "🚨 DR alert: STALE (team_a) — issue #1"
+    # #14407's context token rides INSIDE the scrub (the arm that made the
+    # docstring's old "no detail is carried" premise false): a caller that puts
+    # a secret in it is redacted rather than published…
+    assert store._telegram_text(
+        "ABUSE_FLAG_RAISED", "team_a",
+        {"context": f"rule=point_create token={_TOKEN_3293}"}, 3,
+    ) == ("🚨 DR alert: ABUSE_FLAG_RAISED (team_a) — rule=point_create "
+          "token=[REDACTED:github_token] — issue #3")
+    # …an ordinary token is byte-identical (so the arm above is not passing by
+    # rewriting the text around it)…
+    assert store._telegram_text(
+        "ABUSE_FLAG_RAISED", "team_a",
+        {"context": "rule=point_create count=600"}, 3,
+    ) == ("🚨 DR alert: ABUSE_FLAG_RAISED (team_a) — rule=point_create "
+          "count=600 — issue #3")
+    # …and a blank/absent token adds no separator at all.
+    assert store._telegram_text("STALE", "team_a", {"context": "   \n"}, 1) == \
         "🚨 DR alert: STALE (team_a) — issue #1"
 
 

@@ -37,6 +37,7 @@ import pytest
 
 from tortoise import pricing
 from tortoise.allowance_gate import (
+    DIMENSIONS,
     MeterReading,
     enforce_allowances,
     reset_signal_state_for_tests,
@@ -50,7 +51,15 @@ ORG = "team-13526"
 #: green through a pricing revision while asserting a threshold the deployed gate
 #: no longer composes, on the exact field this change exists to make truthful.
 PRO_CAP_MB = float(pricing.storage_limits("pro")["max_graph_storage_mb"])
-PRO_HARD_STOP_MB = PRO_CAP_MB * 1.5
+
+#: The MULTIPLIER is read from the gate's own band, for the same reason as the
+#: cap and one the cap's derivation does not cover (fresh review of #13526): the
+#: gate composes its compared threshold as ``allowance * cap_band.refuse_at``
+#: (``allowance_gate`` :1736), so a restated ``1.5`` here would keep asserting
+#: 153 through a band revision and red this file over a CORRECT change — a false
+#: red on the report layer this suite exists to make truthful.
+_STORAGE_BAND = next(d for d in DIMENSIONS if d.dimension == "graph_storage")
+PRO_HARD_STOP_MB = PRO_CAP_MB * _STORAGE_BAND.cap_band.refuse_at
 
 #: The figure measured on the deployed graph when the defect was found.
 MEASURED_USED_MB = 329.0
