@@ -13,6 +13,12 @@ version: 1
 #
 # The value (recomputable from the committed `durations` map:
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
+# S is chosen by that formula on the committed map, and the minutes it yields
+# are deliberately NOT restated here — they move with every re-cut, which is
+# how this block went stale twice. The authoritative pins WERE the balance-band
+# test (`test_real_workflow_halves_are_consistent`, CUT in the B7 test cut on
+# 2026-11-23) and the lane-parity superset test below, which recomputes from the
+# map and stays.
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
 # how this block went stale twice. TWO tests are authoritative, and only ONE of
@@ -27,6 +33,13 @@ version: 1
 # SUM paragraph below).
 # The other live pin, the lane-parity superset test below, does NOT read the map —
 # it pins the
+# 2026-11-23), and the lane-parity superset test below STAYS (it grades label
+# polarity, not the map).
+# The ONE live pin left is the emission guard
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
+# the per-shard `--emit-push-matrix` sentence further down in this block against
+# the LIVE emission, so the figures in it are a graded claim and not merely prose.
+# The lane-parity superset test below does NOT read the map — it pins the
 # label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the merge rail
 # subtracts main's published job names against.
 #
@@ -57,38 +70,53 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
-# repaired #7879's record-chain arm, and whose #14429 registered
-# `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
-# `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
-# and #14371's `tests/test_14371_offline_embed_json.py` — the last three at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two
-# at 837.2 s (f, i), so `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.01`, so the two agree by construction rather than by a hand re-read.
-#
-# ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
-# figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 → 837.3 s). So NO arithmetic on the
-# minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted.
-#
-# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
-# sides of this paragraph REDS rather than picking one: it was re-emitted for the #14371 row at a
-# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
-# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
-# single eleven-shard one, #14429's `core` registration re-split it to nine/two at 837.3 s, and
-# merging `main`'s own copy left this block stating the emission TWICE — each parent had rewritten
-# this paragraph and git kept BOTH spellings, so the guard read `<est 837.3 stated twice>` and
-# `<ceil stated 2 times>` rather than a clean claim. It is RE-EMITTED once more here, from the
-# merged tree. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's
-# minute, seconds, or split.
-#
-# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
-# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# one main fold from rounding again.
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
+# `da4b76a585` — eight landings past the `88cd00a068` head the block last named, and a tree that
+# registers no fast file of its own) the verb packs seven shards at 837.5 s
+# (a, c, d, e, i, j, k) and four at 837.4 s (b, f, g, h) — re-derived here rather than carried, and
+# NOT the nine/two that `main` stated before this commit (see the note below) — so
+# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# agree by construction rather than by a hand re-read. The registrations this block's own reading
+# counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
+# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
+# `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
+# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
+# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
+# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
+# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
+# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
+# ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
+# the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
+# it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
+# RED between that landing and the next re-cut, which is the failure this block exists to prevent),
+# #14220's to two at 837.0 and nine at 836.9, #14423's flattened all eleven onto 837.1 s — the first
+# perfectly balanced reading since the 2026-11-23 durations refresh. (Each of those five readings was
+# re-derived with `--emit-push-matrix` at its own landing, not quoted from the one before it.) That
+# scope is MEASURED, not a guess about superlatives: of the 26 landings between that refresh and
+# #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
+# at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
+# unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
+# them back into the nine/two that `main` stated, and then `main`'s own next eight landings moved it
+# AGAIN — to the seven/four above — while the sentence kept the nine/two. That left `main` itself
+# RED on `test_the_fast_shards_header_block_states_the_measured_emission` (measured at
+# `da4b76a585`: stated {837.3: a,b,c,d,e,g,h,j,k; 837.2: f,i} vs emitted
+# {837.5: a,c,d,e,i,j,k; 837.4: b,f,g,h}), which is the base-owned red #14406 inherited and re-cut
+# here rather than merging over. ⛔ It is the FOURTH time this block went stale on a landing it did
+# not name, and the guard is the only reason any of them were caught.
+# ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
+# why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
+# sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
+# branch carried its own re-cut of them, so the merge kept BOTH spellings and the guard read
+# `<est 837.3 stated twice>` / `<ceil stated 2 times>` rather than a clean claim. The sentences
+# above are ONE emission, re-derived at the NAMED head.
+# ⛔ The minute has stood at 28 m across every one of those readings, so NO
+# arithmetic on the minute can catch a carried figure — only the `est_seconds` partition can, which
+# is why the sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES
+# move when a fast file is registered — the packer is greedy, so ONE new 2.0 s file re-packs every
+# bin — which is why the names are stated and graded, not only the seconds. Re-run
+# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or
+# split.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
 # 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
@@ -111,6 +139,10 @@ version: 1
 # `workflow_halves_issues()`, which recomputes the ratio from the committed map
 # (the `test_real_workflow_halves_are_consistent` arm that used to sit beside it
 # went with the durations-map arithmetic cut). The old
+# The 1.25x balance band was enforced by `test_real_workflow_halves_are_
+# consistent`, which recomputed the ratio from the committed map (that arm was
+# CUT in the B7 test cut, 2026-11-23); what still checks it is `--integrity`'s
+# `workflow_halves_issues()`. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
@@ -181,8 +213,12 @@ carve_shards: 3
 # gives the leg count back. It is NOT, on its own, a complete rollback: the
 # wall-target guard recomputes from the map, and 2 legs project well over the
 # 10m target, so removing the key reds it
+# wall-target guard recomputed from the map, and 2 legs projected ~20.9m against
+# the 10m target, so removing the key then redded it
 # (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
-# the_wall_target`). A real rollback therefore moves the target/guard too — which
+# the_wall_target`, CUT in the B7 cut, 2026-11-23 — nothing computes that
+# projection now, so re-derive it by hand with `slow_wall_projection()`). A real
+# rollback therefore moves the target/guard too — which
 # is what makes a growing slow file red HERE rather than silently restoring the
 # ceiling the key was added to raise.
 slow_shards: 5
@@ -489,6 +525,19 @@ surfaces:
   # FULL matrix and selects this file either way. DB-FREE: doubles and the gate's
   # own `meters=` seam.
   - test_13829_cache_cap_at_fold.py  # #13829: dual: core
+  # #13526: the ruled-dimension refusal's FACTS on the health surface — the
+  # dimension that refused, the figures the gate COMPARED, and a reason string
+  # that may not be cut mid-number. DUAL-REGISTERED with `core` for the same
+  # MEASURED reason the two rows above give: the file drives the real gate
+  # (`allowance_gate.enforce_allowances` through `meters=`) and reads
+  # `quota.org_quota_state`, and `tortoise/quota.py` is an EXACT `api`
+  # SOURCE_PATTERN that REPLACES the `core` fallback — so a `core`-only row
+  # would leave it unselected on the very diffs it guards, and an `api`-only row
+  # would leave it unselected on `tortoise/allowance_gate.py` (no named
+  # SOURCE_PATTERN → `['core']`). `tortoise/mcp_server.py` is a SHARED_MODULE,
+  # so a diff there forces the FULL matrix and selects this file either way.
+  # DB-FREE: the gate's own `meters=` seam and a double; no DSN, no graph.
+  - test_13526_quota_refusal_figures.py  # #13526: dual: core
   # #14186: the `api` arm of the TRIPLE registration (core/api/eval). Each arm
   # exists because a DIFFERENT surface owns a module this suite guards, and a
   # named SOURCE_PATTERNS match REPLACES the `core` fallback in `select()` — so a
@@ -3963,6 +4012,16 @@ surfaces:
   # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
+  # #13526: the `core` arm of the DUAL registration (see this file's `api:`
+  # block for the measured classification). `core` is what a diff to
+  # `tortoise/allowance_gate.py` resolves to — that module has no named
+  # SOURCE_PATTERN — and the gate's composed refusal (the figure, the 1.5x hard
+  # stop, the single-sample estimate arm) is exactly what this suite asserts
+  # reaches the health block intact.
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_13526_quota_refusal_figures.py`).
+  # DB-FREE: the gate's `meters=` seam, a double, no DSN and no graph.
+  - test_13526_quota_refusal_figures.py
   # #14185: the record's projection on its OWN loop — the projection worker, the
   # seven conditions under which a write may be deferred, and the lag metric.
   # ⛔ SEVEN: four correctness arms, the unimportable loop, and the two switches
@@ -9611,9 +9670,10 @@ surfaces:
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
   #   * the `durations:` row → the ENTRY RULE pin
-  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
-  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
-  #     0.90 RATIO with headroom and is silent over one missing row.
+  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`,
+  #     CUT in the B7 test cut on 2026-11-23 — nothing pins this now), which saw ONLY
+  #     the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a 0.90 RATIO
+  #     with headroom and is silent over one missing row.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
@@ -12269,6 +12329,12 @@ tier1:
 # at the 7.58m heavier leg of the pre-#10194 pool, and higher today on a lighter
 # leg — the ratio is DERIVED, so it moves with the pool and is not restated as a
 # fixed number here), and the workflow's drift guard pins the union of the EXPANDED legs to
+# `test_slow_leg_bounds_clear_the_committed_work` re-derived the 40m watchdog's
+# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (CUT in
+# the B7 test cut, 2026-11-23: re-derive by hand; 5.3x
+# at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
+# ratio is DERIVED, so it moves with the pool and is not restated as a fixed
+# number), and the workflow's drift guard pins the union of the EXPANDED legs to
 # `slow_gating_files()`. Read the live shape with `python3
 # tools/ci_selection.py --non-gating-report` rather than from a figure here.
 # NOTHING was deleted, moved off the pre-merge gate, or
@@ -12523,8 +12589,8 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (recomputed from the
-# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
-# what absorbs a ranking error; the durable fix is the scheduled refresh
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`, an arm
+# CUT on 2026-11-23 — by hand now) is what absorbs a ranking error; the durable fix is the scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
@@ -12538,8 +12604,9 @@ slow_files:
 # 10.5x at today's 5.72m leg — the multipliers are DERIVED, so re-derive them
 # rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
-# keeps the literals honest is
-# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
+# kept the literals honest was
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work (CUT in
+# the B7 test cut, 2026-11-23; recompute it by hand before moving a literal).
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py

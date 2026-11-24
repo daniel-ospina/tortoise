@@ -412,8 +412,9 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # and both assertions above would stay green. That is the very
     # ungraded-numeral class the module docstring apologises for, so the
     # docstring's own numerals are read OUT OF THE DOCSTRING and compared to the
-    # same measurements. Precedent for reading a prose figure in a test:
-    # `test_sdk_privatise_sweep.py::test_the_abbreviation_length_claim_reproduces`.
+    # same measurements. (The prose-figure precedent this paragraph cited,
+    # `test_sdk_privatise_sweep.py::test_the_abbreviation_length_claim_reproduces`,
+    # was cut in the B8 test-bureaucracy cut, 2026-11-23.)
     doc = inspect.getdoc(beta_variance_sum_bound) or ""
     doc_before = re.search(r"\*\*(\d+)\*\* coercion ``CASE WHEN`` before", doc)
     doc_spared = re.search(r"against \*\*(\d+)\*\* between it and", doc)
