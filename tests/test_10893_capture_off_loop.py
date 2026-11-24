@@ -470,8 +470,9 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
 # point: with the `await` reverted to an inline call the census above is
 # BORDERLINE. The deleted row's per-record cost sits AT the 5 ms TOTAL bar
 # (`_ON_LOOP_BAR_MS`), so the same mutation reads `_graph_write_with_retry`
-# 5.6 ms -> RED on a loaded box and under the bar -> `2 passed` on two quieter
-# runs of this same tree. A verdict that flips with box load is not a falsifier:
+# 5.6 ms -> RED on a loaded box and under the bar -> `2 passed` for the census
+# and the bar's own test on two quieter runs of this same tree. A verdict that
+# flips with box load is not a falsifier:
 # the assertions below are the whole falsifier, which is why the pool identity
 # among them is asserted and not just recorded. (Stated as a range on purpose —
 # an earlier cut of this comment said the census "cannot see this regression at
@@ -489,11 +490,13 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
 # moves WHERE the same callable runs and nothing else (batching is #13722's
 # second half, and it can reorder a load-bearing stamp chain — a data defect,
 # not a perf win).
-#: The blocked window, 2.0 s for the reason `tests/test_graph_write_loop_responsiveness.py`
-#: uses the same value: a 1.0 s window was measured FLAKY on a loaded box (one run in
-#: four red on the tick count / the in-window probe, the identical selection green on
-#: the next two runs). Widening the window is the fix that does not weaken the bound —
-#: the bar (10 ticks) is unchanged, so a loop that is truly blocked still yields 0.
+#: The blocked window: 2.0 s is the value the sibling harness
+#: `tests/test_graph_write_loop_responsiveness.py` already uses for this shape.
+#: The 1.0 s window this test first carried was measured FLAKY HERE (one run in
+#: four red on the tick count / the in-window probe, the identical selection green
+#: on the next two runs). Widening the window is the fix that does not weaken the
+#: bound — the bar (10 ticks) is unchanged, so a loop that is truly blocked still
+#: yields 0.
 _STAMP_STALL_S = 2.0
 _STAMP_TICK_S = 0.02
 _STAMP_MIN_TICKS_IN_STALL = 10
