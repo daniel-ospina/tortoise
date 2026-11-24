@@ -37,7 +37,9 @@ from tools.ci_selection import (  # noqa: I001
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
     slow_matrix_include, slow_shard_issues, slow_shard_count,
-    slow_shard_entries, slow_leg_files, MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    slow_shard_entries, slow_leg_files, slow_wall_projection, MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    SLOW_LEG_WALL_TARGET_MIN, SLOW_LEG_SETUP_ALLOWANCE_MIN,
+    SLOW_LEG_CAPPED_WALL_TARGET_MIN,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -4908,8 +4910,8 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
     # the reason an enumeration claiming to be exhaustive was wrong. The /docs
     # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
     # (in `tests/test_website_docs_consistency.py` — cited WITHOUT a line number on
-    # purpose, as `test_a_fold_never_moves_the_canary_producer_row`'s docstring
-    # does for its runbook row: that import lives in a block every branch appends
+    # purpose, the same discipline the surviving runbook rows apply: that import lives
+    # in a block every branch appends
     # to, so a `path:line` decays silently the moment one import is added above it.
     # Measured 2026-11-09: #11623's sitemap contract added
     # `from xml.etree import ElementTree` at the TOP of that file, the import moved
@@ -8739,9 +8741,9 @@ def test_push_legs_partitions_every_classified_file():
     # unrelated PR). Assert the invariant the code actually provides HERE: every
     # bench file reaches a half (the partition assertion above). The push_extra
     # spread rule is not asserted against this manifest — the shipped
-    # `push_extra` is empty, so it would be vacuous — it is pinned on a
-    # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
-    # below (#2988/#3243).
+    # `push_extra` is empty, so it would be vacuous — it WAS pinned on a
+    # SYNTHETIC manifest by `test_push_legs_distributes_push_extra_across_halves`
+    # (#2988/#3243), an arm CUT with the B7 durations-map arithmetic (2026-11-23).
     all_shard_files = [f for s in legs["shards"] for f in s["files"]]
     assert any(f.startswith("bench/") for f in all_shard_files), \
         "no bench file reached the push legs at all"
@@ -8944,7 +8946,7 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #: copies of that count in the tree and `fast_shards: 9 -> 10` (#11602) moved all four: the
 #: `max-parallel` comment block in `python-ci.yml` states it TWICE (the second copy, in the same
 #: block, is the one a sibling fix missed), `docs/ops/ci-wall-clock.md` §5 and §7 each state it,
-#: and this file's own `test_every_matrix_bounds_its_fan_out_below_the_measured_pool` docstring
+#: and this file's own `test_every_matrix_bearing_job_declares_a_fan_out_cap` docstring
 #: states it. Nothing read any of them, which is how one file came to claim `18` matrix jobs at
 #: `:749` and `17` matrix legs at `:798` a screen apart.
 #:
@@ -9455,8 +9457,9 @@ ROWED_BY_THIS_FOLD = (
     # ⛔ This fold ALSO put it on `sdk`, and that row was then DROPPED because its stated
     # reason was FALSE: `tortoise/sdk.py` is a `SHARED_MODULES` entry, so an `sdk.py` diff
     # selects the FULL matrix — no row can rescue a leg there — and no `sdk` pattern is a
-    # subject of this file. The measurement is pinned by
-    # `test_an_sdk_diff_is_the_full_matrix_and_the_second_row_has_its_subjects_elsewhere`.
+    # subject of this file. The measurement that established it is UNGRADED now —
+    # `test_an_sdk_diff_is_the_full_matrix_and_the_second_row_has_its_subjects_elsewhere`
+    # was CUT with the B7 durations-map arithmetic (2026-11-23).
     # ⛔ The rebase onto #13144 earlier made this fold's own `durations:` copy a DUPLICATE
     # mapping key, which `--integrity` reds rather than silently keeping the last value.
     "test_13110_goalstate_doors.py",
@@ -9726,8 +9729,8 @@ def test_the_14357_repair_suite_is_in_the_entry_rule_set_14362():
     `durations:` row, while `--integrity` stayed green because its coverage check is a
     0.90 RATIO with headroom. A row alone is not enough either — it can be dropped
     again and nothing reds while the file is absent from this tuple — so membership is
-    pinned in both directions from the LIVE map, the same shape as
-    `test_the_eviction_suite_is_in_the_entry_rule_set_13123` above.
+    pinned in both directions from the LIVE map, the shape this file's memory pins use
+    (the `#13123` membership arm was CUT with the B7 arithmetic, 2026-11-23).
 
     Red on the pre-fix tree: the file is registered in `config/ci-surfaces.yml` and
     carries a `durations:` row, but is not in `ROWED_BY_THIS_FOLD`, so the first
@@ -9761,8 +9764,8 @@ def test_the_record_chain_suite_is_in_the_entry_rule_set_7879():
     headroom). That is the same state `#13123` and `#14362` each measured and repaired
     on their own heads, and it is the reason this tuple is explicit rather than derived.
 
-    Both directions are asserted from the LIVE map, exactly as
-    `test_the_eviction_suite_is_in_the_entry_rule_set_13123` above does: membership
+    Both directions are asserted from the LIVE map, the shape the `#13123` membership pin
+    used before the B7 cut removed it (2026-11-23): membership
     alone is not enough (the row can be dropped again), and the row alone is not
     enough (the file can be absent from this tuple while `--integrity` stays green).
     """
@@ -9953,7 +9956,8 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # `.` and `;` still terminate it, and a decimal point does NOT — see `_CLAUSE`)
     # while removing a limit no reader of this file could have known about. Both the
     # over-window shape and the decimal shape that caught this arm's own bound are
-    # pinned in `test_the_still_owed_flat_default_guard_bites_and_stays_quiet`.
+    # pinned in `test_the_still_owed_flat_default_guard_bites_and_stays_quiet`
+    # before that arm was CUT with the B7 durations-map arithmetic (2026-11-23).
     _CLAUSE +
     r"\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
     # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
@@ -10110,8 +10114,9 @@ _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
 # #10610 review at `fdff8f432`, P2). A row that CORRECTED its leading count and left
 # the superseded one standing beside it returned `[]` — the guard's claim is "no
 # count in a row is one its file refutes", and "the first count is right" is a
-# different, weaker sentence. The two-claim arm is
-# `test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row`.
+# different, weaker sentence. The two-claim arm that pinned it
+# (`test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row`) was CUT with the B7
+# durations-map arithmetic, 2026-11-23, so the guard below is now UNGRADED on that shape.
 # ⛔ The JOINER is free-form: the row's ENTRY RULE tells a reader to re-derive the
 # count with `grep -c '^def test_'` and never prescribes how the note spells the
 # relation. Matching `->`/`→` ALONE left the `=` spelling unpoliced, and measured at
@@ -10134,9 +10139,10 @@ _CASE_COUNT_CLAIM_RE = re.compile(
 #: citation already named, and `test_7949_capstone_measure.py`'s decimals
 #: (`0.2 -> 1.0`) match an unanchored `\d+`. The chain ENTRY — the line that opens
 #: with the arrow — is the only position where a repeat means one landing's entry was
-#: replayed beside another's, which is the defect. Measured with this file's own
-#: reader on `origin/main` at `e4703a286a`: 0 offenders across the 1328 rows
-#: `_durations_row_comments` returns there.
+#: replayed beside another's, which is the defect. Measured with the reader
+#: `tools/ci_timing._row_continuation_lines` on `origin/main` at `e4703a286a`: 0
+#: offenders across the map's rows. (The test-side reader `_durations_row_comments`
+#: was CUT with the B7 durations-map arithmetic, 2026-11-23.)
 _CHAIN_ENTRY_RE = re.compile(r"^#\s*->\s*(?P<n>\d+)(?!\.\d)")
 #: Any `-> N` in a comment line — the map's OTHER way of recording a move
 #: (`# 33 at <sha> … -> 39, 40, 41`), used only as evidence that a count DROPPED.
@@ -10215,12 +10221,14 @@ _CHAIN_TERMINUS_RE = re.compile(r"\d+")
 # quotes — `16 tests` and `8 tests` at this head — so the MAP IS CLEAN HERE and
 # this pin is a REGRESSION GUARD, not the report of a live defect: the map arm
 # below asserts the offender list is EMPTY, which is the state a future fold has
-# to keep true, and `test_the_zero_case_guard_is_not_vacuous` supplies the
-# discrimination the clean map cannot.
+# to keep true. The arm that supplied the discrimination on a clean map
+# (`test_the_zero_case_guard_is_not_vacuous`) was CUT with the B7 arithmetic
+# (2026-11-23), so that discrimination is now a by-hand obligation.
 #
-# One guard already covers PART of this, and saying otherwise invites its deletion:
-# `test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests` (`:7843`,
-# added by `ac129dec7`) flags ANY row whose note claims `0 tests` for a key that
+# One guard used to cover PART of this, and saying otherwise would invite its
+# deletion: an arm CUT with the B7 arithmetic
+# (`test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests`, added by
+# `ac129dec7`) flagged ANY row whose note claims `0 tests` for a key that
 # resolves to a file defining `def test_` at any indent — on `02133e21b` it flags
 # all FOUR offenders, including both quoted above, so this class was never
 # unguarded. What it does not reach, and this pin adds: the `0 cases` spelling
