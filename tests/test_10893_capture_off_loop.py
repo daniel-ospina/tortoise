@@ -111,11 +111,16 @@ def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
 #: The "this is WORK, not probe overhead" bar, in ms of TOTAL on-loop time for
 #: one capture request. ⛔ Deliberately a MAGNITUDE and not the noise floor: the
 #: legs that matter here are tens to hundreds of milliseconds (the mint 552 ms
-#: before the fix; `_get_registry` 16-36 ms on this tree), while the largest
-#: UNDECLARED leg on the path (`_emit_event`, inside the provenance stamp) reads
-#: 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar put that leg 0.1 ms
-#: from reding a gate whose own docstring argues against timing sensitivity.
-#: 5 ms leaves ~4x margin over the measured overhead band and is still ~110x
+#: before the fix; `_get_registry` 16-36 ms on this tree), while the leg that
+#: MOTIVATED the bar — `_emit_event` inside the provenance stamp, then the
+#: largest UNDECLARED leg on the path — measured 0.51-0.92 ms and 1.20 ms under
+#: coverage, so a 1 ms bar put it 0.1 ms from reding a gate whose own docstring
+#: argues against timing sensitivity. ⛔ THAT LEG IS NO LONGER ON THE PATH: the
+#: stamp chain is off the loop since #13722/#14112, and the census cannot
+#: observe it at any bar (measured: with the bar back at 1.0 only the synthetic
+#: assertion below reds). The figure is kept as the bar's REASON, not as a
+#: current reading — the margin is sized on the probe-overhead band, which is
+#: why it still stands. 5 ms leaves ~4x margin over that band and is still ~110x
 #: below the 552 ms the mint cost, i.e. every leg worth declaring is caught
 #: (#14086 review, P2).
 _ON_LOOP_BAR_MS = 5.0
@@ -429,9 +434,13 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     size the census exists to catch still is.
 
     Verified non-vacuous: restoring the bar to 1.0 reds the FIRST assertion
-    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking) AND the
-    census row above, whose verdict is `_undeclared_blocking` — that row is the
-    one the change exists for, since it flipped at 1 ms under coverage.
+    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking). ⛔ It does
+    NOT any longer red the census row above, and this docstring used to claim it
+    did: that row flipped at 1 ms only because the stamp's `_emit_event` was ON
+    the loop, and #13722/#14112 moved it off — so the real census can no longer
+    observe it at any bar (measured on this tree: bar=1.0 → `1 failed, 1 passed`
+    across these two tests). The synthetic assertion beside the measured band is
+    what remains as the bar's falsifier.
     """
     # The measured overhead band, including the coverage run that flipped the
     # real census — noise, not work.
