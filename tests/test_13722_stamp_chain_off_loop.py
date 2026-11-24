@@ -55,7 +55,8 @@ this one would also need a real Postgres). It asserts, for EVERY
    Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
    (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
    signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
-   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2`),
+   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2` — `is`/`is not` only over
+   `None`/`True`/`False`, since no other literal has program-determined identity),
    `not X`, `and`/`or` over them, a conditional expression whose test — or whose
    two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
    and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
@@ -135,6 +136,9 @@ _COMPARE_OP = {
     ast.In: lambda a, b: a in b,
     ast.NotIn: lambda a, b: a not in b,
 }
+
+#: The only literals whose `is` identity the program determines.
+_SINGLETON = lambda value: value is None or isinstance(value, bool)  # noqa: E731
 
 #: Zero-argument builtin constructors whose result is always EMPTY (falsy).
 _EMPTY_CONSTRUCTORS = frozenset({
@@ -389,11 +393,21 @@ def _literal_truth(node: ast.expr) -> bool | None:
             rights = [ast.literal_eval(c) for c in node.comparators]
         except (ValueError, TypeError, SyntaxError):
             return None
-        comparators = [_COMPARE_OP.get(type(op)) for op in node.ops]
+        operators = [type(op) for op in node.ops]
+        comparators = [_COMPARE_OP.get(kind) for kind in operators]
         if any(fn is None for fn in comparators):
             return None
+        # ⛔ `is` IS NOT DECIDED BY VALUE, and `ast.literal_eval` returns the AST's
+        # own Constant objects — so grading `'ab' is 'ab'` from them answers False
+        # while CPython (which shares one constant slot, `LOAD_CONST` twice) runs
+        # the body. Only `None`/`True`/`False` have identity the PROGRAM determines;
+        # anything else is undecidable here.
         answer = True
-        for fn, right in zip(comparators, rights, strict=True):
+        for fn, kind, right in zip(comparators, operators, rights, strict=True):
+            if kind in (ast.Is, ast.IsNot) and not (
+                _SINGLETON(left) and _SINGLETON(right)
+            ):
+                return None
             try:
                 if not fn(left, right):  # type: ignore[misc]
                     answer = False
