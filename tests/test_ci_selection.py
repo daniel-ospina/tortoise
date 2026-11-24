@@ -16754,6 +16754,37 @@ def test_halves_guard_reports_all_zero_map_without_crashing():
     assert any("duration-imbalanced" in i for i in issues), issues
 
 
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145 (RESTORED — this is the one arm of #14419's F1 that main still
+    lacks; its two sibling crash arms above came back with #14439's re-cut).
+
+    Same root as the `watchdog_headroom_issues` gate next door: this check
+    compared the EXACT ratio and then rendered both operands at 2 dp, so a fire
+    inside (1.25, 1.255) printed "ratio 1.25x, tolerance 1.25x" — a diagnosis
+    that reads as compliant while the check refuses, the very contradiction the
+    #6145 change removes. The ratio is decided at the precision it publishes, so
+    no message can print a value that reads as within tolerance, and this arm is
+    the only killer of that `round(hi / lo, 2)`: revert it to the bare division
+    and the 1250.4/1000 case below fires with a 1.25x-vs-1.25x message.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    assert any("imbalanced" in i
+               for i in workflow_halves_issues(beyond, halves))
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_duration_issues_flags_non_numeric_value():
     # #3407 review P2: the guards iterated KEYS only, so a hand-edit typo in the
     # now-505-line map passed `--integrity` silently and then crashed
