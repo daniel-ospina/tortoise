@@ -411,6 +411,65 @@ class TestCreatePointRetrySafety:
         assert "AttributeError" not in captured.err
         assert "ValueError" not in captured.err
 
+    def test_a_valueerror_after_the_send_does_not_claim_nothing_was_sent(
+            self, tmp_path, capsys):
+        """The arm catches ValueErrors raised AFTER the write was on the wire.
+
+        A bare `except ValueError` around a `try` that contains `urlopen` also
+        catches ones the redirect handler raises on the SECOND hop — measured:
+        a server answering the POST with a `302` whose `Location` is malformed
+        makes urllib raise `Invalid IPv6 URL` after the server has already
+        received and processed the write. Saying "nothing was sent" there is the
+        same false safety fact
+        `test_an_unreachable_api_does_not_claim_nothing_was_written` exists to
+        keep out of this verb.
+
+        Mutation: make this arm print the pre-flight "nothing was sent" text and
+        this REDs.
+        """
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=ValueError("Invalid IPv6 URL")):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "Invalid IPv6 URL" in err
+        assert "nothing was sent" not in err.lower()
+        assert "does not prove it failed to land" in err
+
+    def test_the_valueerror_arm_does_not_echo_the_credential(self, tmp_path, capsys):
+        """`{e}` quotes the URL it failed on, and can quote the header value.
+
+        A store `api_url` carrying `?token=…` reaches stderr inside the exception
+        text, and a malformed `api_key` is echoed too (`Invalid header value
+        b'Bearer tt_…'`) — the PRIMARY credential. Masking `api_url` on the same
+        line while printing `{e}` raw made the line look already handled.
+
+        Mutation: print `{e}` unredacted and this REDs.
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_key": "tt_leakme0123456789",
+            "api_url": "https://api.example.test/?token=sup3rsecretpw",
+        }))
+        store.chmod(0o600)
+        with mock.patch(
+                "urllib.request.urlopen",
+                side_effect=ValueError(
+                    "unknown url type: "
+                    "'https://api.example.test/?token=sup3rsecretpw/v1/points'"
+                    " header b'Bearer tt_leakme0123456789'"),
+        ):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "sup3rsecretpw" not in err
+        assert "tt_leakme0123456789" not in err
+        assert "<api_url>" in err
+        assert "<api_key>" in err
+
     def test_the_unreachable_arm_never_prints_a_url_credential(
             self, tmp_path, capsys):
         """The `URLError` arm prints the base too, so it must MASK it as well.
