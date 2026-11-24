@@ -33,6 +33,7 @@ drain. Nothing here changes the spool's on-disk format (D2 owns that contract).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -46,18 +47,24 @@ import pytest
 from tortoise import drain_claim
 from tortoise.capture_spool import (
     CAPTURE_CAPACITY_CODE,
+    DEFAULT_BOUNDS,
     DRAIN_CAPACITY_YIELDS,
+    Bounds,
     PostOutcome,
     Snapshot,
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
     capacity_refusal,
     capture_health_line,
+    capture_status_path,
     count_pending_captures,
     flush_spool,
     read_capture_status,
     read_spool_meta,
+    write_capture_status,
     write_spool_entry,
 )
+
+REPO = Path(__file__).resolve().parent.parent
 
 ROOT_TURNS = [{"role": "user", "content": "One turn."}]
 
@@ -70,6 +77,22 @@ CAPACITY_BODY = json.dumps({
         "limit": 8,
     }
 })
+
+
+def _spool_at(root: Path, sessions: int = 3, prefix: str = "sess") -> Path:
+    """Materialise `sessions` pending entries at an EXPLICIT root.
+
+    `_spool` below hard-codes `<tmp>/spool`; the cross-leg parity matrix needs one
+    spool per row, on both legs, with identical content.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for i in range(sessions):
+        write_spool_entry(
+            root,
+            Snapshot(session_id=f"{prefix}-{i}", turns=ROOT_TURNS, source="test",
+                     machine_id="machine-1"),
+        )
+    return root
 
 
 def _spool(tmp_path: Path, sessions: int = 3, prefix: str = "sess") -> Path:
@@ -715,7 +738,9 @@ def test_the_falsifier_holds(tmp_path):
     And with TWO drainers it never saturates the 8-slot ceiling, so NO capacity
     refusal occurs here at all: `server.refusals == 0` is asserted below rather
     than implied. The capacity half of the shape gets its own forcing test
-    (`test_a_CAPACITY_refusal_charges_NOBODY`), which drives the refusal
+    (the capacity half is INLINE below, in
+    `test_a_CAPACITY_refusal_charges_NOTHING_and_stops_the_pass` — an earlier revision
+    cited a separate `..._charges_NOBODY` that never existed), which drives the refusal
     directly. This test therefore proves the SERIALIZATION + convergence half
     only, and says so.
 
@@ -849,7 +874,10 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     TAKEOVER, which this test does not drive, so it would leave every assertion here
     green — the overclaim the Pi twin already records
     (`tortoise-capture.test.ts`, "Reverting to compare-then-unlink does NOT red THIS
-    test"). The acquire path's own cover is `test_the_SECOND_acquire_loses…` /
+    test"). The nearest cover for the acquire path is
+    `test_a_crashed_takers_quarantine_is_COLLECTED_by_the_scratch_sweeper` (which
+    patches `_dispose_quarantine` to False and reds if `acquire` proceeds — it asserts
+    the GIVE-UP, not the restore) and
     `test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window` above, which
     drive the window through `_takedown` rather than this primitive.
     """
@@ -874,6 +902,63 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     assert on_disk is not None and on_disk["token"] == fresh.token, (
         "the live claim must survive a stale taker's disposal attempt")
     fresh.release()
+
+
+def test_a_DISPLACED_claim_is_PRESERVED_when_its_restore_FAILS(tmp_path, monkeypatch):
+    """⛔ THE DISPLACEMENT PATH OBEYS THE SAME RULE AS THE RESTORE (review, cycle 16).
+
+    `_dispose_quarantine` puts a displaced claim BACK with `link` when the bytes are
+    not the ones it judged stale. On a non-`EEXIST` failure the quarantined file is
+    the ONLY copy of that holder's claim — the rename vacated the path — so unlinking
+    it turns "restore failed" into "claim destroyed" and frees the path for the next
+    `link`, which is the double-holder window this whole module closes. That branch
+    now keeps the object and returns `False` (fail closed: `acquire` answers `None`).
+
+    The Pi leg's row asserts BOTH of its primitives
+    (`tortoise-capture.test.ts`, "a FAILED restore does not delete the only copy of a
+    peer claim" — `restoreQuarantine` **and** `disposeQuarantine`); this leg's row
+    covered only `_restore_quarantine`, so half of the same fix was unpinned here.
+
+    MUTATION THAT REDS THIS: delete the `return False` from `_dispose_quarantine`'s
+    `except OSError` arm (the pre-fix code unlinked the quarantine and returned
+    `False` either way, so the RETURN VALUE alone cannot tell the two apart — the
+    preservation assertion is the whole pin).
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    path = drain_claim.claim_path(root)
+    moved = drain_claim._takedown(path, "contender")
+    assert moved is not None, "the fixture never reached the displacement"
+    quarantine, data = moved
+    assert not path.exists(), "the takedown must vacate the claim path"
+
+    real_link = os.link
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-take-" in Path(src).name:
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        restored = drain_claim._dispose_quarantine(
+            quarantine, data, path, b"<not what was judged stale>")
+    finally:
+        monkeypatch.undo()
+    assert restored is False, "a restore that could not happen must give up this tick"
+    # The INVARIANT — the displaced claim's bytes are still on disk — and, because
+    # this takedown left the path FREE, the RECOVERY arm: `rename` needs no hard
+    # link, so the claim goes BACK instead of being stranded for the sweeper to
+    # collect minutes later (which would destroy it just as surely, only slowly).
+    # The both-restores-refused arm has its own row below.
+    survivors = [p for p in (path, quarantine) if p.exists()]
+    assert survivors, (
+        "the only copy of the displaced claim was DELETED when the restore failed")
+    assert survivors[0].read_bytes() == data, (
+        "the surviving object must be the claim that was displaced, byte for byte")
+    assert path.exists() and not quarantine.exists(), (
+        "with the path free the displaced claim is renamed BACK, not left aside")
 
 
 def test_a_FUTURE_version_claim_is_unattributable_not_reinterpreted(tmp_path):
@@ -1339,6 +1424,787 @@ def test_an_EMPTY_only_session_id_is_UNTARGETED_and_takes_the_claim(tmp_path):
     holder.release()
 
 
+def test_a_pass_that_HELD_the_claim_clears_the_fact_WITHOUT_attempting_anything(tmp_path):
+    """⛔ THE PASS THAT ATTEMPTS NOTHING IS EXACTLY THE PASS THAT CLEARS NOTHING —
+    which left the durable fact STRANDED on the operator's line.
+
+    The `ok` write is gated on `attempted > 0` (an empty spool must not erase a
+    recorded refusal), so a pass holding the claim over an empty or
+    backoff-only spool wrote no record at all and the field survived: the operator
+    kept reading `NO drain exclusion (<path>)` for an obstruction they had already
+    removed, and the self-heal could not fire either. Measured: obstruction → pass 1
+    records it; remove it; pass 2 acquires the claim, attempts 0 → the line still
+    said "NO drain exclusion".
+
+    MUTATION THAT REDS THIS: gate the clearing on `attempted > 0` too (the field is
+    then only ever cleared by a filing pass).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "stale obstruction",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    # NO entries: the pass holds the claim and attempts nothing.
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.attempted == 0, "this test is about the pass that attempts NOTHING"
+    recorded = read_capture_status(root)
+    assert not recorded.get("claim_unavailable"), (
+        "a pass that HELD the claim must clear the fact even with nothing to do: "
+        + repr(recorded))
+    assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line
+
+
+def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
+    """⛔ THE CROSS-LEG PIN THE OLD COMMENT PROMISED AND NOBODY WROTE.
+
+    `capture_health_line`'s docstring and the parity test's own prose both said the
+    rendered sentence was "pinned by a cross-leg parity test that executes the real
+    TypeScript" — but the only cross-leg comparison was the STATUS CLASSIFIERS, and
+    the health line had one substring assertion per leg. So changing either leg's
+    punctuation, spacing or suffix left both suites green while the two legs told
+    an operator two different things about one spool (found in review).
+
+    This executes the real Pi leg over a matrix of SPOOL SHAPES (not just status
+    records) and compares its FULL line with the Python leg's, byte for byte.
+
+    ⛔ THE MATRIX REACHES EVERY VERDICT THE SUFFIX MUST SURVIVE (#14480 review,
+    F1). The predecessor's `blocked` row carried `queued == 0`, so the self-heal
+    rewrote it to `ok` and the row rendered `capture: OK (0 queued)` — it never
+    reached the BLOCKED branch at all, which is exactly the branch the durable fact
+    was disappearing on. Every row here therefore names the SPOOL it is about
+    (`sessions`), the credential (`api_key`) and the ceilings (`max_entries`), and
+    the rows cover BLOCKED-with-a-backlog, SATURATED, INACTIVE, DRAINING and
+    UNREADABLE — all five with the claim fact present.
+
+    MUTATION THAT REDS THIS: apply the claim term to the final verdict only (the
+    pre-fix code) — the blocked/saturated/inactive/unreadable rows lose the suffix
+    on BOTH legs, and while parity still holds, `test_every_VERDICT_carries_the…`
+    below reds; change either leg's separator (`", NO drain exclusion"`) and THIS
+    test reds.
+    """
+    from tests.test_capture_spool import _node_that_can_strip_ts
+
+    node = _node_that_can_strip_ts()
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    stamp = "2026-01-01T00:00:00+00:00"
+    claim = {"claim_unavailable": True,
+             "claim_unavailable_reason": "/x/drain.claim exists and is not a claim record"}
+    ok = {"version": 1, "state": "ok", "updated_at": stamp}
+    blocked = {"version": 1, "state": "blocked", "reason": "402 quota",
+               "status": 402, "updated_at": stamp}
+    # ⛔ THE REASON IS NOT ALWAYS A STRING, and the two legs disagreed about what to
+    # render: this one gates on `isinstance(reason, str) and reason`, the Pi leg tested
+    # truthiness and stringified whatever JSON held — so ONE hand-edited or
+    # foreign-written `status.json` rendered `…, NO drain exclusion` on Python and
+    # `…, NO drain exclusion (5)` / `([object Object])` on the Pi leg, against this
+    # PR's own "byte-identical words on both legs for every verdict" (#14480 review,
+    # P3). Both directions are rows, not prose.
+    nonstring = {**ok, "claim_unavailable": True, "claim_unavailable_reason": 5}
+    nullreason = {**ok, "claim_unavailable": True, "claim_unavailable_reason": None}
+    # (label, recorded status.json, spool entries, api key, max_entries, unlistable,
+    #  unreadable claim at the claim path)
+    rows = [
+        ("ok", ok, 0, "present", None, False, False),
+        ("ok+claim", {**ok, **claim}, 0, "present", None, False, False),
+        ("blocked-healed+claim", {**blocked, **claim}, 0, "present", None, False, False),
+        ("blocked+backlog+claim", {**blocked, **claim}, 1, "present", None, False, False),
+        ("saturated+claim", {**ok, **claim}, 1, "present", 1, False, False),
+        ("saturated-keyless+claim", {**ok, **claim}, 1, "", 1, False, False),
+        ("inactive+claim", {**ok, **claim}, 1, "", None, False, False),
+        ("draining+claim", {**ok, **claim}, 1, "present", None, False, False),
+        ("unreadable+claim", {**ok, **claim}, 0, "present", None, True, False),
+        ("claim+NON-STRING reason", nonstring, 1, "present", None, False, False),
+        ("claim+NULL reason", nullreason, 1, "present", None, False, False),
+        # ⛔ THE SELF-HEAL WRITES TOO, and it carried a DIFFERENT key set per leg: the
+        # Python twin keeps every claim-axis key the record HOLDS (`{k: v …}`), the Pi
+        # leg copied only the TRUTHY ones — so `claim_unavailable: false` and a JSON
+        # `null` reason vanished on one leg and survived on the other, in the ONE file
+        # the two legs share (#14480 review, P3 — third instance of the class). The row
+        # is `queued == 0`, which is what makes the self-heal fire at all.
+        ("claim FALSE + NULL reason, healed",
+         {**blocked, "claim_unavailable": False, "claim_unavailable_reason": None},
+         0, "present", None, False, False),
+        # ⛔ AND THE OTHER CLAIM-AXIS TERM (review P2): a regular `drain.claim` this
+        # process cannot read is the ONE arm that blocks the drain permanently, and it
+        # used to be invisible — `capture: DRAINING (1 queued)` over a spool that can
+        # never move. The row is here as well as in its own Python test because the
+        # SENTENCE is the contract: a divergence leaves two operators with two
+        # different diagnoses of one box.
+        ("unreadable CLAIM file", {**ok, **claim}, 1, "present", None, False, True),
+    ]
+    big = 1 << 40
+    driver = tmp_path / "health-parity.mjs"
+    driver.write_text(
+        'import { captureHealthLine } from "' + ext + '";\n'
+        "const jobs = JSON.parse(process.argv[2]);\n"
+        "const out = [];\n"
+        "for (const j of jobs) {\n"
+        "  const opts = { apiKey: j.apiKey };\n"
+        "  if (j.maxEntries) opts.bounds = { maxEntries: j.maxEntries,\n"
+        "    maxTotalBytes: j.big, maxEntryBytes: j.big };\n"
+        "  out.push(captureHealthLine(j.dir, opts).line);\n"
+        "}\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    jobs = []
+    for i, (_label, record, sessions, api_key, max_entries, unlistable,
+            unreadable_claim) in enumerate(rows):
+        for leg in ("pi", "py"):
+            root = tmp_path / f"{leg}{i}"
+            if sessions:
+                _spool_at(root, sessions)
+            if unlistable:
+                root.mkdir(parents=True, exist_ok=True)
+                (root / "entries").write_text("not a directory")
+            else:
+                root.mkdir(parents=True, exist_ok=True)
+            write_capture_status(root, record)
+            if unreadable_claim:
+                # A REGULAR file at the claim path that this process cannot read: the
+                # one arm that stops every pass. Skipped as a whole below when the box
+                # cannot express it (root ignores mode bits).
+                (root / "drain.claim").write_text("{}")
+                os.chmod(root / "drain.claim", 0o000)
+        jobs.append({"dir": str(tmp_path / f"pi{i}"), "apiKey": api_key,
+                     "maxEntries": max_entries, "big": big})
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver),
+         json.dumps(jobs)],
+        capture_output=True, text=True, timeout=120, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_lines = json.loads(proc.stdout.strip().splitlines()[-1])
+    py_lines = []
+    for i, (_label, _record, _sessions, api_key, max_entries,
+            _unlistable, _unreadable_claim) in enumerate(rows):
+        bounds = (Bounds(max_entries=max_entries, max_total_bytes=big, max_entry_bytes=big)
+                  if max_entries else DEFAULT_BOUNDS)
+        py_lines.append(capture_health_line(
+            tmp_path / f"py{i}", api_key=api_key, bounds=bounds).line)
+
+    def _norm(lines: list[str]) -> list[str]:
+        # The UNREADABLE verdict names the entries directory it could not list, and the
+        # two legs necessarily run on two different ones — normalise ONLY the spool
+        # root, so every other byte of every row is still compared exactly.
+        return [ln.replace(str(tmp_path / "pi"), "<root>").replace(
+            str(tmp_path / "py"), "<root>") for ln in lines]
+
+    assert _norm(pi_lines) == _norm(py_lines), (
+        "the two legs describe the SAME spool with different words:\n  pi: "
+        + repr(_norm(pi_lines)) + "\n  py: " + repr(_norm(py_lines)))
+    # ⛔ AND THE ROWS REALLY REACH THEIR TERMS — a parity assertion over two legs that
+    # both render NOTHING is the vacuous shape this whole file exists to remove.
+    labels = [row[0] for row in rows]
+    rendered = dict(zip(labels, _norm(py_lines), strict=True))
+    assert rendered["claim+NON-STRING reason"].endswith(", NO drain exclusion"), (
+        "a non-string reason is NO reason on both legs: "
+        + rendered["claim+NON-STRING reason"])
+    assert rendered["claim+NULL reason"].endswith(", NO drain exclusion")
+    if os.getuid() == 0:
+        # A root box cannot EXPRESS the arm (mode bits are ignored), so the row grades
+        # the other direction: neither leg may claim a stall it cannot see.
+        assert "drain claim UNREADABLE" not in rendered["unreadable CLAIM file"], (
+            rendered["unreadable CLAIM file"])
+    else:
+        assert rendered["unreadable CLAIM file"].endswith(
+            ", NO drain exclusion (/x/drain.claim exists and is not a claim record)"
+            ", drain claim UNREADABLE (a regular file exists but could not be read)"), (
+            "the permanent-block arm must be on the SAME line, after the durable fact: "
+            + rendered["unreadable CLAIM file"])
+    # ⛔ AND EVERY ROW ACTUALLY REACHED A VERDICT WITH THE FACT ON IT: a matrix of
+    # rows that all collapse to `ok` is a parity test for one branch (the shape the
+    # predecessor had). The expected head-word per row is derived from the row, so a
+    # row that silently takes another branch fails HERE rather than passing by
+    # agreeing on the wrong sentence.
+    expected = [("OK", False), ("OK", True), ("OK", True), ("BLOCKED", True),
+                ("SATURATED", True), ("SATURATED", True), ("INACTIVE", True),
+                ("DRAINING", True), ("UNREADABLE", True),
+                ("DRAINING", True), ("DRAINING", True), ("OK", False),
+                ("DRAINING", True)]
+    for (label, _r, _s, _k, _m, _u, _uc), (verb, fact), line in zip(
+            rows, expected, py_lines, strict=True):
+        assert line.startswith(f"capture: {verb}"), (
+            f"row {label!r} took a different branch than the matrix intends: {line!r}")
+        assert line.count("NO drain exclusion") == (1 if fact else 0), (
+            f"row {label!r} must carry the durable claim fact exactly "
+            f"{1 if fact else 0}x: {line!r}")
+
+    # ⛔ AND THE RECORD THE SELF-HEAL WROTE, not only the line it rendered: the two
+    # legs share `<spool>/status.json`, so a heal that keeps a different KEY SET per
+    # leg makes the box's record depend on which leg last printed a health line. The
+    # healed row holds a FALSY `claim_unavailable` and a JSON `null` reason, i.e. the
+    # values a truthiness copy drops.
+    healed = labels.index("claim FALSE + NULL reason, healed")
+    written = {}
+    for leg in ("pi", "py"):
+        record = read_capture_status(tmp_path / f"{leg}{healed}")
+        assert record is not None, f"the {leg} leg did not self-heal the record"
+        written[leg] = {k: v for k, v in record.items() if k != "updated_at"}
+    assert written["pi"] == written["py"], (
+        "the two legs self-healed ONE status.json into different records:\n  pi: "
+        + repr(written["pi"]) + "\n  py: " + repr(written["py"]))
+    assert "claim_unavailable_reason" in written["pi"], (
+        "key-existence, not truthiness: a JSON null reason is KEPT by the self-heal "
+        "on both legs, not dropped: " + repr(written["pi"]))
+
+
+def test_every_VERDICT_carries_the_durable_claim_fact(tmp_path):
+    """⛔ THE HEADLINE CLAIM OF THIS PR, ASSERTED DIRECTLY (#14480 review, F1).
+
+    `status.json` is written with BOTH facts and the firing path DISCARDS stderr
+    (`nohup … >/dev/null 2>&1 &`), so the health line is the only surface through
+    which an operator can learn that the drain exclusion is off. It was applied to
+    the final `DRAINING`/`OK` verdict only, so on four of six verdicts the fact was
+    invisible — including the shape the PR exists for: a CAPACITY 429 with a
+    backlog (`state: blocked`) whose claim path is broken reads `BLOCKED` and
+    nothing else, for the whole duration of the block.
+
+    MUTATION THAT REDS THIS: `return verdict._replace(line=...)` on the last branch
+    only (the pre-fix code) — the BLOCKED, SATURATED, INACTIVE and UNREADABLE
+    rows lose the suffix.
+    """
+    stamp = "2026-01-01T00:00:00+00:00"
+    claim = {"claim_unavailable": True, "claim_unavailable_reason": "/x/drain.claim"}
+    blocked = {"version": 1, "state": "blocked", "reason": CAPTURE_CAPACITY_CODE,
+               "status": 429, "updated_at": stamp}
+    big = 1 << 40
+    small = Bounds(max_entries=1, max_total_bytes=big, max_entry_bytes=big)
+    shapes = [
+        ("ok", 0, "present", DEFAULT_BOUNDS, False),
+        ("blocked", 1, "present", DEFAULT_BOUNDS, False),
+        ("saturated", 1, "present", small, False),
+        ("inactive", 1, "", DEFAULT_BOUNDS, False),
+        ("draining", 1, "present", DEFAULT_BOUNDS, False),
+        ("unreadable", 0, "present", DEFAULT_BOUNDS, True),
+    ]
+    for i, (label, sessions, api_key, bounds, unlistable) in enumerate(shapes):
+        root = tmp_path / f"s{i}"
+        if sessions:
+            _spool_at(root, sessions)
+        if unlistable:
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entries").write_text("not a directory")
+        else:
+            root.mkdir(parents=True, exist_ok=True)
+        write_capture_status(root, ({**blocked, **claim} if label == "blocked"
+                                    else {"version": 1, "state": "ok", **claim,
+                                          "updated_at": stamp}))
+        line = capture_health_line(root, api_key=api_key, bounds=bounds).line
+        assert "NO drain exclusion (/x/drain.claim)" in line, (
+            f"the {label} verdict dropped the durable claim fact: {line!r}")
+
+
+def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp_path):
+    """⛔ `GONE` IS NOT `REFUSED` — the distinction a boolean could not make, and
+    collapsing them ran a whole pass UNCLAIMED beside a live peer claim.
+
+    Two legs meet at a FIFO at `<spool>/drain.claim`: this one looks at it, a peer
+    `unlink`s it (its own release or takeover), and this one's removal step then
+    answers `ENOENT`. The old `except OSError: return False` read that as "cannot be
+    cleared", `acquire` raised `DrainClaimUnavailable`, and `flush_spool`'s handler
+    ran the entire pass without the exclusion — while the peer's own claim sat on
+    disk. For the length of a pass the spool had two drainers, which is the defect
+    this module exists to remove (and it is NOT the documented `ttl/3` bound: an
+    unclaimed pass never holds or re-checks a lease).
+
+    The FIFO stands in for "something that is not a claim, that a peer removes
+    under me", and the peer's `unlink` is played by the `os.rename` into quarantine
+    failing `ENOENT` — the exact errno, reached the exact way (the removal is a
+    `rename` since #14480: `unlink` by name could delete a claim a peer installed in
+    the window).
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` (or `False`) from the
+    `FileNotFoundError` arm — the FIFO path then raises `DrainClaimUnavailable` and
+    the pass runs unclaimed beside the peer.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = _spool(tmp_path, sessions=1)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+
+    real_rename = os.rename
+    undone: list = []
+
+    def peer_wins(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not undone:
+            undone.append(src)
+            os.unlink(src)                          # the peer's removal lands first
+            raise FileNotFoundError(2, "No such file or directory", str(src))
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_wins)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert undone, "the test never reached the FIFO clear"
+    assert claim is not None, (
+        "a peer that removed the obstruction is not an unclearable path: `acquire` "
+        "must RETRY and install its claim (or honour whatever the peer put there)")
+    claim.release()
+
+
+def test_the_clear_NEVER_deletes_an_object_it_did_not_judge(tmp_path):
+    """The obstruction clear is a delete of something that is NOT ours, so it goes
+    through the same atomic arbiter as every other removal: the object is MOVED
+    ASIDE and the object that landed in the quarantine is what gets judged.
+
+    ⛔ THE PREDECESSOR OF THIS TEST DROVE AN `lstat` SEAM and asserted `REFUSED`
+    when the identity changed — narrowing the check-then-unlink window without
+    closing it, and pinning the wrong answer while doing so (#14480 review, F2 and
+    P2-4): between the re-read and the `unlink` a peer can still install its claim,
+    and `unlink` deletes by NAME. An inode compare is not sound evidence either —
+    ext4/xfs reuse a freed inode number, so "same dev+ino" can be a different live
+    lockfile (`filelock` GHSA-fq56-3cx3-fjxp, two holders).
+
+    So the interleave driven here is the REAL one: a peer replaces the FIFO with its
+    own VALID claim in the window between the caller's look and the removal. The
+    object that lands in the quarantine is then a regular file, i.e. a claim, and it
+    must be put BACK and reported as CONTENTION — never deleted, and never reported
+    as an unclearable path (which ran a whole pass unclaimed beside it).
+
+    MUTATION THAT REDS THIS: unlink/quarantine-delete without judging what landed
+    (drop the `landed is not None` arm, or restore the old `os.unlink(path)`).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            real_unlink = os.unlink
+            real_unlink(src)                 # the peer's release lands first …
+            Path(src).write_text(peer_raw)   # … and its claim is in the path
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a claim that appears in the window is CONTENTION, not an unclearable "
+        "path — got " + repr(outcome))
+    assert fifo.exists(), "the live claim this call did not judge was deleted"
+    assert json.loads(fifo.read_text())["token"] == "peer-token", (
+        "the peer's claim must be restored BYTE for byte")
+
+
+def test_the_clear_HONOURS_a_landed_REGULAR_file_it_could_not_READ(tmp_path):
+    """`landed` is `None` for TWO different facts, and only one of them says
+    "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption) and
+    *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES` after a
+    mode drift).
+
+    The second is a PEER'S CLAIM that arrived in the window. `unlink`ing it lets
+    this process win the next `link`, so two holders coexist for up to `ttl/3` —
+    silently, which is exactly the class the `filelock` advisory
+    GHSA-fq56-3cx3-fjxp describes. It also inverts the doctrine `acquire` states
+    forty lines above: a regular file we could not read is HONOURED and never
+    unlinked (#14480 review, F3).
+
+    The interleave is the real one (a peer installs a valid claim in the removal
+    window); only the READ of the quarantined object is made to fail, which is the
+    transient-error case that cannot be provoked portably on a live box.
+
+    MUTATION THAT REDS THIS: treat `None` from `_read_raw` as "not a claim" and fall
+    through to `os.unlink(quarantine)` — the outcome becomes `_CLEAR_DONE` and the
+    peer's claim is gone.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)                  # the peer's release lands first …
+            Path(src).write_text(peer_raw)  # … and its claim is in the path
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        # A transient failure on a perfectly good REGULAR file — never evidence
+        # that the file is junk.
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a regular file we could not read is a possible HOLDER, not junk — got "
+        + repr(outcome))
+    assert fifo.exists(), "a live claim this call could not judge was unlinked"
+    assert fifo.read_text() == peer_raw, (
+        "the peer's claim must be back in the path, byte for byte")
+
+
+def test_a_leftover_ASIDE_copy_does_not_report_the_claim_path_UNCLEARABLE(
+        tmp_path, monkeypatch):
+    """`REFUSED` means THE CLAIM PATH could not be cleared — never "an aside copy
+    survived" (#14480 review at `1a0c29c3`, P2, reproduced).
+
+    The obstruction is MOVED ASIDE first, so by the time the junk copy is deleted the
+    claim path is already FREE. A failing `unlink` on that copy used to answer
+    `REFUSED`: `acquire` raised `DrainClaimUnavailable`, whose handler stat'ed the
+    now-empty path and ran the WHOLE PASS UNCLAIMED with the false durable reason
+    "the spool root cannot hold a claim" — over a spool root that is writable, beside
+    any peer that took the free path, and written to the SHARED `status.json` so the
+    operator line reads `NO drain exclusion` on a healthy box.
+
+    The consequence is asserted, not just the return value: `acquire` must WIN the
+    claim, because winning it is the difference between a claimed pass and the
+    two-drainer window this module exists to close.
+
+    MUTATION THAT REDS THIS: `return _CLEAR_REFUSED` in the `except OSError` around
+    the quarantine `unlink` (the pre-fix body returned it from the whole `try`).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    real_unlink = os.unlink
+
+    def junk_refuses_to_go(target, *args, **kwargs):
+        if ".tmp-clear-" in str(target):
+            raise OSError(errno.EIO, "the aside copy cannot be deleted")
+        return real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", junk_refuses_to_go)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert outcome == drain_claim._CLEAR_DONE, (
+        "the rename VACATED the claim path, so the clear is DONE — REFUSED runs the "
+        "whole pass unclaimed beside a peer over a writable root: got "
+        + repr(outcome))
+    assert not os.path.lexists(fifo), (
+        "the obstruction must be gone from the claim path")
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, (
+        "a writable spool root must yield the claim — `None` here IS the unclaimed- "
+        "pass arm this PR removes")
+    claim.release()
+
+
+def test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass(tmp_path):
+    """⛔ THE DIAGNOSIS, NOT JUST THE ANSWER (F2). `acquire` used to answer
+    `REFUSED` when the object changed under the clear, which raised
+    `DrainClaimUnavailable("… the spool root is not writable by this process")` —
+    a FALSE diagnosis (the root was writable, the object had moved) that
+    `flush_spool` read as "run the whole pass WITHOUT the one-drainer exclusion"
+    while a peer's claim sat on disk.
+
+    End to end: a FIFO at the claim path, and a peer installs a VALID claim in the
+    window the clear opens. The only correct answers are "somebody holds it" and
+    "that claim still exists" — not an unclaimed pass, and not a deletion.
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` (or delete the object) from the
+    `landed is not None` arm.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the clear"
+    assert claim is None, (
+        "a peer's claim that landed in the window must be HONOURED: `acquire` "
+        "answering a claim ran the pass UNCLAIMED beside it")
+    assert fifo.exists(), "the peer's live claim was deleted"
+    held = drain_claim.read_claim(root)
+    assert held is not None and held.get("token") == "peer-token", (
+        f"the peer's claim must still be readable at the path: {held!r}")
+
+
+def test_the_clear_RESTORES_by_RENAME_when_the_LINK_is_REFUSED(tmp_path):
+    """A filesystem that refuses hard links is the reachable failure of the
+    restore, and the first cut deleted the object it had just promised to honour:
+    `link` raised, the warning went to the stderr a session discards, and the
+    quarantine was `unlink`ed unconditionally. The claim path had ALREADY been
+    vacated by the caller's `rename`, so the peer's record existed nowhere while
+    the peer still believed it held — and this process then won the next `link`,
+    i.e. the two-holder window this whole mechanism exists to close, with the only
+    copy of the evidence destroyed (#14480 cycle-17 review, P3).
+
+    `rename` needs no hard link, so it puts the object back while the claim path is
+    still free — the fallback `filelock`'s stale break takes (`tox-dev/filelock#843`).
+
+    MUTATION THAT REDS THIS: `unlink` the quarantine on the non-`EEXIST` failure
+    (the pre-fix body) — the peer's claim is gone and the path is empty.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "the object is a possible HOLDER: contention, not an unclearable path — "
+        "got " + repr(outcome))
+    assert fifo.exists(), (
+        "the restore must not DELETE the object it could not link back: the path "
+        "was vacated and the quarantined copy is the only one left")
+    assert fifo.read_text() == peer_raw, (
+        "the peer's claim must be back at the path, byte for byte")
+    assert not list(root.glob("drain.claim.tmp-clear-*")), (
+        "a restore that succeeded leaves no quarantine behind")
+
+
+def test_the_clear_PRESERVES_the_copy_it_cannot_restore(tmp_path):
+    """The DOUBLE failure: the link is refused AND the rename back fails. Both
+    restores are gone, so the quarantined copy is the ONLY surviving evidence of
+    the holder this call displaced — deleting it is how a live claim becomes
+    unprovable (and how a support engineer is told there is nothing to look at).
+
+    The answer stays `HELD`: the displaced holder still believes it holds, so this
+    pass must not run beside it. `REFUSED` would raise `DrainClaimUnavailable`,
+    whose consumer (`capture_spool.py:4366-4375`) finds the path EMPTY and runs the
+    whole pass UNCLAIMED beside that holder — the two-drainer defect this arm
+    exists to prevent, verified against the consumer rather than assumed.
+
+    MUTATION THAT REDS THIS: `unlink` the quarantine when the restore fails.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    def rename_refuses_the_restore(src, dst, *a, **kw):
+        # The FIRST rename (obstruction -> quarantine) must work; only the restore
+        # back to the claim path is refused.
+        if str(dst) == str(fifo):
+            raise PermissionError(13, "Permission denied")
+        return peer_installs_first(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", rename_refuses_the_restore)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "the displaced holder still believes it holds: `HELD`, never `REFUSED` "
+        "(which runs the pass unclaimed) — got " + repr(outcome))
+    preserved = list(root.glob("drain.claim.tmp-clear-*"))
+    assert len(preserved) == 1, (
+        "the only surviving copy of an object we could neither judge nor restore "
+        "must be LEFT IN PLACE, not deleted: " + repr(preserved))
+    assert preserved[0].read_text() == peer_raw, (
+        "the preserved copy must be the peer's claim, byte for byte")
+    assert not fifo.exists(), (
+        "both restores failed, so the path stays as the caller left it")
+
+
+def test_a_peer_claim_we_cannot_RESTORE_is_CONTENTION_end_to_end(tmp_path):
+    """The DISPOSITION of the failed restore, not just the primitive: `acquire`
+    must answer "somebody holds it" (no claim, no raise) in the state where the
+    displaced claim could not be linked and was renamed back.
+
+    `REFUSED` here would raise `DrainClaimUnavailable`, and `flush_spool`'s handler
+    re-`lstat`s the path — which the caller's own `rename` emptied — so the whole
+    pass would run UNCLAIMED beside the holder that still holds. Answering `None`
+    is the only disposition that keeps the one-drainer rule.
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` from the restore arm
+    (`acquire` raises instead of returning `None`), or delete the quarantined copy
+    (the peer's claim is no longer at the path).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert claim is None, (
+        "a claim we displaced and could not link back is still a HOLDER: `acquire` "
+        "answering a claim here runs the pass beside it")
+    held = drain_claim.read_claim(root)
+    assert held is not None and held.get("token") == "peer-token", (
+        "the restored claim must be readable at the path: " + repr(held))
+
+
 def test_an_UNCLEARABLE_obstruction_runs_the_pass_UNCLAIMED_and_SAYS_what_it_is(tmp_path):
     """A non-empty directory at the claim path cannot be a CLAIM, so reporting
     contention over it names a holder that does not exist — and wedges the spool
@@ -1406,6 +2272,121 @@ def test_an_UNREADABLE_regular_claim_still_reads_as_CONTENTION(tmp_path):
     assert summary.claim_unavailable is False
     assert summary.filed == 0, "no POST may be attempted beside a possible holder"
     assert path.exists(), "a regular claim file must NEVER be deleted unread"
+
+
+def test_an_UNREADABLE_claim_file_is_NAMED_on_the_operator_line(tmp_path):
+    """⛔ THE ARM THAT BLOCKS PERMANENTLY NOW HAS THE SURFACE ITS RESIDUAL CLAIMED.
+
+    A regular `drain.claim` this process cannot read is HONOURED, never taken over
+    (the doctrine is "an unprovable read is ALIVE"), so EVERY pass answers
+    `held_by_claim` with no holder identity, attempts nothing, and the spool stops
+    moving. The residual justified that with "it blocks the drain until a human
+    looks" — and nothing told the human: `status.json` held no fact for this arm and
+    the line read `capture: DRAINING (1 queued)`, which describes a WORKING drain.
+    Reachable without an attacker: `sudo tortoise session drain` leaves a root-owned
+    mode-`600` claim that a user-level pass can never read (#14480 review, P2).
+
+    ⛔ IT IS A LIVE PROBE, NOT A RECORDED FACT, and that is the point: the term
+    disappears the moment the mode is fixed, with no clearing arm to get wrong and no
+    way for a long-dead lock to keep the warning alive. Both halves are asserted.
+
+    MUTATION THAT REDS THIS: return `False` unconditionally from
+    `drain_claim.claim_path_unreadable` (the pre-fix state — nothing surfaces it).
+    """
+    if os.getuid() == 0:
+        pytest.skip("root ignores mode bits")
+    root = _spool(tmp_path, sessions=1)
+    path = drain_claim.claim_path(root)
+    path.write_text(json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "live-holder", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(),
+        "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    }))
+    assert drain_claim.claim_path_unreadable(root) is False, (
+        "a READABLE claim file is not a stall")
+    os.chmod(path, 0o000)
+    try:
+        assert drain_claim.claim_path_unreadable(root) is True
+        line = capture_health_line(root, api_key="present").line
+        assert ", drain claim UNREADABLE (a regular file exists but could not be read)" in line, (
+            "the one arm that blocks the drain permanently was invisible on the line "
+            "the operator reads: " + line)
+        # The pass really does stop — the surface describes a real stall, it does not
+        # decorate a working drain.
+        summary = flush_spool(root, lambda _p: PostOutcome(ok=True, status=200, body={}),
+                             now=1000.0)
+        assert summary.held_by_claim is True and summary.filed == 0
+    finally:
+        os.chmod(path, 0o600)
+    # ⛔ SELF-CLEARING BY CONSTRUCTION: a probe cannot outlive the condition.
+    assert drain_claim.claim_path_unreadable(root) is False
+    assert "drain claim UNREADABLE" not in capture_health_line(
+        root, api_key="present").line
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+def test_a_FIFO_at_the_STATUS_path_does_not_HANG_inside_the_CLAIMED_section(tmp_path):
+    """⛔ THE READ THAT THIS PR MOVED ONTO THE DRAIN PATH, gated the way the claim
+    read has been since cycle 5.
+
+    `read_capture_status` is called by `_record_capture_status` at the tail of
+    `_flush_claimed` — i.e. **while the one-drainer claim is HELD** — and the claim is
+    released in `flush_spool`'s `finally`, AFTER that returns. So a FIFO (or socket)
+    at `<spool>/status.json` blocked `open(2)` forever *inside the claimed section*:
+    the box stopped filing, the drain process never returned, and the spool sat
+    claimed until the lease was judged stale. `capture_health_line` reads the same
+    path, so `tortoise session health` hung instead of reporting the box (#14480
+    review, P1 — measured on the reviewer's export as
+    `read_capture_status BLOCKED >4s`). `contextlib.suppress(Exception)` at the call
+    site cannot help: a block is not an exception.
+
+    MUTATION THAT REDS THIS: drop the `S_ISREG` gate from `read_capture_status` — the
+    probe thread never returns, so the first assertion REDS (the reader is joined with
+    a bound, so a regression asserts instead of hanging the suite).
+    """
+    root = _spool(tmp_path, sessions=1)
+    os.mkfifo(capture_status_path(root))
+
+    outcome: list[object] = []
+
+    def _probe() -> None:
+        outcome.append(read_capture_status(root))
+        # …and the HEALTH LINE reads the same path on every `session_start`.
+        outcome.append(capture_health_line(root, api_key="present").line)
+
+    reader = threading.Thread(target=_probe, daemon=True)
+    reader.start()
+    reader.join(10.0)
+    assert not reader.is_alive(), (
+        "read_capture_status/capture_health_line BLOCKED on a FIFO at status.json — "
+        "they are what the claimed pass calls")
+    assert outcome[0] is None, f"a FIFO holds no record, got {outcome[0]!r}"
+    assert "capture:" in str(outcome[1])
+
+    # ⛔ THE HALF THAT MATTERS: the whole DRAIN PASS, which reads this path with the
+    # claim held. It must return (and therefore release), and the box must recover —
+    # `_atomic_write` replaces the FIFO with a real record on the way through.
+    ran: list[object] = []
+
+    def _drive() -> None:
+        ran.append(flush_spool(
+            root, lambda _p: PostOutcome(ok=True, status=200, body={}), now=1000.0))
+
+    driver = threading.Thread(target=_drive, daemon=True)
+    driver.start()
+    driver.join(30.0)
+    assert not driver.is_alive(), (
+        "a drain pass HUNG on a FIFO at status.json with the claim held")
+    assert ran and ran[0].filed == 1, f"the pass did not run: {ran!r}"
+    assert isinstance(read_capture_status(root), dict), (
+        "the pass must have recorded its status, replacing the obstructing object")
+    # The claim was RELEASED by the pass that held it — read it back, do not assume.
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, (
+        "the claim was left HELD: the pass never reached its release, so every later "
+        "pass would report contention until the lease aged out")
+    claim.release()
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
@@ -1484,3 +2465,659 @@ def test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window(tmp_path, monk
     on_disk = drain_claim.read_claim(root)
     assert on_disk is not None and on_disk.get("token") == "peer-token", (
         f"the peer's live claim was destroyed by our refresh: {on_disk}")
+
+
+def test_an_UNCLAIMED_pass_RECORDS_it_DURABLY_and_the_LINE_says_so(tmp_path):
+    """⛔ "RUN UNCLAIMED AND SAY SO" IS NOT SATISFIED BY A CONSOLE LINE.
+
+    The primary firing path discards stderr (`session-start.sh`: `nohup … session
+    drain … >/dev/null 2>&1 &`), so a pass that ran without the one-drainer
+    exclusion and only WARNED left the box reporting `capture: OK`/`DRAINING` while
+    N drainers POSTed into the same ceiling — the silent-failure shape this spool's
+    rules exist to remove (#14423 cycle-7 review, P1).
+
+    This pass files NOTHING (the spool is empty), so every other rule in
+    `_record_capture_status` writes nothing at all: the claim axis has to write the
+    record ITSELF.
+
+    MUTATION THAT REDS THIS: drop the `summary.claim_unavailable` arm from
+    `_record_capture_status` — no `status.json` is written, and the health line
+    reports a normal drain.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    obstruction = drain_claim.claim_path(root)
+    obstruction.mkdir()
+    (obstruction / "keep").write_text("not a claim\n", encoding="utf-8")
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.claim_unavailable is True
+    recorded = read_capture_status(root)
+    assert recorded is not None, "the exclusion being off must be DURABLE"
+    assert recorded.get("claim_unavailable") is True
+    assert "not a claim record" in recorded["claim_unavailable_reason"]
+    line = capture_health_line(root, api_key="present").line
+    assert "NO drain exclusion" in line, line
+    assert "not a claim record" in line, (
+        "the line must name WHAT stops the exclusion: " + line)
+
+
+def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
+    """The other direction: a durable field nobody clears is a one-way latch, and a
+    one-way latch is how an operator learns to ignore the line.
+
+    MUTATION THAT REDS THIS: delete the `elif held_claim:` clearing arm
+    (`capture_spool.py`, the arm that pops `claim_unavailable` /
+    `claim_unavailable_reason`). ⛔ NOT "keep the stale field when a claimed pass
+    writes `ok` / merge the previous record into every write": this pass FILES an
+    entry, so it holds the claim AND attempted something, and the clearing arm pops
+    the fields again after any merge — measured GREEN under that mutant, which made
+    the earlier sentence an unattributable catch. The Pi twin reaches the same VERDICT
+    by a DIFFERENT route — its spool is EMPTY on purpose, so `attempted == 0` and that
+    `ok` write never executes at all — so its reasoning cannot simply be borrowed: two
+    legs, two mechanisms, one conclusion (#14480 review, cycle 11 F3 / cycle 14 P3).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "stale obstruction",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    _spool(tmp_path, sessions=1)
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.claim_unavailable is not True
+    recorded = read_capture_status(root)
+    assert not recorded.get("claim_unavailable"), (
+        "a pass that HELD the claim must clear the fact: " + repr(recorded))
+    assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line
+
+
+def test_a_NULL_reason_is_carried_by_NEITHER_leg(tmp_path):
+    """⛔ A JSON `null` REASON IS "NO REASON" ON BOTH LEGS — the carry-forward half
+    of the cycle-19 P3 (the `previous?.claim_unavailable_reason !== undefined` arm;
+    `tortoise-capture.ts:6320` **at `23ac4a97d1fd`** — a head-relative number, and the
+    line holds unrelated code at later heads, which is why it is qualified).
+
+    The two legs write ONE shared `status.json`, so the record they produce for the
+    same prior and the same pass must be the same record. The Python leg copies the
+    prior reason only when it `is not None`; the Pi leg tested `!== undefined`, so a
+    `null` reason was CARRIED there and DROPPED here — the same hand-edited/foreign
+    shape that made the rendered suffix disagree. Only reachable with a foreign
+    record today, which is exactly why it needs a row rather than an argument.
+
+    MUTATION THAT REDS THIS: put `!== undefined` back in `applyClaimPolicy`'s
+    carry-forward arm (the Pi leg then writes `claim_unavailable_reason: null` where
+    Python writes no key at all).
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    prior = {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True, "claim_unavailable_reason": None,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    py_root = tmp_path / "py"
+    py_root.mkdir(parents=True)
+    write_capture_status(py_root, dict(prior))
+    # A TARGETED pass that EARNED an `ok` record: it never asked for the claim, so it
+    # must carry the fact forward rather than clear it — the arm under test.
+    _record_capture_status(py_root, FlushSummary(attempted=3), held_claim=False)
+    py_record = read_capture_status(py_root)
+    assert py_record is not None and py_record.get("claim_unavailable") is True
+    assert "claim_unavailable_reason" not in py_record, (
+        "a JSON null reason is NO reason on this leg: " + repr(py_record))
+
+    earned = json.dumps({"version": 1, "state": "ok",
+                         "updated_at": "2026-01-02T00:00:00+00:00"})
+    script = (
+        f'import {{ applyClaimPolicy }} from {json_dumps(_TS_LEG.as_posix())};\n'
+        'const prior = JSON.parse(process.env.PRIOR);\n'
+        'const earned = JSON.parse(process.env.EARNED);\n'
+        'const out = applyClaimPolicy(earned, prior, {});\n'
+        'process.stdout.write(JSON.stringify(out));\n'
+    )
+    out = subprocess.run([_NODE, "--experimental-strip-types", "-e", script],
+                         capture_output=True, text=True, timeout=120, cwd=str(REPO),
+                         env={**os.environ, "PRIOR": json.dumps(prior),
+                              "EARNED": earned})
+    assert out.returncode == 0, out.stderr[-2000:]
+    pi_record = json.loads(out.stdout)
+    assert pi_record.get("claim_unavailable") is True, pi_record
+    assert "claim_unavailable_reason" not in pi_record, (
+        "the Pi leg carried a JSON null reason that Python drops — ONE record, two "
+        "shapes: " + repr(pi_record))
+
+
+def test_a_TARGETED_pass_cannot_erase_the_durable_claim_fact(tmp_path):
+    """⛔ ONLY A PASS THAT HELD THE CLAIM MAY CLEAR IT (#14480 review, F1).
+
+    A TARGETED pass (`only_session_id` set) takes NO claim by design, so it reports
+    neither `claim_unavailable` nor `held_claim` — and it wrote its `ok` record
+    WITHOUT the claim fields, which DELETED the durable fact. That pass is the
+    SessionEnd path (`tortoise session capture`), the most frequent writer on the
+    box; on an obstructed spool one successful capture therefore wiped the warning
+    until the next general pass re-recorded it, which is exactly the false-PASS
+    direction the durable fact exists to remove.
+
+    MUTATION THAT REDS THIS: gate the carry-forward arm on nothing (i.e. let the
+    `attempted > 0` `ok` write replace the record wholesale, as before) — the fact
+    is gone from `status.json` and from the health line.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "the spool root cannot hold a claim",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    entry = write_spool_entry(
+        root,
+        Snapshot(session_id="targeted-0", turns=ROOT_TURNS, source="test",
+                 machine_id="machine-1"),
+    )
+    assert entry, "the entry was written"
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          only_session_id="targeted-0", sleep=lambda _s: None)
+    assert summary.attempted > 0, "the precondition: the targeted pass FILED something"
+    assert summary.claim_unavailable is not True
+    recorded = read_capture_status(root)
+    assert recorded is not None
+    assert recorded.get("claim_unavailable") is True, (
+        "a targeted pass never asked for the claim, so it cannot clear the fact: "
+        + repr(recorded))
+    assert recorded.get("claim_unavailable_reason") == (
+        "the spool root cannot hold a claim")
+    line = capture_health_line(root, api_key="present").line
+    assert "NO drain exclusion" in line, line
+    assert summary.filed > 0, "the pass still filed its entry; the fact is orthogonal"
+
+
+def test_a_TARGETED_pass_that_attempted_NOTHING_leaves_the_record_alone(tmp_path):
+    """The other half of the same rule: a targeted pass with an empty spool writes
+    nothing at all, so it can neither clear nor invent the fact.
+
+    MUTATION THAT REDS THIS: write an `ok` record unconditionally from the targeted
+    arm (dropping the `attempted > 0` gate) — `updated_at` moves and the state the
+    previous pass recorded is overwritten with a pass that observed nothing.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    before = {
+        "version": 1, "state": "blocked", "reason": "quota_exhausted",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "the spool root cannot hold a claim",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    write_capture_status(root, before)
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          only_session_id="absent-session", sleep=lambda _s: None)
+    assert summary.attempted == 0
+    assert read_capture_status(root) == before, (
+        "a pass that attempted nothing observed nothing, so it writes nothing")
+
+
+def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
+    """⛔ THE TWO LEGS ARE ONE PROTOCOL on a SHARED `<spool>/status.json`, so the
+    clearing/carrying rule is compared rather than each leg holding its own opinion.
+
+    This matrix is the SAME one the Pi leg drives
+    (`the claim policy agrees between both legs on every summary shape` in
+    `tortoise-capture.test.ts`), row for row; a leg that drifts reds on its own side.
+
+    MUTATION THAT REDS THIS: make any row disagree with the twin — clear the fact on a
+    pass that did not hold the claim, or write a record from a targeted pass that
+    observed nothing.
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    fact = {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True, "claim_unavailable_reason": "obstructed",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    # (label, attempted, claim state, expect a record?, expect claim_unavailable)
+    matrix = [
+        ("targeted, earned nothing", 0, {}, False, None),
+        ("targeted, earned ok", 3, {}, True, True),
+        ("holder, earned nothing", 0, {"held": True}, True, False),
+        ("holder, earned ok", 3, {"held": True}, True, False),
+        ("unclaimed, earned nothing", 0, {"unavailable": True}, True, True),
+        ("unclaimed AND holder", 0, {"unavailable": True, "held": True}, True, True),
+        # ⛔ THE EMPTY-REASON ROW (review, cycle 14, P3). An empty reason is NO
+        # reason: both legs must fall back to the same default, because they write the
+        # same `<spool>/status.json`. This leg tested truthiness (so "" defaulted) and
+        # the Pi leg tested nullish (so "" was written verbatim) — the exact predicate
+        # class `client_captured_at_source` was fixed for in this same file, and no row
+        # here carried `""`, which is why five rounds of parity work missed it.
+        ("unclaimed, reason is EMPTY", 0, {"unavailable": True, "empty_reason": True},
+         True, True),
+        # ⛔ THE FALSE-POSITIVE DIRECTION (review, cycle 15 P2). Every other row
+        # starts from an EXISTING fact, so "carry it forward" could be widened to
+        # "always stamp it" (`elif record is not None:`) with this matrix green — and
+        # a healthy box would then report `NO drain exclusion` forever. This is the
+        # only row with NO prior fact, which is what makes inventing one visible.
+        ("targeted, earned ok, NO prior fact", 3, {"no_prior": True}, True, False),
+    ]
+    for index, (label, attempted, state, writes, expected) in enumerate(matrix):
+        root = tmp_path / f"row-{index}"
+        root.mkdir(parents=True)
+        if not state.get("no_prior"):
+            write_capture_status(root, dict(fact))
+        summary = FlushSummary(attempted=attempted)
+        if state.get("held"):
+            summary.claim_unavailable = False
+        if state.get("unavailable"):
+            summary.claim_unavailable = True
+            summary.claim_unavailable_reason = (
+                "" if state.get("empty_reason") else "obstructed")
+        _record_capture_status(
+            root, summary,
+            held_claim=bool(state.get("held")),
+        )
+        recorded = read_capture_status(root)
+        assert recorded is not None, label + ": prior record vanished"
+        wrote = recorded != fact
+        assert wrote is writes, label + " → writes? " + repr(recorded)
+        if writes:
+            assert bool(recorded.get("claim_unavailable")) is expected, (
+                label + " → " + repr(recorded))
+        if writes and state.get("empty_reason"):
+            assert recorded.get("claim_unavailable_reason") == (
+                "the spool root cannot hold a claim"), (
+                "an EMPTY reason is no reason on BOTH legs, not empty on one: "
+                + repr(recorded))
+
+
+def _receipt(**race) -> dict:
+    return {"claim_race": dict(race)}
+
+
+def test_the_measurement_is_NO_VERDICT_when_NOBODY_won_the_claim():
+    """⛔ A RACE NOBODY WON MEASURED NOTHING, and it used to exit 0 as a PASS.
+
+    `supported` was `bounded` alone — a statement about the probe's own hold — so a
+    run whose processes never reached their attempt reported `winners: 0` with
+    `bounded: true` and `supported: true`, and `main` returned 0. The `BARREN` marker
+    that says exactly this was printed by nobody who parsed it (#14480 review, F2).
+
+    MUTATION THAT REDS THIS: drop the `winners == 0` row from `_no_verdict` (the
+    pre-fix behaviour: `bounded` is the only question asked).
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=0,
+                                  processes=10)) is True
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=0,
+                                  barren=4, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_a_process_never_arrived():
+    """A `BARREN` process is ABSENT from the race, not a loser: its arrival barrier
+    expired, so it never attempted. Counting it as "not a winner" is how a run that
+    measured nothing read as a clean one.
+
+    MUTATION THAT REDS THIS: drop the `barren > 0` row from `_no_verdict`.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=1,
+                                  barren=1, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_the_winner_RELEASED_early():
+    """⛔ THE THIRD WAY OF MEASURING NOTHING, and the one no case exercised.
+
+    Every other case in this family passes `bounded=True`, so the `bounded is False`
+    row of `_no_verdict` could be deleted with the suite still green (#14480 review,
+    cycle 15 P2 — the round that added it, not cycle 13, whose two P2s are the
+    `processes - 1` hold and the Pi leg's `held` wiring). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
+    receipt then exits 0 — byte-indistinguishable from a real two-drainer
+    FINDING, which is exactly the fail-open this field exists to close.
+
+    MUTATION THAT REDS THIS: drop the `race.get("bounded") is False` row from
+    `_no_verdict`.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=False, winners=1,
+                                  barren=0, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_a_NESTED_race_measured_nothing():
+    """⛔ `--scenario all` puts the claim race only NESTED (`baseline` /
+    `saturated`), so a scan of the TOP-LEVEL receipt alone never sees it.
+
+    Deleting the nested scan left `_no_verdict` permanently `False` in the tool's
+    only multi-race mode — exit 0 on a barren run (#14480 review, cycle 15 P3).
+    The loop is what makes the mode's verdict exist at all.
+
+    MUTATION THAT REDS THIS: delete the `for key in ("baseline", "saturated")`
+    loop from `_no_verdict` (read `receipt["claim_race"]` only).
+    """
+    import tools.measure_drain_convergence as M
+
+    for key in ("baseline", "saturated"):
+        nested = {key: {"claim_race": {"supported": False, "bounded": True,
+                                       "winners": 1, "barren": 2, "processes": 10}}}
+        assert M._no_verdict(nested) is True, key + ": " + repr(nested)
+        # ⛔ And the containment check is BIDIRECTIONAL: a clean nested race is a
+        # real measurement, so the loop must not turn every nested receipt into a
+        # no-verdict — that would make `--scenario all` unreadable instead of safe.
+        clean = {key: {"claim_race": {"supported": True, "bounded": True,
+                                       "winners": 1, "barren": 0, "processes": 10}}}
+        assert M._no_verdict(clean) is False, key + ": " + repr(clean)
+
+
+def test_the_BARREN_counter_reads_each_processes_OWN_stdout():
+    """The `barren` counter is a PRODUCER claim, so it is graded at the producer.
+
+    `barren += out.count("BARREN")` could be disabled with the hand-built
+    receipts still green (a witness that passes `barren=4` proves nothing about
+    the counter) — and the printed receipt would then say `supported: true`
+    while the exit code said 2 (#14480 review, cycle 15 P2). This drives the real
+    `_claim_race` with the arrival barrier stubbed to expire for every process.
+
+    MUTATION THAT REDS THIS: delete the `barren += out.count("BARREN")` line.
+    """
+    import tools.measure_drain_convergence as M
+
+    receipt = M._claim_race(3, acquire_setup=(
+        "def acquire(root, leg=None):\n"
+        "    print('BARREN', flush=True)\n"
+        "    raise SystemExit(0)\n"
+    ))
+    assert receipt["barren"] == 3, receipt
+    assert receipt["winners"] == 0, receipt
+    # `_claim_race` returns the RACE dict; `_no_verdict` reads it under `claim_race`
+    # on a top-level receipt, so wrap it rather than passing the race itself.
+    assert M._no_verdict({"claim_race": receipt}) is True, receipt
+
+
+def test_TWO_winners_is_a_FINDING_not_a_no_verdict():
+    """The other side, and the reason the winners check is `== 0` and not `!= 1`:
+    TWO winners is the defect this harness exists to measure. Folding it into "no
+    verdict" would silence the measurement in exactly the case it was built for.
+
+    ⛔ THE SHAPE THIS BUILDS IS REACHABLE NOW, and that is pinned by its own row:
+    `test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING` drives the real
+    `_claim_race` and gets `bounded: true, winners: 2+` out of it. Before that fix
+    this receipt was unreachable from the producer and only this hand-built witness
+    said it was a FINDING (#14480 review, F1).
+
+    MUTATION THAT REDS THIS: make the row `winners != 1` — the harness then reports
+    NO VERDICT on the finding it was written to find.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=2,
+                                  processes=10)) is False
+    assert M._no_verdict({"claim_race": {"supported": False, "winners": None}}) is False
+
+
+def test_the_measurement_EXITS_NONZERO_on_a_no_verdict_receipt(monkeypatch, capsys):
+    """The gate itself, end to end: `main` must return 2 when the measurement it
+    produced is a no-verdict, and 0 when it is a real one.
+
+    ⛔ THIS IS THE ROW THE TOOL DID NOT HAVE: `git grep measure_drain_convergence --
+    tests/` returned 0 hits, so deleting the `if _no_verdict(receipt): … return 2`
+    block redded nothing (#14480 review, F2).
+
+    MUTATION THAT REDS THIS: delete that block — the no-verdict receipt then exits 0.
+    """
+    import tools.measure_drain_convergence as M
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=False, bounded=True, winners=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 2
+    assert "NO VERDICT" in capsys.readouterr().err
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=True, bounded=True, winners=1, barren=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 0
+
+
+def test_the_measurement_EXITS_ZERO_on_a_real_two_drainer_FINDING(monkeypatch):
+    """A two-winner receipt is a FINDING, not a failure of the run: exit 0, with the
+    count in the receipt. A gate that refused it would refuse to report the bug.
+
+    ⛔ The receipt is the shape `_claim_race` produces (see
+    `test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING`); `measure` is
+    stubbed only so the exit code can be read without spawning a real race.
+
+    MUTATION THAT REDS THIS: make `_no_verdict` fire on `winners != 1`.
+    """
+    import tools.measure_drain_convergence as M
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=False, bounded=True, winners=2, barren=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 0
+
+
+def test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING():
+    """⛔ THE ROW THE TOOL DID NOT HAVE: a receipt `_claim_race` ACTUALLY PRODUCES
+    when more than one process holds the claim.
+
+    The witness above pins `_no_verdict` on a hand-built receipt, and the barrier
+    used to make that receipt UNREACHABLE: the hold waited for `processes - 1`
+    `done` markers while a winner only wrote its own AFTER releasing, so with `k`
+    winners the marker population topped out at `processes - k`. Every winner then
+    blocked to the 60 s deadline, `bounded` became False, and the two-drainer
+    FINDING the harness exists to report came out as *"NO VERDICT — re-run on a
+    quieter box"* (exit 2). Two tests certified a shape the producer could not emit
+    (#14480 review, F1).
+
+    So this drives the real `_claim_race` — real subprocesses, real barrier, real
+    receipt — with the CLAIM PROTOCOL stubbed to admit every contender. That is the
+    defect being measured, reproduced at the seam: the barrier must survive it and
+    the receipt must be a FINDING, not a no-verdict.
+
+    MUTATION THAT REDS THIS: restore the hold to `processes - 1` and move the
+    winner's marker back after `c.release()` — `bounded` flips to False (after a
+    60 s stall) and `_no_verdict` then reports no verdict.
+    """
+    import tools.measure_drain_convergence as M
+
+    receipt = M._claim_race(3, acquire_setup=(
+        "class _AlwaysWins:\n"
+        "    def release(self):\n"
+        "        pass\n"
+        "def acquire(root, leg=None):\n"
+        "    return _AlwaysWins()\n"
+    ))
+    assert receipt["winners"] == 3, receipt
+    assert receipt["barren"] == 0, receipt
+    assert receipt["bounded"] is True, (
+        "the barrier must not wait on winners: every peer had finished attempting, "
+        "so nothing straggled — " + repr(receipt))
+    assert receipt["supported"] is False, receipt
+    assert M._no_verdict({"claim_race": receipt}) is False, (
+        "a real two-drainer race is the FINDING this harness was built for, not a "
+        "no-verdict — " + repr(receipt))
+
+
+def test_a_FAILED_restore_does_not_delete_the_only_copy(tmp_path, monkeypatch):
+    """⛔ A FAILED RESTORE MUST NOT DESTROY THE CLAIM IT COULD NOT PUT BACK
+    (review, cycle 16, P1).
+
+    `_takedown`/the clear already vacated the claim path, so once the object is in the
+    quarantine it is the ONLY copy of a live holder's claim. The failure branch used to
+    warn and then `unlink` it, emptying the path for the next `link` — two holders for
+    up to `TTL/3`, silently, with the moved-aside evidence gone too. `link(2)` lists
+    `EACCES`/`EDQUOT`/`EIO`/`EMLINK`/`ENOSPC`/`EPERM`/`EROFS`/`EXDEV` besides
+    `EEXIST`, and `ENOSPC`/`EDQUOT` on a spool directory is the ordinary case.
+
+    The answer stays HELD (fail CLOSED: `acquire` → `None` → `held_by_claim`, nothing
+    attempted). ⛔ Not `REFUSED`: that raises `DrainClaimUnavailable`, whose handler
+    finds an empty path and runs the pass UNCLAIMED — strictly worse.
+
+    MUTATION THAT REDS THIS: restore the unconditional `os.unlink(quarantine)` on the
+    failure branch (the object vanishes from disk, and the second assertion fails).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_link = os.link
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-clear-" in str(src):
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
+    # The INVARIANT, not one mechanism: the peer's bytes must still exist on disk
+    # after a restore that could not be done with `link`. This row drives
+    # `_DISPOSE_QUARANTINE` (its peer claim is READABLE, so the clear takes the
+    # `landed is not None` arm), and its `link` refuses with ENOSPC while the path is
+    # FREE, so `_dispose_quarantine` RENAMES the object back — the filelock fallback,
+    # strictly stronger than leaving it aside, because the holder keeps holding instead
+    # of being swept up minutes later. `_restore_quarantine`'s own arms have their own
+    # rows (`…_RESTORE_FAILS…`, `…_DISPLACED_claim_is_PRESERVED…`).
+    survivors = [path for path in (fifo, *root.glob("*.tmp-clear-*")) if path.exists()]
+    assert survivors, (
+        "the only copy of the peer's claim was DELETED when the restore failed")
+    assert json.loads(survivors[0].read_text())["token"] == "peer-token"
+    assert fifo.exists(), (
+        "with the path free the object is put BACK, not stranded in the quarantine")
+
+
+def test_the_DISPLACEMENT_path_PRESERVES_a_copy_it_cannot_restore(tmp_path, monkeypatch):
+    """Both restores refused on the displacement path: the quarantined copy is the
+    only surviving evidence of the held claim, so it is LEFT IN PLACE.
+
+    MUTATION THAT REDS THIS: `unlink` the quarantine when the rename-back also fails.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    claim = root / "drain.claim"
+    peer_raw = b'{"token": "peer-token"}\n'
+    quarantine = root / "drain.claim.tmp-take-5678-efgh"
+    quarantine.write_bytes(peer_raw)
+
+    def link_fails(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    real_rename = os.rename
+
+    def rename_fails(src, dst, *a, **kw):
+        if ".tmp-take-" in str(src):
+            raise OSError(30, "Read-only file system")
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", link_fails)
+    monkeypatch.setattr(os, "rename", rename_fails)
+    try:
+        ours = drain_claim._dispose_quarantine(
+            quarantine, peer_raw, claim, b"<the bytes we judged>")
+    finally:
+        monkeypatch.undo()
+    assert ours is False
+    assert quarantine.exists() and quarantine.read_bytes() == peer_raw, (
+        "the only copy must be preserved, not deleted")
+    assert not claim.exists(), "both restores failed, so the path stays as it was"
+
+
+def test_an_UNREADABLE_quarantined_claim_whose_RESTORE_FAILS_is_kept(
+        tmp_path, monkeypatch):
+    """⛔ THE `_restore_quarantine` HALF, WHICH THE ROW ABOVE DOES NOT REACH (review,
+    cycle 16, P1).
+
+    The row above drives `_dispose_quarantine`: its peer claim is READABLE, so
+    `landed is not None` and the `_lstat_is_regular` branch — the one that calls
+    `_restore_quarantine` — never executes. `grep -rn _restore_quarantine tests/`
+    returned zero hits, so the function's own failure branch was unpinned, and it
+    still unlinked the only copy.
+
+    This row makes the quarantine UNREADABLE (so `landed is None` and the lstat says
+    regular), makes `link` fail with `ENOSPC` (a non-`EEXIST` errno — the ordinary
+    full-disk case on a spool directory), and requires the peer's bytes to survive
+    the failed restore.
+
+    MUTATION THAT REDS THIS: restore the unconditional `os.unlink(quarantine)` in the
+    `except OSError` branch (the object vanishes and the "still on disk" assertion
+    fails).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+    real_link = os.link
+
+    def read_fails_in_the_quarantine(path):
+        # A REGULAR file whose BYTES cannot be had: `landed is None`, and the lstat
+        # below still says regular — the `_restore_quarantine` branch.
+        if ".tmp-clear-" in str(path):
+            return None
+        return real_read_raw(path)
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-clear-" in str(src):
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", read_fails_in_the_quarantine)
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
+    # The INVARIANT (the peer's bytes are still on disk), not one mechanism: this
+    # row's `link` refuses with ENOSPC while the path is FREE, so the object is
+    # RENAMED BACK — strictly stronger than leaving it for the sweeper, and the arm
+    # `test_the_clear_PRESERVES_the_copy_it_cannot_restore` covers for the case where
+    # even that fails.
+    survivors = [p for p in (fifo, *root.glob("*.tmp-clear-*")) if p.exists()]
+    assert survivors, (
+        "the only copy of the peer's claim was DELETED when the restore failed")
+    assert json.loads(survivors[0].read_text())["token"] == "peer-token"
