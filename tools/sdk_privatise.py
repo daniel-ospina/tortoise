@@ -2046,31 +2046,32 @@ SWEEP_NAMES = 66
 #: OTHER direction, so it is attributed ROW BY ROW rather than accepted as a flake: `main`'s rewrite
 #: of `tests/test_collision_preflight.py` adds exactly one untyped `.update` receiver,
 #: `seen.update(kwargs)` in its new `spy()` fixture, and that merge deleted no `.update` line anywhere
-#: (`#4625`'s own -2 is still in this tree: `_JSONB_CACHE.update` is 2 rows on `origin/main` and 0
+#: (`#4625`'s own -2 is still in this tree: `_JSONB_CACHE.update` is 2 rows on `2cccf90f4dd4` and 0
 #: here). A rising pin is the direction the guard exists to CATCH, and here the row is main's, so the
 #: pin followed `main` — measured `--repin` on that merged tree, never arithmetic on the old number.
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE, because
 #: the fold's own tree is a THIRD tree: this merge brings main's durable `claim_unavailable` self-heal,
 #: whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one new untyped `.update(`
-#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -3
-#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
+#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The two rows
+#: between that and the 11912 main's OWN tree derives are attributed ROW BY ROW, not waved through:
 #:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
 #:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
-#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
-#:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
-#:     inherits main's row set, not main's number.
+#:     with `#14506`'s rewrite and which that re-pin did not count. So `--check` exited 1 on `main`
+#:     ITSELF as this block was written (the `#14062` recurrence the blocks above record a sixth
+#:     time); this branch inherits main's row set, not main's number.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
-#:     took with it — 2 rows on `origin/main`, 0 here, and the report row sets are otherwise IDENTICAL
+#:     took with it — 2 rows on `2cccf90f4dd4`, 0 here, and the report row sets are otherwise IDENTICAL
 #:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
 #: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
 #: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
 #: ── THIS BRANCH'S OWN RE-CUT, AND THE FOLD THAT RETIRED ITS PREMISE ──────────────────────────────
-#: This branch was opened while `surface-guard` was RED on `main`, and its first cut carried
-#: `(11912, "73827c80583e139f")` — the pair its OWN merge tree derived, which was neither parent's
-#: pin. The two measurements that made that the wrong number are recorded here, because together they
-#: are the recurrence's whole cost: `main` `59a08fdb8b` COMMITS `(11910, "adc8229295339239")` while its
-#: own tree derived `(11911, "4ed42694957a174d")`, so `main` was already grading a stale pin, and the
-#: branch was built on a `main` whose committed pair was a third number again.
+#: This branch was opened while `surface-guard` was RED on `main`, and its first cut `b351bba800fe`
+#: COMMITS `(11912, "73827c80583e139f")` — the pair its OWN merge tree derived, which was neither
+#: parent's pin. The two measurements that made that the wrong number are recorded here, because
+#: together they are the recurrence's whole cost: `main` `59a08fdb8b` COMMITS
+#: `(11910, "adc8229295339239")` while its own tree derived `(11911, "4ed42694957a174d")`, so `main`
+#: was already grading a stale pin, and the branch was built on a `main` whose committed pair was a
+#: third number again.
 #: ⛔ `main` HAS SINCE REPAIRED THAT RED ITSELF, so this branch's premise EXPIRED before its conflict
 #: was resolved: `#14459`'s fold retired the two `_JSONB_CACHE.update` rows, and `6a02515d14ad5`
 #: COMMITS `(11910, "3216395d35345904")` — which is also what `--repin` prints on its own tree.

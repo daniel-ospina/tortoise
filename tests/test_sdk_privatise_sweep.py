@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1976 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1977 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -321,7 +321,7 @@ def _residue_block() -> str:
     — and THIS BRANCH'S OWN re-cut note (the block recording that its `(11912, …)` was its own merge
     tree's pair for a `main` that has since moved, that `#14459` then repaired `main`'s red itself,
     and that the pair is therefore `main`'s and UNCHANGED) appended `#:` lines to
-    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this file at 1976
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this file at 1977
     rather than adjusted by arithmetic from `main`'s 1954 — carrying that figure forward is exactly
     what this arm exists to refuse,
     AND THE ARMS GRADE ALL OF IT
@@ -514,6 +514,9 @@ _ARM_REFSPECS: dict[str, str] = {
     # what still resolves after the movement, and it is the form this map already grades.
     "59a08fdb8b": "+59a08fdb8b4094c1b0394d4191804797facce47b:refs/pi/59a08fdb8b",
     "6a02515d14ad5": "+6a02515d14ad5587b5b57800813f3f1b37bb43ec:refs/pi/6a02515d14ad5",
+    # `b351bba800fe` is this branch's FIRST cut, reachable only by sha once the branch is squash-merged
+    # — so the want form is the only address that survives the landing, exactly as for the two above.
+    "b351bba800fe": "+b351bba800fe21cef89723841c91bebcbeb43a71:refs/pi/b351bba800fe",
     # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
     # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
     # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
@@ -2227,6 +2230,10 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # is: `git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`.
     "59a08fdb8b": (11910, "adc8229295339239"),
     "6a02515d14ad5": (11910, "3216395d35345904"),
+    # `b351bba800fe` is THIS branch's own first cut — the third tree's number, graded so that a future
+    # re-cut cannot restate it in a spelling nothing reaches. It is reachable only by sha after the
+    # squash, so the premise arm SKIPS where the object is absent, never asserting it.
+    "b351bba800fe": (11912, "73827c80583e139f"),
 }
 
 
