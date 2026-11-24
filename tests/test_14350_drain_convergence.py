@@ -2485,7 +2485,9 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
 
 def test_a_NULL_reason_is_carried_by_NEITHER_leg(tmp_path):
     """⛔ A JSON `null` REASON IS "NO REASON" ON BOTH LEGS — the carry-forward half
-    of the cycle-18 P3 (#14480 review, `:6320`).
+    of the cycle-19 P3 (the `previous?.claim_unavailable_reason !== undefined` arm;
+    `tortoise-capture.ts:6320` **at `23ac4a97d1fd`** — a head-relative number, and the
+    line holds unrelated code at later heads, which is why it is qualified).
 
     The two legs write ONE shared `status.json`, so the record they produce for the
     same prior and the same pass must be the same record. The Python leg copies the

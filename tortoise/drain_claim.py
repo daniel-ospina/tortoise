@@ -323,6 +323,16 @@ def claim_path_unreadable(root: Path) -> bool:
     Only a REGULAR file is opened (`lstat` first — opening a FIFO or a socket is the
     block this module already removed from the claim read), and ``FileNotFoundError``
     is answered ``False``: a claim released between the two syscalls is not a stall.
+
+    ⛔ AND THAT IS A REPLACE WINDOW, NOT AN ABSOLUTE — stated here rather than implied,
+    because the sibling status gate (`capture_spool.read_capture_status`) carries the
+    identical `lstat` → `open` exposure and states it: an object swapped for a FIFO
+    between the two syscalls IS opened, and this call then blocks. CERT C `FIO32`
+    names exactly this TOCTOU and prescribes `O_RDONLY|O_NONBLOCK` then `fstat`/
+    `S_ISREG` on the FD; that is deliberately NOT adopted here, so that this probe and
+    the status gate stay ONE mechanism with one stated residual, and because the box
+    owner is by definition the only writer that could perform the swap (review,
+    cycle 19, P3 — the earlier wording promised more than the two syscalls can).
     """
     path = claim_path(root)
     try:

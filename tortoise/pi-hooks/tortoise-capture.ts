@@ -6484,18 +6484,6 @@ export function applyClaimPolicy(
   return next;
 }
 
-/**
- * Append the durable claim fact to WHICHEVER verdict was chosen.
- *
- * ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
- * F1). The claim axis is a fact about the SPOOL ROOT — true whatever the queue is
- * doing — so a `SATURATED` box whose claim path is broken must read BOTH, exactly
- * as a quota-blocked one must. Applying it only to the final `DRAINING`/`OK`
- * verdict dropped it on the four early returns, and the case the durable fact
- * exists for (a capacity 429 with a backlog: `state: blocked` AND a broken claim
- * path) is one of those early returns. Mirrors `capture_spool._with_claim_term`
- * byte for byte — the cross-leg parity test compares the FULL rendered line.
- */
 /** The operator-line term for the one claim arm that blocks PERMANENTLY — the
  *  Python twin's `_UNREADABLE_CLAIM_TEXT`, byte for byte, because the cross-leg
  *  parity test compares the FULL rendered line. */
@@ -6522,6 +6510,16 @@ const UNREADABLE_CLAIM_TEXT = "a regular file exists but could not be read";
  *  Only a REGULAR file is opened (`lstatSync` first — opening a FIFO or a socket is
  *  the block this module already removed from the claim read), and `ENOENT` is
  *  answered `false`: a claim released between the two syscalls is not a stall.
+ *
+ *  ⛔ AND THAT IS A REPLACE WINDOW, NOT AN ABSOLUTE — stated rather than implied,
+ *  because the sibling status gate (`readCaptureStatus`) carries the identical
+ *  `lstat` → open exposure and states it: an object swapped for a FIFO between the
+ *  two syscalls IS opened and this call then blocks. CERT C `FIO32` names exactly
+ *  this TOCTOU and prescribes `O_RDONLY|O_NONBLOCK` then `fstat`/`S_ISREG` on the
+ *  FD; deliberately not adopted here, so this probe and the status gate stay ONE
+ *  mechanism with one stated residual, and because the box owner is by definition
+ *  the only writer that could perform the swap (review, cycle 19, P3 — the earlier
+ *  wording promised more than two syscalls can).
  */
 export function claimPathUnreadable(dir: string): boolean {
   const claimPath = drainClaimPathFor(dir);

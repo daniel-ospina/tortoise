@@ -4999,7 +4999,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: never carried. Generation stays 33 for the same reason the earlier re-cuts did:
 #: **33 has never shipped**, so it freezes when this reaches `main`, not before.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "738b16f71743d58e98b10f860c6a8804cf9af30571532a36b0c38931b3df18e1")
+    33, "0c4e960d2e5855abf6f333cde5172e3b41f1047a17d08f6d565478ec020279be")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5203,7 +5203,7 @@ _GENERATION_DIGESTS = {
     # `6652dd6b…` and then `b775fcab…` on theirs — a merge is a byte set NEITHER
     # side hashed, so every one of those is wrong here and only the merged tree's
     # digest is right.
-    33: "738b16f71743d58e98b10f860c6a8804cf9af30571532a36b0c38931b3df18e1",
+    33: "0c4e960d2e5855abf6f333cde5172e3b41f1047a17d08f6d565478ec020279be",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
