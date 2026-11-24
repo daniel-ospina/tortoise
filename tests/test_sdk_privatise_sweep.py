@@ -1054,8 +1054,12 @@ def test_a_tool_only_diff_selects_this_suite():
 
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
-    to `tier1` (the `core` pool is skipped for tier-1 files, so the arm would pass while the
-    suite still never ran).
+    to `tier1`. ⛔ THE MECHANISM IS A UNION, NOT A SKIP: `tier1` is unioned into EVERY PR
+    selection (`files = set(tier1)` in `select()`), so a tier-1 membership selects this suite
+    unconditionally — the `core` row stops being what selects it, and the asserts below would
+    then pass even with the row deleted, i.e. over a lost row. Measured: with this file injected
+    into `tier1` the selection is unchanged (`surfaces ['core']`, suite selected) and it is STILL
+    selected after the `CORE_ALSO` row is also removed.
 
     Runs the selector's own CLI rather than re-deriving its rules, so it grades the wiring the
     CI job actually uses, and it is object-free (no `fetch-depth` dependence).
@@ -1081,8 +1085,9 @@ def test_a_tool_only_diff_selects_this_suite():
         "a diff to tools/sdk_privatise.py no longer selects its own pins: "
         f"{len(files)} test files, this one absent — the selection gap #14062 describes")
 
-    # ⛔ NON-VACUITY, FROM THE OTHER SIDE: if this file joined `tier1`, the `core` pool is skipped
-    # for it and the selects above would pass while the suite still never ran on its own diff.
+    # ⛔ NON-VACUITY, FROM THE OTHER SIDE: `tier1` is unioned into EVERY PR selection, so if
+    # this file joined `tier1` it would be selected unconditionally and the asserts above would
+    # pass even with the `CORE_ALSO` row deleted — they would no longer be testing the row.
     _assert_not_tier1(_load_manifest_for_test())
 
 
@@ -1101,7 +1106,8 @@ def _load_manifest_for_test():
 
 
 def _assert_not_tier1(manifest):
-    """`core` must not be skipped for this file, and the guard must not lose its subject."""
+    """The `CORE_ALSO` row must remain what selects this suite, and the guard must not lose its
+    subject."""
     assert "tier1" in manifest, (
         "not a defect of this file: the manifest no longer carries 'tier1', so this non-vacuity "
         "guard has lost its subject and would pass for the wrong reason")
@@ -1109,6 +1115,7 @@ def _assert_not_tier1(manifest):
     # `tier1:` holds bare FILENAMES, not `tests/`-prefixed paths — asserting the prefixed form
     # would test nothing at all.
     assert "test_sdk_privatise_sweep.py" not in tier1, (
-        "this file joined 'tier1' — a tier-1 file is SKIPPED for the `core` pool, so the "
-        "`CORE_ALSO` row above is now decorative: the selection asserts pass while the suite "
-        "still never runs on a tools/sdk_privatise.py-only diff")
+        "this file joined 'tier1' — `tier1` is UNIONED into every PR selection, so this suite "
+        "is now selected unconditionally and the asserts above would pass even with the "
+        "`CORE_ALSO` row deleted: the row is no longer what selects it, so this pin must be "
+        "RE-DERIVED rather than assumed still load-bearing")
