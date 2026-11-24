@@ -1864,6 +1864,17 @@ SWEEP_NAMES = 66
 #: `tools/measure_drain_convergence.py`, `tests/test_14350_drain_convergence.py`) carry no
 #: `.query` / `.update` / `.delete` reference AT ALL (`grep -nE '\.(query|update|delete)\b'` → no
 #: match on all three), and the branch's other edits are inside files that already carry their rows.
+#: ⛔ RE-PINNED A THIRD TIME (#14423, cycle 8), and the measurement now says something the two
+#: earlier re-pins could not: **`main` IS AHEAD OF THIS BRANCH, NOT BEHIND IT.** `--repin` on this
+#: merged tree prints **(11902, "da43b524f4e1599b")**, while a detached worktree at `origin/main`'s
+#: own `88cd00a068` observes **(11906, "045a9146647cdfaa")** — four rows MORE. So the pair below is
+#: this tree's, the drift that keeps moving it arrives from `main` between folds, and this branch is
+#: adding nothing to it: its own new files carry no `.query`/`.update`/`.delete` reference at all
+#: (`grep -nE '\.(query|update|delete)\b' tortoise/drain_claim.py tools/measure_drain_convergence.py`
+#: → no match). ⛔ The consequence for the NEXT lane is stated here because it will hit it: every
+#: fold of `main` moves this pin again, and a branch that re-pins only from its own tree will keep
+#: landing a pair that `main` has already outrun. That is exactly why `--check` is run on the MERGED
+#: tree and never against `main`'s number.
 #: ⛔ RE-PINNED A SECOND TIME BY THE SAME LANE (#14423), AND AGAIN FROM `main`'S DRIFT — the
 #: observation is **(11901, "953c70c05b55923b")**, +3 rows and a new digest, measured after this
 #: branch merged `origin/main` `b2d1e9086a` (the `tests/test_7879…` / `#14371 offline-embed` pair).
@@ -1918,7 +1929,7 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11901, "953c70c05b55923b")
+SWEEP_RESIDUE = (11902, "da43b524f4e1599b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
