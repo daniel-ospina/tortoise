@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2019 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2025 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -326,7 +326,7 @@ def _residue_block() -> str:
     naming `a2f165b0ba47` was wrong: that tree derives 11912 and `--check` exits 1 there) — so the
     claim in this sentence is now true of the resolved file rather than
     only of the peer's half. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE
-    at 2019 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
+    at 2025 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
     `--repin` on BOTH trees
     (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
     — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
