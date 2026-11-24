@@ -138,22 +138,21 @@ def test_one_incident_is_one_push_for_its_whole_lifecycle(delivered):
     assert "issue #1" in message, f"not attributable: {message!r}"
     assert "rule=point_create" in message, "the triager's rule context was dropped"
     assert "count=600" in delivered.filed[0][1], "the count belongs on the issue"
-    # ⛔ THE LABEL, pinned (review cycles 5–6). The episode's OPENING push is the
+    # ⛔ THE LABEL, pinned (review cycles 5–8). The episode's OPENING push is the
     # STORE's create-once template (`AlertStore._telegram_text`), because opening the
-    # incident is the store's decision and every incident kind shares it. TWO labels
-    # is the resulting truth, and both are deliberate: this opening message wears the
-    # DR vocabulary, while the 24h REMINDER (the re-alarm arm of
-    # `notify._notify_abuse_incident`, which no store path emits) keeps the
-    # abuse-specific `🚨 Tortoise Security: <kind>` header — one of the THREE renderers
-    # of `notify._abuse_message` (the other two are the unattributed delivery and the
-    # activity digest), so the per-detection TEXT survives on those paths even though
-    # the per-detection SENDER is gone. The reminder is the one arm of the INCIDENT
-    # path that no store emitter serves. Both name the kind and the issue, so neither is
-    # unattributable; what a reader must not do is grep for one label and conclude the
-    # other kind of message does not exist. A relabelling of a security alert into
-    # the DR vocabulary is fine ONLY while it is stated and watched: the runbook's
-    # `ABUSE_FLAG_RAISED` row names both labels, and this assertion makes any future
-    # template change visible instead of silent.
+    # incident is the store's decision and every incident kind shares it. That makes
+    # TWO ALERT labels, both deliberate: this opening message wears the DR vocabulary,
+    # while the 24h REMINDER (the re-alarm arm of `notify._notify_abuse_incident`)
+    # keeps the abuse-specific `🚨 Tortoise Security: <kind>` header — one of the THREE
+    # renderers of `notify._abuse_message` (the other two are the unattributed delivery
+    # and the activity digest), so the per-detection TEXT survives on those paths even
+    # though the per-detection SENDER is gone. Each is attributable in its own words,
+    # but they do not share one token — the two store templates spell the INCIDENT kind
+    # (`ABUSE_FLAG_RAISED`) while the reminder spells the EVENT kind (`abuse_flag`) —
+    # so a reader must not grep one label and conclude the other message does not
+    # exist. A relabelling of a security alert into the DR vocabulary is fine ONLY
+    # while it is stated and watched: the runbook's `ABUSE_FLAG_RAISED` row names both
+    # spellings, and this assertion makes any future template change visible.
     assert message.startswith("🚨 DR alert: ABUSE_FLAG_RAISED"), (
         "the episode push no longer carries the store's create-once template — "
         f"if that is deliberate, update the runbook row and this pin: {message[:60]!r}")
@@ -195,15 +194,17 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
     assert len(delivered.pushes) == 2, delivered.pushes
     assert "Still open" in delivered.pushes[-1]
     assert "issue #1" in delivered.pushes[-1], "a reminder must name the incident"
-    # ⛔ THE SECOND ALERT LABEL, pinned (#14407 review cycle 6). One episode emits THREE
-    # messages and each wears its own string: the OPENING push is the store's
+    # ⛔ THE SECOND ALERT LABEL, pinned (#14407 review cycles 6–8). One episode emits
+    # THREE messages and each wears its own string: the OPENING push is the store's
     # create-once template (`🚨 DR alert: …`, shared with every incident kind), this
-    # REMINDER renders the abuse-specific `notify._abuse_message` text (the one arm of
-    # the incident path no store emitter serves), and the episode END adds the store's
-    # `✅ DR resolved: …` close — which contains neither alert label, so the runbook
-    # row names all three and says to grep the KIND. Stating one label while the code
-    # emits three is how a triager greps for the wrong string and concludes the
-    # reminder does not exist, so the two ALERT labels are read here.
+    # REMINDER renders the abuse-specific `notify._abuse_message` text, and the episode
+    # END adds the store's `✅ DR resolved: …` close — which contains neither alert
+    # label. They do not even share a KIND spelling: the two store templates spell the
+    # INCIDENT kind (`ABUSE_FLAG_RAISED`) while this reminder spells the EVENT kind
+    # (`abuse_flag`), so a triager who greps one label — or one spelling — concludes the
+    # other message does not exist. (The reminder names the issue only when the incident
+    # carries one; on a placeholder or a post-close tombstone it says the number could
+    # not be read, which is still attributable.) Both ALERT labels are read here.
     assert delivered.pushes[0].startswith("🚨 DR alert: ABUSE_FLAG_RAISED"), (
         delivered.pushes[0])
     assert delivered.pushes[-1].startswith("🚨 Tortoise Security:"), (
