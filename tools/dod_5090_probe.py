@@ -216,8 +216,10 @@ import sys
 #: two nested same-quote f-strings in `score_rule_bullet` are built as plain
 #: locals: PEP 701 (`f"…{d['at']}…"` inside a `"`-delimited f-string,
 #: https://peps.python.org/pep-0701/ — *Python-Version: 3.12*, "quote reuse")
-#: cannot be tokenized before 3.12, and `tests/test_dod_5090_probe.py::
-#: test_the_tool_parses_under_the_floor` pins that.
+#: cannot be tokenized before 3.12. ⛔ NO TEST PINS THE GUARD BELOW any more: the
+#: #14544 B-arm cut deleted `test_the_tool_parses_under_the_floor`, which was the arm
+#: that read this file back (review F2). The guard below is the check — a regression
+#: to 3.12-only syntax now surfaces as this file failing to import, not as a red pin.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/dod_5090_probe.py requires Python >= 3.12 (got "
@@ -245,9 +247,10 @@ if str(REPO_ROOT) not in sys.path:
 VERDICTS = ("MET", "PARTIAL", "NOT MET")
 
 #: `#5090`'s four bullets, verbatim from the epic body. Held here so the table
-#: cannot silently score a re-worded bullet: the pin
-#: `tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`
-#: reads them back and the epic body is the source of truth.
+#: cannot silently score a re-worded bullet. ⛔ The arm that read them back
+#: (`tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`) went
+#: with the #14544 B-arm cut (review F2), so nothing compares these strings to the
+#: epic body now: the epic body is the source of truth and this tuple is a COPY of it.
 BULLETS: tuple[str, ...] = (
     "A stated, enforced rule for what earns an embedding.",
     "No vector is stored without a path to query it.",
@@ -891,8 +894,10 @@ def _alias_credit_rank(name: str) -> int:
 #: ⛔ IT MUST CONTAIN EVERY `_ALIASABLE_CALL_NAMES` MEMBER — `_alias_preference` reads it by
 #: `.index()` and its `except ValueError` arm is marked `# pragma: no cover` on exactly that
 #: premise. `SEAM_MODULE` was enrolled as aliasable at `#13447` review cycle 7 without being added
-#: here, so that premise was false and live code sat behind a "no cover" pragma; pinned by
-#: `tests/test_dod_5090_probe.py::test_every_aliasable_name_has_a_canonical_order_entry`.
+#: here, so that premise was false and live code sat behind a "no cover" pragma.
+#: ⛔ `test_every_aliasable_name_has_a_canonical_order_entry` was the arm that would
+#: have caught it and it went with the #14544 B-arm cut (review F2): the `.index()`
+#: premise is unguarded now, and the failure it hides is a `ValueError` at call time.
 #: ⛔ `SEAM_MODULE` is LAST on purpose: both it and `SEAM_CALL` are rank 0 (both credit `gated`), so
 #: an APPEND keeps the ordering that was measured before the enrolment and no published `callee`
 #: moves. Reordering it ahead of `SEAM_CALL` would silently republish those names (`#11444`).
@@ -1113,12 +1118,12 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
       unchanged, and `_imports_that_REBIND` counts a foreign import as the rebinding it is;
     * the receiver is NOT bound where the call sits — belt AND braces, because the caller already
       drops shadowed aliases through `_keep_shadowed_aliases` and this function is also called
-      directly (its unit test, and any future caller) with a hand-fed map. That second half is
-      PINNED, not assumed: the DIRECT-CALL arm of
-      `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
-      hands this function an alias map that still RESOLVES the receiver while the node's own `def`
-      binds it, which is the one shape this check can save (`#13447` review cycle 8, P3 — the
-      mutant that deleted it survived every other row in the file).
+      directly (its unit test, and any future caller) with a hand-fed map. ⛔ That second half is
+      UNGUARDED since the #14544 B-arm cut (review F2): the DIRECT-CALL arm of
+      `test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach` — which handed this
+      function an alias map that still RESOLVES the receiver while the node's own `def` binds it,
+      the one shape this check can save (`#13447` review cycle 8, P3 — the mutant that deleted it
+      survived every other row in the file) — was deleted with the file's B cases.
 
     ⛔ "where the call sits" — NOT "in the writer's own scope" (`#13447` review cycle 10, P2,
     measured). This walk descends the whole subtree, so a nested `def`'s PARAMETER bound only
@@ -1127,9 +1132,9 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     an own ungated write clause measured `gated` — outside `NEEDS_A_DECLARATION`, i.e. owing no
     declaration while never reaching the gate. The shadow is therefore threaded DOWNWARD per scope
     (the shape `_named_callees` already uses, and for the same reason: "own scope only" would drop
-    the legitimate closure). Pinned — in both directions — by
-    `tests/test_dod_5090_probe.py::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`'s
-    nested rows.
+    the legitimate closure). ⛔ UNGUARDED since the #14544 B-arm cut (review F2): it was
+    pinned in both directions by `test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`'s
+    nested rows, and that arm was deleted with the file's B cases.
 
     An UNRESOLVED receiver — including the shape no rule in this file resolves
     (`import tortoise.derived_embedding as de`, an `ast.Import`, which `_import_aliases` does not
@@ -1143,10 +1148,11 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     review cycle 3, issue 7). Its replacement, a `"_" + SEAM_MODULE` SUFFIX, credited every
     `*_derived_embedding` receiver (`my_derived_embedding`, `#13447` review cycle 6, issue 1). Both
     were re-spellings of the same unasked question, which is why cycle 7 replaced the question
-    (binding) instead of the answer (a third spelling). Pinned by
-    `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
-    (the substring/suffix rows) and
-    `…::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach` (the three binding rows).
+    (binding) instead of the answer (a third spelling). ⛔ UNGUARDED since the #14544 B-arm cut
+    (review F2): `test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach` (the
+    substring/suffix rows) and `test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach` (the
+    three binding rows) were both deleted with the file's B cases, so a re-spelling of either
+    question would red nothing here.
     """
     import ast
 
@@ -1434,8 +1440,9 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
     # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
     # catches it, and it caught this one only post-merge on `main` — the pytest lane could
-    # not, until `#9314`'s pin
-    # (`tests/test_dod_5090_probe.py::test_the_census_has_no_DUPLICATE_dict_key_in_its_source`).
+    # not, until `#9314`'s pin (`test_the_census_has_no_DUPLICATE_dict_key_in_its_source`).
+    # ⛔ THAT PIN WENT with the #14544 B-arm cut (review F2), so `ruff` is the only detector of a
+    # duplicate key in these tables today.
     # ⛔ That pin exists TWICE this merge: `main`'s `#9314` version and #12182's review cycle-7 P2
     # version are the same detector written independently, and this rebase keeps ONE of them — the
     # `#12182` one, which also covers `WRITER_LABEL_OVERRIDES` and asserts each literal's key count
@@ -7059,8 +7066,9 @@ def score_rule_bullet() -> Row:
             # container's environment, so `#12022` routes it to `outside_runtime`
             # (a deployed process never reads it) instead of counting it as a hit. ⛔ THE
             # `ENV …=1` / `ENV …=0` SHAPE IS NO LONGER ONE OF THEM EITHER: last-wins makes
-            # the walk read the file OFF, which
-            # `test_the_LAST_assignment_in_a_file_decides_its_arming` pins — an earlier
+            # the walk read the file OFF, and an arm
+            # (`test_the_LAST_assignment_in_a_file_decides_its_arming`) pinned it until the
+            # #14544 B-arm cut deleted that arm with the file's B cases (review F2) — an earlier
             # revision of this comment still claimed it read ON, the "a sentence wider
             # than the measurement under it" class this probe exists to police (fresh
             # review of PR #12474, P3, measured). The one remaining shape is
@@ -8032,7 +8040,9 @@ def score_path_bullet() -> Row:
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
     # ⛔ The census population is the `unresolved_write` set — the SAME set
-    # `test_every_unresolved_writer_carries_a_census_class` walks — and NOT
+    # `test_every_unresolved_writer_carries_a_census_class` walked. That arm was cut with
+    # the #14544 B cases (review F2), so the set-equality below is stated and not graded: a
+    # writer classed here but absent from `WRITER_CENSUS` reds no test. It is NOT
     # `unknown`, which also carries the `duplicate` identities. A duplicate is
     # a DIFFERENT defect (two definitions collided, so the later one's label
     # overwrote the earlier one) and has no key it could EVER have in

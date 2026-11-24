@@ -24,6 +24,8 @@ consequence, not an editorial one:
 | `test_measure_restores_the_gate_flags`, `test_measure_pins_the_gate_flags_to_an_explicit_off` | the measurement leaving an ambient gate flag flipped — a bypass created by an instrument |
 | `test_the_fallback_probe_restores_the_circuit_breakers`, `test_the_fallback_probe_leaves_no_breaker_it_CREATED_behind` | the probe leaving a breaker it opened (or one it created) behind, changing runtime behaviour |
 | `test_the_instrument_is_selected_by_its_own_subjects` | a guard registered nowhere — an inert enforcer |
+| `test_the_embed_decision_has_exactly_one_predicate`, `test_the_seam_module_is_scanned_for_its_own_patterns`, `test_a_pattern_list_in_the_seam_module_reads_as_drift`, `test_a_second_pattern_list_in_the_embed_gate_reads_as_drift` | the §12.2a predicate count becoming a number nobody asserts on — a second rule set on the embed path reported as `MET` (a false PASS: `measure()` still prints `§12.2a predicates: N — verdict`) |
+| `test_an_unparseable_module_is_a_hole_in_the_predicate_count`, `test_a_class_level_pattern_still_counts_as_an_owner`, `test_a_function_local_pattern_is_not_a_second_predicate_owner` | the same count reading a member it could not parse as `MET`, or its module-scope prune swinging into a false `MET` (class body) / a false `DRIFT` on a helper's local pattern |
 
 ⛔ WHERE THESE ARMS ACTUALLY RUN — and the trigger this cut COST, stated rather
 than papered over. `tortoise/embeddings.py` selects `eval`, so these arms run on a
@@ -35,6 +37,13 @@ regression in one of those modules therefore reaches the gate-flag, breaker and
 census arms on the push-to-main full sweep AFTER merge, not on the PR that
 introduces it. That is a disclosed consequence of the `core` removal, not
 coverage that exists.
+
+⛔ The §12.2a predicate arms are here because their failure mode is the
+INVERSE of bookkeeping: they are the falsifiers for a number the instrument
+PRINTS as a verdict (`§12.2a predicates: N (target M) — MET`). Restored after
+review F1 on this PR measured that the count, its owner set and its population
+were asserted on by nothing once they were cut — a false `MET` is exactly the
+class `AGENTS.md` §Product Over Process calls **A**.
 
 ⛔ These tests never write a graph and never flip a gate: the instrument is
 read-only and its pin must be too.
@@ -173,6 +182,218 @@ def test_the_census_refuses_an_embedded_engine():
     # ⛔ The documented contract, not merely "it raised": a non-int SystemExit
     # argument exits 1, and this refusal MEANS "could not measure" (review P3).
     assert raised.value.code == 2, raised.value.code
+
+
+# ── §12.2a — one predicate ─────────────────────────────────────────────────
+# ⛔ RESTORED (review F1 on PR #14544): the count/owners/population half was cut as
+# "bookkeeping", but its failure mode is a FALSE PASS — the instrument prints
+# `§12.2a predicates: 1 (target 1) — MET` while a second rule set, a dropped seam
+# module or an unparseable module goes unreported. `tools/dod_5090_probe.py:10346`
+# still feeds `count_embed_predicates()` into `measure()`, so without these the value
+# is computed and asserted on by nothing. Hermetic: tmp_path only, no DB, no graph, no
+# network.
+
+
+def test_the_embed_decision_has_exactly_one_predicate():
+    """§12.2a: ONE rule set, ONE predicate, shared by identity."""
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 1, (
+        "a second predicate that can answer NO-EMBED is the drift §12.2a "
+        f"forbids — measured owners: {counted['owners']}"
+    )
+    assert counted["owners"] == [probe.PREDICATE_MODULE], counted
+    assert counted["rule_set_is_shared_identity"] is True, (
+        "embed_gate.RULE_SET must BE value_gate.RULES, not an equal copy"
+    )
+    assert counted["verdict"] == "MET", counted
+
+
+def test_a_second_pattern_list_in_the_embed_gate_reads_as_drift(tmp_path, monkeypatch):
+    """The mutation check, made executable: the count CAN fail.
+
+    A fake tree whose embed gate owns its own patterns must read `DRIFT` with
+    two owners. If the count were hard-wired to 1 (a probe that cannot come
+    back red), this test fails — which is the point.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('value.identifier_only.reference',)\n"
+        "def identifier_only(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    # A SECOND, independently-derived rule set — exactly the drift.
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "import re\n_B = re.compile(r'\\b\\d{4}-\\d{2}-\\d{2}\\b')\n"
+        "RULE_SET = ('value.identifier_only.reference',)\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_the_seam_module_is_scanned_for_its_own_patterns():
+    """§12.2a's population must include the module that DECIDES to consult the gate.
+
+    ⛔ `tortoise/embeddings.py` imports `embed_gate`, so a walk of the GATE's own
+    imports can never enter it: an import makes the IMPORTER depend on the
+    IMPORTEE (Python Language Reference §5), and this edge runs the other way.
+    Excluding the seam on the grounds that "it is the CALLER, and it imports half
+    the tree" answers a question about its IMPORTS — not about its own
+    module-scope assignments, which is what this count exists to find.
+
+    Real tree, no monkeypatch: this is the pin that reds if `OWNERSHIP_ONLY` is
+    ever "tidied" away, which would silently re-open the hole below.
+    """
+    population = probe.predicate_population()
+    assert "tortoise/embeddings.py" in population, (
+        "the seam that decides whether the gate is consulted is not scanned for "
+        f"its own patterns — population: {population}"
+    )
+    # …and the widening must NOT drag in the imports it was excluded for:
+    assert "tortoise/api.py" not in population, population
+
+
+def test_a_function_local_pattern_is_not_a_second_predicate_owner(tmp_path, monkeypatch):
+    """A helper's LOCAL `re.compile` is not a second rule set — module scope is.
+
+    `count_embed_predicates`'s docstring has always said *`re.compile` at module
+    scope*, while the code ran `ast.walk()` over each top-level statement — which
+    descends into `FunctionDef.body`. One ordinary helper-local pattern in any
+    module of the population therefore read `count: 2 / verdict: DRIFT` and
+    reddened `test_the_embed_decision_has_exactly_one_predicate`, a required
+    `core` leg, on a change that is NOT drift: a guard that refutes a correct
+    tree, whose cheapest-looking repair is to delete it (review, P3).
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n"
+        "def identifier_only(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    # The shape a helper grows: compiled when CALLED, not when imported.
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "def _is_precomputed(text):\n"
+        "    import re\n"
+        "    pat = re.compile(r'^sha256:[0-9a-f]{64}$')\n"
+        "    return bool(pat.match(text))\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 1, (
+        f"a function-LOCAL pattern is not a module-scope predicate owner: {counted}")
+    assert counted["verdict"] == "MET", counted
+
+
+def test_a_class_level_pattern_still_counts_as_an_owner(tmp_path, monkeypatch):
+    """The module-scope prune must not become the false `MET` it guards against.
+
+    A class body executes at IMPORT time, so a pattern list there IS owned then
+    and is a real second rule set. Pruning function bodies must not take the
+    class with it — over-reporting drift is this file's stated safe direction,
+    and a false `MET` is the failure the whole instrument exists to remove.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "class _Skip:\n"
+        "    import re\n"
+        "    _PATS = [re.compile(r'^sha256:')]\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_a_pattern_list_in_the_seam_module_reads_as_drift(tmp_path, monkeypatch):
+    """A second rule set at the SEAM is the drift §12.2a forbids, and counts.
+
+    ⛔ Non-vacuity: on the pre-fix tool this tree reads `{"count": 1,
+    "verdict": "MET"}` — the seam is not in the population, so its pattern list
+    is invisible AND the writer map skips the same module, leaving this the only
+    detector for the shape. The module is written so it genuinely could not be
+    reached by walking the gate's imports: `embeddings.py` imports `embed_gate`,
+    never the reverse.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n", encoding="utf-8")
+    # The seam: it IMPORTS the gate (so no forward walk of the gate's imports can
+    # ever enter it) and owns a second, independently-derived rule set.
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "import re\nfrom . import embed_gate\n"
+        "_SKIP = re.compile(r'^sha256:[0-9a-f]{64}$')\n"
+        "def encode_for_row(t, d):\n"
+        "    if embed_gate.embed_gate_enabled():\n        return None\n"
+        "    return _SKIP.match(t)\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert "tortoise/embeddings.py" in counted["owners"], counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_an_unparseable_module_is_a_hole_in_the_predicate_count(
+        tmp_path, monkeypatch):
+    """A module the count cannot parse is a HOLE, never a silent zero.
+
+    The writer map already says so (`UNPARSEABLE:<path>` entries; the note "a
+    module that will not parse is a HOLE in the measurement, not a zero"). The
+    predicate count used to `continue` instead or report the hole, so a broken
+    `embed_rules.py` carrying a second pattern list left `count: 1 / MET` —
+    the one verdict this instrument exists to withhold.
+
+    ⛔ Non-vacuity: on the pre-fix tool `verdict` reads `"MET"` here.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nfrom . import embed_rules\n"
+        "RULE_SET = value_gate.RULES\n", encoding="utf-8")
+    # Reachable ONLY because the PARSEABLE importer names it: `_embed_path_modules`
+    # skips an unparseable file when building its edge map but keeps it in the
+    # population, which is exactly the reachable shape.
+    (tmp_path / "tortoise" / "embed_rules.py").write_text(
+        "import re\n_SKIP = re.compile(r'^sha256:')\ndef oops(:\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    # The primary claim first, so the pre-fix failure is the VERDICT (it reads
+    # `MET`), not merely the absent key: a hole cannot certify `MET`.
+    assert counted["verdict"] != "MET", counted
+    # `UNDETERMINED`, not `DRIFT`: a hole is not evidence of a second rule set
+    # either, and claiming one would be the same unfounded verdict inverted.
+    assert counted["verdict"] == "UNDETERMINED", counted
+    assert counted["unparseable"] == ["tortoise/embed_rules.py"], counted
 
 
 def test_the_instrument_is_selected_by_its_own_subjects():
