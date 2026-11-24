@@ -85,14 +85,19 @@ submission arm must speak first for a revert; the `async def` arm must only spea
 once submission and await hold (an `async def` that IS submitted and awaited still
 reaches it, so nothing is lost by the reorder).
 
-WHAT IS PINNED DIRECTLY, WITHOUT USING `hosted_api.py` AS THE FIXTURE. The two
-predicates the main test rests on — `_string_value`'s constant fold, and the shape
-set `_refers_to`/`_submitted_names` agree on — are ALSO graded on synthetic
-sources below. The shipped module uses only the bare-name spelling, so those arms
-were otherwise reachable only through it: reverting either predicate left the
-WHOLE SUITE GREEN (measured twice, review P2 at `4fd3fc8c` and again at
-`1d59c806` on `/tmp` copies). A gate whose only encoding of its own arm is prose
-is a habit, not a gate.
+WHAT IS PINNED DIRECTLY, WITHOUT USING `hosted_api.py` AS THE FIXTURE. The three
+predicates the main test rests on — `_string_value`'s constant fold, the shape set
+`_refers_to`/`_submitted_names` agree on, and `_statically_false`/`_dead_guards`
+(the dead-guard arm) — are ALSO graded on synthetic sources below. The shipped
+module uses only the bare-name spelling, carries no split spelling, no attribute
+submission for this owner, and no statically-false guard, so those arms were
+otherwise reachable only through it: reverting any of the three predicates left
+the WHOLE SUITE GREEN (measured twice for the first two, review P2 at `4fd3fc8c`
+and again at `1d59c806` on `/tmp` copies; re-measured for the third at
+`74e6a0f0`, where neutering `_statically_false` — or `_dead_guards` itself — still
+left `16 passed`). A gate whose only encoding of its own arm is prose is a habit,
+not a gate. `test_dead_guards_reports_only_the_guards_the_interpreter_skips`
+closes the third.
 
 WHAT IT DELIBERATELY DOES NOT PIN. The number of round trips per record. That
 number is a property of `record_projection.replay`'s plan and is measured (not
@@ -684,6 +689,19 @@ def _expr(source: str) -> ast.expr:
     return ast.parse(source, mode="eval").body
 
 
+def _call(tree: ast.Module, name: str) -> ast.Call:
+    """The single `name(...)` call node of a synthetic module."""
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    ]
+    assert len(calls) == 1, f"expected exactly one `{name}(...)` call, found {len(calls)}"
+    return calls[0]
+
+
 def _tree(lines: list[str]) -> ast.Module:
     """A synthetic module whose LINE NUMBERS are ``1..len(lines)``.
 
@@ -815,6 +833,80 @@ def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
     assert [
         node.lineno for node in ast.walk(tree) if _string_value(node) == "_stamp_chain"
     ] == [3]
+
+
+@pytest.mark.parametrize(
+    ("source", "folded"),
+    [
+        # ─── the interpreter folds these to a FALSE value: the body never runs ───
+        ("False", True),
+        ("0", True),
+        ('""', True),
+        ("not True", True),
+        ("True and False", True),
+        ("_flag and False", True),
+        ("False or False", True),
+        # ─── NOT statically false: the dead-guard arm must not claim them ───
+        ("True", False),
+        ("not _flag", False),
+        ("_flag", False),
+        ("True and _flag", False),
+        ("True or _flag", False),
+        # `1 == 2` is constant-false to a human and NOT folded here on purpose:
+        # `_statically_false` models only what the INTERPRETER folds, and its
+        # docstring says a `Compare` is out of scope.
+        ("1 == 2", False),
+    ],
+)
+def test_statically_false_folds_exactly_what_the_interpreter_folds(
+    source: str, folded: bool
+) -> None:
+    """`_statically_false` answers only what the INTERPRETER would fold away.
+
+    ⛔ THE THIRD PIN ON THE P2 AXIS (measured). The `dead_guards` arm reads this
+    predicate, and on the shipped module it passes VACUOUSLY — there is no
+    statically-false guard around the submission, so `_dead_guards` returns `[]`
+    and the arm never decides anything. Measured at `74e6a0f0`: with this predicate
+    neutered to `return False` the WHOLE SUITE still passed (`16 passed`), i.e. the
+    arm that exists to reject a "disabled" offload could itself be disabled and no
+    assertion noticed. Both directions are pinned above — a fold the interpreter
+    performs, and a run-time-constant guard it must NOT claim (claiming it would be
+    an over-block: a fixer told to delete a guard that is already correct).
+    """
+    assert _statically_false(_expr(source)) == folded
+
+
+def test_dead_guards_reports_only_the_guards_the_interpreter_skips() -> None:
+    """`_dead_guards` returns the enclosing folds-to-false guards — and not live ones.
+
+    The negative controls are the half that matters. A live guard (`if _flag:`) and
+    the `else` branch of a false one both RUN, so reporting either would be an
+    over-block. The `orelse` rule is the invariant `_dead_guards`' own docstring
+    states; it is encoded here rather than only described there.
+    """
+    dead = _tree([
+        "def f():",
+        "    if True and False:",
+        "        g()",
+    ])
+    assert _dead_guards(dead, _call(dead, "g")) == [(2, "True and False")]
+
+    live = _tree([
+        "def f():",
+        "    if _flag:",
+        "        g()",
+    ])
+    assert _dead_guards(live, _call(live, "g")) == []
+
+    # ⛔ the ELSE branch of a statically-false `if` is the branch that RUNS.
+    else_branch = _tree([
+        "def f():",
+        "    if False:",
+        "        pass",
+        "    else:",
+        "        g()",
+    ])
+    assert _dead_guards(else_branch, _call(else_branch, "g")) == []
 
 
 if __name__ == "__main__":  # pragma: no cover
