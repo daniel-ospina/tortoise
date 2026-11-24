@@ -3383,6 +3383,55 @@ def test_a_minted_submission_survives_its_own_recovery_scan_adopting_it():
         i.item_id for i in items]
 
 
+def test_a_read_fault_while_deciding_ownership_refuses_and_deletes_nothing():
+    """⛔ A FAULT IS "NOT PROVABLY OURS" — IT MUST NOT REACH THE ROLLBACK (round 22, MEDIUM).
+
+    The lost-create arm reads the row to decide whether it may take it over, and that
+    read sits inside `submit`'s `try`. `submit`'s `except Exception` does
+    `self._store.discard(org_id, bid)` + `_discard_staged(...)` — which deletes the
+    batch row, its item rows AND its staged bytes. When the read itself fails (graph
+    over budget, a broken socket) the call cannot know who owns the id, so rolling
+    back deletes a batch it may not own. Measured at `874bcd74`: `submit` raised
+    `RuntimeError` and the winner's row was GONE with its items; with only that hunk
+    guarded, `_BatchIdConflict` and the winner's row and items are intact.
+    """
+    class _FaultyReadStore(InMemoryBatchStore):
+        """The two id checks read free; the ownership read RAISES."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+            self.discarded: list[str] = []
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads <= 2:
+                return None            # `submit`'s check and `_submit_rows`' own
+            raise RuntimeError("graph over budget: the row could not be read")
+
+        def put_batch_if_absent(self, batch) -> bool:
+            return False               # a concurrent writer won the create
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _FaultyReadStore()
+    coord = BatchCoordinator(store)
+    # The EXCEPTION TYPE is not the point — the DELETION is. Asserted on the store, so
+    # this fails for the right reason whichever way the fault surfaces: without the
+    # guard the fault escapes into `submit`'s rollback, which discards the id.
+    with pytest.raises((ValueError, RuntimeError)):
+        # No inline contents: staging would fail first and never reach the arm.
+        coord.submit(ORG, ["/d/a.md"], batch_id="owned-by-someone-else")
+
+    assert store.discarded == [], (
+        "a READ FAULT was answered by discarding the batch id — the call could not "
+        f"know who owned it: {store.discarded}")
+    assert store.reads >= 3, (
+        f"the ownership read was never reached ({store.reads} reads)")
+
+
 def test_a_caller_supplied_id_that_was_adopted_is_still_a_conflict():
     """The takeover is scoped to MINTED ids — a caller's clash stays a refusal.
 
