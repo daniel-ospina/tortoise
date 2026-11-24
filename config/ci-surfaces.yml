@@ -74,8 +74,8 @@ version: 1
 # `2cccf90f4dd4` (this head's own fold, on top of the `#14472` merge base after the `#14419` B7 cut
 # took the durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool)
 # plus this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb
-# packs eight shards at 838.4 s (a, b, c, d, e, h, j, k) and three shards at 838.3 s (f, g, i), so
-# `ceil(838.4/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# packs six shards at 838.6 s (a, b, c, i, j, k) and five shards at 838.5 s (d, e, f, g, h), so
+# `ceil(838.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
@@ -136,13 +136,13 @@ version: 1
 # `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
 # #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
 # (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `2cccf90f4dd4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (g) and ten at
-# 838.2 s (a, b, c, d, e, f, h, i, j, k), so
-# `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
-# agree by construction rather than by a hand re-read.
+# MERGES INTO, never carried from the branch that first wrote it. ⛔ THE EMISSION IS STATED ONCE, in
+# the paragraph above, and this one deliberately restates NO partition and no minute: a second
+# `N shards at S.S s (names)` clause here is the `<est stated twice>` shape the guard reds on, and
+# a carried figure is exactly what the graded sentence further up exists to catch. (An earlier cut
+# of this spot stated its own partition attributed to `main` `2cccf90f4dd4`; it is DELETED rather
+# than re-pointed, because two spellings of one emission is the failure and re-pointing a duplicate
+# leaves the shape.)
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
 # this pool from 835.5 s to 838.1 s — so NO arithmetic on the minute can catch a carried figure;
