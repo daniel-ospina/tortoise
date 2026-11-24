@@ -22003,11 +22003,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # `_stamp_capture_provenance` call below appends ONE `PointRevised`
             # per id and then writes it, and each of those writes is a
             # synchronous `live_write.write` -> `record_writer.write_live_record`
-            # -> `record_projection.replay`: SEVEN blocking Postgres round trips
-            # PER RECORD (two tenant-prologue statements, the cursor-presence
-            # read, three plan statements, one commit), on whatever thread
-            # called it. Called inline, that thread was the single uvicorn
-            # worker's loop.
+            # -> `record_projection.replay`: blocking Postgres round trips PER
+            # RECORD (two tenant-prologue statements, the cursor-presence read,
+            # the plan's statements, one commit), on whatever thread called it.
+            # Called inline, that thread was the single uvicorn worker's loop.
+            # ⛔ THE COUNT IS SIX HERE, NOT SEVEN, because the stamp emits
+            # `PointRevised` and its plan is TWO statements (`UPDATE public.point`
+            # + the `journal_event` row); SEVEN is the `PointAdded` shape the
+            # diagnosis measured for the turn/mint writes, whose third plan
+            # statement is the `node_identity` insert. Measured through
+            # `record_projection.replay_plan` at this head:
+            # `PointRevised` -> 2 statements, `PointAdded` -> 3 (2 without the
+            # position row). So a stamp write is 2 + 1 + 2 executes + 1 commit
+            # = 6 round trips; the turn write is 7.
             #
             # MEASURED (issue #13722, `/health` -> `loop_blocks`, the loop
             # thread's own stack, innermost LAST):
@@ -22017,10 +22025,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             #
             # with `loop_blocks.max_age_s` 53.041 against `wait_bound_breaches`
             # 107, and `workload_in_flight` observed 19-32. The arithmetic that
-            # closes it: 53.041 s / (7 x round-trip latency) = 31.5 records at
-            # the 240.7 ms latency measured 45 s before that sample — the wedge
-            # is the IN-FLIGHT POPULATION, i.e. the stamp chain of one capture,
-            # not a hidden blocker.
+            # closes it: 53.041 s / (N x round-trip latency) gives 1647 / 49.7 /
+            # 31.5 records at N = 7 and the 4.6 / 152.5 / 240.7 ms latencies
+            # measured 45 s apart, or 1921 / 58 / 36.7 at N = 6 — i.e. at the
+            # worst latency the wedge is a few dozen records, the order of the
+            # in-flight population itself, so it is the stamp chains of the
+            # captures in flight rather than a hidden blocker. The count is
+            # quoted per record TYPE rather than rounded to one number: the
+            # arithmetic is only honest at the shape the caller actually writes.
             #
             # ⛔ ONLY WHERE IT RUNS CHANGES. The records, their order and their
             # content are untouched (#13722's hard scope: a cost fix, not a

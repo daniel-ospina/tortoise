@@ -166,26 +166,31 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     handler relies on.
     """
     tree = _module()
-    handler = _find_function(tree, _HANDLER)
-    calls = _stamp_calls(handler)
+    # ⛔ MODULE-WIDE ON PURPOSE (review cycle 4, P2): the walk used to start at
+    # `_HANDLER` while the header claimed every stamp call in `hosted_api`, so a
+    # stamp appended to any OTHER function of this module was never looked at and
+    # the stated population was wider than the measured one (a `/tmp` mutant that
+    # added an inline stamp elsewhere stayed green). All four calls live in the
+    # handler today; the scan does not assume it.
+    calls = _stamp_calls(tree)
     assert calls, (
-        f"{_HANDLER} no longer calls {_STAMP_DOOR} — if the stamp chain moved, "
-        "this pin must move with it rather than be deleted (#13722)")
+        f"{HOSTED_API.name} no longer calls {_STAMP_DOOR} — if the stamp chain "
+        "moved, this pin must move with it rather than be deleted (#13722)")
 
     owners = set()
     for call in calls:
-        chain = _enclosing_functions(handler, call)
+        chain = _enclosing_functions(tree, call)
         # ⛔ A clean failure, not an `IndexError` (review residual 2): a stamp call
-        # reachable directly in the handler's own body leaves no enclosing function
-        # to submit, so `chain[-2]` used to raise before any assertion could name the
-        # reason. Still RED either way; this only makes the message the useful one.
+        # reachable outside any function leaves no enclosing function to submit,
+        # so `chain[-2]` would raise before any assertion could name the reason.
+        # Still RED either way; this only makes the message the useful one.
         assert len(chain) >= 2, (
-            f"{_STAMP_DOOR} is called directly in {_HANDLER}'s own body, so there is "
-            f"no enclosing function to submit to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
+            f"{_STAMP_DOOR} is called outside any function of {HOSTED_API.name}, so "
+            f"there is no enclosing function to submit to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
             "the chain would run on the event loop, which is the #13722 wedge. Move "
             "it into a sync `def` and submit that.")
         owners.add(chain[-2])
-    submissions = _off_loop_submissions(handler)
+    submissions = _off_loop_submissions(tree)
     submitted = {(pool, fn) for _line, pool, fn, _aw in submissions}
     awaited = {(pool, fn) for _line, pool, fn, aw in submissions if aw}
 
@@ -197,7 +202,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # record, no append, no warning, and every assertion below still passes.
     async_owners = {
         node.name
-        for node in ast.walk(handler)
+        for node in ast.walk(tree)
         if isinstance(node, ast.AsyncFunctionDef) and node.name in owners
     }
     assert not async_owners, (
@@ -208,10 +213,12 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
 
     for owner in sorted(owners):
         assert (_OFF_LOOP_POOL, owner) in submitted, (
-            f"{_STAMP_DOOR} is called from {owner!r}, which "
-            f"{_HANDLER} never submits to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
-            "so its per-id record writes (7 blocking Postgres round trips "
-            "each) run on the event loop, which is the 53 s `loop_blocks` "
+            f"{_STAMP_DOOR} is called from {owner!r}, which no function of "
+            f"{HOSTED_API.name} ever submits to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
+            "so its per-id record writes (two prologue statements, the "
+            "cursor-presence read, two plan statements and one commit = SIX "
+            "blocking Postgres round trips for a `PointRevised`) run on the "
+            "event loop, which is the 53 s `loop_blocks` "
             f"wedge #13722 exists to remove. Submissions found: {submissions}")
         assert (_OFF_LOOP_POOL, owner) in awaited, (
             f"{_HANDLER} submits {owner!r} to {_OFF_LOOP} but never awaits the "
