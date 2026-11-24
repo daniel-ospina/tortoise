@@ -192,6 +192,16 @@ are re-staged on **every** run — `TORTOISE_GIT_SHA` from non-secret context
 GitHub secret when one is present, else the versioned default (§4.6) — so a
 Fly-only value for any of them is reverted by the next deploy exactly like a
 `gh-secret:` one.
+`TORTOISE_CAPTURE_IN_FLIGHT` (#12992) is a **fourth**, and the one an operator is
+most likely to have set by hand: it is staged unconditionally from its versioned
+default `16` (`deploy-hosted.yml`, next to `TORTOISE_GIT_DIRTY`), so
+`flyctl secrets set TORTOISE_CAPTURE_IN_FLIGHT=<n>` is overwritten by the next
+deploy. **Change the number in the workflow, not on the app** — a hand-set value
+is exactly the state that reds the provenance gate until it is declared, which
+is how every hosted deploy that REACHED the gate was blocked from
+2026-11-21T21:34Z (one run died earlier at `packaging-smoke`, so it never got
+there, and two were cancelled) — the gate was still refusing at the last
+measurement (2026-11-24T00:39Z).
 `BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
 the whole backup/R2/DR secret set is present, and otherwise the assignment is
 skipped and any Fly-side value is left as it was (the fail-closed default —
@@ -977,7 +987,7 @@ one session were refused on an idle-looking box, and the investigation into them
 The body carries
 
 ```json
-"capture": {"in_flight": 0, "max_in_flight": 8, "workers": 4, "capacity_refused_total": 0,
+"capture": {"in_flight": 0, "max_in_flight": 16, "workers": 4, "capacity_refused_total": 0,
             "last_refused_at": null, "refusing": false, "refusal_window_s": 300.0,
             "code": "capture_capacity_saturated", "retry_after": 30, "error": null}
 ```
@@ -996,10 +1006,19 @@ Four properties, because each is a different misread:
   questions). `refusing` is true only when the last CAPACITY refusal is within `refusal_window_s`
   (300 s — 10× the advertised `Retry-After`). Reading the cumulative total as "the gate is refusing"
   is the forever-red failure #10185 forbids. Sample twice for a rate.
-- **`workers` is NOT `max_in_flight`.** The gate ADMITS 8 (a process-global int,
-  `TORTOISE_CAPTURE_IN_FLIGHT`, clamped `[1, 16]`) while the pool RUNS 4
-  (`TORTOISE_CAPTURE_WORKERS`, clamped `[1, 8]`), so up to four admitted captures hold their slots
-  while queued behind running extractions. `8 slots` does not mean eight extractions at once.
+- **`workers` is NOT `max_in_flight`.** The gate ADMITS **16** on the hosted app
+  (`TORTOISE_CAPTURE_IN_FLIGHT`, a process-global int that defaults to 8, is
+  clamped `[1, 16]`, and is staged at `16` by `deploy-hosted.yml` — #12992)
+  while the pool RUNS 4 (`TORTOISE_CAPTURE_WORKERS`, clamped `[1, 8]`). Admission
+  is a SLOT counter, released only when the extraction ends — not a worker slot —
+  so on the hosted app up to **twelve** admitted captures can be holding slots
+  queued behind the four running ones (`16 − 4`). `16 slots` does not mean
+  sixteen extractions at once, and it does not mean four are waiting: it is
+  twelve. `8` and `4` above are the CODE defaults, not a pinned contract:
+  `tests/test_12992_capture_capacity_typed_refusal.py` pins the SEPARATION (a
+  reader who saw only `max_in_flight` would overcount) with the ceiling
+  monkeypatched, never the defaults; the app reads the staged 16, which is also
+  the clamp ceiling.
 - **A slot outlives the request.** The transport wait bound is 10 s, and a capture that breaches it
   is abandoned by the CLIENT while its worker keeps the slot until the extraction ends (up to ~800 s
   at a 16K budget). So a steady `in_flight` with a low arrival rate is the signature of long

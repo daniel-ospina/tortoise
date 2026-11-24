@@ -1,0 +1,132 @@
+{
+  "corpus": {
+    "copied_entries": 265,
+    "source_before": {
+      "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+      "bytes": 1683451,
+      "entries_meta": 265,
+      "entries_turns": 265,
+      "files": 530
+    }
+  },
+  "graph_after_pass_1": {
+    "capture_ok_true": 0,
+    "entities": 0,
+    "extracted_points": 0,
+    "phase_in_flight": 0,
+    "sessions": 214,
+    "turn_points": 1164
+  },
+  "graph_after_pass_2": {
+    "capture_ok_true": 0,
+    "entities": 0,
+    "extracted_points": 0,
+    "phase_in_flight": 0,
+    "sessions": 214,
+    "turn_points": 1164
+  },
+  "graph_settled": {
+    "capture_ok_true": 0,
+    "entities": 0,
+    "extracted_points": 0,
+    "phase_in_flight": 0,
+    "sessions": 214,
+    "turn_points": 1164
+  },
+  "invariant_source_untouched": true,
+  "mode": "head-keyless",
+  "observations": {
+    "ack_ms_max": 1024.8,
+    "ack_ms_p50": 330.7,
+    "ack_ms_p95": 411.5,
+    "posts": 264,
+    "posts_per_min": 124.3,
+    "rate_limited": 50,
+    "refusal_bodies": [
+      {
+        "body": "{\"detail\":\"Rate limit exceeded. 100 points/minute per API key.\"}",
+        "status": 429
+      },
+      {
+        "body": "{\"detail\":\"Rate limit exceeded. 100 points/minute per API key.\"}",
+        "status": 429
+      },
+      {
+        "body": "{\"detail\":\"Rate limit exceeded. 100 points/minute per API key.\"}",
+        "status": 429
+      },
+      {
+        "body": "{\"detail\":\"Rate limit exceeded. 100 points/minute per API key.\"}",
+        "status": 429
+      },
+      {
+        "body": "{\"detail\":\"Rate limit exceeded. 100 points/minute per API key.\"}",
+        "status": 429
+      }
+    ],
+    "stage_strings": [],
+    "status_counts": {
+      "200": 214,
+      "429": 50
+    }
+  },
+  "passes": [
+    {
+      "exit": 0,
+      "label": "drain-1",
+      "seconds": 128.95,
+      "stderr": "spool drain: cleared terminal state on 0 entries \u2014 retrying\nspool drain: filed 214, deferred 50, skipped 1 (0 waiting on backoff), held back 0, probe refusals 0, terminal 0 (kept, not retried; re-file with 'tortoise session drain --retry-terminal'), discarded 0\n",
+      "stdout": ""
+    },
+    {
+      "exit": 0,
+      "label": "drain-2 (replay)",
+      "seconds": 0.21,
+      "stderr": "spool drain: cleared terminal state on 0 entries \u2014 retrying\nspool drain: filed 0, deferred 0, skipped 265 (50 waiting on backoff), held back 0, probe refusals 0, terminal 0 (kept, not retried; re-file with 'tortoise session drain --retry-terminal'), discarded 0\n",
+      "stdout": ""
+    }
+  ],
+  "settle": {
+    "capture_ok_true": 0,
+    "entities": 0,
+    "extracted_points": 0,
+    "phase_in_flight": 0,
+    "reached_zero": true,
+    "seconds": 0.0,
+    "sessions": 214,
+    "turn_points": 1164
+  },
+  "source_after": {
+    "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+    "bytes": 1683451,
+    "entries_meta": 265,
+    "entries_turns": 265,
+    "files": 530
+  },
+  "spool_after_pass_1": {
+    "attempts_gt_0": 50,
+    "attempts_max": 11,
+    "attempts_min": 0,
+    "attempts_p50": 0,
+    "backoff_max_seconds": 21471.0,
+    "backoff_p50_seconds": 21471.0,
+    "backoff_waiting": 50,
+    "entries": 265,
+    "filed_key_present": 215,
+    "terminal_failure": 0,
+    "terminal_reasons": {}
+  },
+  "spool_after_pass_2": {
+    "attempts_gt_0": 50,
+    "attempts_max": 11,
+    "attempts_min": 0,
+    "attempts_p50": 0,
+    "backoff_max_seconds": 21471.0,
+    "backoff_p50_seconds": 21471.0,
+    "backoff_waiting": 50,
+    "entries": 265,
+    "filed_key_present": 215,
+    "terminal_failure": 0,
+    "terminal_reasons": {}
+  }
+}
