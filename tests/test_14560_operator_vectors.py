@@ -275,11 +275,11 @@ def test_a_TRIVIAL_verdict_cannot_license_the_restore_drop(monkeypatch):
     a count that compared two zeroes must not license the drop: that door now asks
     with ``require_substantive=True``.
 
-    Both directions are driven — a NON-trivial verified verdict still stops the
-    writer (so this is not an always-keep stub), a trivial one keeps the copy — and
-    the plain `mirror_required` answer is asserted to be ``False`` in both, which is
-    the issue's own acceptance condition and the reason the keyword could not simply
-    be the default.
+    Both directions are driven — a NON-trivial verified verdict still answers stop (so
+    this is not an always-keep stub; asserted on `:Object`, whose drop is NOT held),
+    a trivial one keeps the copy — and the plain `mirror_required` answer is asserted
+    to be ``False`` in both, which is the issue's own acceptance condition and the
+    reason the keyword could not simply be the default.
     """
     from tortoise.hosted_backup import _restore_retires_vector
     from tortoise.record_writer import use_record_tenant
@@ -292,7 +292,7 @@ def test_a_TRIVIAL_verdict_cannot_license_the_restore_drop(monkeypatch):
             monkeypatch.setattr(record_vector, "_record_vector_count",
                                 lambda *a, **k: record, raising=True)
             record_vector.reset_coverage_cache()
-            for entity_type in ("point", "operator"):
+            for entity_type in ("point", "operator", "object"):
                 verdict = record_vector.coverage(
                     entity_type, record_vector._Scope(*scope), graph_vectors=graph)
                 assert verdict.verified is True, verdict.as_dict()
@@ -310,15 +310,64 @@ def test_a_TRIVIAL_verdict_cannot_license_the_restore_drop(monkeypatch):
             assert _restore_retires_vector(["Point"]) is False, (
                 "the DR restore would drop a `:Point` vector on a vacuous count; that "
                 "vector has no other copy and `#5004` forbids re-encoding it")
+            assert _restore_retires_vector(["Object"]) is False, (
+                "the `require_substantive` rule is `:Point`-specific above only in "
+                "WHERE it is hit; a vacuous `:Object` count may not license a drop "
+                "either")
 
-            # (2) SUBSTANTIVE: the same answer minus the vacuity keeps the door open,
-            # which is what makes (1) a rule rather than an always-keep stub.
+            # (2) SUBSTANTIVE: the same answer minus the vacuity stops the writer for
+            # the labels the door may still act on — which is what makes (1) a rule
+            # rather than an always-keep stub.
             _seat(2, 2)
             assert record_vector.mirror_required("operator") is False
             assert record_vector.mirror_required(
                 "operator", require_substantive=True) is False
-            assert _restore_retires_vector(["Point"]) is True, (
-                "a substantively verified `:Point` pair no longer retires the restored "
-                "vector — the restore door was closed, not taught to ask")
+            assert _restore_retires_vector(["Object"]) is True, (
+                "a substantively verified pair no longer retires the restored vector "
+                "— the restore door was closed, not taught to ask")
+            assert _restore_retires_vector(["Point"]) is False, (
+                "`#14560` review F5: `:Point`'s drop is HELD until `#13971`'s per-ID "
+                "ask lands — an aggregate count is not evidence about the row a "
+                "restore would delete")
         finally:
             record_vector.reset_coverage_cache()
+
+
+def test_the_Point_restore_drop_is_HELD_until_the_per_id_ask_lands(monkeypatch):
+    """⛔ F5: the door `require_substantive` does NOT close, and why it is held shut.
+
+    `require_substantive` refuses a VACUOUS aggregate. The aggregate that is merely
+    SUFFICIENT is still an aggregate, and before `#14560` it could never reach `:Point`
+    (the `operator` conjunct counted a different population, so it was never stop).
+    Now it can — so `:Point`, the label whose ~39.6k vectors are the reason this gate
+    exists, would begin retiring restored vectors on evidence that says nothing about
+    the ROW being deleted, while `#5004` forbids re-encoding what is dropped and the
+    per-ID ask that WOULD be evidence is `#13971`'s outstanding work.
+
+    Pinned in both directions on the ONE declaration that says so: the hold is in
+    force, AND `:Point` is still a gated label (so `#13971`'s gating and the strip's
+    writer census are untouched). Mutating `_RESTORE_DROP_HELD` in either direction
+    reds an arm here.
+    """
+    from tortoise import hosted_backup
+
+    assert "Point" in hosted_backup._RESTORE_DROP_HELD, (
+        "the hold was lifted without `#13971`'s per-ID ask — a restored `:Point` vector "
+        "would now be dropped on an AGGREGATE count, and `#5004` forbids re-encoding it")
+    assert "Point" in hosted_backup._GATED_RESTORE_LABELS, (
+        "lifting the hold must not un-gate the label: the strip's writer census asks "
+        "that set, so a `:Point` removed from it is an ungated writer again")
+
+    # The hold is not a no-op on the decision: a node whose ONLY gated label is `:Point`
+    # keeps its vector even when the label asks stop, while a non-held gated label in the
+    # same position retires — so the arm is a hold, not a blanket refusal.
+    monkeypatch.setattr(hosted_backup, "_GATED_RESTORE_LABELS", ("Point",))
+    assert hosted_backup._restore_retires_vector(["Point"]) is False
+
+    monkeypatch.setattr(hosted_backup, "_GATED_RESTORE_LABELS", ("Object",))
+    monkeypatch.setattr(
+        "tortoise.projection.entities._derived_mirror_required",
+        lambda entity_type, **kw: False, raising=True)
+    assert hosted_backup._restore_retires_vector(["Object"]) is True, (
+        "the same shape with a NON-held label must still retire — otherwise the hold "
+        "above is indistinguishable from a broken decision")
