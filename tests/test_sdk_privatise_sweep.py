@@ -257,11 +257,11 @@ def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
     ⛔ ITS EXTENT IS THE ENTIRE RUN (2326 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED AGAIN on THIS fold, which merged `main` `e216ca91b07` into the `#14560`
-    branch and so united both sides' blocks: `main`'s own run read `2294` here and this branch's
-    read `2227` (the two numerals the two sides of that resolution stated, kept as the records they
-    are), and the figure above is RE-MEASURED by THIS walk on the RESOLVED file rather than
-    adjusted by arithmetic on either side's reading — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
+    walk — ⛔ RE-WALKED AGAIN on THIS fold, which both merged `main` `e216ca91b07` into the `#14560`
+    branch AND folded the peer lane's own record in, so it united every side's block: `main`'s run
+    read `2294`, this branch's `2227`, and the peer's fold restored yet another — the numerals are
+    kept as the records they are, and the figure above is RE-MEASURED by THIS walk on the RESOLVED
+    file rather than adjusted by arithmetic on any side's reading — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
     the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base

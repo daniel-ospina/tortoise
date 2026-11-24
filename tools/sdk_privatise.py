@@ -2410,25 +2410,25 @@ SWEEP_NAMES = 66
 #: this module's own `edits_for` on the RESOLVED merge tree: `main` (`10f0107689b9`) had already
 #: re-pinned 11903 -> **11913** (the `#14544` cut's -7 is the block above; the later folds' +10 are
 #: `main`'s own, and this module's history records each), and this PR adds exactly **three** untyped
-#: `.query` receivers:
+#: receivers:
 #:   * `tests/test_14560_operator_vectors.py:118` — `whole = g.query(...)`
 #:   * `tests/test_14560_operator_vectors.py:120` — `kinded = g.query(...)`
 #:   * `tests/test_13826_write_gate.py` — `proj.g.query("MATCH (n) DETACH DELETE n")` (the F5
 #:     arms' fixture, added when `:Point`'s restore drop was held)
 #: all three on the projection's own handle (`g = sdk._get_proj().g`, `proj.g`), which is exactly
-#: the untyped shape a typed-reference count cannot see and is deliberate here (these cases MEASURE
-#: the graph the production path writes). 11913 + 3 = 11916, the digest moved with the count, and no
-#: other file in the PR touches a `.query`/`.update`/`.delete` receiver: `--repin` on this tree
-#: prints **(11916, "f75238ea321ee918")** and `--check` exits 0 on it. ⚠️ Without the re-pin,
-#: `surface-guard` reds where it is green on `main` — measured (`observed: (11916, ...)` /
+#: the untyped shape a typed-reference count cannot see and was deliberate there (these cases
+#: MEASURE the graph the production path writes). 11913 + 3 = 11916, the digest moved with the
+#: count, and no other file in the PR touches a `.query`/`.update`/`.delete` receiver: `--repin` on
+#: that tree printed **(11916, "f75238ea321ee918")** and `--check` exited 0 on it. ⚠️ Without the
+#: re-pin, `surface-guard` reds where it is green on `main` — measured (`observed: (11916, ...)` /
 #: `pinned: (11913, ...)`), and it is a code-measuring check the land rail refuses to merge red.
-#: ⛔ THEN ALL THREE WERE REMOVED, NOT RE-PINNED, WHEN THE PAIR BECAME A RATCHET. The re-pin above
-#: was measured against a tree where this arm still GATED on the recorded pair; `main` has since
-#: replaced that with the baseline reconstructed at check time ("there is no pin to re-cut"), and
-#: against the ratchet the sanctioned repair is "type the receiver, or convert the call". So:
-#:   * `tests/test_14560_operator_vectors.py` now reads its census through the projection's own
-#:     `_label_vector_count` door instead of two raw `.g.query` receivers, and its POPULATION
-#:     claim rests on the per-node read-back and the journal snapshot / INSERT column list;
+#: ⛔ THEN ALL THREE WERE REMOVED, AND THE PIN WENT WITH THEM, WHEN THE PAIR BECAME A RATCHET.
+#: `main` replaced the recorded-pair equality with a baseline reconstructed at check time ("there is
+#: no pin to re-cut"), and against the ratchet the sanctioned repair is "type the receiver, or
+#: convert the call" — a re-pin no longer clears growth. So:
+#:   * `tests/test_14560_operator_vectors.py` censuses the graph with the handle's own `ro_query`
+#:     instead of `query` — the statement is a READ and says so, and the count stays INDEPENDENT of
+#:     `_label_vector_count`, which is the production door those tests grade;
 #:   * `tests/test_13826_write_gate.py`'s hold arm became `test_the_Point_restore_drop_is_HELD`,
 #:     which takes a FRESH graph from its fixture rather than wiping one it inherited.
 #: Naming an untyped handle `sdk_g` would have satisfied this sweep's spelling heuristic and then
@@ -2436,7 +2436,7 @@ SWEEP_NAMES = 66
 #: handle and not the SDK, which is why the receivers were converted instead. This tree therefore
 #: adds NO untyped receiver: `--check` reports the count EQUAL to the baseline, and the pair below
 #: is re-cut to the tree's own reading so the record and the measurement agree.
-SWEEP_RESIDUE = (11913, "4953069e1b2ae57c")
+SWEEP_RESIDUE = (11912, "68d06e179e3a6d9e")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
