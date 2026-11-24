@@ -11211,6 +11211,16 @@ ROWED_BY_THIS_FOLD = (
     # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed
     # has no `durations:` row and nothing reds.
     "test_13685_entity_vector_backfill.py",
+    # #14552 — the PER-ID record ask behind the `:Point` strip
+    # (`record_read.point_vector_keys` + `projection._record_point_vector_keys`), the read
+    # that lets the pass-1b snapshot restore ask `mirror_required("point")` about an ID the
+    # record actually answers instead of about a label aggregate. A file this fold ADDED
+    # and registered on `core` (via `tools/ci_selection.py --register`) because its subjects
+    # — `tortoise/record_read.py` and `tortoise/projection/` — match no narrower surface, so
+    # a module-only diff would collect it nowhere else. Listed here for the reason every row
+    # above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed
+    # has no `durations:` row and nothing reds.
+    "test_record_read_point_vector_keys.py",
     # #13665 — the Sentry STARTUP seam. A file this fold ADDED, registered on `api`
     # because the behaviour it pins is a call made from `_lifespan` in
     # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES the

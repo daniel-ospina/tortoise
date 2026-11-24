@@ -3359,6 +3359,51 @@ def _write_capture_turns(
     if not _writable_id(session_id):
         _log_identity_skip("capture turn batch", session_id, "session id")
         return 0
+    # ── WHICH STORE HOLDS THE TURNS (#10000) ──────────────────────────────
+    # A CAPABILITY question, never a policy flag (§9.1/D1 puts the transcript in
+    # Postgres; this asks only whether Postgres can hold it right now). Two
+    # halves, and the SECOND one is what the review's P0 was about:
+    #
+    #   1. BEFORE the write: `record_writer.record_holds_turns` — the write
+    #      door's OWN predicate (armed DSN + durable journal + a tenant + a
+    #      closed connect breaker). The record path then SKIPS the graph write
+    #      entirely (the `if not _record_first` batch below), so there is no node
+    #      read-back to learn `createdAt`/`status`/`vector` from: those come from
+    #      the record's PRIOR row instead (`_record_prior_vectors`), which is
+    #      what the journal must carry for a replay to leave the record alone.
+    #      The graph path is the one that writes first and reads back.
+    #   2. AFTER the write: the outcome each emit actually reported. A record
+    #      write can still be REFUSED after the preflight approved it — the
+    #      database went unreachable mid-capture, the breaker tripped on it, the
+    #      fold refused the record — and those turns are then in NO store. So
+    #      every turn whose record write did not LAND is written to the graph
+    #      below, per turn.
+    #
+    # ⛔ A DECISION MADE BEFORE THE WRITE IS NOT A DECISION. Gating only on
+    # journal+DSN (what this code did) meant an armed deployment whose record
+    # write declines wrote the transcript to NO store while the capture returned
+    # success — the one outcome this change may not have.
+    #
+    # Removing the graph write unconditionally would do the same on an UNARMED
+    # deployment, so the graph path is not transitional scaffolding: it is the
+    # store of every lane where the record cannot hold the turns, and it stays
+    # until the record can carry them everywhere.
+    #
+    # ⛔ IT IS COMPUTED HERE, BEFORE THE ROW LOOP, because `#14552` made it part of
+    # the VECTOR decision as well as the store decision: a row's vector is only a
+    # mirror when this predicate says the record holds the turn (`turn_rows` below).
+    # The reads the later blocks add (`_record_prior_vectors`, the residue sweep) are
+    # untouched by the move — the predicate itself touches no store.
+    from tortoise.record_writer import record_holds_turns
+    _log = sdk._get_event_log()
+    # DURABILITY IS READ, not assumed — the same value `_emit_event` hands
+    # `write_live_record` (a scratch buffer is not a journal, so the record
+    # declines it, so it cannot hold the turns).
+    _journal_configured = _log is not None
+    _record_first = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None))
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
     else:
@@ -3400,30 +3445,50 @@ def _write_capture_turns(
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
-        # ⛔ `#13971` (review P1, corrected): THIS WRITER DOES **NOT** ASK THE GATE, and that is a
-        # correction rather than an omission. `#13971`'s first cut blanked `emb` when the
-        # label's coverage verdict answered "stop", on the premise that "the graph copy of a
-        # turn's vector is a MIRROR, not the store". That premise is FALSE on every lane where
-        # this batch statement actually runs:
+        # ⛔ `#13971` (review P1) WAS RIGHT THAT THE **LABEL AGGREGATE** CANNOT BLANK THIS
+        # ROW, AND `#14552` KEEPS THAT FINDING WHILE CLOSING THE GATE. `#13971`'s first cut
+        # blanked `emb` when the label's coverage verdict answered "stop", on the premise
+        # that "the graph copy of a turn's vector is a MIRROR, not the store". That premise
+        # is FALSE on every lane where this batch statement actually runs:
         #
         #   * `_record_first` False (no journal, a scratch buffer, no tenant, or the record's
         #     connect breaker open) — this batch write IS the store, so the vector must go with
-        #     the turn;
-        #   * a turn the record REFUSED after the preflight approved it — see the fallback arm
-        #     below, which now re-attaches the vector for exactly those turns.
+        #     the turn. That is the `else` arm below, and it writes the vector whatever the
+        #     gate says;
+        #   * a turn the record REFUSED after the preflight approved it — the fallback write
+        #     further down RE-ATTACHES the vector for exactly those turns (`_unrecorded`), so
+        #     the redundancy decision below can never strand one.
         #
-        # The verdict it was gated on is also the wrong SHAPE for this writer:
-        # `record_vector.coverage` is `record_vectors >= graph_vectors` over a LABEL, and a
-        # label-level aggregate cannot say "the record holds THIS turn" — which is the only
-        # question that would make the graph copy redundant. Blanking on it wrote the turn's
-        # vector to NEITHER store on those lanes, and `#5004` forbids re-encoding while the
-        # journal heals only on a replay that may never come.
+        # ⛔ SO THE QUESTION IS ASKED PER TURN, ON THE ONLY LANE WHERE IT CAN BE ANSWERED:
+        # the record is expected to hold this capture's turns (`_record_first`), so the graph
+        # copy is a MIRROR — and `record_vector.mirror_required` is exactly the predicate that
+        # decides whether the graph is still a leg that serves a `:Point` vector (`#13610`, and
+        # the same ask `sdk::_update_entity` makes). While it answers KEEP (an unarmed
+        # deployment, or coverage the record has not proved) every row keeps its vector; once
+        # it answers STOP the redundant copy is not written, and a turn the record then
+        # refuses gets it back from `_unrecorded` below.
         #
-        # ⚠️ THE CONSEQUENCE IS STATED, NOT HIDDEN: the strip's writer census now reports
-        # `sdk::_write_capture_turns` as a writer that does not ask
-        # (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`), so the plan REFUSES
-        # `:Point` until the capture path can answer per-turn. That is the honest state: a strip
-        # the operator cannot run yet is cheap, a capture that drops the only copy is not.
+        # ⚠️ THAT ELSE-ARM RE-ATTACH IS WHY THE BLANK IS CURRENTLY UNOBSERVABLE, and saying so
+        # is the honest half (`#14552` review, P2). On the `_record_first` lane the graph batch
+        # does not run at all, so `turn_rows[*]["emb"]` has exactly two consumers: the batch (not
+        # taken here) and the `_unrecorded` rescue, which re-attaches `turn_embs[_i]` whenever
+        # the blanked None would otherwise reach it. So this ask CANNOT remove a vector from any
+        # store today — the sole-copy guarantee is the DISPATCH (`if not _record_first` plus the
+        # rescue's unconditional re-attach), pinned by
+        # `tests/test_10000_turns_record_only.py::
+        # test_a_refused_record_write_falls_back_to_the_graph_WITH_its_vector` and
+        # `...::test_the_graph_store_lane_keeps_the_turn_VECTOR`. What the ask buys is that the
+        # mirror decision is made per turn at the site that writes the turn, so a future change
+        # that made the batch run on a record-holding lane cannot resurrect the mirror — and it
+        # is what `tools/strip_graph_entity_vectors.py`'s census can SEE (its stated residual 1:
+        # "two write sites, one guarded"; the unguarded site is the SOLE-COPY site and must
+        # store).
+        embedding = None
+        if _record_first:
+            if _derived_mirror_required("point"):
+                embedding = turn_embs[i]
+        else:
+            embedding = turn_embs[i]
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
@@ -3440,7 +3505,7 @@ def _write_capture_turns(
             "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
-            "emb": turn_embs[i],
+            "emb": embedding,
         })
 
     # #7405 (audit G8): the batched turn store rides the SAME bounded write
@@ -3453,45 +3518,11 @@ def _write_capture_turns(
     # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
-    # ── WHICH STORE HOLDS THE TURNS (#10000) ──────────────────────────────
-    # A CAPABILITY question, never a policy flag (§9.1/D1 puts the transcript in
-    # Postgres; this asks only whether Postgres can hold it right now). Two
-    # halves, and the SECOND one is what the review's P0 was about:
-    #
-    #   1. BEFORE the write: `record_writer.record_holds_turns` — the write
-    #      door's OWN predicate (armed DSN + durable journal + a tenant + a
-    #      closed connect breaker). The record path then SKIPS the graph write
-    #      entirely (the `if not _record_first` batch below), so there is no node
-    #      read-back to learn `createdAt`/`status`/`vector` from: those come from
-    #      the record's PRIOR row instead (`_record_prior_vectors`), which is
-    #      what the journal must carry for a replay to leave the record alone.
-    #      The graph path is the one that writes first and reads back.
-    #   2. AFTER the write: the outcome each emit actually reported. A record
-    #      write can still be REFUSED after the preflight approved it — the
-    #      database went unreachable mid-capture, the breaker tripped on it, the
-    #      fold refused the record — and those turns are then in NO store. So
-    #      every turn whose record write did not LAND is written to the graph
-    #      below, per turn.
-    #
-    # ⛔ A DECISION MADE BEFORE THE WRITE IS NOT A DECISION. Gating only on
-    # journal+DSN (what this code did) meant an armed deployment whose record
-    # write declines wrote the transcript to NO store while the capture returned
-    # success — the one outcome this change may not have.
-    #
-    # Removing the graph write unconditionally would do the same on an UNARMED
-    # deployment, so the graph path is not transitional scaffolding: it is the
-    # store of every lane where the record cannot hold the turns, and it stays
-    # until the record can carry them everywhere.
-    from tortoise.record_writer import record_holds_turns
-    _log = sdk._get_event_log()
-    # DURABILITY IS READ, not assumed — the same value `_emit_event` hands
-    # `write_live_record` (a scratch buffer is not a journal, so the record
-    # declines it, so it cannot hold the turns).
-    _journal_configured = _log is not None
-    _record_first = record_holds_turns(
-        journal_configured=_journal_configured,
-        durable=_journal_configured and getattr(_log, "durable", True),
-        tenant=getattr(sdk, "_record_tenant", None))
+    # ── WHICH STORE HOLDS THE TURNS: THE STORE HALF IS DECIDED ABOVE ─────
+    # `_record_first` (with its full rationale and its "a decision made before
+    # the write is not a decision" rule) is computed before the row loop since
+    # `#14552`, because the VECTOR half is decided there too. The `if not
+    # _record_first` batch below is still the arm where the graph is the store.
     stored: dict[str, tuple] = {}
     #: turn ids whose RECORD row holds an enriched text that THIS capture does
     #: not write (`enrich_on` is False). Filled once the prior rows are read,
@@ -4058,12 +4089,13 @@ def _write_capture_turns(
                        if not _landed(_record_outcome.get(_row["id"]))]
         if _unrecorded:
             # ⛔ THESE TURNS' GRAPH WRITE **IS** THEIR STORE, and their rows carry the vector
-            # (`#13971` review P1, arm 2). The row loop stores `turn_embs[i]` unconditionally —
-            # precisely so this arm, the one where the RECORD REFUSED the turn after the
-            # preflight approved it, does not leave the turn in neither store (the record
-            # declined it, and a NULL `emb` would leave the graph without the vector). The
-            # journal is not a rescue: it heals only on a replay that may never come, and
-            # `#5004` forbids re-encoding.
+            # (`#13971` review P1, arm 2). The row loop above blanks `emb` on exactly one arm —
+            # the record was expected to hold the turn AND the write gate answered STOP — and
+            # that expectation is a PREFLIGHT. This block is where it is repaired from the
+            # write's own outcome: a turn the record then REFUSED would otherwise land in the
+            # graph with a NULL vector while its vector is nowhere (the record declined it, and
+            # `#5004` forbids re-encoding). So the vector is re-attached HERE, per rescued turn,
+            # and the journal is not a rescue: it heals only on a replay that may never come.
             # Loud, because a re-capture's journalled snapshot for these turns is
             # this capture's `now`/`draft` rather than the values a read-back
             # would have given — the residual of deciding after the append. The
@@ -4075,11 +4107,19 @@ def _write_capture_turns(
                 "the journal; a `journal_collision` one does NOT — it "
                 "re-raises, and needs journal identity in the key (#12894).",
                 session_id, len(_unrecorded), len(turn_rows))
+            #: the rows this fallback rescues, with their vectors RE-ATTACHED
+            #: (`#14552`): see the block comment above and the row loop's gate ask.
+            _rescued_rows: list[dict] = []
+            for _i in _unrecorded:
+                _row = turn_rows[_i]
+                _rescued_rows.append(
+                    _row if _row.get("emb") is not None
+                    else {**_row, "emb": turn_embs[_i]})
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
                     _TURN_WRITE_CYPHER,
                     params={
-                        "turns": [turn_rows[i] for i in _unrecorded],
+                        "turns": _rescued_rows,
                         "sid": session_id, "now": now,
                         # The turn statement carries the count for the same
                         # reason the batch does: it cannot be separated from the

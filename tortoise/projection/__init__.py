@@ -1695,6 +1695,60 @@ def _is_snapshot_primitive(value) -> bool:
     return False
 
 
+def _record_point_vector_keys(keys) -> frozenset[str]:
+    """Which of ``keys`` the RECORD already answers with a vector (`#14552`).
+
+    THE PER-ID ASK the `#13971` review recorded as the remaining work. The write gate
+    (`record_vector.mirror_required`) answers about a LABEL
+    (``record_vectors >= graph_vectors``), which cannot say *"the record holds THIS
+    row"* — and `projection._rebuild_all_replay`'s pass-1b restore runs for a GRAPH-ONLY
+    id the journal wrote no vector for, i.e. exactly the population a label aggregate
+    cannot speak about. Gating that restore on the aggregate alone was measured to drop
+    the sole copy of such a vector (`#13971` review P1, pinned by
+    `tests/test_rebuild_graph_only_derived_parity.py::
+    test_the_pass_1b_snapshot_restore_is_NEVER_gated_by_the_label_verdict`).
+
+    ⛔ UNKNOWN ANSWERS EMPTY, WHICH MEANS "WRITE EVERY VECTOR". A missing tenant, an
+    unarmed record, an unreachable database and a raised read all land here, and every one
+    of them is the conservative direction for a write: the graph copy is written, the
+    redundant one is kept, and nothing is lost. The opposite default would restore a
+    graph-only point elementless after a wipe.
+
+    ⛔ IT IS A MEASUREMENT, NEVER A PERMISSION. The caller still asks the write gate; this
+    function only answers *which ids the record holds*, so it cannot become an operator
+    override (the shape `#13647` and `#13796` both refuse).
+    """
+    ids = [k for k in keys if isinstance(k, str) and k]
+    if not ids:
+        return frozenset()
+    try:
+        from tortoise.record_read import point_vector_keys
+        from tortoise.record_serve import open_record
+        from tortoise.record_writer import record_tenant
+
+        tenant = record_tenant()
+        if tenant is None:
+            logger.debug(
+                "#14552: no record tenant is installed, so the record cannot be "
+                "asked which of %d restored id(s) it holds — every vector is written",
+                len(ids))
+            return frozenset()
+        org_id, graph_id = tenant
+        conn = open_record()
+        try:
+            return point_vector_keys(
+                conn, org_id=org_id, graph_id=graph_id, keys=ids)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    except Exception:  # noqa: BLE001, RUF100 — unknown keeps the graph copy
+        logger.warning(
+            "#14552: the record could not be asked which of %d restored id(s) it "
+            "holds a vector for — every restored vector is written to the graph, so no "
+            "graph-only id loses its only copy", len(ids), exc_info=True)
+        return frozenset()
+
+
 # ── #2814: authoritative-configuration durability ────────────────────────────
 # The rebuild wipe (`MATCH (n) DETACH DELETE n`, :3197) is unconditional and
 # only the journal is replayed. Some node classes are GRAPH-RESIDENT, ride NO
@@ -7506,6 +7560,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     BELIEF_PROPS,
     _belief_bool_value_ok,
     _belief_prop_value_ok,
+    _derived_mirror_required,
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
@@ -17424,6 +17479,27 @@ class FalkorProjection(
                 if v is not None and dst.get(k) is None:
                     dst[k] = v
         restore_failures = 0
+        # ⛔ `#14552`: WHICH RESTORED IDS THE RECORD ALREADY ANSWERS WITH A VECTOR. One
+        # bounded read, taken only where the answer can change anything — an unarmed or
+        # unverified deployment keeps every restored vector anyway (the gate answers KEEP),
+        # so asking the record there would be a query with no possible effect. `frozenset()`
+        # means "the record answers none of them" (the conservative direction: every vector
+        # is written), and that is also what a failed read and a missing tenant produce —
+        # see `_record_point_vector_keys`.
+        #
+        # ⛔ AND IT IS ASKED IN THE ROW LOOP, NOT HOISTED (`#14552` review, P2), for a reason
+        # that is about DETECTABILITY rather than cost: `_writer_consults_gate` certifies a
+        # writer by finding an `if` that NAMES the gate and whose body holds the write
+        # decision. Hoisting the verdict beside this read was tidier and left the census
+        # unable to prove the ask, i.e. it turned a measurable writer back into one that only
+        # looks gated. The predicate is cache-only, so the per-row ask costs no query — and
+        # if a cache loss flips it mid-loop, the withholding becomes PER-ROW for the rest of
+        # the pass: the failure mode is an extra graph vector written (the conservative side,
+        # and the next strip re-runs), never one withheld.
+        _record_vector_ids: frozenset[str] = frozenset()
+        if not _derived_mirror_required("point"):
+            _record_vector_ids = _record_point_vector_keys(
+                pid for pid in restore_sources if pid not in journal_deleted)
         for pid, sp in restore_sources.items():
             if pid in journal_deleted:
                 continue
@@ -17439,11 +17515,11 @@ class FalkorProjection(
             if (sp.get("content_hash") is not None
                     and pid not in journal_hash_write):
                 gap["content_hash"] = sp["content_hash"]
-            # ⛔ `#13971` (review P1, corrected): the SNAPSHOT restore is NOT a mirror of anything,
-            # so it is NEVER gated. `#13971`'s first cut popped `embedding` here on the coverage
-            # verdict, justified by "with coverage measured true the record holds that vector —
-            # that is what coverage means". It is not: `record_vector.coverage` is
-            # `record_vectors >= graph_vectors` over a LABEL (an aggregate), while this pass
+            # ⛔ `#13971` (review P1) WAS RIGHT THAT THE **LABEL AGGREGATE** CANNOT GATE THIS POP,
+            # AND `#14552` KEEPS THAT FINDING. `#13971`'s first cut popped `embedding` here on
+            # the coverage verdict, justified by "with coverage measured true the record holds
+            # that vector — that is what coverage means". It is not: `record_vector.coverage`
+            # is `record_vectors >= graph_vectors` over a LABEL (an aggregate), while this pass
             # runs for a GRAPH-ONLY id whose journal carries no record of it at all — see the
             # `#4305` comment below, and this file's own statement of the class a few thousand
             # lines up ("`embedding` is stripped because this is a SYNTHETIC event for a
@@ -17451,18 +17527,21 @@ class FalkorProjection(
             # from the live pre-wipe capture in the pass-1b tail").
             #
             # The restore below is ALREADY restricted to ids the journal does not own a vector
-            # for (`restore_embedding` requires `pid not in journal_embed_write`), so the pop
-            # could only ever delete the SOLE carrier of a vector: after the wipe, for an id with
-            # no journal vector and no record row, the node came back vectorless and nothing
-            # could heal it (`#5004` forbids re-encoding). That is the same data-loss class the
-            # journal fold is exempted from by decision — a `:Point`'s vector is RECORD TRUTH
+            # for (`restore_embedding` requires `pid not in journal_embed_write`), so a pop on the
+            # aggregate could only ever delete the SOLE carrier of a vector: after the wipe, for an
+            # id with no journal vector and no record row, the node came back vectorless and
+            # nothing could heal it (`#5004` forbids re-encoding). That is the same data-loss class
+            # the journal fold is exempted from by decision — a `:Point`'s vector is RECORD TRUTH
             # (`#5004`), and for a graph-only id the graph is the record.
             #
-            # ⚠️ The consequence is stated, not hidden: `:Point` therefore does NOT satisfy the
-            # strip's writer census (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`
-            # names this writer as one of the two that do not ask), so the plan refuses `:Point` until
-            # the snapshot-restore population can be answered per-id by the record. A strip an
-            # operator cannot run is cheap; a rebuild that drops the only copy is not.
+            # ⛔ SO THE QUESTION IS ASKED PER ID, WHICH IS WHAT THE `#13971` REVIEW PRESCRIBED
+            # ("the correct fix is a PER-ID ask (does the record hold THIS row)") — and it is
+            # what `#14552` closed, so `:Point` now satisfies the strip's writer census
+            # (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`) and the plan's
+            # `strip_ready` no longer refuses the label on this writer. `_record_vector_ids`
+            # below holds the record's own answer, and it is EMPTY on every lane that cannot
+            # answer (unarmed, no tenant, a failed read), where every vector is written exactly
+            # as before.
             emb = sp.get("embedding")
             # #4305 review P2: only a numeric vector is writable through
             # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,
@@ -17485,24 +17564,69 @@ class FalkorProjection(
                 params["props"] = gap
             restore_guard = ""
             if restore_embedding:
-                restore_guard = clear_then_set_prefix("n", "$emb")
-                if sp.get("embedding_verbatim"):
-                    # #5004 round-7: a CALLER-owned vector must keep its RAW
-                    # form. `vecf32()` is the ONE form it must not take (it
-                    # narrows a float64 list: `0.1` -> `0.10000000149011612`),
-                    # and this path is the graph-only id's only restorer — the
-                    # synthetic event deliberately carries neither the vector
-                    # nor the marker. The marker is restored with it, or the
-                    # property exists on live and not on replay (a #330/#3312
-                    # break this change would otherwise introduce).
-                    clauses.append("n.embedding = $emb")
-                    clauses.append("n.embedding_verbatim = true")
+                # ⛔ THE PER-ID ASK, AND WHY IT IS NOT THE LABEL AGGREGATE (the full rationale
+                # — and the reason the aggregate cannot license this pop — is stated in the
+                # `#13971`/`#14552` block above; it is not restated here). The gate is asked
+                # about the ID: `_record_vector_ids` is the record's own answer to "do you
+                # SERVE a vector for this id" (`projection._record_point_vector_keys` →
+                # `record_read.point_vector_keys`), and it is EMPTY whenever that answer is
+                # unknown (no tenant, unarmed record, read failure) — the conservative
+                # direction the gate itself keeps. If the gate then says "stop" the graph copy
+                # is redundant (the record is the read leg, `#13330` retired the in-graph
+                # index); if it says "keep" the graph may still be the leg that serves the row,
+                # so the mirror stays.
+                embedding = None
+                if pid in _record_vector_ids:
+                    if _derived_mirror_required("point"):
+                        embedding = list(emb)
                 else:
-                    # `vecf32()` cast exactly like `_upsert_point_props`: the
-                    # HNSW index rejects a bare list, and a bare-list write
-                    # would leave the restored vector unsearchable.
-                    clauses.append(set_embedding_clause("n", "$emb"))
-                params["emb"] = list(emb)
+                    # ⛔ THE SOLE-COPY ARM, and it is deliberately NOT behind the label
+                    # predicate: the record answers no vector for this id, so the snapshot
+                    # value is the only one in existence. It must be written on EVERY gate
+                    # answer, which is why `tools/strip_graph_entity_vectors.py`'s census
+                    # cannot prove this arm stopped by reading the gate alone (its stated
+                    # residual 1: "two write sites, one guarded").
+                    embedding = list(emb)
+                if embedding is not None:
+                    # ⛔ THE GUARD BELONGS WITH THE WRITE, not with the branch (`#14552`):
+                    # `clear_then_set_prefix` emits a clause that REFERENCES `$emb`, so
+                    # installing it on the arm that withholds the vector made the statement
+                    # fail on a missing parameter and took the whole props write down with
+                    # it (measured: `ResponseError: Missing parameters`, and the node's
+                    # `content_hash` was not restored either). One guard, one write.
+                    restore_guard = clear_then_set_prefix("n", "$emb")
+                    if sp.get("embedding_verbatim"):
+                        # #5004 round-7: a CALLER-owned vector must keep its RAW form.
+                        # `vecf32()` is the ONE form it must not take (it narrows a
+                        # float64 list: `0.1` -> `0.10000000149011612`), and this path is
+                        # the graph-only id's restorer — the synthetic event carries
+                        # neither the vector nor the marker. The marker is restored with
+                        # it, or the property exists on live and not on replay (a
+                        # #330/#3312 break this change would otherwise introduce).
+                        clauses.append("n.embedding = $emb")
+                        clauses.append("n.embedding_verbatim = true")
+                    else:
+                        # `vecf32()` cast exactly like `_upsert_point_props`: the HNSW
+                        # index rejects a bare list, and a bare-list write would leave
+                        # the restored vector unsearchable.
+                        clauses.append(set_embedding_clause("n", "$emb"))
+                    params["emb"] = embedding
+            if not clauses:
+                # ⛔ AN EMPTY CLAUSE LIST IS NOT A WRITE (review P2 on `#14552`). The skip
+                # above (`not gap and not restore_embedding`) was written when
+                # `restore_embedding` IMPLIED "a clause is emitted". This pass can now
+                # WITHHOLD the vector — an id the record answers, with the gate at STOP —
+                # so `gap == {}` + a withheld vector reaches here with nothing to say, and
+                # the statement would be `MATCH (n:Point {id:$pid}) SET ` (a syntax error).
+                # That state is ordinary, not exotic: an OPERATOR-shaped `:Point` carries
+                # none of `_REPLAY_GAP_PROPS` and no `content_hash`, and its vector IS in
+                # `public.point.embedding` — so it lands on the withhold arm with an empty
+                # gap. Raising there counted a SELF-INFLICTED failure in `restore_failures`
+                # and printed the post-loop ERROR telling the operator to re-write points
+                # that are fine, which is exactly what that counter must not do (#4305).
+                # Skipping is the same outcome as withholding: nothing is written, and
+                # nothing was lost (the record holds this row's vector).
+                continue
             try:
                 self._restore_write(
                     "MATCH (n:Point {id:$pid}) " + restore_guard

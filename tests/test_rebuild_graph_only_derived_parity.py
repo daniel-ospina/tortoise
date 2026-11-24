@@ -409,6 +409,135 @@ def test_the_pass_1b_snapshot_restore_is_NEVER_gated_by_the_label_verdict(
         "copy (#13971 review P1)")
 
 
+def test_the_pass_1b_restore_ASKS_the_gate_about_an_id_the_record_ANSWERS(
+        sup, tmp_path, monkeypatch):
+    """`#14552` FALSIFIER (a), for the PASS-1B SNAPSHOT RESTORE (`projection::_rebuild_all_replay`):
+    gate STOP **and** the record answers this id ⇒ the vector is NOT restored, while the node's
+    derived PROPERTIES still are.
+
+    ⛔ THE TWO CONJUNCTS ARE BOTH LOAD-BEARING, and the test above pins the other side of
+    the same rule. A label aggregate answering stop is NOT enough to skip a graph-only id's
+    only copy (`#13971` review P1) — but when the RECORD ANSWERS THE ID
+    (`record_read.point_vector_keys`), the graph copy is genuinely redundant: the record is
+    the read leg, `#13330` retired the in-graph `:Point` index, and re-writing the mirror is
+    the write-back race `#13610` option 2 exists to end.
+
+    Both halves of the assertion matter for opposite reasons: dropping the vector alone would
+    be indistinguishable from a writer that simply stopped restoring; restoring the
+    `content_hash` in the SAME statement is what proves the write still lands and only the
+    vector was withheld.
+    """
+    from tortoise import projection as projection_mod
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    # The record ANSWERS this id — the per-id read is the `#14552` half, and it is stubbed
+    # here because a unit test has no record database. The read itself is exercised by
+    # `tests/test_record_read_point_vector_keys.py`.
+    events, sdk = sup
+    pid = "pt-record-answers"
+    _seed(sdk, pid, "SEED")
+    records = [_point_added(pid, "")]
+    _write_journal(events, records)
+    monkeypatch.setattr(projection_mod, "_record_point_vector_keys",
+                        lambda keys: frozenset([pid]))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    actual = _read_derived(sdk, pid)
+    assert actual["embedding"] is None, (
+        "the PASS-1B SNAPSHOT RESTORE (`projection::_rebuild_all_replay`) restored the graph "
+        "vector of an id the RECORD answers, on a gate that answered STOP — the mirror "
+        "`#13610` option 2 retires is written back on every rebuild (`#14552`). ⛔ NOT the "
+        "journal fold's doing: `_upsert_point_props` has no gate on purpose, so this message "
+        "must not be read as describing that exemption.")
+    assert actual["content_hash"] is not None, (
+        "the node's derived properties were dropped with the vector — withholding the "
+        "vector must not take the PROPS write with it (#14552 falsifier a). `content` itself "
+        "is '' here for a pre-existing reason (a falsy `PointAdded` writes the empty text); "
+        "`content_hash` is the restored derived this test is about")
+
+
+def test_the_pass_1b_restore_keeps_the_vector_of_an_id_the_record_CANNOT_answer(
+        sup, tmp_path, monkeypatch):
+    """`#14552`: a STOP verdict does NOT license dropping a vector the record has no row for.
+
+    ⛔ THE LABEL AGGREGATE CANNOT SPEAK ABOUT THIS ID, and that is the `#13971` review's
+    finding kept intact: the record answers SOME other id, the gate says stop, and this id is
+    graph-only. The per-id read returns a DIFFERENT key, so `restore_embedding` must write
+    the snapshot value — the sole copy — exactly as before `#14552`.
+
+    This is the discriminating twin of the test above: both force the same STOP verdict, and
+    only the RECORD'S ANSWER differs.
+    """
+    from tortoise import projection as projection_mod
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    events, sdk = sup
+    pid = "pt-record-silent"
+    _seed(sdk, pid, "SEED")
+    records = [_point_added(pid, "")]
+    _write_journal(events, records)
+    expected = _oracle(tmp_path, records, pid, "SEED")
+    monkeypatch.setattr(projection_mod, "_record_point_vector_keys",
+                        lambda keys: frozenset(["some-other-id"]))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _read_derived(sdk, pid)["embedding"] == expected["embedding"], (
+        "the record answers no vector for this id, and the gate's STOP verdict still "
+        "dropped the only copy (#14552)")
+
+
+def test_the_pass_1b_restore_of_a_WITHHELD_vector_does_not_emit_an_EMPTY_STATEMENT(
+        sup, tmp_path, monkeypatch, caplog):
+    """`#14552` (review P2): nothing to restore ⇒ NO statement, not `SET ` with no clause.
+
+    ⛔ THE STATE IS ORDINARY. Pass-1b's skip is `if not gap and not restore_embedding`, which
+    was written when `restore_embedding` IMPLIED "a clause is emitted". This pass can now
+    WITHHOLD the vector (the record answers this id, the gate says STOP) while `gap` is empty
+    — an operator-shaped `:Point` carries none of `_REPLAY_GAP_PROPS`, and its vector IS in
+    `public.point.embedding` — so `clauses` came out EMPTY and the statement was
+    `MATCH (n:Point {id:$pid}) SET `, a syntax error the `except` below counted as a FAILED
+    restore. That inflated `restore_failures` (the counter #4305 exists to make a SYSTEMATIC
+    failure distinguishable from benign degradation) and printed the post-loop ERROR telling
+    the operator to re-write points that are FINE.
+
+    Discriminating by construction: with the guard this test's `caplog` is empty of the
+    per-id warning; without it, the warning (and the summary ERROR) is recorded for a
+    withheld vector that was never lost.
+    """
+    import logging as _logging
+
+    from tortoise import projection as projection_mod
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    events, sdk = sup
+    pid = "pt-withheld-nothing-else"
+    _seed(sdk, pid, "SEED")
+    # The shape: a vector with NO content_hash. Removing it is what makes `gap` empty on the
+    # replay side, and it is what a caller-written vector on a status-less point looks like.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.content_hash", params={"id": pid})
+    records = [_point_added(pid, "")]
+    _write_journal(events, records)
+    monkeypatch.setattr(projection_mod, "_record_point_vector_keys",
+                        lambda keys: frozenset([pid]))
+    caplog.set_level(_logging.WARNING, logger="tortoise.projection")
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    noisy = [r.getMessage() for r in caplog.records
+             if "snapshot derived restore" in r.getMessage()]
+    assert noisy == [], (
+        "a WITHHELD vector with an empty gap was written as an empty clause list, so the "
+        "statement raised and #4305's failure counter reported a restore that failed when "
+        f"nothing was lost: {noisy}")
+    assert _read_derived(sdk, pid)["embedding"] is None, (
+        "the gate said STOP and the record answers this id, so the mirror must stay "
+        "withheld — the empty-clause guard must not change WHICH arm ran")
+
+
 def test_rebuild_is_idempotent_for_graph_only_derived(sup, tmp_path):
     """rebuild → rebuild must converge (the restore is a fixed point)."""
     events, sdk = sup

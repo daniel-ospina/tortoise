@@ -66,9 +66,10 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
     asks the gate** — not "the fold does". The gate therefore refused all four entity
-    labels until `#13854` closed them, and it REFUSES `:Point` today on TWO INDEPENDENT
-    arms — the coverage verdict, which currently measures a shortfall, and the writer
-    census, which names two of its four declared writers that must keep the copy:
+    labels until `#13854` closed them, and it refused `:Point` on TWO INDEPENDENT arms until
+    `#14552` closed the WRITER one (the COVERAGE arm still refuses — see below): the coverage
+    verdict (which measured a shortfall) and the writer census, which
+    named two of its four declared writers that had to keep the copy —
     `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
     where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
     or a record write that REFUSED the turn) and `tortoise.projection::_rebuild_all_replay`
@@ -76,9 +77,16 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     only where the snapshot is the sole carrier). `#13971`'s first cut gated all four on the
     label's coverage verdict and was reverted on review: that verdict is
     `record_vectors >= graph_vectors` over a LABEL, so blanking on it wrote those turns'
-    vectors to NEITHER store. The two writers that place a genuinely redundant copy
-    (`tortoise.sdk::_update_entity`, `tortoise.hosted_backup::restore_graph`) DO ask, and
-    do stop. When the coverage verdict answers STOP it names each un-cleared writer; while
+    vectors to NEITHER store. ⛔ `#14552` CLOSED THE WRITER ARM WITHOUT REVERSING THAT
+    FINDING, and left the COVERAGE arm open: the label aggregate is still never the whole
+    answer — the pass-1b SNAPSHOT RESTORE asks the record about the ids it is about to write
+    (`record_read.point_vector_keys`, one bounded read) and asks the label predicate
+    (`mirror_required("point")`) only about an id the record ANSWERS, while the capture asks
+    the label predicate per row on the lane where the record is
+    expected to hold the turns, re-attaching the vector per turn for any turn the record
+    then REFUSES — so each writer's sole-copy branch is stated
+    and tested instead of being a place no gate reaches, and the `:Point` census is EMPTY.
+    When the coverage verdict answers STOP it names each un-cleared writer; while
     it answers KEEP, or cannot be read, it returns before that walk and names the counts
     (or, with the predicate symbol absent, the requirement). That is the
     true state of a two-pronged retirement, and the WRITER prong is a satisfiable one: as
@@ -365,13 +373,14 @@ fresh process. It is the
 largest reclaimable block left (37,158 stored vectors, ≈67 MB), the in-graph `:Point`
 HNSW index is RETIRED (`#13330`) so nothing reads the property, and `#5004`'s "a Point
 vector is RECORD TRUTH" is now the reason a graph copy that the record also holds is a
-redundant MIRROR — not a reason to keep it. ⛔ **BUT THE PLAN STILL REFUSES `:Point`**, and
-the refusal is the honest half: two declared writers must keep the copy because on their
-lanes it is the SOLE carrier (`sdk::_write_capture_turns` on every lane where the record
-cannot hold the turn; `projection::_rebuild_all_replay`, whose pass-1b restore runs only
-for ids the journal wrote no vector for). The census names them once coverage verifies, so
-that arm of the refusal is checkable rather than a shrug; the coverage arm names both
-counts instead. The tool's refusals are otherwise unchanged: it will not
+redundant MIRROR — not a reason to keep it. ⛔ **AND SINCE `#14552` THE PLAN NO LONGER
+REFUSES `:Point` ON THE WRITER ARM**: all four declared writers ask the gate, the two that
+keep the copy on their own lanes do so on a STATED sole-copy branch (the capture writes a
+turn's vector exactly where the record cannot hold that turn; the pass-1b restore writes one
+exactly where the record answers no vector for that id), and both are pinned by tests. The
+remaining refusal is the COVERAGE verdict — `operator`'s graph denominator is the whole
+`:Point` label, so it is unreachable while a plain point carries an embedding — which is an
+operator act, not a backfill. The tool's refusals are otherwise unchanged: it will not
 strip `:Point` unless the record's coverage for `point`/`operator` MEASURES true in this
 process. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
@@ -551,11 +560,12 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`). The
     # consequence is stated in the tool's own refusal text rather than hidden: a
     # `rebuild_all` re-materialises the journal's `:Point` vectors, so the strip is an
-    # operator action that has to be RE-RUN after a rebuild. TWO of the four declared
-    # `:Point` writers ask the gate (the SDK update door and `restore_graph`); the live
-    # capture and the pass-1b snapshot restore must NOT, because on their lanes the graph
-    # copy is the SOLE store — which is why the census REFUSES `:Point` once coverage
-    # verifies, naming both.
+    # operator action that has to be RE-RUN after a rebuild. ⛔ SINCE `#14552` ALL FOUR
+    # declared `:Point` writers ask the gate, including the live capture and the pass-1b
+    # snapshot restore — each asks it on the branch where the graph copy is a mirror and
+    # keeps the copy on a stated SOLE-COPY branch (the record cannot hold the turn; the
+    # record answers no vector for the id). The census therefore no longer refuses `:Point`
+    # on the writer arm; the coverage arm still can, on its own counts.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -6834,10 +6844,15 @@ def render_plan(plan: dict) -> str:
             "",
             "⚠️ `:Point` durability: the JOURNAL FOLD re-adds the vector, so this plan is "
             "undone by a `rebuild_all` AND by any journalled point write that carries one "
-            "— re-run this tool afterwards. Only the SDK update door and the DR restore "
-            "ask the gate and stop; the capture writer, the pass-1b snapshot restore and "
-            "the fold keep the copy on the lanes where it is the ONLY one, which is why "
-            "this plan refuses `:Point` while the census names them once coverage verifies.",
+            "— re-run this tool afterwards. That is a DECISION (`point` is not in "
+            "`MIRROR_RETIRED_LABELS`, so the dense leg keeps a named fallback), and the "
+            "four writers that do ask the gate stop only where the graph copy is the "
+            "MIRROR: the SDK update door and the DR restore on the label verdict; the "
+            "capture on that same LABEL verdict asked per row, on the lane where the "
+            "record is expected to hold the turns, re-attaching the vector per turn for "
+            "any turn the record then REFUSES; and the pass-1b snapshot restore on a "
+            "per-ID record ask (does the record SERVE a vector for THIS id). Sole-copy "
+            "branches stated and tested (`#14552`).",
         ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured
