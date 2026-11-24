@@ -294,6 +294,8 @@ version: 1
 # below what it grades. ⛔ `merge=union` (#5373) spliced TWO copies of this paragraph at the
 # `14b8322eb271` fold, each carrying its own stale pair (`825.1 s`, ratios `2.0361` and `2.0362`,
 # both refuted at this tree); they are collapsed here to one, re-read at this head.
+# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
+# exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
 # the NAME SETS move on every landed registration, so no arithmetic on the minute can catch a carried
