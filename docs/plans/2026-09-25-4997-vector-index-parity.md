@@ -38,7 +38,7 @@
 | reader | what it reads | why this plan's differs |
 |---|---|---|
 | `tortoise/projection/__init__.py:6112` (embedded composite repair) | `_row[0]` label + `_row[1]` properties, substring match | **cannot** tell VECTOR from FULLTEXT — it never looks at column 2 |
-| `tortoise/hosted_backup.py:2683` `_index_has_is_operator()` | `_row[1]`, **exact field name, never substring** (its docstring: substring *"would also match an unrelated property such as `is_operator_flag`"*) | needs no type discrimination |
+| `tortoise/hosted_backup.py:2732` `_index_has_is_operator()` | `_row[1]`, **exact field name, never substring** (its docstring: substring *"would also match an unrelated property such as `is_operator_flag`"*) | needs no type discrimination |
 | `tests/test_indexes.py:82-99` `_range_indexes()` | normalizes **both** 3.x flat rows and 4.x dict rows to `{label: {field: [types]}}` | test-only; the 3.x path is unreachable here (see the gate below) |
 | `tests/test_divergence_conformance.py:133-146` | a second copy of the above | test-only |
 | **this plan** `_record_vector_index_inventory()` | label + **column 2 `types`**, VECTOR membership | it is the only reader that must discriminate index TYPE, which is why it reads a column none of the others touch |
