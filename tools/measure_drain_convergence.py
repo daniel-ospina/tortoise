@@ -56,10 +56,20 @@ What it measures, and why each number is in the receipt:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first, with a traceback instead of this message.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_drain_convergence.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_drain_convergence.py`"
+    )
+
 import argparse
 import json
 import subprocess
-import sys
 import tempfile
 import threading
 import time
