@@ -1965,7 +1965,34 @@ SWEEP_NAMES = 66
 #: the branch and false of `main`. Nothing was mis-measured; the pin is only as current as the tree the
 #: cutting lane last saw, and `--check` grades a tree that keeps moving under it.
 #: `typed references still pointing at a public name: 0` here too, and `--check` exits 0 on the pair.
-SWEEP_RESIDUE = (11901, "953c70c05b55923b")
+#: ⛔ RE-CUT A THIRD TIME ON `main`, AND AGAIN FROM `main`'S OWN DRIFT rather than from this branch
+#: (#14445's re-pin of the `#14062` class): `--check` on the RESOLVED MERGE TREE reports
+#:   observed: (11902, '3a694c6f3ff4e36f')
+#:   pinned:   (11901, '953c70c05b55923b')
+#: against the pair `main` and this branch each carried when the branch was cut. The +1 is
+#: `f635f9e00075` (`#14446`, the `#7879` review repairs), and it is FULLY ATTRIBUTED rather than
+#: assumed: the residue rows were recomputed with THIS FILE's own `rename_map(SWEEP_BASE)` and
+#: `edits_for()` over every `.py` file `main` changed between `953c299c9b1f` (the pin's basis,
+#: whose own tree derives 11901) and `origin/main` `989765162fbc` — fourteen paths, eleven of
+#: which are unchanged in every row — and the diff of the sorted row sets is exactly
+#: `projection.g.query` 2 → 0 (−2) and `reached.update` 0 → 3 (+3, a
+#: `reached.update(alias.name for alias in node.names)` at three call sites in
+#: `tests/test_7879_record_chain.py`), with NO other shape moved and none decreased: 3 − 2 = 1 =
+#: 11902 − 11901, the same cross-check the `#14434` block above uses.
+#: ⛔ THIS BRANCH'S OWN CONTRIBUTION IS ZERO ROWS, measured rather than inferred: the same probe
+#: over the three `.py` files this branch changes (`tools/sdk_privatise.py`, `tools/ci_selection.py`,
+#: `tests/test_sdk_privatise_sweep.py`) returns an IDENTICAL row multiset at its merge base and at
+#: its head (21 rows each side), so the drift is `main`'s and the re-pin DECLARES it rather than
+#: rewriting a peer's helper: `projection.g.query`'s two removed sites and `reached.update`'s three
+#: live in `tests/test_7879_record_chain.py`, and re-pointing an ordinary-word receiver there would
+#: be sabotage (the `declared_markers.update` precedent).
+#: ⛔ WHY IT WAS STALE ON ARRIVAL A THIRD TIME, so the next reader does not re-derive the race: the
+#: pair was correct for the tree `#14423` measured and `#14446` then landed ONE row after that
+#: measurement, in the very file the `11898 → 11901` block above attributes. That IS the `#14062`
+#: class: a pin is only as current as the tree the cutting lane last saw, and the repair is this
+#: deliberate re-pin — never a gate that rewrites itself (the `--check` / `--repin` split).
+#: `--check` exits 0 on the pair below with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11902, "3a694c6f3ff4e36f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

@@ -252,8 +252,13 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1855 lines at this head, measured through THIS function's own
-    walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1882 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
+    which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
+    figure is re-derived here rather than carried from either side; the later fold of `origin/main`
+    `989765162fbc` kept both sides again and added no `#:` line above the pin, and this PR's own
+    re-pin record then declared 27 more, so the walk re-reads 1882 — and GRADED, see
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -281,16 +286,22 @@ def _residue_block() -> str:
     this walk rather than inherited from either side,
     — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
     `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, which took the run to 1765 (1741 +
-    the 24 that re-cut declared) — and then the `#14062` re-cut below (`SWEEP_RESIDUE` `11898` →
-    `11901`, stale ON ARRIVAL on `main` a SECOND time, and measured on `main` itself rather than on
-    a branch tree) appended a further 28 `#:` lines, and `main`'s own `#14423` fold then appended 43
-    more while its docstring moved 1765 → 1796 — TWELVE SHORT of the 1808 its walk returned, a stale
-    carry of exactly this class, RED on `main` before this rebase touched it and repaired HERE rather
-    than left for the next lander. This rebase's own fold (both sides' blocks KEPT, plus the note
-    recording that `main` had already landed the same pair) adds a further 47 `#:` lines, so the
-    figure above is RE-MEASURED by this walk on THIS tree at **1855** (1808 + the 47 this fold
-    declares) rather than carried forward or summed from either side's reading, which is what the
-    graded figure exists to force:
+    the 24 that re-cut declared), and then `main`'s own `#14423` fold appended 43 more (`1765 →
+    1808`) while its docstring moved only 1765 → 1796 — TWELVE SHORT of the 1808 its own walk
+    returned, a stale carry of exactly this class, RED on `main` before this branch touched it and
+    repaired HERE rather than left for the next lander. ⛔ THIS BRANCH'S ONE INSERTION IS THE 47
+    BELOW, NOT A FURTHER 28: the `#14062` re-cut's earlier PRE-REBASE DRAFT declared 28 lines (the
+    reading an earlier review measured on the pre-rebase prose), and the force-push replaced that
+    draft with the single 47-line block in this tree, so a chain that counts both double-counts the
+    one insertion — read it as `1765 + 43 = 1808` and `1808 + 47 = 1855`, never as
+    `1765 + 28 + 43 + 47` (which sums to 1883, a figure nothing in this tree derives). For the same
+    reason the `#14395` fix lane's re-pin paragraph is NOT in this chain: it was cut on that lane's
+    OWN tree (1774 there) and never landed in `tools/sdk_privatise.py`. This fold of `origin/main`
+    `989765162fbc` kept both sides' blocks and added no `#:` line above the pin, and this PR's own
+    re-pin record (the `#14062` class, a THIRD time) then declared 27 more, so the figure above is
+    RE-MEASURED by this walk on THIS tree at **1882** (1808 + the 47 this fold declares + the 27
+    this re-pin's record declares) rather than carried forward or summed from either side's
+    reading, which is what the graded figure exists to force:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

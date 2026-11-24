@@ -244,9 +244,10 @@ def test_docs_scanning_gates_stay_in_tier1():
 
     assert "test_12184_shifted_cites.py" in tier1, (
         "#12184: the evidence-cite pin binds `file:line` citations in "
-        "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md, "
-        "docs/architecture/SUBSTRATE-REBUILD-MAP.md, the #12298 M3 recall brief "
-        "and the #13083 census README, and `docs/` is in NON_PYTHON_PREFIXES "
+        "docs/architecture/SUBSTRATE-REBUILD-MAP.md, the #12298 M3 recall brief, "
+        "the #13083 census README, docs/architecture/ENTITY-VERDICT-BANDS.md, "
+        "docs/00_index.md and the #4997 vector-index-parity plan, and `docs/` is in "
+        "NON_PYTHON_PREFIXES "
         "while none of those documents matches a SOURCE_PATTERNS entry — so a "
         "docs-only diff takes the tier1-only early return and a `core`-only row "
         "ran the pin ZERO times on exactly the change class that re-points a "
@@ -657,10 +658,12 @@ def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
 def test_the_shifted_cite_pin_runs_on_a_docs_only_diff():
     """#12184: the cite pin must run on the DIFF that re-points a cite.
 
-    `tests/test_12184_shifted_cites.py` binds `file:line` citations in four living
-    documents (`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`,
-    `docs/architecture/SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief and
-    the #13083 census README) to the CONTENT of the line each names — the defect it
+    `tests/test_12184_shifted_cites.py` binds `file:line` citations in six living
+    documents (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall
+    brief, the #13083 census README, `docs/architecture/ENTITY-VERDICT-BANDS.md`,
+    `docs/00_index.md` and the #4997 vector-index-parity plan; the
+    `CAPABILITY-PLACEMENT-AUDIT.md` it also bound was deleted with its arms, #14428)
+    to the CONTENT of the line each names — the defect it
     was written for was a FALSE CORRECTION (a correct `:4549` re-pointed to `:4552`
     by applying the branch's `+3` twice), and no delta or marker can prove a number
     right. The file shipped registered on `core` only, whose comment stated the
