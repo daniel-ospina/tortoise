@@ -217,7 +217,7 @@ Re-running is safe with this attempt's --dedup: the server folds identical conte
         wall 10.9 s
 ```
 
-⚠️ **The two blocks above are the capture taken against the live server at `74b4d326c5`.**
+⚠️ **The two blocks above are the capture recorded at `74b4d326c5` (against prod `e74cf1d13da7`).**
 The refusal wording was TIGHTENED afterwards: the no-`--dedup` warning now reads *"…on the
 HOSTED API, where dedup defaults off (measured: 4 attempts, 4 Points) … On a self-hosted
 server dedup already defaults ON, so the flag is a no-op there"*, because
