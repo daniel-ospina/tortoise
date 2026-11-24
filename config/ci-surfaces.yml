@@ -53,17 +53,16 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
-# and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
-# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
-# `b2d1e9086a`, plus the `core`-registered fast rows this tree carries — `#14423`'s
-# `tests/test_14350_drain_convergence.py` (the D1 suite, `api` + `core`), `#14434`'s
-# `tests/test_14371_offline_embed_json.py` and `tests/test_14186_embedder_seam_batching.py` — all
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
+# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`origin/main`
+# at `989765162fbc`, plus the three `core`-registered fast rows it carries — `#14423`'s
+# `tests/test_14350_drain_convergence.py` (the D1 suite, `api` + `core`), `#14409`'s
+# `tests/test_14371_offline_embed_json.py` and `#14220`'s
+# `tests/test_14186_embedder_seam_batching.py` — all at the flat 2.0 s `DEFAULT_FAST_WEIGHT`; this
+# PR's own diff is comment-only, so it moves no row)
 # the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k): the greedy packer
-# re-packs EVERY bin when a fast file is registered, so the previous two-bin 837.0 / 836.9 split no
-# longer exists, and a block that keeps quoting it is quoting an emission this tree cannot produce.
+# re-packs EVERY bin when a fast file is registered, so `#14428`'s sweep of this block replaced a
+# two-bin 837.0 / 836.9 split that the third row above had already invalidated — the count and the
+# names move together, never only the count.
 # `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
