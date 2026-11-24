@@ -577,11 +577,16 @@ class TestReviewFindings:
         assert "2 refused with an owner (credential/tombstone)" in notes, notes
         assert "1 reserved control-plane" in notes, notes
         # The GATE is unchanged and deliberately so: nothing resolved, so the
-        # estate still needs adjudication and the run still reds for it.
+        # estate still needs adjudication and the run still reds for it. ⛔ And the
+        # REASON may not name a cause it cannot see: with an owner on every row the
+        # control plane is answering correctly, so "control-plane fault" (and the
+        # word "orphan-shaped") would be the same false-label class, one level up.
         assert done.returncode != 0, record["reasons"]
-        assert any("resolved none" in r for r in record["reasons"]), record["reasons"]
-        assert any("name no owning org" in r and "2 were refused with an owner" in r
-                   for r in record["reasons"]), record["reasons"]
+        [reason] = [r for r in record["reasons"] if "resolved none" in r]
+        assert "2 refused with an owner" in reason, reason
+        assert "orphan-shaped" not in reason, reason
+        assert "control-plane fault" not in reason, reason
+        assert "needs adjudication" in reason, reason
 
     def test_ONE_orphan_among_reserved_rows_reds_the_run(self, tmp_path):
         """The other half of the discriminator: the flag must not swallow the case
@@ -617,6 +622,45 @@ class TestReviewFindings:
         assert {r["graph"]: r["reserved"] for r in report["graphs"]} == {
             "tortoise": True, "registry_ops": True, "orphan0": False}, report["graphs"]
         assert counts == [], "a reserved graph had its node count read"
+
+    def test_the_report_stamps_org_id_on_a_refused_with_owner_row(self, monkeypatch):
+        """The OTHER premise the three-way split reads, and nothing pinned it.
+
+        The verdict counts a row as `refused_with_owner` when `build_report` stamped
+        a populated `org_id` beside `reserved: false` on a `refused-unresolved` row.
+        Both halves of the hand-built fixtures are ours, so if the tool ever renamed
+        or stopped populating `org_id` on the credential/tombstone arm the verdict's
+        note would silently regress to "no owning org" with every test still green.
+        Pinned against the REAL `build_report`, faking only the control plane.
+        """
+        from tools import reap_empty_test_graphs as reaper
+
+        class _Proj:
+            db = type("D", (), {"list_graphs": lambda self: ["org_c0_g0"]})()
+
+        monkeypatch.setattr(
+            reaper, "_namespace_index",
+            lambda cp: {"org_c0_g0": {
+                "org": {"id": "c0", "name": "agent-c0"},
+                "gid": None,
+                "refused": "REFUSED rather than deleted: graph row is a TOMBSTONE",
+            }},
+        )
+        # The tool reads no node count on a refused row — that is deliberate, so a
+        # regression that started reading one fails loudly here rather than on a
+        # customer graph.
+        def _no_count(proj, name):
+            raise AssertionError(f"node count read for {name}")
+
+        monkeypatch.setattr(reaper, "_node_count", _no_count)
+        report = reaper.build_report(proj=_Proj(), cp=object())
+        [row] = report["graphs"]
+        assert row["bucket"] == "refused-unresolved", row
+        assert row["reserved"] is False, row
+        assert row["org_id"] == "c0", (
+            "the refused arm stopped stamping `org_id`, so the verdict's "
+            "refused_with_owner arm would silently read the row as an orphan", row)
+        assert report["counts"] == {"refused-unresolved": 1}, report["counts"]
 
     def test_a_killed_execute_pass_is_a_failure_even_with_a_clean_verify(
             self, tmp_path):

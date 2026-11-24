@@ -8450,10 +8450,14 @@ surfaces:
   # ⛔ #13205's own suite pins the tool's four refusals and this PR's
   # `TestMemoryDelta`; `test_14559_reaper_schedule.py` ALSO imports the tool
   # (`from tools import reap_empty_test_graphs`, for the `reserved` row stamping)
-  # but its subject is the WORKFLOW, not the tool's classification. Both rows are
-  # needed for a different reason: without the row above, a diff to
-  # `tools/reap_empty_test_graphs.py` selects NO surface at all (a `tools/` path is
-  # in `NON_PYTHON_PREFIXES`, so the subject is dropped before this map is read).
+  # but its subject is the WORKFLOW, not the tool's classification. Without the
+  # row above, `--integrity` reds (`manifest drift`) and this file is a member of
+  # NO selected surface, so these pins never run on a reap-tool-only diff. ⛔ The
+  # selection itself is NOT what that row buys: a `tools/` path is in
+  # `NON_PYTHON_PREFIXES` and would be dropped, so the tool is rescued by its own
+  # `CORE_ALSO` entry (`tools/ci_selection.py`), which a surface row cannot
+  # influence — measured: with this row removed, a
+  # `tools/reap_empty_test_graphs.py`-only diff still selects `core`.
   # `fast_pool()` carries each file once, so the graded partition is unmoved —
   # measured with the row added.
   - test_13205_graph_provision_leak.py

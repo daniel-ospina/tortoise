@@ -393,21 +393,33 @@ jobs:
           # saying so is a false claim about a row that names its own owner: the
           # tool puts a CREDENTIAL/tombstone refusal in this same bucket WITH the
           # org row present (`classify_graph`'s `entry["refused"]` arm — the org
-          # DOES own the graph; what cannot be attributed is its ACL user), and
+          # DOES own the graph, and the refusal is about that graph's ACL user or
+          # about destroying a restorable graph, NEVER about ownership), and
           # `build_report` stamps `reserved: false` beside a populated `org_id`
           # for it. So the two states are counted apart, and only the one that
           # actually names no owner is labelled "no owning org".
           orphan_no_owner = [row for row in orphan_unresolved if not row.get("org_id")]
           refused_with_owner = len(orphan_unresolved) - len(orphan_no_owner)
           if total > 0 and unresolved == total and orphan_unresolved:
+              # ⛔ THE REASON ASSERTS NO CAUSE, and that is deliberate. It covers TWO
+              # different states — rows that name no owner (an ownership/control-plane
+              # question) and rows REFUSED WITH an owner (the tool's credential or
+              # tombstone guard, where the control plane answered correctly) — so a
+              # sentence diagnosing "control-plane fault" would re-introduce, one level
+              # up, exactly the defect this arm was just repaired for.
+              breakdown = ", ".join(
+                  part for part in (
+                      f"{len(orphan_no_owner)} orphan-shaped (no owning org)"
+                      if orphan_no_owner else "",
+                      f"{refused_with_owner} refused with an owner "
+                      f"(credential/tombstone)" if refused_with_owner else "",
+                  ) if part
+              )
               reasons.append(
                   f"the control plane ANSWERED but resolved none of the {total} "
-                  f"graph(s): {len(orphan_unresolved)} of them are orphan-shaped "
-                  f"(`refused-unresolved` and not reserved) — {len(orphan_no_owner)} "
-                  f"name no owning org and {refused_with_owner} were refused with an "
-                  f"owner (credential/tombstone) — so `reapable` is 0 and nothing "
-                  f"was deleted. An estate where the control plane answers but "
-                  f"resolves NO graph is a control-plane fault, not a clean sweep")
+                  f"graph(s): {breakdown} — `refused-unresolved` and not reserved, "
+                  f"so `reapable` is 0 and nothing was deleted. An estate that "
+                  f"resolves NO graph needs adjudication; it is never a clean sweep")
 
           if execute_ran and execute is None:
               # A crashed or refused reap writes no document at all, so there is
