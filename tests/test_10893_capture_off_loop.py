@@ -466,12 +466,16 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
 # row above was deleted by the change this pins (its owner was #14112), so this
 # test is now the row's replacement: the stamp half of `_capture_session_impl`
 # is submitted as ONE closure through `_run_off_loop(_CAPTURE_EXECUTOR, …)`.
-# ⛔ MEASURED, so nobody re-derives it: with the `await` reverted to an inline
-# call, the census above (and the bar's own test) stay GREEN — 2 passed. The
-# deleted row's per-record cost lands under the 5 ms TOTAL bar, so the census
-# cannot see this regression at any bar; the assertions below are the whole
-# falsifier, which is why the pool identity among them is asserted and not just
-# recorded.
+# ⛔ MEASURED, so nobody re-derives it — AND MEASURED BOTH WAYS, which is the
+# point: with the `await` reverted to an inline call the census above is
+# BORDERLINE. The deleted row's per-record cost sits AT the 5 ms TOTAL bar
+# (`_ON_LOOP_BAR_MS`), so the same mutation reads `_graph_write_with_retry`
+# 5.6 ms -> RED on a loaded box and under the bar -> `2 passed` on two quieter
+# runs of this same tree. A verdict that flips with box load is not a falsifier:
+# the assertions below are the whole falsifier, which is why the pool identity
+# among them is asserted and not just recorded. (Stated as a range on purpose —
+# an earlier cut of this comment said the census "cannot see this regression at
+# any bar", which a 5.6 ms run falsifies; a single green run is not a range.)
 #
 # MEASURED, pre-fix vs post-fix, same fixture: pre-fix the ticker completes 0
 # ticks inside the blocking window and `/health` answers only after `exited`;
