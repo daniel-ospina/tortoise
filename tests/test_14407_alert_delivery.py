@@ -194,6 +194,9 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
     assert len(delivered.pushes) == 2, delivered.pushes
     assert "Still open" in delivered.pushes[-1]
     assert "issue #1" in delivered.pushes[-1], "a reminder must name the incident"
+    # The OTHER half of the arm-conditional pointer (round 7): the NUMBERED arm must
+    # KEEP it, or a mutant deleting the parenthetical from all three arms stays green.
+    assert "the issue comment trail is the recurrence record" in delivered.pushes[-1]
     # ⛔ THE SECOND ALERT LABEL, pinned (#14407 review cycles 6–8). One episode emits
     # THREE messages and each wears its own string: the OPENING push is the store's
     # create-once template (`🚨 DR alert: …`, shared with every incident kind), this
@@ -263,6 +266,12 @@ def test_a_reminder_over_a_number_less_sentinel_says_which_state_it_is(monkeypat
     assert "could not be read" not in reminder, (
         "the number-less arm borrowed the RAISE arm's string — a reader is told the "
         f"read failed when it did not: {reminder!r}")
+    # Round 5, P2: the sentence also said "the issue comment trail is the recurrence
+    # record", naming a record that cannot exist in an arm whose own clause says
+    # there is no issue number. The pointer is now arm-conditional and pinned here.
+    assert "issue comment trail" not in reminder, (
+        "the reminder points at a comment trail on an incident it just said has no "
+        f"issue: {reminder!r}")
     notify.reset_abuse_delivery_for_tests()
 
 

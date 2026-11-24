@@ -180,7 +180,21 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
                  if incident in _EPISODE_INCIDENT_KINDS and event not in kinds)
     return tuple(kinds)
 
-#: Delivery windows (#14407). One message per ``(kind, subject)`` per window.
+#: Delivery windows (#14407). One message per ``(kind, subject)`` per window —
+#: ⛔ WITH ONE SHAPE AS THE EXCEPTION, and only for the two RULE-EPISODE kinds:
+#: in the NO-INCIDENT-CHANNEL fallback a confirmed episode end re-arms the ledger
+#: unconditionally, so THERE the bound for a rule that flaps is one message per
+#: episode (one per crossing for an alternating rule, which is the pre-fix rate),
+#: and that window is the ceiling only for a CONTINUOUSLY breaching subject — or
+#: for an episode end the engine cannot observe, where the armed window FOLDS the
+#: new episode (the residual below). On the STORE path nothing re-arms per
+#: crossing: the release is gated on the store's ``SKIPPED_WINDOW``, unsatisfied
+#: until ``DR_RECOVERY_STREAK`` consecutive clean observations, so an alternating
+#: rule stays inside the window there and the 24h bound holds (measured: 24
+#: alternating evaluations over 36h = 2 pushes store-side, 12 no-channel).
+#: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes
+#: it by policy, so its window is NEVER re-armed early — a second operator
+#: suspension of the same subject inside 24h is not delivered at all.
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
@@ -198,8 +212,12 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: `latest_flag_at() is None` read: the same read returns None for a flag this
 #: process just wrote when the read is stale (#3631), and releasing on it re-pages
 #: per detection and can close the incident of an org still over threshold. The
-#: runbook row names the manual close. The same window bounds the
-#: no-incident-channel fallback, where it is the only bound there is.
+#: runbook row names the manual close. In the NO-INCIDENT-CHANNEL fallback this
+#: window is NOT the bound: the ledger is the only delivery there is and a
+#: confirmed episode end re-arms it unconditionally, so the bound is per episode
+#: (see `resolve_abuse_episode`) and this ceiling applies only to a continuously
+#: breaching subject — or where the engine could not observe the episode end, in
+#: which case the armed window folds the new episode (the residual above).
 #:
 #: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
 #: detector cadence — R3 re-arms every 5 minutes (288 detections/day at
@@ -648,8 +666,25 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # crossing would re-arm the ledger and page a reminder, so the 24h reminder
     # window would degenerate back into one message per crossing.
     #
-    # The no-channel shape keeps the old behaviour below (the ledger is local
-    # and is the ONLY delivery there is, so an ended episode must re-arm it).
+    # The no-channel shape re-arms the ledger on EVERY confirmed episode end
+    # (below), because the ledger is local and is the ONLY delivery there is —
+    # with no store there is no `skipped_window` gate to hold it. ⛔ THE BOUND
+    # THAT FOLLOWS IS PER EPISODE, NOT PER 24h, and every claim about this path
+    # says so (round 5, P2): a rule that flaps pages once per episode — measured
+    # 12 messages in 36 h over 24 alternating evaluations — while a continuously
+    # breaching org stays at the one-per-window bound, and so does a NEW episode
+    # whose predecessor's end the engine could not observe — it is FOLDED into the
+    # armed window (the residual documented on _INCIDENT_DELIVERY_WINDOW_S).
+    #
+    # ⛔ AND THE FLAPPING VOLUME IS NOT IMPROVED HERE, which an earlier cut of
+    # this comment wrongly claimed: for an ALTERNATING rule one episode spans
+    # exactly one detection, and pre-#14407 released its claim on every clean
+    # window too (`_release_notify(… EVENT_FLAG)` gated only on `ended`), so a
+    # flap pages once per crossing in BOTH worlds. What this shape improves is
+    # (a) ATTRIBUTION — the message now names the missing incident channel instead
+    # of saying nothing — and (b) the CONTINUOUSLY breaching rate (pre-fix one per
+    # engine window, now one per 24h). The flapping rate is unchanged and is
+    # stated as unchanged rather than sold as a win.
     store, reason = _abuse_alert_store()
     if store is None:
         for kind in _episode_delivery_kinds():
@@ -974,8 +1009,16 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         attribution=(f"Still open — {ref}. One reminder per "
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
                                      "while the episode stays open; repeats "
-                                     "inside that window are folded (the issue "
-                                     "comment trail is the recurrence record)."),
+                                     "inside that window are folded"
+                                     # ⛔ ONLY the arm that NAMES an issue may
+                                     # point at its comment trail (round 5, P2):
+                                     # the two number-less arms say in the same
+                                     # sentence that there is no issue number, so
+                                     # a pointer to "the issue comment trail"
+                                     # referenced a record that does not exist —
+                                     # the over-claiming class this PR removes.
+                                     + (" (the issue comment trail is the "
+                                        "recurrence record)." if number else ".")),
                         folded=folded)):
                     # A failed send must not consume the reminder window.
                     release_abuse_delivery(kind, subject)
@@ -1083,8 +1126,16 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "
-        "per subject until the incident channel is repaired (#14407).",
-        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
+        "per subject on the no-incident-channel path, RE-ARMED by a confirmed "
+        "episode end for the two RULE-EPISODE kinds — a continuously breaching "
+        "org stays at that ceiling, while a rule that FLAPS pages once per "
+        "episode (one message per crossing, the pre-#14407 rate: this path's "
+        "gain is attribution and the continuous-breach rate, not flapping "
+        "volume). %s is not in that re-arm set, so its window is never re-armed "
+        "early: a second suspension of the same subject inside %dh is not "
+        "delivered. Never silent (#14407).",
+        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600),
+        KIND_ABUSE_SUSPENDED, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
     if not _send_abuse(bot_token, chat_id, _abuse_message(
             kind, org_id, details,
             attribution=(
