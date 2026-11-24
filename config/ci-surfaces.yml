@@ -55,10 +55,7 @@ version: 1
 # x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
 # the map as #11576 shipped it packed the worst shard at 782.0 s -> 27 m, i.e. 58.64 x 1.5 =
 # 87.96 m: 2.04 m of real headroom rather than the 0.54 m S=10 was clearing by. (The
-# 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog,
-# #12926's own 10.0 s row moved that emission to 24 m (arm-2 SUM 55.64 m, x 1.5 = 83.5 m,
-# 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
-# is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
+# 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
 # `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
@@ -140,14 +137,9 @@ version: 1
 # bins and so moves THIS graded claim on a number no run measured, which is the deviation the
 # review round on this PR caught. Re-run
 # `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
-# ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
-# this emission and left its own reading behind, so the block accumulated stacked restatements of
-# the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
-# ends up claiming two partitions while looking like one (measured on #14459's merge, which
-# spliced BOTH parents' clauses into this header). The graded clause is the ONE paragraph above.
-# What is kept below is only what a reader cannot get from it: which registrations this reading
-# counts, and the direction the readings have travelled. NO sentence here restates a partition,
-# deliberately — a historical figure spelled as a claim is a claim the guard grades.
+# ⛔ WHAT IS KEPT BELOW IS HISTORY, NOT A SECOND CLAIM: which registrations this reading counts, and
+# the direction the readings have travelled. The rule that a restatement would be graded as a second
+# claim is stated ONCE, in the "ONE CLAUSE" paragraph.
 # ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
@@ -194,9 +186,12 @@ version: 1
 # folds every surface into one `classified` set and returns `sorted(...)` of it
 # (`tools/ci_selection.py`, `fast_pool`), so a file registered on TWO surfaces (`api` beside
 # `test_abuse`, `core` beside `test_notify`) contributes ONE pool entry and therefore ONE bin.
-# Measured at this head both of those files land in the same one. A dual registration is exactly the
-# case where a neighbour's bin tells you nothing, which is why the rule is to read the letter off the
-# verb rather than to remember a pairing.
+# ⛔ THAT IS THE WHOLE CLAIM, and it is deliberately bin-free: this sentence used to add "measured at
+# this head both of those files land in the same one", which was TRUE when written and FALSE one
+# fold later (this head packs `test_14407_alert_delivery` and `test_notify` in DIFFERENT bins) —
+# the mechanism does not entail co-location with another file, so the empirical half could only rot.
+# A dual registration is exactly the case where a neighbour's bin tells you nothing, which is why the
+# rule is to read the letter off the verb rather than to remember a pairing.
 #
 # The registrations the reading above counts are `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows:
 # #14409's `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`,
@@ -210,9 +205,8 @@ version: 1
 # carried one.
 # The figures above are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head — re-derive them
-# with that verb rather than trusting them. ⛔ A restatement is NOT fine even when it cites the
-# emission it came from: a second clause at the same `est` is read as `<est … stated twice>` and reds
-# the required leg, so the figure is stated ONCE, above, and only its HISTORY is kept below.
+# with that verb rather than trusting them, and only its HISTORY is kept below (the rule that a
+# restatement is graded as a second claim lives in the "ONE CLAUSE" paragraph, not here).
 # The direction of the readings, as history: the 2026-11-16 durations sweep re-packed the same 11
 # shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
 # #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
