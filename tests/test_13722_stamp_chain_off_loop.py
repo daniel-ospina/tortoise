@@ -483,6 +483,37 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     return dead
 
 
+def _unaccounted_mentions(
+    tree: ast.Module, owners: set[str], source: str,
+) -> dict[str, tuple[int, int]]:
+    """`owner -> (textual mentions, graded AST nodes)` for every mismatch.
+
+    ⛔ WHOLE-WORD, NOT SUBSTRING (review P2-2, measured): a substring count made
+    `_stamp_chain_retry = None` — an identifier that merely EXTENDS the chain's
+    name, the plausible refactor — add one occurrence with no node to grade, so a
+    CORRECT tree redded with "builds the callable some way this pin cannot follow".
+    `\b` counts the name where it is the name (`"_stamp_chain"` in a string, the
+    `def` line, a reference) and not where it is a prefix of a longer identifier.
+
+    Fail-closed where it is declared to be: a mention this walk cannot see as a
+    node (a comment, a docstring, a string-built `locals().get("…")`) still
+    counts. ⛔ NOT closed, and stated so the arm is not over-read: CONCATENATION
+    (`"_stamp" + "_chain"`) has no contiguous occurrence to count.
+    """
+    unaccounted: dict[str, tuple[int, int]] = {}
+    for owner in sorted(owners):
+        graded = (
+            [line for line, _submitted in _off_loop_references(tree, owner)]
+            + [node.lineno for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == owner]
+        )
+        occurrences = len(re.findall(rf"\b{re.escape(owner)}\b", source))
+        if occurrences != len(graded):
+            unaccounted[owner] = (occurrences, len(graded))
+    return unaccounted
+
+
 def test_every_stamp_call_runs_off_the_loop() -> None:
     """`_stamp_capture_provenance` must be called from a leg submitted off-loop.
 
@@ -622,6 +653,13 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # docstring mentioning the name in this module reds too — fail-closed on
     # purpose: a name worth mentioning is a name worth grading, and the message
     # says so.
+    # ⛔ WHOLE-WORD ON PURPOSE (review P2-2, measured): the count is `\b…\b`, not
+    # a substring count, so `_stamp_chain_retry = None` beside an untouched
+    # submission stays GREEN. The first cut counted substrings and redded that
+    # correct tree with "the extra mention builds the callable some way this pin
+    # cannot follow" — a false report on the plausible refactor, i.e. the defect
+    # class this PR exists to remove. What remain covered are the shapes the
+    # message names: a string-built callable and a comment.
     unaccounted = _unaccounted_mentions(
         tree, owners, HOSTED_API.read_text(encoding="utf-8"))
     assert not unaccounted, (
@@ -686,6 +724,107 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         "silently does NOT run: no record, no `PointRevised`, no warning "
         "(#13722). Remove the dead guard rather than leaving the offload "
         "unreachable")
+
+
+#: A minimal module carrying one dead-guarded and one undecidable-guarded stamp
+#: call behind a `match` — the shape an `if`-only walk cannot see.
+_MATCH_SOURCE = '''
+def dead(value):
+    match value:
+        case _ if False:
+            _stamp_capture_provenance(1)
+
+def live(value):
+    match value:
+        case _ if _flag:
+            _stamp_capture_provenance(2)
+'''
+
+
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        # A collection is decided by its OPERAND, not by its shape (P2-1).
+        ("{*()}", False),
+        ("{*{1}}", True),
+        ("[*[1]]", True),
+        ("{**{}}", False),
+        ("{**{1: 2}}", True),
+        ("{*_x}", None),
+        ("{**_x}", None),
+        # Literal shapes that are falsy without being folded by CPython.
+        ("f''", False),
+        ("f'{_x}'", None),
+        ("set()", False),
+        ("dict()", False),
+        ("set(_x)", None),
+        ("1 < 0", False),
+        ("1 == 1", True),
+        ("'a' in 'abc'", True),
+        ("1 < _x", None),
+        ("-0.0", False),
+        ("(0 if True else 1)", False),
+        ("None if False else None", False),
+        ("not {*()}", True),
+        # Undecidable — the caller must NOT read these as a polarity.
+        ("_x", None),
+    ],
+)
+def test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on(
+    expr: str, expected: bool | None,
+) -> None:
+    """The dead-guard arm is only as good as `_literal_truth`'s answers.
+
+    ⛔ NON-VACUOUS, measured: on the pre-fix cuts every f-string, zero-arg
+    constructor and literal comparison below answered `None`, so a submission
+    under `if set():` / `if f'':` / `if 1 < 0:` stayed GREEN although its body can
+    never run — the silent-loss state the arm exists to refuse. The `{*…}`/
+    `{**…}` rows are the P2-1 fix, which read a spread from its operand instead of
+    treating it as empty. The `None` rows pin the other direction: nothing may
+    grade a run-time value, or a correct tree reds with a false diagnosis.
+    """
+    assert _literal_truth(ast.parse(expr, mode="eval").body) is expected
+
+
+def test_a_match_case_guard_is_graded_as_a_guard() -> None:
+    """`case _ if False:` is a disable, and an `if`-only walk cannot see it.
+
+    ⛔ NON-VACUOUS, measured: on the pre-fix `_dead_guards` the dead case returned
+    NO guards (the walk entered the `match` through `iter_child_nodes` and never
+    pushed the case guard), so a submission moved into an unreachable case stayed
+    GREEN. The `live` control pins that an undecidable guard is not graded.
+    """
+    tree = ast.parse(_MATCH_SOURCE)
+    targets = {
+        node.args[0].value: node
+        for node in _stamp_calls(tree)
+    }
+    assert [source for _line, source in _dead_guards(tree, targets[1])] == ["False"]
+    assert _dead_guards(tree, targets[2]) == []
+
+
+def test_the_mention_count_is_whole_word_and_still_fails_closed() -> None:
+    """P2-2: a sibling identifier must not red a CORRECT tree; a string must.
+
+    ⛔ NON-VACUOUS, measured: the pre-fix arm counted SUBSTRINGS, so appending
+    `_stamp_chain_retry = None` beside an untouched submission made it RED with
+    "the extra mention builds the callable some way this pin cannot follow" —
+    false for that input, and the plausible refactor. The string row is the
+    declared fail-closed arm that must survive the whole-word change.
+    """
+    source = HOSTED_API.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    owner = _enclosing_functions(tree, _stamp_calls(tree)[0])[-2]
+
+    assert _unaccounted_mentions(tree, {owner}, source) == {}
+    # A name that EXTENDS the chain's adds no graded node and must add no count.
+    assert _unaccounted_mentions(
+        tree, {owner}, source + f"\n{owner}_retry = None\n") == {}
+    # A callable built from a STRING is invisible to the AST and stays fail-closed.
+    unaccounted = _unaccounted_mentions(
+        tree, {owner}, source + f'\n_again = locals().get("{owner}")\n')
+    assert list(unaccounted) == [owner]
+    assert unaccounted[owner][0] - unaccounted[owner][1] == 1
 
 
 if __name__ == "__main__":  # pragma: no cover
