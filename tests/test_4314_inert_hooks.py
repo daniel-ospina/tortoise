@@ -1874,9 +1874,11 @@ def test_a_breadcrumb_reads_only_once_it_is_COMPLETE(tmp_path, prefix):
     because readiness rejects the document before the caller can parse it (no
     assertion in this arm covers that case for that mutation).
 
-    Mutation: restore one of those readiness predicates — this REDs, because
-    the prefix is then accepted as COMPLETE and the caller's parse raises
-    ``JSONDecodeError``."""
+    Mutation, and what it grades: make ``_breadcrumb_body``'s readiness a
+    non-emptiness (or ``is_file()``) check again — this REDs, because the prefix
+    is then accepted as COMPLETE and the caller's parse raises
+    ``JSONDecodeError``. The four call sites are graded only THROUGH this helper,
+    so reverting one SITE to its own predicate would not red this arm."""
     path = tmp_path / "codex-install.json"
     path.write_bytes(prefix)
     assert _read_complete_breadcrumb(path) is None, (

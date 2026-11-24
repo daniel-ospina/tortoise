@@ -2339,9 +2339,11 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     `SOURCE_PATTERNS` bridge, so the changed-file filter answers `surfaces: []` — and a PR that
     edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
     before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
-    `full: false`, and only the tier-1 smoke set selected, THIS FILE ABSENT. (The population is
-    `len(manifest["tier1"])`; it moves with every registration and is deliberately not typed —
-    the arm's own failure message computes it.) `--check` (the required `surface-guard`
+    `full: false`, and the tier-1 smoke set selected, THIS FILE ABSENT. (That selected set is
+    `tier1 - uri_requiring - on_demand` — the docs-only return at `tools/ci_selection.py`'s
+    `if not changed:` — which today equals `len(manifest["tier1"])` but is NOT that population;
+    it moves with every registration and is deliberately not typed — the arm's own failure
+    message prints `len(files)`, the size of that SELECTED list.) `--check` (the required `surface-guard`
     step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
     count of typed references that survive, never this suite's arms.
 
