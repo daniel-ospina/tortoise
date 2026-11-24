@@ -56,20 +56,21 @@ version: 1
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `b665cbd61986` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
+# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
-# this PR's OWN rows in `fast_pool()` (`tests/test_14219_batch_ingest.py` and
-# `tests/test_14219_batches_api.py`, `core` + `api`, each at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs two shards at 825.5 s (b, g) and nine shards at 825.4 s
-# (a, c, d, e, f, h, i, j, k), so `ceil(825.5/60 x 2)` = 28 m governs (a shard's job-level wall
-# clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.04`, so the two agree by construction rather than by a hand re-read.
+# this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 825.6 s
+# (a, b, c, d, e, f, g, h, i, j, k), so `ceil(825.6/60 x 2)` = 28 m governs (a shard's job-level
+# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` `b665cbd61986` alone packs six shards at 825.1 s and five at 825.0 s —
+# each tree's own map, `main` `10f0107689b9` alone packs nine shards at 825.4 s and two at 825.5 s —
 # quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
 # the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1329 files at this head against 1327 on `main`, and the two additions
-# are exactly this PR's `tests/test_14219_batch_ingest.py` and `tests/test_14219_batches_api.py`.
+# small: `fast_pool()` holds 1330 files at this head against 1329 on `main`, and the ONE addition is
+# this PR's `tests/test_14559_reaper_schedule.py`. ⛔ `#14415`'s two rows
+# (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
+# NOT this PR's: they were that PR's own additions and they landed before this fold.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -1947,11 +1948,18 @@ surfaces:
   # #13205: the tenant-graph PROVISIONING class — the name composer's double
   # prefix (`team_team_…`), the hard-delete purge dropping only the org's
   # default graph while its custom `org_{id}_{gid}` graphs outlived the row, and
-  # `tools/reap_empty_test_graphs.py`'s refusals. Owned by `api` because every
-  # file it guards (`tortoise/sdk.py`'s `_derive_graph_name`,
-  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`) is an
-  # `api` SOURCE_PATTERN match — the same #2938 silent-drop reasoning as the
-  # `__main__.py` pair above.
+  # `tools/reap_empty_test_graphs.py`'s refusals. Registered on `api` for its ORIGINAL
+  # subjects — `tortoise/sdk.py`'s `_derive_graph_name` and
+  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`, both `api`
+  # SOURCE_PATTERN matches (the same #2938 silent-drop reasoning as the
+  # `__main__.py` pair above) — and ⛔ ALSO on `core` below, because this PR gave
+  # that file a FOURTH guarded subject, `tools/reap_empty_test_graphs.py`, which
+  # matches NO `SOURCE_PATTERNS` row: a `tools/` path is in `NON_PYTHON_PREFIXES`,
+  # so the `api` row alone left the reaper's own 91 tests (its four refusals and
+  # `TestMemoryDelta`; measured at this head with `--collect-only`, never carried)
+  # UNRUN on a reap-tool-only diff — the fail-open direction that file's own
+  # comment names. Dual registration is the #14407 precedent, and `fast_pool()`
+  # carries it once, so the graded partition is unmoved by the second row.
   - test_13205_graph_provision_leak.py
   # #13224: the create-path write bound (`encode_for_row`'s bounded wait for a COLD
   # embedder), measured from OUTSIDE the handler — `POST /v1/subjects` answers 200 and stays
@@ -8427,6 +8435,24 @@ surfaces:
   # without this line `test_integrity_covers_all_test_files` fails — every
   # tests/**/test_*.py must be classified (the scope-v5 drift trap).
   - test_install_reaper_schedule.py
+  # #14559: the SCHEDULE for `tools/reap_empty_test_graphs.py` — a job that
+  # DELETES graphs on the production instance. Registered `core` beside its
+  # scheduling sibling above, because the subjects it guards are
+  # `.github/workflows/test-graph-reaper.yml` (which matches no `SOURCE_PATTERNS`
+  # row) and `tools/reap_empty_test_graphs.py` (a `tools/` path, which
+  # `_keep_changed` DROPS — the #12363 silent-drop class). Without this row
+  # `--integrity` reds (`manifest drift: test_14559_reaper_schedule.py`, measured
+  # on PR #14565); without the `CORE_ALSO` row for the tool a tool-only diff
+  # selects NO surface and these pins never run. Hermetic: the workflow is parsed
+  # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
+  # docker.
+  - test_14559_reaper_schedule.py
+  # ⛔ #13205's own suite, made selectable by the reap-tool entry above: it is
+  # the ONLY file that pins `tools/reap_empty_test_graphs.py` (the four refusals
+  # and this PR's `TestMemoryDelta`); `test_14559_reaper_schedule.py` never
+  # imports the tool, it parses the workflow. `fast_pool()` carries it once, so
+  # the graded partition is unmoved — measured with the row added.
+  - test_13205_graph_provision_leak.py
   - test_reaper.py
   - test_reaper_orphan.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).
@@ -15851,6 +15877,16 @@ durations:
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1
   test_13205_graph_provision_leak.py: 0.2
+  # #14559 (new file): a PR-added file takes the header's flat `DEFAULT_FAST_WEIGHT`,
+  # not a hand-picked reading. `--integrity` cannot see a missing row, so this line
+  # is what records the weight. What the weight covers, hermetically: the reaper
+  # schedule's trigger set / 15-minute cadence / scopes / band, the absence of every
+  # widener flag, and TWO of the workflow's `run:` bodies executed as `bash -c`
+  # against the tool's own JSON report shape — the credential guard (each secret
+  # missing in turn) and the verdict step (every arm that must fail, plus the
+  # rehearsal arms that must not). No docker, no DB, no graph, no model call.
+  # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
+  test_14559_reaper_schedule.py: 2.0
   test_13220_record_label_embeddings.py: 1.8
   test_13224_cold_embedder_write_bound.py: 78.8
   test_13302_ended_read.py: 2.5
