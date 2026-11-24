@@ -2045,10 +2045,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # with every falsifier that catches those asleep — and the failure it would
              # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
              # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
-             # and by the REQUIRED `manifest-integrity` leg, which covers this
-             # file's classification and slow-file consistency (a missing
-             # `durations:` row is only the 0.90 coverage ratio's business, and
-             # it costs a mis-ranked pack rather than a wrong selection).
+             # and by
+             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row,
+             # which iterates `ROWED_BY_THIS_FOLD` — this file's test is a member, so DROPPING
+             # its `durations:` row reds that pin. The REQUIRED `manifest-integrity` leg covers
+             # the classification and slow-file halves; it does NOT cover the row: its coverage
+             # check is a 0.90 RATIO with headroom and is silent over one missing row.
              "tools/entity_vector_backfill.py",
              # #13906: the dense-leg QUERY-parity harness
              # (`tools/vector_parity_13906.py`) owns

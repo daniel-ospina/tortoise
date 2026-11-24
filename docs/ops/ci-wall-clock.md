@@ -850,10 +850,15 @@ wiring, and the arithmetic behind the caps is stated above rather than pinned:
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
   than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
   mechanically (both `test` and `test-slow` take theirs from `fromJSON(...)` and carry no literal
-  `include:` rows); the WATCHDOG half is still pinned, though not here —
-  `tests/test_ci_last_failed.py` (`test_prephase_has_its_own_bounded_watchdog`)
-  requires the gating line to carry `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m`
-  and refuses a literal, so read the job itself for the shard's watchdog;
+  `include:` rows); the WATCHDOG half is pinned TWICE, once here and once outside this file, so
+  neither pin is safe to delete on its own —
+  `tests/test_ci_selection.py` (`test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed`)
+  parses the `Run fast test suite` step and requires its gating line to carry
+  `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m` (a whole-file scan is not enough: the
+  identical string sits in heading comments), and
+  `tests/test_ci_last_failed.py` (`test_prephase_has_its_own_bounded_watchdog`) requires the same
+  expression on the pre-phase line and refuses a literal, so read the job itself for the shard's
+  watchdog;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
 - the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — all THREE are
   held by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: presence for every

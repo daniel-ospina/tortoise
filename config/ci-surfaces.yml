@@ -15,19 +15,18 @@ version: 1
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
-# how this block went stale twice. Two tests are authoritative, and both recompute
-# from the map rather than trusting a quoted number: the lane-parity superset test
-# below, and the emission guard
-# how this block has gone stale. Three tests are authoritative, and TWO of
-# them recompute from the map rather than trusting a quoted number: the balance-band
-# test (`test_real_workflow_halves_are_consistent`, whose weights come from
-# `m["durations"]`) and the emission guard
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
-# the per-shard `--emit-push-matrix` sentence further down in this block against
-# the LIVE emission, so the figures in it are a graded claim and not merely prose.
-# The balance-band arm (`test_real_workflow_halves_are_consistent`) that used to
-# sit beside them went with the durations-map arithmetic cut.
-# The third, the lane-parity superset test below, does NOT read the map — it pins the
+# how this block went stale twice. TWO tests are authoritative, and only ONE of
+# them recomputes from the map rather than trusting a quoted number: the emission
+# guard (`test_the_fast_shards_header_block_states_the_measured_emission`), which
+# grades the per-shard `--emit-push-matrix` sentence further down in this block
+# against the LIVE emission, so the figures in it are a graded claim and not merely
+# prose. The balance-band test that used to sit beside it
+# (`test_real_workflow_halves_are_consistent`, whose weights come from
+# `m["durations"]`) went with the durations-map arithmetic cut, and the 1.25x band it
+# held is enforced by `--integrity`'s `workflow_halves_issues()` instead (see the
+# SUM paragraph below).
+# The other live pin, the lane-parity superset test below, does NOT read the map —
+# it pins the
 # label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the merge rail
 # subtracts main's published job names against.
 #
@@ -59,19 +58,19 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `43182ac09a`, whose #14220 landed `tests/test_14186_embedder_seam_batching.py` at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`, plus #14371's `tests/test_14371_offline_embed_json.py` and #7879's
-# `tests/test_7879_record_chain.py`) the verb packs two shards at 837.0 s (a, e) and nine at
-# 836.9 s (b, c, d, f, g, h, i, j, k), so `ceil(837.0/60 x 2)` = 28 m governs (a shard's
-# job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two agree by construction rather
-# than by a hand re-read.
+# `953c299c9b1f`, whose #14350 landed `tests/test_14350_drain_convergence.py`, on top of #14220's
+# `tests/test_14186_embedder_seam_batching.py`, #14371's `tests/test_14371_offline_embed_json.py`
+# and #7879's `tests/test_7879_record_chain.py`, all at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the
+# verb packs eleven shards at 837.1 s (a–k), so `ceil(837.1/60 x 2)` = 28 m governs — and the same
+# emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two agree by
+# construction rather than by a hand re-read.
 #
 # ⛔ The partition moves on EVERY landed registration, and that is why the shard NAMES are stated
 # here and graded below, not only the seconds: this one paragraph was re-emitted for the #14371 row
 # at a six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
-# between), and #14220 moved it again to this two/nine split — while the MINUTE has stood at 28 m
-# across every reading of this pool from 835.5 s to 837.0 s. NO arithmetic on the minute can catch
+# between), #14220 moved it to a two/nine split, and merging `main`'s #14350 row collapsed it to
+# this single eleven-shard one — while the MINUTE has stood at 28 m
+# across every reading of this pool from 835.5 s to 837.1 s. NO arithmetic on the minute can catch
 # a carried figure; only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged
 # tree; never carry the last revision's minute, seconds, or split.
 #
