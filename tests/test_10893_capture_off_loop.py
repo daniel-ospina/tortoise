@@ -514,23 +514,32 @@ def _install_blocking_stamp_write(monkeypatch, state: dict) -> None:
 
     Keyed on ``type_ == "PointRevised"`` because that is the type the stamp
     emits; blocking every emit would also block legs this test does not touch
-    and would let it pass for the wrong reason. Blocks ONCE: the window under
+    and would let it pass for the wrong reason. Blocks ONCE — the window under
     measurement is the first write's, and every further id would only add
-    another ``_STAMP_STALL_S`` to the run.
+    another ``_STAMP_STALL_S`` to the run — while the WHERE-IT-RAN flag is
+    folded over every ``PointRevised``, so a later on-loop id cannot hide behind
+    an off-loop first one.
     """
     real = TortoiseSDK._emit_event
 
     def _blocking(self, type_, payload=None, **kwargs):
-        if type_ == "PointRevised" and "entered" not in state:
-            # AGGREGATED, never last-call-wins: a later off-loop call must not
-            # erase an earlier on-loop one (the census's own rule above).
+        if type_ == "PointRevised":
+            # AGGREGATED, never last-call-wins — and the aggregation is FOLDED
+            # OVER EVERY `PointRevised`, not just the blocked one, so the flag
+            # means what it says: a later off-loop call cannot erase an earlier
+            # on-loop one (a last-write assignment would hide exactly the
+            # regression this row exists to catch). Only the FIRST write is
+            # BLOCKED — the window under measurement is its own, and every
+            # further id would add another `_STAMP_STALL_S` to the run — so the
+            # aggregation and the block are deliberately separate.
             state["ran_on_loop"] = state.get("ran_on_loop", False) or _on_loop()
             state["thread"] = threading.current_thread().name
-            state["entered"] = time.perf_counter()
-            try:
-                time.sleep(_STAMP_STALL_S)  # stand-in for the blocking write
-            finally:
-                state["exited"] = time.perf_counter()
+            if "entered" not in state:
+                state["entered"] = time.perf_counter()
+                try:
+                    time.sleep(_STAMP_STALL_S)  # stand-in for the blocking write
+                finally:
+                    state["exited"] = time.perf_counter()
         return real(self, type_, payload, **kwargs)
 
     monkeypatch.setattr(TortoiseSDK, "_emit_event", _blocking)
