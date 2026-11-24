@@ -207,7 +207,9 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
-#: RE-ALARM bound while the episode stays open (the `DEDUP` outcome). 24h keeps a
+#: RE-ALARM bound while the delivery **window HOLDS** (the `DEDUP` outcome) — not
+#: while the episode stays open, which a release that is not an episode end breaks
+#: (see the shapes above). 24h keeps a
 #: persistent breach from going silent without paging a human every window: the
 #: pre-fix code re-paged hourly (``_claim_notify``'s window expiry) for a breach
 #: that was already tracked by ONE issue, so a single org over its R1 threshold
