@@ -2313,13 +2313,18 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     production caller, and pre-#4625 the next consult healed because the entry was
     keyed on a fingerprint that MOVED.
 
-    ⛔ THE RETURNED FLAG IS THIS CALL'S, NOT THE ENTRY'S — so a reader that gates
-    on it cannot memoise an answer derived from a read ANOTHER thread has since
-    completed (measured: thread B memoising a complete read between A's read and
-    A's memo made `entry["sql"] is not None` true, and A's SHORT map was stored
-    under it — the losing race stored the wrong answer, which the entry's own
-    idempotence argument at `_schema_entry` does not cover). A reader that gates
-    on the flag stores only what its own local read certified.
+    ⛔ THE FLAG CERTIFIES THE BYTES RETURNED, NOT WHO READ THEM. When this call
+    performs the read it is that read's completeness; when the entry already holds
+    the SQL it is `True` because a COMPLETE read is the only thing ever memoised
+    there — so the bytes returned are the certified ones, which is exactly what a
+    caller deriving an answer FROM THEM needs. (An earlier revision of this
+    paragraph claimed the flag was "this call's, not the entry's", which is FALSE
+    for the memoised branch: no read happens there at all.)
+    ⛔ WHICH MAKES IT THE WRONG FLAG FOR A CALLER THAT PARSES SOMETHING ELSE:
+    `jsonb_columns` re-reads the directory through its own parser, so it certifies
+    with `_jsonb_columns_for_dir_state`'s flag — thread B memoising a complete read
+    between A's read and A's memo makes `entry["sql"] is not None` true while A's
+    own read was short (measured: the losing race stored A's short map).
 
     The healthy path is untouched: a first read that finds a complete tree still
     memoises, so a warm process keeps its zero-filesystem-operations property.
@@ -2334,11 +2339,6 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     if complete:
         entry["sql"] = sql
     return sql, complete
-
-
-def _entry_sql(entry: dict[str, Any]) -> str:
-    """The SQL only; use :func:`_entry_sql_state` when the completeness decides a memo."""
-    return _entry_sql_state(entry)[0]
 
 
 def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
@@ -2525,9 +2525,13 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: per consult instead of freezing a silently SHORT map; and
 #: :func:`table_columns` / :func:`refused_props_names` / :func:`jsonb_columns`
 #: each gate their own memo on the completeness of their own parse);
-#: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`
-#: or `_jsonb_cache_clear()` — instead of paying a per-call `stat` on the write
-#: path. The earlier wording in this block ("The map cannot go stale
+#: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`,
+#: which drops the SQL, the column map and every parse together. ⛔
+#: `_jsonb_cache_clear()` is NOT an interchangeable spelling of it: it pops the
+#: `jsonb` view ONLY, so after an edit it answers a FRESH name set beside a STALE
+#: column map — the same divergence as a shrink, from the other side. It exists
+#: for tools and pins that need the encoding view re-taken; anything that must
+#: re-resolve the schema calls `_release_schema_cache()`. The earlier wording in this block ("The map cannot go stale
 #: mid-process") was wider than the code and is corrected here rather than
 #: deleted, because the invariant it once carried is worth answering in place:
 #: *"`supabase/migrations` is applied by a workflow separate from the app deploy,
@@ -2951,6 +2955,28 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
         # unbounded, not the microseconds an earlier revision of this comment
         # claimed. `_jsonb_columns_for_dir_state` reports its own read's
         # completeness from the same `exists()` that skipped each absent file.
+        if not complete and entry["sql"] is not None:
+            # ⛔ A SHRINK UNDER AN ALREADY-RESOLVED SCHEMA IS REFUSED, NOT ANSWERED
+            # SHORT (#4625 review, third round). The SQL memo is only ever taken
+            # from a COMPLETE read, so `entry["sql"] is not None` is proof this
+            # process resolved a complete schema — and `table_columns()` /
+            # `refused_props_names()` keep answering from those certified bytes.
+            # This reader is the only one that re-reads, so answering a SHORT set
+            # here would leave a MIXED state nothing reds: the column map keeps the
+            # column while the `jsonb` name set loses it, and `_jsonb_or_scalar`
+            # then binds a value the schema declares `jsonb` as a RAW string — the
+            # `22P02` row-drop class this module documents (measured: `payload`
+            # present in the column map, absent from the name set, and the string
+            # parameter written unencoded). Pre-#4625 the same removal raised
+            # loudly out of `table_columns()`, and a loud refusal is what to keep.
+            raise RecordProjectionError(
+                "the record migrations changed under an already-resolved schema: "
+                f"not every registered migration could be read in {entry['base']}, "
+                "but this process had already resolved a COMPLETE schema from it, "
+                "so the column map and the jsonb name set would disagree and a "
+                "value bound to the missing declaration would be written "
+                "UNENCODED. Call `record_projection._release_schema_cache()` to "
+                "re-resolve.")
         if complete:
             entry["parsed"]["jsonb_columns"] = names
     return names
@@ -3096,7 +3122,7 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     thread. The copy-on-return rule is the same too.
 
     ⛔ AN EMPTY READ IS NOT MEMOISED — the same rule, and the same reason, as
-    :func:`_entry_sql` (#4625 review): `{}` is not `None`, so a parse of an
+    :func:`_entry_sql_state` (#4625 review): `{}` is not `None`, so a parse of an
     ABSENT schema stored here would satisfy the probe below for the life of the
     process. The reader would then never see an absence→appear transition and
     would answer "no name is refused" forever, which is not a slow path: the

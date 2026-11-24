@@ -310,7 +310,7 @@ def test_the_second_reader_parses_once_for_an_unchanged_schema(
     migration work in place.
 
     ⚠️ This pin counts the PARSE, and the distinction is the whole point: BOTH
-    readers take the SQL from `_entry_sql`, which memoises it on the schema entry,
+    readers take the SQL from `_entry_sql_state`, which memoises it on the schema entry,
     so counting `_read_migrations` stays at 1 even with this reader's short-circuit
     DELETED — that is a pin which can never fail on the mutation it names (review
     at `eee6bc92bc5`). What each reader repeats for ITSELF is the parse over the

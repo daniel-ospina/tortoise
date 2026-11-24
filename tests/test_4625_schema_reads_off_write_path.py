@@ -377,7 +377,7 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
     uncovered.
 
     FALSIFIER (executed): memoise the empty read again (`entry["sql"] = sql`
-    unconditionally in `_entry_sql`) and the second `table_columns()` below keeps
+    unconditionally in `_entry_sql_state`) and the second `table_columns()` below keeps
     raising; memoise the refusal parse unconditionally
     (`entry["parsed"]["refused_props_names"] = out`) and `healed` stays `{}`.
     """
@@ -410,7 +410,7 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
             "life of the process. The projection then stops dropping the "
             "derived/EP-scalar names BY NAME and `chk_*_props_no_derived` "
             f"rejects the row instead (healed={healed}). An empty read must not "
-            "satisfy the cache probe — mirror `_entry_sql`.")
+            "satisfy the cache probe — mirror `_entry_sql_state`.")
         assert rp.jsonb_columns(), (
             "the jsonb name map did not heal. It fails closed on an absent "
             "schema today, so this can only red on a 'make it cheap' tidy-up "
@@ -546,7 +546,8 @@ def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
     certify-then-parse comment describes.
 
     FALSIFIER (executed): certify with `_entry_sql_state`'s flag instead of
-    `_jsonb_columns_for_dir_state`'s and `payload` never comes back.
+    `_jsonb_columns_for_dir_state`'s and this test reds — the short set is
+    memoised instead of the shrink being refused.
     """
     source = _real_migrations()
     tree = tmp_path / "migrations"
@@ -562,16 +563,20 @@ def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
         assert "jsonb_columns" not in rp._resident_entry()["parsed"]
         # …now the tree goes partial BEHIND the memoised SQL.
         (tree / _PARTIAL_JSONB_OMITTED).unlink()
-        short = rp.jsonb_columns()
-        assert "payload" not in short, (
-            "the removed migration's names survived its file — the fixture does "
-            "not produce a short parse")
+        # ⛔ A SHRINK UNDER A RESOLVED SCHEMA IS REFUSED, not answered short and
+        # not memoised (#4625 review, third round). `table_columns()` keeps
+        # answering from the certified bytes, so a SHORT name set here would leave
+        # the two readers disagreeing — the column retained, the `jsonb` name lost
+        # — and `_jsonb_or_scalar` would bind that parameter UNENCODED, the 22P02
+        # row-drop class. Pre-#4625 the same removal raised out of
+        # `table_columns()`; a loud refusal is what to keep.
+        with pytest.raises(rp.RecordProjectionError, match="already-resolved"):
+            rp.jsonb_columns()
         assert "jsonb_columns" not in rp._resident_entry()["parsed"], (
-            "the jsonb name set was memoised on the strength of the SQL memo, so "
-            "a tree that lost a migration AFTER the SQL was read freezes a SHORT "
-            "set for the life of the process — every parameter bound to those "
-            "columns is then encoded on the wrong side of the rule, silently. "
-            "Certify the jsonb parse with the completeness of ITS OWN read.")
+            "the jsonb name set was memoised from a short parse — every parameter "
+            "bound to the missing declaration is then encoded on the wrong side of "
+            "the rule, silently. Certify the jsonb parse with the completeness of "
+            "ITS OWN read, and refuse when a resolved schema shrinks.")
         # …and it heals with no refresh verb once the file is back.
         shutil.copy(source / _PARTIAL_JSONB_OMITTED, tree / _PARTIAL_JSONB_OMITTED)
         assert "payload" in rp.jsonb_columns(), (

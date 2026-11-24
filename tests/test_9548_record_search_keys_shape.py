@@ -401,7 +401,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
       that matters: one per plan build, never one per bound parameter (the
       regressed shape measured ~180 for this plan);
     * `reads` counts `_read_migrations_state` as a cross-check on the column map, which
-      is now memoised per TREE (`_entry_sql`), so a cleared-cache build reads once
+      is now memoised per TREE (`_entry_sql_state`), so a cleared-cache build reads once
       and a warm one reads zero.
 
     Both caches are cleared first (#9558): the column map has its own
