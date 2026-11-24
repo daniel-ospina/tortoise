@@ -1796,6 +1796,13 @@ _WINDOW_KNOBS = [
     ("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
     ("TORTOISE_INVITE_RESEND_WINDOW_S", 86400),
     ("TORTOISE_CLAIM_WINDOW_S", 86400),
+    # #14415: the batch drain's two `_S`-suffixed cadence knobs. They are window
+    # shaped by the `_S` heuristic (a zero-length window re-drives the leftover
+    # set on every tick / re-scans every tenant on every pass), so they read
+    # through `_window_env` and are registered here with the defaults the code
+    # ships — `TORTOISE_BATCH_RESCAN_S` defaults to the batch reclaim window.
+    ("TORTOISE_BATCH_RETRY_S", 60),
+    ("TORTOISE_BATCH_RESCAN_S", 900),
 ]
 
 _WINDOW_FILES = ("tortoise/abuse.py", "tortoise/hosted_api.py")

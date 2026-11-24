@@ -253,8 +253,41 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2126 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `af40c97ca31` merged into the branch,
+    ⛔ THE RECORD `main`'S COPY OF THIS FILE CARRIES IS KEPT TOO, with its figure re-attributed to
+    the tree that produced it rather than to this head: on THAT fold of `origin/main`
+    `2cccf90f4dd4` its resolved file walked **2209** — both sides' prose blocks are
+    kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
+    RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
+    the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
+    `2cccf90` walked 1930, each measured by THIS function on its own file, and the resolved run is
+    their UNION plus this lane's fold note, never a sum of them. ⛔ AND RE-WALKED AGAIN on THIS LATER
+    FOLD of `origin/main` `af40c97c`, which re-cut the pin 11920 → **11913** (the −7 is `#14544`'s
+    DoD-probe cut deleting the receivers that test carried) and RESTORED the 146 distinct `#:` lines
+    of `main`'s own records from `e66997b8` that the branch's resolution did not already carry — so
+    the run read **2209** on THAT resolved file, which is `main`'s own reading and not this head's. The
+    2047 that record names is the PREVIOUS fold's reading (`60db4d7`), and the 2059 is what the branch
+    head read before `main`'s block was restored; both are kept because every fold's record stays —
+    neither is this head's figure. ⛔ THOSE NUMBERS ARE A
+    MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
+    <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
+    re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as
+    the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
+    ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
+    defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
+    penultimate branch reading as the resolved one. Only the figure the graded sentence publishes is
+    graded
+    (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
+    lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
+    the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
+    `59a08fdb8b40`, 1930 on `main`): ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
+    and `main` 1833, so the figure is re-derived here rather than carried from either side — ⛔ AND
+    RE-WALKED AGAIN on the LATER fold of `origin/main` `59a08fdb8b40`, which re-ran this sentence's
+    own walk rather than carrying either side's number, because that fold kept both blocks too —
+    and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2350 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `e627ca89375` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch and
     `main` each published their OWN tree's reading, so the figure is re-derived here rather
     than carried from either side — and GRADED, see
@@ -406,6 +439,30 @@ def _residue_block() -> str:
     what the graded figure exists to force. This fold's `#:` lines in `tools/sdk_privatise.py` are
     what the delta between them accounts for, and the pair did NOT move with them: `--repin` on this
     resolved tree prints the pair `main` commits, because this branch contributes no row.
+    — and THIS fold of `origin/main` `ae9bf0f959` kept both sides' blocks in
+    `tools/sdk_privatise.py` once more, and the row-set attribution prose this lane added for it
+    (four shapes, 860 rows on BOTH sides) sits in that run like every fold's prose before it, so
+    the figure above is RE-MEASURED by this walk on the RESOLVED file at 1977 rather than
+    inherited from either side: the pre-merge branch head `abf5fefe` walks **1890** and `main`'s
+    own blob walks **1921**, each measured by THIS function on its own file, and the resolved run
+    is the union of the two blocks plus this lane's attribution — never a sum of them, which is
+    why the branch's reading sitting BELOW `main`'s does not make the resolved figure `main`'s
+    plus a delta. The sentence that carries it arrived from `main`'s copy of this file (the
+    branch's `abf5fefe` copy had no such arm at all), and it was TRUE at `main`: its blob walks
+    the 1921 it published. It is not true of the MERGE tree, which is the whole reason the figure
+    is graded rather than trusted.
+    — and `main`'s NEXT two commits (`2cccf90f4dd4`, whose own note records that its
+    `recorded.update(keep)` receiver moved its pin by one) add that note to the same run, so THIS
+    fold's figure is again this function's own walk of the RESOLVED file rather than either side's
+    reading; the row it names is the one row this fold adds, and the pin below is `--repin`'s output
+    on that same tree.
+    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks in
+    `tools/sdk_privatise.py` once more (`main`'s #4625 `_JSONB_CACHE.update` re-pin record
+    beside this branch's own fold notes, each preserved verbatim there), so the figure above is
+    re-measured by this walk on the RESOLVED file rather than carried from either side: `main`'s
+    block names the pair it derived on ITS tree (`11910`) and the `seen.update(kwargs)` row it
+    counted row by row, while the pair this tree publishes is `--repin`'s output HERE (`11920`)
+    — neither parent's number.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
