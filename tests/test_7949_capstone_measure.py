@@ -12001,8 +12001,9 @@ _D5Needle = str | tuple[str, ...]
 #: arm's `needle not in actual` test accepted ANY of them: re-pointing the row's `:28020` at
 #: `:4475` — another `_logger.warning(`, 23,545 lines away and beside nothing the row names —
 #: stayed GREEN, on the exact row whose thesis is that a typed number rots. That is the class
-#: `_D5_PINNED_PAIRS` already closed with `hits != [number]` (#14003 review), reintroduced one
-#: screen below it. So a needle may now be a FRAGMENT — consecutive lines, each on its own line,
+#: the (now CUT in the B4 test-volume cut, 2026-11-23) `_D5_PINNED_PAIRS` table already closed
+#: with `hits != [number]` (#14003 review), reintroduced one screen below it. So a needle may
+#: now be a FRAGMENT — consecutive lines, each on its own line,
 #: the same `_D5Needle` shape — and the arm requires the single hit it names. The 4th entry uses
 #: one: `_logger.warning(` alone names 115 lines, but that call's own message line names exactly
 #: one (`grep -nF 'promote_point: temporal target %s for %s no longer' tortoise/sdk.py` -> 28021).
