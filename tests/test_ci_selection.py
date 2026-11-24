@@ -9264,7 +9264,8 @@ _SPLICE_SHINGLE_WORDS = 10
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
 #: bounds the read on the ~1,950-word block this head carries (measured: 1,948 words; the spliced
-#: fold's block was ~2,950). jscpd's clone taxonomy draws the same line: divergent
+#: fold's block was 3,043, measured at `45dd35ba9a` and `14b8322eb2`). jscpd's clone taxonomy draws
+#: the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
 #:
@@ -9272,7 +9273,9 @@ _SPLICE_SHINGLE_WORDS = 10
 #: reporter reads only the words AFTER a repeated shingle, and it demands `RESYNC` agreeing words
 #: after the difference. So a divergence inside a copy's first `_SPLICE_SHINGLE_WORDS` (10) words, or
 #: within `RESYNC` (6) words of its end, is never named — and a copy of 16 words or fewer can never
-#: be named at all (band ≈ word index `[10, len-7)`). Measured on 17-word copies with one figure
+#: be named at all (band `[10, len-7]`, word index 0-based and BOTH BOUNDS INCLUSIVE — the half-open
+#: form first recorded here denied the very case its own example names, so the edges are GRADED at
+#: the end of the arm below instead of trusted). Measured on 17-word copies with one figure
 #: changed: index 1 -> `[]`, index 5 -> `[]`, index 10 -> `('2.0361', '2.0362')`, index 12 -> `[]`.
 #: A difference of WIDTH (an insertion or a deletion) is likewise never named, because both tails are
 #: indexed with the same gap. This field is DIAGNOSTIC ONLY — the arm reds and reports the spans
@@ -9590,7 +9593,7 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
     # below would be decoration on the one file it exists to grade. This block is ~1,950 words at
-    # this head (measured: 1,948; the spliced fold's was ~2,950), so the floor is roughly 19x below
+    # this head (measured: 1,948; the spliced fold's was 3,043), so the floor is roughly 19x below
     # it — not a tuned value.
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
@@ -9682,6 +9685,28 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     assert _splice_divergences(divergent) == [("2.0361).", "2.0362).")], (
         "a divergent pair's differing tokens were not reported, so the failure message cannot name "
         f"the figure to reconcile: {_splice_divergences(divergent)!r}")
+    # ⛔ …and the BAND that report is silent outside is graded, not remembered. The bound was
+    # recorded as `[10, len-7)` — half-open, which denies the one case its own 17-word example
+    # names — and nothing graded it, so a stated blind spot drifted from the behaviour it describes
+    # inside this very PR. The edges are arithmetic, so they are pinned on synthetic 17-word copies:
+    # the difference must sit at 0-based index 10 or later (a 10-word shingle has to survive before
+    # it) and leave `RESYNC` agreeing words after it (here: index <= len-7).
+    def _named_at(length: int, differ_at: int) -> list[tuple[str, str]]:
+        plain = [f"w{i:02d}" for i in range(1, length + 1)]
+        changed = list(plain)
+        changed[differ_at] = "X" + changed[differ_at]
+        return _splice_divergences(_emission_block_header(
+            f"# {' '.join(plain)}\n# {' '.join(changed)}\n\nfast_shards: 11\n"))
+    assert _named_at(17, 10) == [("w11", "Xw11")], (
+        "the divergence reporter no longer names the last position inside its own band (0-based "
+        f"index 10 of a 17-word copy): {_named_at(17, 10)!r} — the recorded bounds and the code "
+        "have drifted apart")
+    assert not _named_at(17, 9), (
+        "a divergence at 0-based index 9 breaks the 10-word shingle the reporter reads after, so "
+        f"it must stay silent: {_named_at(17, 9)!r}")
+    assert not _named_at(17, 12), (
+        "a divergence within `_SPLICE_DIVERGENCE_RESYNC_WORDS` of the copy's end leaves too few "
+        f"agreeing words to re-agree on, so it must stay silent: {_named_at(17, 12)!r}")
     # …and two copies that merely END differently are NOT a divergence: this block legitimately
     # states one sentence twice, so a read that reported every first difference would send a
     # maintainer to reconcile nothing. Measured: these copies diverge at `the` / `while` and never
