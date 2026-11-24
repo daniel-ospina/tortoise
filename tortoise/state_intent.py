@@ -614,16 +614,52 @@ _NP_WORD_GUARDED = rf"[^\W_](?:(?:-{_NP_DASH_BOUNDARY})|[^\W_]|['’])*"
 #: `_fold_typography` already normalises every `Pd` to `-`, so `all—hands` (em dash)
 #: reaches this set as `all-hands` and routes — which is exactly the spelling the
 #: routing table pins.
+#: ⛔ THE WELD WORDS — the closed grammatical class the segment test refuses. A word
+#: here can start a NEGATED predicate, a NEGATED modifier, a new CLAUSE or a new SUBJECT,
+#: so a joiner in front of it welds it out of `_NP_STOP`'s reach and the shape answers the
+#: opposite population. This list is finite and grammatical (unlike the compound vocabulary
+#: below, which is an open product vocabulary), which is why the test is on the SEGMENT and
+#: not on the whole token: enumerating weld words is sound, enumerating head nouns is not.
+_WELD_SEGMENTS: frozenset[str] = frozenset({
+    # negation / approximation — the polarity-inverting class
+    "not", "no", "never", "neither", "nor", "none", "nobody", "nothing",
+    "hardly", "barely", "scarcely", "rarely", "without",
+    # determiners
+    "the", "a", "an", "this", "that", "these", "those",
+    # pronouns
+    "i", "we", "you", "he", "she", "it", "they", "us", "them", "me", "him", "her",
+    "anyone", "someone", "everyone", "anybody", "somebody", "everybody",
+    # quantifiers
+    "all", "any", "some", "each", "every", "both", "either", "few", "many",
+    "much", "more", "most", "several", "own",
+    # relatives / wh-words
+    "which", "who", "whom", "whose", "when", "where", "why", "how",
+    # conjunctions and clause markers
+    "or", "and", "but", "so", "yet", "if", "unless", "because", "although",
+    "though", "as", "since", "while", "whenever", "whereas", "whether",
+    "before", "after", "until", "once",
+    # the futurity carriers `_NP_STOP` frames on — a joiner in front of these hides
+    # the frame (`is the plan\u2014to be retired`)
+    "to", "in", "of", "for", "due", "going", "scheduled", "about",
+})
+
+#: ⛔ REGISTRATION IS ONLY NEEDED FOR A COMPOUND THAT CONTAINS A WELD WORD. A compound
+#: whose segments are all ordinary — `all-hands`, `self-service`, `e-mail`, `read-only` —
+#: is admitted by the segment test on its own merits, so an entry for one would be
+#: vocabulary doing no work (measured: deleting any of those three changed no test, and a
+#: dead entry is how a set looks like it guards something it does not). Every entry below
+#: carries at least one segment from `_WELD_SEGMENTS` (`state-of-the-art` -> `the`,
+#: `all-or-nothing` -> `or`, `do-it-yourself` -> `it`, `not-for-profit` -> `not`,
+#: `go-to-market` -> `to`), which is exactly the exception the rule needs — and
+#: `test_the_dash_compound_whitelist_is_what_admits_the_routing_rows` asserts it, so a
+#: dead entry reds.
 _DASH_COMPOUND_TOKENS: frozenset[str] = frozenset({
-    "all-hands",
     "go-to-market",
     "point-to-point",
     "all-in-one",
     "made-to-order",
     "up-to-date",
     "day-to-day",
-    "self-service",
-    "e-mail",
     "state-of-the-art",
     "all-or-nothing",
     "everything-or-nothing",
@@ -642,20 +678,48 @@ _DASH_COMPOUND_TOKENS: frozenset[str] = frozenset({
 
 
 def _admits_dash_joined_tokens(t: str) -> bool:
-    """Whether every dash-joined token in `t` is a registered compound.
+    """Whether every joined token in `t` is safe to weld.
 
-    `is_predicate`'s subject NP admits `-` inside a head noun (`company's`, `all-hands`),
-    and that spelling is what lets a dash WELD a negator or a clause subject onto the head
-    noun so no token-start stop can see it. The guarded token class alone cannot close
-    that: `-officially` and `-anyone` are ordinary words, so a frame built from auxiliaries
-    refuses them only until the next word. This predicate is the closed-vocabulary backstop
-    — one space-delimited token at a time, matched WHOLE.
+    A token inside the subject NP may carry `-`, `'` or `’` (`company's`, `all-hands`,
+    `e-mail`), and ANY of those hides the following word from `_NP_STOP`, which is a
+    token-START lookahead. That is the weld: `plan—not cancelled` and `plan'not cancelled`
+    both serve the CANCELLED/ENDED population — the polarity-INVERTED answer — while the
+    spaced twin of each refuses. Measured, both joiners: 810/810 (dash) and 756/1404
+    (apostrophe) welded routes whose spaced twin refuses.
+
+    The rule is a WELD-WORD test on the SEGMENTS, not a whitelist on the whole token.
+    The two are different classes, and only one of them is enumerable:
+
+    * the words that flip what a question asks are a CLOSED GRAMMATICAL CLASS — negators,
+      determiners, pronouns, relatives, conjunctions, quantifiers. That set is finite and
+      stable, so testing it is sound;
+    * the compound head nouns of a product are an OPEN vocabulary, so a whitelist over
+      them loses every ordinary hyphenated modifier nobody thought to register
+      (`is the self-hosted deployment archived`, `… read-only …`, `… multi-tenant …`,
+      `… 30-day …`) — each became a silent `0 rows`.
+
+    So: a token is admitted when NO segment after a joiner is a weld word; a registered
+    compound (`_DASH_COMPOUND_TOKENS`) is admitted regardless, because those spellings
+    legitimately CONTAIN a weld word as a non-predicate segment (`state-of-the-art`,
+    `all-or-nothing`, `do-it-yourself`, `not-for-profit`).
+
+    ⛔ POSSESSIVES ARE ORDINARY and must not be refused: `'` at the end of a token
+    (`all-hands'`) or before `s` (`company's`) is a possessive, not a weld. ⛔ And the
+    leak closes because a weld word is only reachable through a joiner when it is the
+    FIRST segment after it — any later weld word is space-separated and `_NP_STOP` sees
+    it (`is the plan—report not cancelled` refuses on `not`).
     """
-    return all(
-        tok in _DASH_COMPOUND_TOKENS
-        for tok in t.split()
-        if "-" in tok
-    )
+    for tok in t.split():
+        if not any(j in tok for j in "-'\u2019"):
+            continue
+        # A possessive tail is not part of the head noun's spelling.
+        base = tok.rstrip("'\u2019")
+        if base in _DASH_COMPOUND_TOKENS:
+            continue
+        for segment in re.split(r"[-'\u2019]", base)[1:]:
+            if segment in _WELD_SEGMENTS:
+                return False
+    return True
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -976,8 +1040,13 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # EXCLUDES terminal statuses, so a refused state question answers `0 rows`.
     # The determiner set is the closed one (`these`/`those` included: a yes/no
     # question about ONE named record can use either), and the token class
-    # survives `company's` / `all-hands` — a hyphen or an apostrophe inside a
-    # head noun is an ordinary spelling, not a clause boundary.
+    # survives `company's` / `all-hands` / `self-hosted` — a hyphen or an
+    # apostrophe inside a head noun is an ordinary spelling, NOT a clause boundary.
+    # ⛔ BUT AN ORDINARY SPELLING IS NOT AN UNCONDITIONAL ONE, and the earlier
+    # wording of this very comment claimed otherwise. A joiner also WELDS the next
+    # word into the token, out of reach of the token-start stops, so it is a boundary
+    # exactly when the segment after it is a weld word; `_admits_dash_joined_tokens`
+    # below is the test and the whitelist beside it is the closed exception.
     ("is_predicate", re.compile(
         rf"^(?:is|are|was|were)\s+"
         rf"(?:the|our|your|their|its|my|this|that|these|those)\s+"

@@ -67,6 +67,7 @@ not a constant, and it is not a regression (epic #1647 P4).
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -746,10 +747,12 @@ DASH_JOINED_NEGATION_REFUSED = (
 )
 
 #: ⛔ THE WELD CLASS, pinned after the grammatical guard was measured leaking it TWICE
-#: MORE (PR #14491: 810/810 dash-joined NEGATOR + one non-AUX word, 1701/1701 dash-joined
-#: CLAUSE SUBJECT, each reaching the polarity-INVERTED or wrong population while the
-#: SPACED twin refused). Every row here is a dash that WELDS an ordinary word onto the
-#: head noun so no token-start stop can see it. The `_NP_DASH_AUX` frame cannot close
+#: MORE. Swept on the head before this rule, every one of these reached the
+#: polarity-INVERTED or wrong population while its SPACED twin refused: 3240/3240
+#: negator+gap spellings and 1701/1701 clause-subject spellings, and 756/1404 once the
+#: apostrophe joiner was included (the dash-only backstop did not examine it). Every row
+#: here WELDS an ordinary word onto the head noun so no token-start stop can see it. The
+#: `_NP_DASH_AUX` frame cannot close
 #: this — `officially` and `anyone` are ordinary words, so the hole moves one word out
 #: each time the list is widened — which is why `is_predicate` now admits a dash-joined
 #: TOKEN only from `_DASH_COMPOUND_TOKENS`, a closed vocabulary. The consequence is that
@@ -768,13 +771,54 @@ DASH_WELD_REFUSED = (
     "is the plan\u2014anyone abandoned",
     "is the ticket\u2014both teams cancelled",
     "is the data\u2014we retired",
-    "is the claim\u2014finance retracted",
     "is the plan\u2014the team abandoned",
     # a registered compound with a negator glued on is a DIFFERENT token, so the
     # WHITELIST cannot be re-opened by prefixing a compound it admits
     "is the all-hands\u2014not cancelled",
     "is the all-hands meeting\u2014not cancelled",
+    # ⛔ THE APOSTROPHE IS A JOINER TOO, and this was a LIVE leak the dash-only
+    # backstop did not examine (`'`/`\u2019` are ordinary members of the token class, so a
+    # possessive-shaped weld hid the negator from the token-start stop). Measured before
+    # the segment test: 756/1404 welded routes whose spaced twin refused.
+    "is the plan'not cancelled",
+    "is the plan\u2019not cancelled",
+    "is the plan'never archived",
+    "is the plan'anyone abandoned",
 )
+
+#: The OTHER half of the same rule: an ordinary hyphenated head-noun MODIFIER, and a
+#: POSSESSIVE, are ordinary spellings and must keep routing. A whitelist over compound
+#: spellings refused all of these (measured: 18/18 realistic modifiers became `0 rows`),
+#: which is why the test is on the SEGMENT after a joiner rather than on the whole token —
+#: enumerating weld words is sound, enumerating head nouns is not.
+JOINED_TOKENS_KEEP_THIS_RECALL = (
+    "is the self-hosted deployment archived",
+    "is the read-only deployment archived",
+    "is the multi-tenant deployment archived",
+    "is the 30-day deployment archived",
+    "is the e-mail policy archived",
+    "is the company's policy archived",
+    "is the all-hands' meeting archived",
+    "is the customer-facing api retired",
+)
+
+
+@pytest.mark.parametrize("query", JOINED_TOKENS_KEEP_THIS_RECALL)
+def test_an_ordinary_joined_token_still_routes(query):
+    """A hyphen or apostrophe INSIDE a head noun is ordinary spelling.
+
+    `self-hosted`, `read-only`, `multi-tenant`, `30-day`, `e-mail` and the possessive
+    `all-hands'` are not clause boundaries. Refusing them answers `0 rows` for a
+    perfectly good state question — a SAFE miss, but a miss that a whole-token whitelist
+    over compound spellings cannot avoid and that this rule does not pay.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is not None, (
+        f"{query!r} keeps the relevance read — the joiner here is INSIDE the head noun "
+        f"or is a possessive, so nothing is being welded past a stop word. This is the "
+        f"recall a compound whitelist costs")
 
 
 @pytest.mark.parametrize("query", DASH_WELD_REFUSED)
@@ -799,52 +843,80 @@ def test_a_dash_may_not_weld_an_ordinary_word_onto_the_head_noun(query):
 def test_the_dash_weld_class_leaks_nothing_across_the_sweep():
     """The class, not just its examples — this is the falsifier for the NAME SET.
 
-    Measured on the head before the whitelist: 810/810 across this sweep reached the
-    population. A fix that closes the named rows but leaves the class open reds here,
-    which is exactly the failure mode four earlier rounds shipped (each round pinned
-    the rows it fixed and the hole moved one word out).
+    ⛔ A row only belongs to this class if the SPACED twin ALSO refuses: that is what
+    makes the joiner the cause. Two spellings were dropped from an earlier cut of this
+    sweep for exactly that reason — `is the plan\u2014officially cancelled` (an ordinary
+    adverb modifying the predicate, so the population is the RIGHT answer, and the spaced
+    form routes too) and `is the claim\u2014finance retracted` (residual #1's bare-noun
+    subject, disclosed, and identical spaced). A sweep that demanded a refusal for those
+    would pin a wrong behaviour and red a correct fix.
+
+    Every `weld` below is a member of `_WELD_SEGMENTS`: a negator, a determiner, a
+    pronoun or a quantifier — i.e. a word that can start a negated predicate or a new
+    clause, which is the only way a joiner changes WHICH population is the answer.
     """
     from tortoise.state_intent import detect_state_question
 
     endings = ("cancelled", "archived", "retired", "withdrawn", "deprecated")
-    separators = ("\u2014", "\u2013", "\u2015", "\uff0d", "-")
+    separators = ("\u2014", "\u2013", "\u2015", "\uff0d", "-", "'", "\u2019")
     weld_words = (
-        "officially", "soon", "remotely", "surely", "quickly",
-        "anyone", "someone", "both", "each", "we", "they",
+        "not", "never", "nor", "anyone", "someone", "both",
+        "each", "we", "they", "the", "all", "any",
     )
     leaks = []
     for weld in weld_words:
         for ending in endings:
             for sep in separators:
-                query = f"is the plan{sep}{weld} {ending}"
-                got = detect_state_question(query)
-                if got.population is not None:
-                    leaks.append((query, got.population))
+                welded = f"is the plan{sep}{weld} {ending}"
+                spaced = f"is the plan {weld} {ending}"
+                got = detect_state_question(welded)
+                if got.population is None:
+                    continue
+                if detect_state_question(spaced).population is not None:
+                    # The spaced twin routes too, so the shape — not the joiner — is the
+                    # cause; that is a disclosed residual, not a weld leak.
+                    continue
+                leaks.append((welded, got.population))
     assert not leaks, (
-        f"{len(leaks)} dash-welded spelling(s) still route, e.g. {leaks[:4]} — the "
-        f"dash is joining an ordinary word onto the head noun, which is the "
-        f"polarity-INVERTED answer class. Close the CLASS (a dash-joined token must be "
-        f"registered vocabulary), not the rows")
+        f"{len(leaks)} welded spelling(s) route while their spaced twin refuses, e.g. "
+        f"{leaks[:4]} — the joiner is hiding a weld word from the token-start stop, which "
+        f"is the polarity-INVERTED answer class. Close the CLASS (a segment after a "
+        f"joiner must not be a weld word), not the rows")
 
 
 def test_the_dash_compound_whitelist_is_what_admits_the_routing_rows():
-    """The whitelist must be load-bearing, not decorative.
+    """The whitelist must be load-bearing, and ONLY load-bearing entries may sit in it.
 
-    Two directions, because a whitelist that admits everything and one that admits
-    nothing both look 'closed'. Every routing-table compound must be IN the set, and a
-    token that is NOT in the set must refuse — so deleting an entry reds the routing
-    table and adding one cannot silently widen past a weld.
+    Registration exists for one reason: a compound whose own segments include a WELD WORD
+    would otherwise refuse (`state-of-the-art` has `the`, `all-or-nothing` has `or`,
+    `not-for-profit` has `not`). A compound with no weld segment is admitted by the
+    segment test anyway, so an entry for one does no work — and a dead entry is how a set
+    looks like it guards something it does not (`e-mail` and `self-service` were exactly
+    that, measured: deleting either changed nothing). So every entry is asserted to carry
+    a weld segment, which makes a dead entry red.
+
+    The other direction: a weld-bearing token that is NOT registered must refuse.
     """
-    from tortoise.state_intent import _DASH_COMPOUND_TOKENS, detect_state_question
+    from tortoise.state_intent import (
+        _DASH_COMPOUND_TOKENS,
+        _WELD_SEGMENTS,
+        detect_state_question,
+    )
 
-    for query in DASH_JOINED_COMPOUND_ROUTES + DASH_JOINED_COMPOUND_FORMERLY_REFUSED:
-        for token in query.split():
-            if "-" in token:
-                assert token in _DASH_COMPOUND_TOKENS, (
-                    f"{token!r} (from {query!r}) routes but is not registered — the "
-                    f"routing table and the whitelist disagree")
-    assert "plan-not" not in _DASH_COMPOUND_TOKENS
-    assert detect_state_question("is the plan\u2014not cancelled").population is None
+    for entry in sorted(_DASH_COMPOUND_TOKENS):
+        segments = re.split(r"[-'\u2019]", entry)[1:]
+        assert any(seg in _WELD_SEGMENTS for seg in segments), (
+            f"{entry!r} is registered but none of its segments {segments} is a weld "
+            f"word, so the entry does nothing — the segment test already admits it. "
+            f"Delete it rather than leaving vocabulary that looks load-bearing")
+    for unregistered in ("plan-not", "plan-anyone", "plan-the", "plan-or"):
+        assert unregistered not in _DASH_COMPOUND_TOKENS
+    for query in (
+        "is the plan\u2014not cancelled",
+        "is the plan\u2014anyone cancelled",
+        "is the plan\u2014the cancelled",
+    ):
+        assert detect_state_question(query).population is None, query
 
 
 #: ⛔ AN ATTRIBUTIVE ENDING WORD IN THE **HEAD** SLOT, pinned because the guard that
