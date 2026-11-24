@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2006 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2047 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2006 rather than inherited from either side —
@@ -329,6 +329,13 @@ def _residue_block() -> str:
     fold's figure is again this function's own walk of the RESOLVED file rather than either side's
     reading; the row it names is the one row this fold adds, and the pin below is `--repin`'s output
     on that same tree.
+    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks in
+    `tools/sdk_privatise.py` once more (`main`'s #4625 `_JSONB_CACHE.update` re-pin record
+    beside this branch's own fold notes, each preserved verbatim there), so the figure above is
+    re-measured by this walk on the RESOLVED file rather than carried from either side: `main`'s
+    block names the pair it derived on ITS tree (`11910`) and the `seen.update(kwargs)` row it
+    counted row by row, while the pair this tree publishes is `--repin`'s output HERE (`11920`)
+    — neither parent's number.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

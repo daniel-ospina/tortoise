@@ -2116,7 +2116,48 @@ SWEEP_NAMES = 66
 #: `--repin` on THIS tree prints **(11922, "97af31f6c4fda3c5")**, which is this branch's own pre-fold
 #: 11921 plus exactly the ONE row `main`'s block above names, and NO other row moves — the count a
 #: reader can check, not a delta taken on trust. `--check` exits 0 on it.
-SWEEP_RESIDUE = (11922, "97af31f6c4fda3c5")
+#: ⛔ KEPT FROM `origin/main` (`6a02515d14ad`) — that side's record, preserved rather than
+#: overwritten (this file's standing rule: one assignment, both records). It was derived on ITS
+#: tree, not this one, and it is not the publication below.
+#: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
+#: #4625's own fold then RE-PINNED DOWN 11910 -> **11908** — the pin's HARMLESS direction, because a
+#: residue count that FALLS cannot hide a new untyped reference. The two rows that left are the last
+#: `_JSONB_CACHE.update({...})` calls in `tortoise/record_projection.py`, deleted with the 5 s `jsonb`
+#: TTL this PR retires: the TTL was the only reason that dict was refreshed in place rather than
+#: cleared through `_release_schema_cache()` — measured `--repin` on the branch's tree printed
+#: `(11908, 'f03fb8e5f6e44a9c')`, no shape added or absorbed.
+#: ⛔ THE MERGE WITH `origin/main` MOVED IT BACK UP BY ONE, to **11909 / `1f020f859e887f94`** — the
+#: OTHER direction, so it is attributed ROW BY ROW rather than accepted as a flake: `main`'s rewrite
+#: of `tests/test_collision_preflight.py` adds exactly one untyped `.update` receiver,
+#: `seen.update(kwargs)` in its new `spy()` fixture, and that merge deleted no `.update` line anywhere
+#: (`#4625`'s own -2 is still in this tree: `_JSONB_CACHE.update` is 2 rows on `origin/main` and 0
+#: here). A rising pin is the direction the guard exists to CATCH, and here the row is main's, so the
+#: pin followed `main` — measured `--repin` on that merged tree, never arithmetic on the old number.
+#: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE, because
+#: the fold's own tree is a THIRD tree: this merge brings main's durable `claim_unavailable` self-heal,
+#: whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one new untyped `.update(`
+#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -3
+#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
+#:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
+#:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
+#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
+#:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
+#:     inherits main's row set, not main's number.
+#:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
+#:     took with it — 2 rows on `origin/main`, 0 here, and the report row sets are otherwise IDENTICAL
+#:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
+#: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
+#: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
+#: ⛔ THIS FOLD — `origin/main` `6a02515d14ad` (#14459/#4625 + #14522) — is RE-CUT ON THE RESOLVED
+#: TREE, never inherited from either parent: `--repin` HERE prints **(11920, "932d96bdb7151f75")**.
+#: The whole movement against this branch's own published 11922 is -2, attributed ROW BY ROW rather
+#: than waved through: the two `_JSONB_CACHE.update({...})` receivers in
+#: `tortoise/record_projection.py` that `origin/main`'s #4625 fold deleted with the retired 5 s
+#: `jsonb` TTL. MEASURED on both sides of THIS merge — pre-fold HEAD 7ce74ac: 2 rows, `origin/main`
+#: 6a02515: 0, merge-base 2cccf90: 2, resolved tree: 0 — so the fold removes exactly those two and
+#: adds none. A FALLING pin cannot hide a new untyped reference, which is the direction this arm
+#: exists to catch; every other parent record above stays verbatim.
+SWEEP_RESIDUE = (11920, "932d96bdb7151f75")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
