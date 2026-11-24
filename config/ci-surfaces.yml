@@ -72,12 +72,6 @@ version: 1
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
-# SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
-# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
-# the last revision's minute, seconds, or split.
-#
 # `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
@@ -92,9 +86,6 @@ version: 1
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. A restatement
-# and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`). ⛔ No letter here: one registration is not the claim, and a
-# per-file letter rots on the next fold — see the GRADED rule below. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
 # reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
 # `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
@@ -136,26 +127,17 @@ version: 1
 # and `2.0` at this head's 838.2 s (1680 / 838.2 = 2.0043). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
-# ⛔ ONE CLAUSE, NOT A LEDGER. This paragraph was re-emitted at every fold and had accumulated SEVEN
-# stacked restatements of the same sentence; a fold that splices two sides of it is read by the
-# guard as `<est … stated twice>` / `<ceil stated 2 times>`, i.e. a block claiming two partitions
-# while looking like one — measured on THIS fold, where `main`'s re-emission and this branch's
-# arrived side by side and the guard red `1 failed` at the merged head (838.1/838.0 beside
-# 838.1/838.2). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
-# be read as a second claim.
+# ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
+# the NAME SETS move on every landed registration, so no arithmetic on the minute can catch a carried
+# figure; only the `est_seconds` partition can. This paragraph was re-emitted at EVERY fold and had
+# accumulated seven stacked restatements of one sentence; a fold that splices two sides of it is read
+# by the guard as `<est … stated twice>` / `<ceil stated 2 times>`, i.e. a block claiming two
+# partitions while looking like one — measured on the fold at `7e9d369f2214`, where `main`'s
+# re-emission and this branch's arrived side by side and the guard red (`838.1/838.0` beside
+# `838.1/838.2`). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
+# be read as a second claim, and re-derived with `--emit-push-matrix` on the merged tree rather than
+# carried.
 #
-# The direction, so a reader can see how fast this moves and why the SET is the graded operand: the
-# 2026-11-16 durations sweep packed eleven shards at a 23 m worst-shard watchdog; #12926's 10.0 s
-# row moved it to 24 m and #14015's M5 row to 25 m; #14429's `core` registration re-packed them to
-# nine/two at 837.3 s; #14471's flat-default registration to seven/four (837.5/837.4 — measured by
-# withholding that row, which packs 837.3/837.2, so charging the seven/four to #14429 would be
-# false); #14407's dual registration to five/six at 837.7/837.6; #14504's
-# `tests/test_13722_stamp_chain_off_loop.py` row — which also moved `d` and `e` out of the worst bin
-# — and then `main`'s next two landings to the one/ten at 838.1/838.2 above; and the 2026-11-23 sweep
-# to the 28 m it prints (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom). The MINUTE has stood
-# at 28 m across every one of those readings while the seconds moved under it (835.5 s to 838.2 s),
-# so NO arithmetic on the minute can catch a carried figure: only the `est_seconds` partition can,
-# which is why the sentence is GRADED below instead of trusted.
 # The registrations this reading counts are enumerated ONCE, below — ⛔ NOT re-listed here, and with
 # NO per-file shard letter (the paragraph after it says why a letter rots). A file a PR ADDS carries
 # the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: it cannot have a junit reading yet),
@@ -200,8 +182,9 @@ version: 1
 # carried one.
 # The figures above are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head — re-derive them
-# with that verb rather than trusting them, but a restatement is fine when it cites the emission
-# it came from — and the promise is GRADED, not just stated:
+# with that verb rather than trusting them. ⛔ A restatement is NOT fine even when it cites the
+# emission it came from: a second clause at the same `est` is read as `<est … stated twice>` and reds
+# the required leg, so the figure is stated ONCE, above, and only its HISTORY is kept below.
 # The direction of the readings, as history: the 2026-11-16 durations sweep re-packed the same 11
 # shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
 # #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
