@@ -21942,8 +21942,8 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # So this pin reads every record that carries such a verdict and requires it to
 # match the tree. The convention it enforces is the one this PR's fix rounds
 # already adopted: a historical cut is recorded as "CUT by <sha/PR> … RESTORED by
-# `#14481`", and a name whose restoration is stated in the same passage is read as
-# history, not as a claim about this head.
+# `#14481`", and a name whose restoration is stated in the SAME SENTENCE (clause) is read
+# as history, not as a claim about this head.
 #
 # `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
 # above is accountable to: one entry per recurrence, the plan ledger's Step-4
@@ -21952,8 +21952,7 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # the next commit — the scan reads THIS file and the two fixtures below, so any number
 # re-stales on the next edit, which is the "a record quoting a figure its instrument
 # does not return" defect this PR repairs, one level up. Re-derive it instead:
-#     uv run python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
-#                print(len(t._cut_claims()), [c for c in t._cut_claims() if c[3]])"
+#     uv run python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t; print(len(t._cut_claims()), [c for c in t._cut_claims() if c[3]])"
 # and the pin itself asserts non-vacuity, so the number is not load-bearing.
 # ⚠️ Count the ROWS the helper returns, not the verdicts a commit message enumerates:
 # `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
@@ -21963,7 +21962,13 @@ _CUT_CLAIM_WINDOW = 200
 #: this pin exists to catch passes by carrying the word in an unrelated clause.
 _CUT_CLAIM_RESTORED_RE = re.compile(
     r"(?:RESTORED|restored)\s+by\s+`?(?:#\d+|[0-9a-f]{7,40})")
-_CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b")
+#: ⛔ BOTH SPELLINGS, AND ONLY THE VERDICT PHRASE OF THE LOWERCASE ONE. The corpus
+#: writes this verdict in lowercase as often as not — `cut by #14419`, `cut with the B7
+#: arithmetic` — and a `\bCUT\b`-only token read those as CLEAN: measured, a lowercase
+#: verdict on a live arm was a FALSE PASS while the uppercase control redded. The
+#: phrase is narrowed to `cut by|in|with` on purpose: a bare `\bcut\b` (or `re.I`)
+#: also matches `re-cut` and prose like "a better cut of two", which is not a verdict.
+_CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b|\bcut\s+(?:by|in|with)\b")
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
@@ -22036,13 +22041,15 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     return claims
 
 
-#: Block openers. Markdown bullets AND their `#`-comment spellings, because 4 of the 6
-#: files this pin scans are comment prose — a separator set that only knows `- ` splits
-#: nothing there, and the measured consequence was a FALSE RED: one `# - ` bullet's verdict
-#: charged the arm in the next bullet. (`#- `, `# * ` and `#  - ` are the spellings the
-#: repo actually uses.)
-_BLOCK_SEPARATORS = ("\n\n", "\n- ", "\n* ", "\n# - ", "\n#- ", "\n# * ", "\n#  - ",
-                     "\n#   - ")
+#: Block openers: blank line, markdown bullet, and the `#`-comment spelling of a bullet at
+#: ANY indent (the repo indents them — measured `  #  - …` in `config/ci-surfaces.yml`).
+#: 5 of the 6 files this pin scans are comment prose, so a set that only knew `- ` split
+#: nothing there and let one bullet's verdict charge the next bullet's arm — a FALSE RED.
+#: ⛔ No census of spellings is stated here: an earlier cut enumerated three and two of them
+#: occur zero times in the repo, which is the same "a figure the instrument does not return"
+#: defect this PR repairs. `_COMMENT_BULLET_RE` is the statement.
+_COMMENT_BULLET_RE = re.compile(r"\n[ \t]*#+[ \t]*[-*][ \t]")
+_BLOCK_SEPARATORS = ("\n\n", "\n- ", "\n* ")
 
 
 def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
@@ -22056,9 +22063,11 @@ def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
     """
     starts = [i for i in (text.rfind(sep, 0, pos) for sep in _BLOCK_SEPARATORS)
               if i != -1]
+    starts += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, 0, pos)]
     lo = (max(starts) + 1) if starts else 0
     ends = [i for i in (text.find(sep, pos) for sep in _BLOCK_SEPARATORS)
             if i != -1]
+    ends += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, pos)]
     return lo, (min(ends) if ends else len(text))
 
 
@@ -22254,6 +22263,25 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         assert got and not any(got.values()), (
             "a restoration stated over a LIST must defuse every arm in it, or the pin "
             f"reds the record shape its own message prescribes: {passage!r} -> {got!r}")
+
+    # ⛔ THE LOWERCASE VERDICT IS A VERDICT. The corpus writes "cut by #14419" as often as
+    # "CUT", and a `\bCUT\b`-only token read those as CLEAN — a measured FALSE PASS on a
+    # live arm while the uppercase control redded.
+    got = _cut_claims_in("`test_live` was cut by #14439's re-cut.", {"test_live"})
+    assert [c for _o, _n, c in got] == [True], (
+        f"a lowercase verdict on a live arm must contradict: {got!r}")
+    # …while prose that merely contains the word is not a verdict.
+    got = _cut_claims_in("This is a better cut of two passes; `test_live` is graded.",
+                         {"test_live"})
+    assert not got, f"'a better cut of two' is not a verdict: {got!r}"
+
+    # ⛔ AND AN INDENTED `#` BULLET IS A BULLET. The repo indents its comment bullets, so a
+    # column-0-only separator charged the next bullet's arm with this one's verdict.
+    indented = ("    # - `test_c_arm` — CUT (B7).\n"
+                "    # - `test_d_arm` — **SURVIVES** (never cut).\n")
+    got = {n: c for _o, n, c in _cut_claims_in(indented, {"test_c_arm", "test_d_arm"})}
+    assert got == {"test_c_arm": True}, (
+        f"an indented `# - ` bullet must bound its verdict: {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
