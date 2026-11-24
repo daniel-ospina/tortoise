@@ -17709,16 +17709,38 @@ async def create_batch(body: BatchRequest,
 
     try:
         batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
-    except ValueError as exc:
-        # The one refusal raised by the layer at acceptance: inline text with
-        # nowhere durable to put it. 503, because that is a SERVER missing its
-        # configuration, not a bad request (a valid body retried for ever is
-        # what a 400 here would buy — #14219 review).
-        raise HTTPException(status_code=503,
-                            detail="Batch storage is unavailable on this "
-                                   "server — send items as paths under the "
-                                   "configured document storage instead."
-                            ) from exc
+    except _batch_ingest._BatchIdConflict:
+        # ⛔ A DIFFERENT FACT NEEDS A DIFFERENT ANSWER (#14415 recut review,
+        # MEDIUM — measured). `_BatchIdConflict` subclasses `ValueError`, so the
+        # arm below used to swallow it — and that arm's copy names a cause the
+        # server cannot know and a remedy that cannot apply: a graph read fault
+        # before the item write (`batch_ingest.py`'s pre-write existence read),
+        # or a create lost to a concurrent writer, was answered
+        # "Batch storage is unavailable — send items as paths", to a caller whose
+        # body already consists of paths. The staging refusal that copy was
+        # written for is refused EARLIER and unconditionally by the write probe
+        # above (`inline_stage_root is None`), so nothing reachable here is that
+        # refusal. 409: the request was fine, nothing was accepted, nothing was
+        # charged — a retry is the right move, and it must be safe to make.
+        _logger.warning(
+            "batch acceptance refused for team %s (id not provably free)",
+            org_id, exc_info=True)
+        raise HTTPException(
+            status_code=409,
+            detail="This batch could not be recorded just now — nothing was "
+                   "accepted and nothing was charged; retry.") from None
+    except ValueError:
+        # Belt-and-braces only: the staging refusal this arm was written for is
+        # now refused BEFORE acceptance by the write probe above. Anything that
+        # still reaches here is bad input the layer rejected, so it must not be
+        # reported as the server missing its storage configuration (a 503 tells
+        # a caller with a valid body to retry for ever — #14219 review).
+        _logger.warning("batch acceptance rejected for team %s", org_id,
+                        exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail="The batch request was rejected — nothing was accepted."
+            ) from None
     except Exception:
         _logger.exception("batch acceptance failed for team %s", org_id)
         raise HTTPException(status_code=503,
@@ -17745,7 +17767,8 @@ async def create_batch(body: BatchRequest,
             batch.batch_id, org_id)
 
     return _batch_ingest.acceptance_receipt(
-        batch, items, status_url=f"/v1/batches/{batch.batch_id}")
+        batch, items, status_url=f"/v1/batches/{batch.batch_id}",
+        fallback_estimate=est_dict)
 
 
 @app.get("/v1/batches")

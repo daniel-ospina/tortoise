@@ -112,6 +112,7 @@ import contextlib
 import hashlib
 import logging
 import math
+import os
 import threading
 import time
 import uuid
@@ -1230,10 +1231,16 @@ BATCH_MAX_ATTEMPTS = 3
 # counter cannot strand a row across restarts: `recover()` still requeues, and a
 # re-submitted item is a new id.
 _FAILED_PASSES: dict[tuple[str, str, str], int] = {}
-#: Items whose ONE visible settle has already been attempted at the ceiling. The
-#: settle needs a read, so it must not become a new unbounded loop of its own:
-#: exactly one attempt per item, ever.
-_SETTLE_TRIED: set[tuple[str, str, str]] = set()
+#: When the ceiling's visible settle was last attempted, per item. The settle
+#: needs a read, so it must not become a new unbounded loop of its own — but it
+#: must also not be a ONE-SHOT latch: see `_claim_settle_attempt` for the
+#: measured stranding that a permanent latch produced.
+_SETTLE_TRIED: dict[tuple[str, str, str], float] = {}
+#: How long a spent settle attempt blocks the next one. Sized to the same window
+#: `recover()`/`run_item` use to decide a claim is abandoned, so a store that
+#: comes back gets a settle within one recovery interval rather than never.
+_SETTLE_RETRY_WINDOW_S = float(
+    os.environ.get("TORTOISE_BATCH_SETTLE_RETRY_S", "900"))
 _FAILED_PASSES_LOCK = threading.Lock()
 
 
@@ -1273,16 +1280,36 @@ def _clear_failed_pass(org_id: str, batch_id: str, item_id: str) -> None:
     with _FAILED_PASSES_LOCK:
         key = (org_id, batch_id, item_id)
         _FAILED_PASSES.pop(key, None)
-        _SETTLE_TRIED.discard(key)
+        _SETTLE_TRIED.pop(key, None)
 
 
 def _claim_settle_attempt(org_id: str, batch_id: str, item_id: str) -> bool:
-    """True exactly once per item: the ceiling's visible settle is attempted once."""
+    """True when the ceiling's visible settle may be attempted NOW.
+
+    ⛔ ONE ATTEMPT PER WINDOW, NOT ONE PER PROCESS LIFETIME (#14415 recut
+    review, MEDIUM — measured). The latch used to be permanent, and
+    `_clear_failed_pass` — the only thing that re-armed it — is unreachable for
+    an exhausted item, so if the SINGLE settle read itself faulted the row was
+    stranded `queued` for the life of the process: every later pass raised
+    `RetryCeilingReached` without touching the store, `_drain_batch` excludes
+    exhausted items from `leftover` so the batch was never re-driven, and the
+    batch row settled `running` over a `pending: 1`. That is the exact defect
+    the ceiling exists to remove, surviving across a one-pass-later fault
+    window — the store recovers, and nothing ever settles the item.
+
+    Re-arming on a WINDOW keeps the property the permanent latch was protecting
+    (a settle is never retried on every pass) while letting a store that
+    recovers one window later still settle the item visibly, terminal and
+    actionable. The window is deliberately the SAME one recovery uses to decide
+    a claim is abandoned.
+    """
+    now = time.monotonic()
     with _FAILED_PASSES_LOCK:
         key = (org_id, batch_id, item_id)
-        if key in _SETTLE_TRIED:
+        tried = _SETTLE_TRIED.get(key)
+        if tried is not None and (now - tried) < _SETTLE_RETRY_WINDOW_S:
             return False
-        _SETTLE_TRIED.add(key)
+        _SETTLE_TRIED[key] = now
         return True
 
 
@@ -3500,13 +3527,21 @@ class BatchCoordinator:
                 # compare would requeue work somebody is inside the runner call
                 # on. And `moved` follows the WRITE, not the call: a lost compare
                 # must not report the batch as resumed.
-                requeued = self.advance(
+                # ⛔ AND THE FLAG IS THE WRITE'S, NOT THE ROW'S (#14415 recut
+                # review, LOW — measured). `advance()` returns the STORED row,
+                # and on a lost compare that is the WINNER's row — so
+                # `returned.state is QUEUED` was TRUE for a caller whose CAS had
+                # lost, and this scan then relabelled a batch a PEER is running
+                # `resuming`, the round-7 N7 symptom its own comment below says
+                # must not happen. `_advance_landed`'s explicit `landed` flag is
+                # the only fact that distinguishes a win from a lost race.
+                _requeued, requeue_landed = self._advance_landed(
                     org_id, item, BatchItemState.QUEUED,
                     reason="resumed after a process restart — "
                            "requeued for a fresh attempt",
                     expected=item.state,
                     expected_attempts=item.attempts)
-                moved = moved or requeued.state is BatchItemState.QUEUED
+                moved = moved or requeue_landed
         if moved or any(not i.terminal for i in items):
             # ⛔ BUT ONLY RELABEL A BATCH THIS SCAN GAVE WORK TO (#14415 review
             # round 7, N7). A batch whose only non-terminal item is a FRESH claim
@@ -3669,7 +3704,8 @@ class BatchCoordinator:
 
 # ── receipt shape ──────────────────────────────────────────────────────────
 def acceptance_receipt(batch: Batch, items: Sequence[BatchItem], *,
-                       status_url: str, copy: str | None = None
+                       status_url: str, copy: str | None = None,
+                       fallback_estimate: Mapping[str, Any] | None = None
                        ) -> dict[str, Any]:
     """The ACK body: what was accepted, what it will cost, how to watch it.
 
@@ -3677,13 +3713,26 @@ def acceptance_receipt(batch: Batch, items: Sequence[BatchItem], *,
     word — a batch acceptance is the same kind of promise as a capture ack
     ("durable, async-confirmed"), and a client that already branches on
     ``memory_write_v1``'s ``accepted`` should not need a second vocabulary.
+
+    ⛔ BUT THE RECORD IS THE TRUTH, EVEN WHEN THE RECORD IS NOT `accepted`
+    (#14415 recut review, LOW — measured). The takeover arm returns the STORED
+    row ("the RECORD is then the truth and the ACK reports it"), and a row
+    adopted by the recovery scan can already be `cancelled` or `completed` by
+    the time this runs — so a hardcoded `accepted` let `POST /v1/batches` answer
+    `201 {status: "accepted", estimate: {}}` for a batch the very next
+    `GET /v1/batches/{id}` calls `cancelled`. Two surfaces of one payload
+    disagreeing about one row is the defect class this PR exists to remove.
+    ``fallback_estimate`` carries the caller's own figure for the same reason:
+    an adopted row is rebuilt without one, and "a proactive estimate" is part of
+    the documented ACK contract.
     """
     from tortoise.write_verb import MEMORY_WRITE_V1, STATUS_ACCEPTED
-    est = dict(batch.estimate)
+    est = dict(batch.estimate) or dict(fallback_estimate or {})
     hours = float(est.get("estimated_hours") or 0.0)
     return {
         "protocol_version": MEMORY_WRITE_V1,
-        "status": STATUS_ACCEPTED,
+        "status": (STATUS_ACCEPTED if batch.state is BatchState.ACCEPTED
+                   else str(batch.state)),
         "batch_id": batch.batch_id,
         "status_url": status_url,
         "items_total": len(items),
