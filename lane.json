@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14574-drift-1795556503-p4011049-3ace0cde",
+  "_sha": "f23f345b22493281e5db5209f3e87e44f0ea8b6f",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14574-drift.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/drift-reporter"
+    },
+    {
+      "kind": "sha",
+      "value": "13025a117b0ffeeb4fd4f0f54ef2fbfea2826aab"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14574-drift"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 4662,
+  "ended_at": 1795561165,
+  "exit_code": 0,
+  "heartbeat_at": 1795561165,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14574-drift-1795556503-p4011049-3ace0cde",
+  "lease_until": 1795597765,
+  "pid": 4011049,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795556503,
+  "state": "DONE",
+  "tag": "14574-drift",
+  "worktree": "/home/cmux/tortoise/.worktrees/14574-drift"
+}
