@@ -151,7 +151,9 @@ version: 1
 # at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
 # unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
 # them back into a nine/two split, and this PR's own `core` row re-packed them once more — into the
-# five/six above.
+# eight/three partition the graded clause above states (re-measured at this head, not carried: this
+# sentence said `five/six`, which was a PRE-merge reading and is written so the clause parser cannot
+# see it — the carried-figure class this block exists to warn about).
 # ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
 # why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this

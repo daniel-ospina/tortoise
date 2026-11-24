@@ -23,8 +23,11 @@ against the run it came from, and the census bar elsewhere in this repo says the
 same thing for the same reason.
 
 ⛔ WHY THIS IS NOT "CACHE FOREVER AND HOPE". The freshness the old TTL and the
-per-call fingerprint bought is now a VERB: `_release_schema_cache()` and
-`_jsonb_cache_clear()`. `test_the_refresh_verb_re_resolves_the_resident_schema`
+per-call fingerprint bought is now a VERB: `_release_schema_cache()`.
+⛔ `_jsonb_cache_clear()` is NOT a second one — every resident reader parses the
+entry's memoised SQL, so popping that view re-parses the same bytes and an edit
+stays invisible (measured; the module states it at the freshness block).
+`test_the_refresh_verb_re_resolves_the_resident_schema`
 pins both halves — that the resident schema is NOT re-checked per call (the
 fix), and that an explicit refresh DOES see an edit (what is still guaranteed) —
 so a future edit cannot keep the fix and silently drop the refresh.
@@ -201,7 +204,8 @@ def test_a_warm_record_write_performs_no_migration_filesystem_operation(
         "\"checkout\"`), so this buys nothing a redeploy would not deliver — and "
         "on the single serving thread it is what held the loop for 52.406 s "
         "(#4625). Resolve the schema once; refresh through "
-        "`_release_schema_cache()` / `_jsonb_cache_clear()`.")
+        "`_release_schema_cache()` (`_jsonb_cache_clear()` re-parses the same "
+        "bytes and does NOT make an edit visible).")
 
 
 def test_the_write_path_never_fingerprints_the_migrations(monkeypatch):

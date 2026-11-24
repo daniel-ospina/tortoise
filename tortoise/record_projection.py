@@ -2277,9 +2277,12 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
     that costs — the TTL arm was caught reading `.sql` files inside a
     `replay_plan` on the single serving thread, inside a 52.406 s loop block,
     with customers refused in the same window. A refresh is therefore something
-    a caller ASKS for: `_release_schema_cache()` / `_jsonb_cache_clear()`. What
-    is lost is bounded and stated: an edit to the files of a RUNNING process is
-    seen by its next resolution, not by its next record.
+    a caller ASKS for, and there is exactly ONE verb for seeing an edit:
+    `_release_schema_cache()`. ⛔ `_jsonb_cache_clear()` is NOT its second
+    spelling — every resident reader parses the entry's memoised SQL, so popping
+    the `jsonb` view re-parses THE SAME BYTES and an edit stays invisible. What is
+    lost is bounded and stated: an edit to the files of a RUNNING process is seen
+    by its next resolution, not by its next record.
 
     One stat pass (:func:`_migrations_fingerprint`) replaces "read and
     regex-parse twenty migration files" — measured at 1.546–1.588 ms per call
@@ -3093,7 +3096,7 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             f"{PACKAGED_MIGRATIONS} (installed package — a wheel ships the "
             "record's migrations there)."
         )
-    # ⛔ THE SAME RULE AS `_entry_sql_STATE` (#4625 review): `complete` is THIS
+    # ⛔ THE SAME RULE AS `_entry_sql_state` (#4625 review): `complete` is THIS
     # call's own read, so a map parsed from a SHORT read is never stored — not
     # even when another thread has since memoised a complete read onto the same
     # entry. Memoising a short column map is invisible (every record table is
@@ -3173,9 +3176,16 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     would answer "no name is refused" forever, which is not a slow path: the
     derived/EP-scalar names stop being dropped BY NAME and the row is instead
     rejected by `chk_*_props_no_derived` — the row-loss class the carve-out at
-    :func:`table_columns` exists to prevent. `jsonb_columns()` fails closed on
-    the same read (:func:`_jsonb_columns_for_dir`), so only this reader and the
-    SQL half can memoise an absence.
+    :func:`table_columns` exists to prevent.
+    ⛔ NOTHING HERE CAN MEMOISE AN ABSENCE, and no reader is the exception: this
+    one returns before its memo when the read was not complete (below), and
+    `_entry_sql_state` assigns `entry["sql"]` only on its `complete` branch, so
+    there is never a stored empty or short SQL for a reader to be certified
+    against. The resident `jsonb_columns()` shares that rule through the same
+    flag; `_jsonb_columns_for_dir`'s fail-closed raise is the EXPLICIT-directory
+    path, not this one (the poison pin at
+    `tests/test_4625_schema_reads_off_write_path.py` shows the resident read stays
+    silent while the explicit-directory read raises).
     """
     entry = _schema_entry(migrations_dir)
     cached = entry["parsed"].get("refused_props_names")
