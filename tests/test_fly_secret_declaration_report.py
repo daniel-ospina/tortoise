@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -406,13 +406,13 @@ def test_the_help_block_names_every_declaration_shape_and_the_variable():
     """The issue body must carry the copy-paste line — that is the FIX, not advice."""
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
-        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+        import fly_secret_declaration_report as tool  # noqa: PLC0415, RUF100 — path-based
     finally:
         sys.path.pop(0)
     help_text = tool.declaration_help("SOME_UNDECLARED_KEY")
     for source, _why in tool.SOURCES:
         assert source in help_text, source
-        assert f"SOME_UNDECLARED_KEY" in help_text
+        assert "SOME_UNDECLARED_KEY" in help_text
     # Every shape the gate's `read_manifest` accepts, and no invented fifth one.
     assert {s for s, _ in tool.SOURCES} == {
         "gh-secret:<GH_NAME>",
@@ -435,7 +435,7 @@ def test_the_real_manifest_declares_every_name_the_real_payload_stages():
     """
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
-        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+        import fly_secret_declaration_report as tool  # noqa: PLC0415, RUF100 — path-based
     finally:
         sys.path.pop(0)
     gate = tool._gate()
@@ -788,7 +788,7 @@ class _Harness:
 def _drift_reading(*names: str) -> dict:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
-        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+        import fly_secret_declaration_report as tool  # noqa: PLC0415, RUF100 — path-based
     finally:
         sys.path.pop(0)
     return {

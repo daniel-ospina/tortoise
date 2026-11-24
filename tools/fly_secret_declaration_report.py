@@ -364,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow_path=workflow_path,
             toml_path=toml_path,
         )
-    except Exception as exc:  # noqa: BLE001 — EVERY failure is "could not read"
+    except Exception as exc:  # noqa: BLE001, RUF100 — EVERY failure is "could not read"
         # ⛔ A bare exception would exit 1, i.e. "drift found" — a verdict this run
         # never reached, and one the workflow would render as a named variable.
         # Everything that is not a completed reading is UNREADABLE (exit 2).
