@@ -253,7 +253,10 @@ def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
     ⛔ ITS EXTENT IS THE ENTIRE RUN (1808 lines at this head, measured through THIS function's own
-    walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
+    which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
+    figure is re-derived here rather than carried from either side — and GRADED, see
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -288,6 +291,9 @@ def _residue_block() -> str:
     reads 1804 here and the figure above is RE-MEASURED by this function rather than inherited
     again (1765 -> 1804 was that merge's 39 `#:` lines, and the peer lane's next four `#:` lines
     take it to 1808 — the arm below names the current number rather than the history):
+    — and the `#14395` fix lane's re-pin paragraph took it to 1774 on its own tree, while this
+    merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose) re-reads 1808 above,
+    re-walked by this function and never adjusted to a carried figure:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
