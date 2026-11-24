@@ -236,8 +236,8 @@ def test_a_constraint_is_still_not_dropped_in_silence():
             f"routing drops what the caller asked for")
 
 
-def test_the_five_guards_inside_is_predicate_are_each_load_bearing():
-    """All five guards of `is_predicate` have a pinned falsifier.
+def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
+    """All six guards of `is_predicate` have a pinned falsifier.
 
     ⛔ A pin has to be able to reach the guard it pins. The `what is the payment
     terms clause given the contract was archived` row of ``NOT_SELECTED`` is
@@ -266,6 +266,12 @@ def test_the_five_guards_inside_is_predicate_are_each_load_bearing():
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
       four residuals;
+    * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
+      twelve measured rows of
+      :func:`test_a_modified_predicate_is_not_the_question_asked` — dropping the
+      `not|never|…|or` line routes the negated / future / disjunctive predicate
+      class, which answers the question with the POLARITY-INVERTED (or a
+      not-yet-existing) population;
     * relaxing the START anchor (`^(?:is|are|was|were)` →
       `(?:^|\\b)(?:is|are|was|were)`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
@@ -338,3 +344,107 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
             f"{one_record!r} routed to {got.population!r} (shape {got.shape!r}) "
             f"— an imperative naming ONE record is a lookup, not a request for "
             f"the population (#14033 keeps #13558's measured hijack refused)")
+
+
+#: A PREDICATE MODIFIER between the head noun and the ending — the slot can only
+#: be modifying the predicate, and every row here was answered with the ended
+#: population before the NP stop carried `not|never|to|be|going|about|due|
+#: scheduled|or|neither|nor|longer` (PR #14491 review, P1/P2 — measured on the
+#: pre-fix head, all routed to `ended`/`is_predicate`).
+#:
+#: Three classes, one failure each, and none of them is the question asked:
+#:
+#: * NEGATION — `is the plan not cancelled` was served the population of
+#:   **cancelled** records: the polarity-INVERTED answer to the question. That is
+#:   #14033's own defect class ("a confident answer to a different question")
+#:   reached by a new route, and it is over-admission, not an inherited boundary:
+#:   every pre-existing shape refuses the class on the same tree
+#:   (`which plans are not cancelled`, `what was not archived`, `what did we not
+#:   archive` all stay relevance reads).
+#: * FUTURITY / INTENT — `is the v2 api to be retired` asks about something that
+#:   has NOT ended; the ended population can only answer with records that have.
+#: * DISJUNCTION — `is the ticket still open or cancelled` asks about two states
+#:   at once, and one population cannot answer both.
+#:
+#: ⛔ ATTRIBUTION, row by row, because a pin must be able to reach its guard:
+#: every row reds on the pre-fix head EXCEPT `is the plan not going to be
+#: cancelled`, which the NP bound (`{0,3}`) already refused — it is a BOUNDARY
+#: pin for the future class, not a non-vacuity row, and it is named here rather
+#: than left to be re-measured. The rest were all measured leaking.
+MODIFIED_PREDICATE_STAYS_OUT = (
+    # negation
+    "is the plan not cancelled",
+    "is the api not deprecated",
+    "is the claim never archived",
+    "is the plan not yet archived",
+    "was the plan not cancelled",
+    "were the claims not retracted",
+    "are our endpoints not deprecated",
+    # negation spelt with a correlative or a `no longer` — the same class, and
+    # the reason `longer`/`neither`/`nor` are stop words while `no` is not
+    "is the plan no longer archived",
+    "is the plan neither deprecated nor retired",
+    "is the ticket still not archived",
+    "is the plan any longer cancelled",
+    # futurity / intent — the ending has not happened, so the ended population
+    # cannot answer it (the second row is the NP-bound boundary pin above)
+    "is the v2 api to be retired",
+    "is the report scheduled to be archived",
+    "is the report going to be archived",
+    "is the deal about to be cancelled",
+    "is the ticket due to be archived",
+    "is the plan not going to be cancelled",
+    "is the plan still to be cancelled",
+    # disjunction
+    "is the ticket still open or cancelled",
+)
+
+
+@pytest.mark.parametrize("query", MODIFIED_PREDICATE_STAYS_OUT)
+def test_a_modified_predicate_is_not_the_question_asked(query):
+    """A negated / future / disjunctive predicate must not reach the population.
+
+    The ended population is "records that HAVE ended", so a modifier that flips
+    the predicate's polarity, or moves it into the future, or conjoins it with a
+    second state, makes the population an answer to a different question. The
+    detector's contract is the module's own — *where a shape could go either way
+    it does not fire* — so the shape refuses and the caller keeps the relevance
+    read they had before (#14033's fallthrough is the lesser harm here: the
+    population read would be a WRONG answer, not a miss).
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is None, (
+        f"{query!r} routed to {got.population!r} (shape {got.shape!r}) — the "
+        f"ending is modified by a negation, a futurity or a disjunction, so the "
+        f"population is an answer to a different question. A negated predicate "
+        f"is the worst: the caller is served the POLARITY-INVERTED set "
+        f"(#14033, PR #14491 review P1/P2)")
+
+
+def test_an_affirmative_temporal_modifier_still_routes():
+    """The modifier guard is narrower than "any adverb in the slot", measured.
+
+    ⛔ These three rows are the RECALL half of the P1/P2 remedy, and they are
+    why the stop list is `not|never|neither|nor|longer|to|be|going|about|due|
+    scheduled|or` rather than that list plus `yet|still|already` (the shape the
+    review measured). Both close the whole over-admission class; the wider list
+    additionally refuses all three strings below, which ask exactly the question
+    the ended population answers — has this named record already ended. Every
+    row here routes on the pre-fix head too, so this test is a RECALL guard, not
+    a non-vacuity pin: it reds only if someone widens the modifier list.
+    """
+    from tortoise.state_intent import ENDED, detect_state_question
+
+    for affirmative in (
+        "is the claim already archived",
+        "is the ticket still archived",
+        "is the report already withdrawn",
+    ):
+        got = detect_state_question(affirmative)
+        assert got.population == ENDED, (
+            f"{affirmative!r} answered as {got.population!r} (shape "
+            f"{got.shape!r}) — `already`/`still` modify the AFFIRMATIVE predicate, "
+            f"so this is the state question #14033 exists to route; refusing it "
+            f"is a recall loss with no precision gain")

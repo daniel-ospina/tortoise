@@ -70,7 +70,7 @@ fell through to the relevance read and were served as a confident answer to a
 different question. They are ``is_predicate`` (`is the onboarding flow retired?`
 — a yes/no question about ONE record the caller NAMES, whose PREDICATE is the
 ending; the ended population is SERVED, so the named record's row carries its
-#: ``status`` when it lands on the page) and
+``status`` when it lands on the page) and
 ``list_what`` (`list what we retired` — an imperative whose `what we <verb>`
 CLAUSE asks for a SET). So "names a record" is no longer by itself a refusal:
 `is the X retired?` routes because the participle is the question's predicate,
@@ -164,6 +164,28 @@ _ENDING_WORDS = (
 #: at a relativiser AND at the subject a zero relative puts where the head noun's
 #: own modifier would be — a determiner, a pronoun, or an indefinite/quantified
 #: subject (`is the plan anyone abandoned`, `is the ticket both teams cancelled`).
+#:
+#: ⛔ AND IT STOPS AT A PREDICATE MODIFIER, which is a DIFFERENT failure from the
+#: clause one: the words between the head noun and the ending can only modify the
+#: PREDICATE, and each of the three classes below changes what the question asks.
+#: Measured before this guard (PR #14491 review, P1/P2) — every row routed:
+#:
+#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`) — `is the plan not
+#:   cancelled` was answered with the population of CANCELLED records, the
+#:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
+#:   is left in the run by the residual below (it is an ordinary noun modifier),
+#:   so the `no longer` spelling is stopped by its own token rather than by `no`;
+#: * FUTURITY / INTENT (`to`, `be`, `going`, `about`, `due`, `scheduled`) —
+#:   `is the v2 api to be retired` asks about something that has NOT ended, and
+#:   the ended population can only answer it with records that have;
+#: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
+#:   states at once, and one population cannot answer both.
+#:
+#: ⛔ NO RECALL IS LOST BY THIS, and that is measured rather than assumed: the
+#: AFFIRMATIVE temporal modifiers stay in the run, so `is the claim already
+#: archived`, `is the ticket still archived` and `is the report already withdrawn`
+#: still route. Adding `yet|still|already` as well would close the same class and
+#: additionally refuse those three, so this is the narrower list.
 #: ⛔ IT APPLIES FROM THE SECOND WORD ON, never to the head noun: `it` and `us`
 #: are ordinary head nouns in this product's own vocabulary (`is our IT platform
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
@@ -206,6 +228,12 @@ _NP_STOP = (
     r"|we|us|i|they|them|he|she|you|it"
     r"|anyone|anybody|someone|somebody|everyone|everybody|nobody"
     r"|whoever|whatever|whichever|such"
+    # predicate modifiers — negation, futurity/intent, disjunction (see the note
+    # above: each one changes what the question asks, and a negated predicate is
+    # answered with the polarity-INVERTED population)
+    r"|not|never|neither|nor|longer"
+    r"|to|be|going|about|due|scheduled"
+    r"|or"
     r"|each|every|both|either|another|several|many|most|few|none)\b)"
 )
 
@@ -512,6 +540,13 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `is the policy when a booking is cancelled` all refuse. The tail anchor, the
     # NP bound, the NP stop and the start anchor are each pinned by a falsifier
     # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
+    # ⛔ AND THE SUBJECT RUN STOPS AT A PREDICATE MODIFIER (PR #14491 review,
+    # P1/P2): a `not`/`never` in the run INVERTS the question — `is the plan not
+    # cancelled` was served the CANCELLED records — and a futurity (`to be
+    # retired`) or a disjunction (`… open or cancelled`) marker asks about a state
+    # the ended population cannot represent. All three classes are pinned in
+    # `tests/test_14033_state_cue_gap.py`, and the affirmative temporal modifiers
+    # (`already`, `still`) stay in the run so their spellings still route.
     # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
     # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
