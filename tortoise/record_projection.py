@@ -2050,10 +2050,16 @@ def _read_migrations_state(
 #: Bounded because the process is long-lived and a test suite builds dozens of
 #: temporary migration trees; on overflow the whole cache is dropped rather than
 #: evicted one entry at a time, which is enough because the live set is tiny.
-#: ⛔ The population is NOT static: the key is `(tree, fingerprint)`, so a
-#: production process holds ONE entry while the migration files are unchanged and
-#: gains one more per distinct FILE STATE it observes — an edit, an addition, a
-#: removal. Stale states are exactly what the wholesale drop clears (#9558).
+#: ⛔ PRODUCTION HOLDS **ZERO** ENTRIES HERE (#4625). This map is reachable only by
+#: a caller that names an EXPLICIT migrations directory: the record write path
+#: (`migrations_dir=None`) reads the process's own schema from
+#: :data:`_RESIDENT_SCHEMA` and never touches this cache at all, so it gains no
+#: entry per file state — that per-file-state growth is exactly what #4625 removed
+#: from the serving thread.
+#: For those explicit-directory callers the population is NOT static: the key is
+#: `(tree, fingerprint)`, so one tree holds one entry per distinct FILE STATE it
+#: observes — an edit, an addition, a removal. Stale states are exactly what the
+#: wholesale drop clears (#9558).
 _SCHEMA_CACHE_LIMIT = 8
 
 #: `{(base, fingerprint): {"sql": str | None, "parsed": {name: result}}}` —
@@ -2895,9 +2901,11 @@ def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]
     readers `replay_plan` drives per batch — `table_columns()` and
     `refused_props_names()` — and the map that runs once per string PARAMETER
     (`jsonb_columns`) all answer from the process's RESIDENT schema
-    (:func:`_resident_entry`), resolved once and never re-read. Caching this
-    one would buy nothing measured and add a third invalidation rule to keep
-    correct.
+    (:func:`_resident_entry`), resolved once and never re-read ONCE THAT READ
+    FOUND A COMPLETE TREE — an ABSENT or PARTIALLY-present tree is re-read on
+    every consult so it can self-heal (:func:`_resident_entry`'s own note, and the
+    two `…_heals_without_the_refresh_verb` pins). Caching this one would buy
+    nothing measured and add a third invalidation rule to keep correct.
     """
     return _declared_types_for_dir(migrations_dir or _migrations_dir())
 
@@ -2925,7 +2933,10 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     string parameter of every statement, so an un-memoised parse is the whole
     cost of a plan build. The answer is memoised ON THE PROCESS'S RESIDENT SCHEMA
     (:func:`_resident_entry`) — parsed at most once per process, then zero
-    filesystem operations per call — with `_jsonb_cache_clear()` as the refresh
+    filesystem operations per call ONCE A COMPLETE SET WAS READABLE (an ABSENT or
+    PARTIALLY-present tree is re-parsed per consult so it can self-heal, pinned by
+    `test_a_partial_jsonb_read_does_not_freeze_the_name_set`) — with
+    `_jsonb_cache_clear()` as the refresh
     verb. ⛔ IT WAS A 5 s TTL UNTIL #4625, and the TTL is the defect: an expiry
     under load re-read and re-parsed TWENTY `.sql` files INSIDE `replay_plan`, on
     the single serving thread, which is what the production stack caught
@@ -3000,7 +3011,13 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     migration files (`record_writer` priced it at "~4 ms of plan
     materialization"). It is now served from the process's RESIDENT schema
     (:func:`_resident_entry`) — resolved once, zero filesystem operations per
-    call — because the deployed image bakes those files in. A caller that names
+    call ONCE THAT RESOLUTION READ A COMPLETE TREE — because the deployed image
+    bakes those files in. ⚠️ An ABSENT or PARTIALLY-present tree is re-read on
+    every consult instead, and that is the self-heal
+    `test_an_absent_schema_heals_without_the_refresh_verb` /
+    `test_a_partially_present_schema_heals_without_the_refresh_verb` pin: the
+    memoised answer is never a short join (:func:`_entry_sql_state`). A caller
+    that names
     an EXPLICIT directory keeps exact file-level invalidation: the entry is keyed
     on each migration file's `(name, mtime_ns, size, inode, ctime_ns)`
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
@@ -3172,11 +3189,16 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     # `refused_props_names()` returned `{}` and still returned `{}` after every
     # migration file was copied in, while `table_columns()` healed — it RAISES
     # before its memo, and that asymmetry is what made this invisible.
-    # ⛔ `complete` is the LOCAL flag, not `entry["sql"] is not None`: the latter
-    # can be true because ANOTHER thread memoised a complete read after this
-    # call's short one (measured), which would store this call's short map under
-    # it. A schema that is present and genuinely refuses nothing still memoises
-    # normally.
+    # ⛔ `complete` certifies the bytes this call RETURNED: this call's own read's
+    # flag, or — on a cache hit — the fact that `entry["sql"]` was stored by a
+    # PREVIOUS COMPLETE read (that is `_entry_sql_state`'s memo branch, which
+    # answers `True`). ⚠️ Do NOT restate that as "the LOCAL flag, not
+    # `entry["sql"] is not None`": on a hit the flag IS that expression, and there
+    # is no read here to have a local flag. What makes the hit safe is WHERE THE
+    # WRITE IS — `entry["sql"]` is assigned only on `_entry_sql_state`'s `complete`
+    # branch, so no ABSENT and no SHORT join is ever stored, and therefore no
+    # reader can be certified `True` over one. A schema that is present and
+    # genuinely refuses nothing still memoises normally.
     if not complete:
         return dict(out)
     entry["parsed"]["refused_props_names"] = out

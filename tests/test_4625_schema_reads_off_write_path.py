@@ -583,3 +583,74 @@ def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
             "a short jsonb name set survived the file being restored")
     finally:
         rp._release_schema_cache()
+
+
+def test_an_incomplete_read_never_reaches_the_sql_memo(monkeypatch, tmp_path):
+    """The WRITE rule that makes the cache-hit flag safe (#4625 review, round 2).
+
+    The prose on `_entry_sql_state` and `refused_props_names` used to say "the
+    returned flag is THIS CALL'S, not the entry's". That is false on a cache HIT —
+    there the flag literally IS `entry["sql"] is not None` and this call reads
+    nothing — and what actually carries the safety is WHERE THE WRITE IS:
+    `entry["sql"]` is assigned only on the complete branch, so no ABSENT and no
+    SHORT join can reach the memo, and therefore no reader can ever be certified
+    `True` over one.
+
+    That mechanism had no pin of its own: the three self-heal pins above observe
+    its CONSEQUENCE (a short map is never frozen), which passes even if the memo
+    stores a short SQL the readers happen to re-derive past. This one holds the
+    rule directly, at the seam the readers trust, in three steps.
+
+    FALSIFIER (executed): `if complete:` -> `if sql:` reds step 2
+    (`entry["sql"] is None`), and an unconditional `entry["sql"] = sql` reds step
+    1 — the two shapes that freeze a short map for the life of the process.
+    """
+    source = _real_migrations()
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        entry = rp._resident_entry()
+        # 1. ABSENT — the read yields `""`, which must NOT be stored: storing it
+        #    would make every later consult answer `(sql, True)` without reading,
+        #    so the process would never see its migrations appear.
+        sql, complete = rp._entry_sql_state(entry)
+        assert (sql, complete) == ("", False), (
+            "an absent tree did not read as (\"\", False) — the fixture is not "
+            f"exercising the absent path: {sql[:40]!r}, {complete!r}")
+        assert entry["sql"] is None, (
+            "an ABSENT read was stored as the entry's SQL: every later consult "
+            "now answers `(sql, True)` without reading, so the process never "
+            "sees its migrations appear. Only a COMPLETE read may be memoised.")
+
+        # 2. PARTIAL — a non-empty join of only the files that happen to exist.
+        #    This is the shape `if sql:` would store.
+        for name in rp.RECORD_MIGRATIONS:
+            if name != _PARTIAL_OMITTED:
+                shutil.copy(source / name, tree / name)
+        sql, complete = rp._entry_sql_state(entry)
+        assert sql and not complete, (
+            "the partial tree did not yield a NON-EMPTY incomplete read, so this "
+            f"step cannot discriminate the `if sql:` shape: {len(sql)} chars, "
+            f"{complete!r}")
+        assert entry["sql"] is None, (
+            "a PARTIALLY-present tree was stored as the entry's SQL. The memo is "
+            "then a silently SHORT join served to every later consult — and on the "
+            "cache-hit path that map is returned WITH `True`, which is exactly the "
+            "certification the prose says cannot happen. Gate the write on the "
+            "completeness of THIS read, never on the read being non-empty.")
+
+        # 3. COMPLETE — the write is allowed, and the memo is then what a later
+        #    call is handed (the HIT branch). `(sql, True)` there is legitimate
+        #    ONLY because steps 1 and 2 kept every incomplete join out of it.
+        shutil.copy(source / _PARTIAL_OMITTED, tree / _PARTIAL_OMITTED)
+        sql, complete = rp._entry_sql_state(entry)
+        assert complete, "the completed tree did not read as complete"
+        assert entry["sql"] == sql, (
+            "a COMPLETE read was not memoised, so the warm path re-reads twenty "
+            "files per consult — the #4625 cost the whole change exists to remove")
+        assert rp._entry_sql_state(entry) == (sql, True), (
+            "the memo was not served back to a later call")
+    finally:
+        rp._release_schema_cache()
