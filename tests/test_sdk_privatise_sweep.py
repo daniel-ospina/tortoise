@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2019 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2048 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -346,18 +346,26 @@ def _residue_block() -> str:
     moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
     gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
     on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
-    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks once more (each side
-    had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
-    prose), and the resolution keeps both verbatim rather than trimming the run to one side's
-    reading — so the figure above is RE-MEASURED by this walk on the RESOLVED FILE, never inherited
-    from either side's published `1953` or `1954`: that resolution first walked 2010, and the peer's
-    two P2 repairs then restored a six-line record INSIDE the same run, so the figure above is the
-    FINAL reading of the resolved file and neither intermediate numeral is published here,
-    and the pair did NOT follow the run: `--repin` on this resolved tree prints
-    `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this fold
-    adds no row — the 11912 this branch carried sat 2 above it only while the branch still held
-    the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on this branch's pre-merge
-    tree, 0 on `origin/main`), and that pair is what adopting main's deletion removes,
+    — and the PR was `CONFLICTING` against `origin/main` again, so its commits were REBASED onto
+    `533e256f2c89` rather than merged into it: a rebase rewrites the head, so the fold narrative
+    this sentence used to carry is replaced by what the rebase actually did. The suite's conflict
+    was a PURE DOUBLE-APPEND at EOF of this file — `main`'s `#14445` added
+    `test_a_tool_only_diff_selects_this_suite` at the same anchor this branch appended its ratchet
+    arms to — so BOTH blocks are kept and neither arm is lost. `tools/sdk_privatise.py` needed one
+    more decision: `#14445` had expanded the `#:` re-cut chain into a SUPERSET of the older
+    narrative this branch had corrected in three places, so the resolution keeps `main`'s fuller
+    chain and applies those three corrections on top of it (each re-verified against Git: `#14506`
+    not `#14491`, TWO rows not three, and `_JSONB_CACHE.update` 2 rows at `2cccf90f4dd4` rather
+    than on `origin/main`). The rebase ALSO added the paragraph that restates the mechanism — the
+    pin is a historical reading and every `--check` exit recorded in the run is a PRE-RATCHET
+    reading — which is prose INSIDE the walked run, so the figure above is RE-MEASURED by this
+    walk on the rebased file and is not inherited from the pre-rebase `2019` or from either side's
+    published numeral,
+    and the pair did NOT follow the run: `--check` on this rebased tree reports
+    `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this change
+    adds no row — the 11912 this branch once carried sat 2 above it only while the branch still
+    held the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on that tree, 0 on
+    `origin/main`), and that pair is what adopting main's deletion removes,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2569,6 +2577,133 @@ def test_the_ratchet_passes_an_unchanged_count():
     ok, lines = _verdict({"client.update": 45}, {"client.update": 45})
     assert ok is True, "an unchanged count must not red"
     assert "equal to the baseline" in "\n".join(lines), lines
+
+
+def test_the_ratchet_passes_an_EQUAL_count_even_when_the_SHAPE_moved():
+    """⛔ THE DECISION THIS CHANGE IS MADE OF: shape is REPORTED, never graded.
+
+    `shape_notes()` keeps the one signal the equality pin carried, and `ratchet_verdict()`'s
+    whole design says it must not gate. Renaming an innocent receiver
+    (`db.update` -> `store.update`) leaves the COUNT equal and moves the DIGEST — the ordinary
+    rename a digest gate would red, and redding it rebuilds precisely the re-pin treadmill this
+    change removes. So the equal-count path must pass a MOVED shape.
+
+    Mutation: add `if now == then and residue_digest(measured) != residue_digest(baseline):\n    return False, ["shape moved"]` to `ratchet_verdict`'s equal branch — this arm REDs, and no
+    other arm reaches that branch with a moved shape, which is why it exists.
+    """
+    ok, lines = _verdict({"store.update": 1}, {"db.update": 1})
+    assert ok is True, (
+        "an equal COUNT with a moved SHAPE must PASS: gating the digest here would red every "
+        "innocent receiver rename, which is the treadmill `shape_notes` exists to avoid")
+    assert "equal to the baseline" in "\n".join(lines), lines
+
+
+def test_the_shape_signal_is_REPORTED_when_rows_appear_vanish_or_move():
+    """`shape_notes` is the ONLY report of an appeared / vanished row, and it must stay one.
+
+    A count ratchet passes a NET-ZERO change (one receiver added, one removed), so this report
+    is the whole of what a reviewer sees about the shape — and a mutant returning `[]` deletes
+    it silently, leaving every other arm green. Each of the three branches is graded here, plus
+    the ordinary quiet case: an unchanged shape must print NOTHING, or the note becomes noise a
+    reader learns to skip.
+    """
+    text = "\n".join(privatise.shape_notes(
+        Counter({"a.update": 2, "b.update": 1}), Counter({"a.update": 1, "c.update": 2})))
+    assert text, "a moved SHAPE must produce a report — the digest is a signal, not a gate"
+    assert "SHAPE changed" in text, text
+    assert "appeared: b.update" in text, text
+    assert "vanished: c.update" in text, text
+    assert "not a failure" in text, (
+        f"the report must say it is NOT a gate, or a lane reads it as a red it cannot clear: {text}")
+
+    moved = "\n".join(privatise.shape_notes(
+        Counter({"a.update": 3}), Counter({"a.update": 1})))
+    assert "count moved: a.update  1 -> 3" in moved, (
+        f"the same rows with a different count is the third branch, and it must be named: {moved}")
+
+    assert privatise.shape_notes(
+        Counter({"a.update": 1}), Counter({"a.update": 1})) == [], (
+        "an unchanged shape must print nothing: a note on every green run is noise")
+
+
+def _main_fixture(monkeypatch, tmp_path: Path, src: str) -> Path:
+    """Let `main()` answer over ONE fixture file: the tree walk and the pinned map are stubbed.
+
+    Stubbing them is not a shortcut around the graded behaviour — `--baseline` resolution and the
+    degraded ceiling are decided BEFORE any of this, and the real walk would spend its 1m13 to
+    reach the same decision.
+    """
+    path = tmp_path / "subject.py"
+    path.write_text(src, encoding="utf-8")
+    monkeypatch.setattr(privatise, "py_files", lambda: [path])
+    # `main()` reports residue paths RELATIVE TO `ROOT`, so the fixture tree has to BE the root
+    # or the report raises `ValueError` out of `relative_to` instead of reaching a verdict.
+    monkeypatch.setattr(privatise, "ROOT", tmp_path)
+    monkeypatch.setattr(privatise, "SWEEP_NAMES", 1)
+    monkeypatch.setattr(
+        privatise, "rename_map",
+        lambda rev=None: [privatise.Entry(name="update", private="_update", collided=False)])
+    return path
+
+
+def test_a_named_baseline_that_does_not_resolve_is_a_REFUSAL(monkeypatch, tmp_path, capsys):
+    """A `--baseline` the caller NAMED and this clone cannot resolve must NOT fall back.
+
+    Falling through to the degraded pin would answer a DIFFERENT question from the one asked —
+    a frozen ceiling instead of a tree — and print an ordinary verdict for it. That is the
+    fail-open shape `--check` exists to refuse, so it is exit 2 and the refusal names why.
+
+    Mutation: delete the `return 2` in `main()`'s `base_rev is None and args.baseline` branch —
+    the run falls through to the pin and this arm's `== 2` REDs.
+    """
+    dead = "0" * 40
+    rev, why = privatise.baseline_rev(dead)
+    assert rev is None, f"`{dead}` must not resolve as a baseline: {rev!r}"
+    assert dead in why and "does not name a commit" in why, why
+
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", dead])
+    assert privatise.main() == 2, (
+        "an unresolvable `--baseline` is a REFUSAL (exit 2), never a degraded pass")
+    err = capsys.readouterr().err
+    assert "CANNOT ANSWER" in err, f"the refusal must say it could not answer: {err!r}"
+
+
+def test_without_origin_main_the_RECORDED_PIN_is_the_ceiling(monkeypatch, tmp_path, capsys):
+    """The degraded path: no `origin/main`, so the FROZEN pin is the only ceiling available.
+
+    ⛔ LOOSER, not stricter — growth between this tree's count and the pin passes — and the body
+    says so. Both directions are graded, plus the sentence that tells a lane the ceiling is
+    frozen, because a lane reading "not an increase" off a frozen pin without knowing it is
+    frozen has been told the wrong thing by a true number.
+
+    Mutation: flip the degraded `ok` to `True` — the above-the-pin arm REDs; delete the
+    "frozen" clause from the message — the message assert REDs.
+    """
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+
+    def _no_origin(*args, **_kwargs):
+        raise subprocess.CalledProcessError(1, args[0] if args else "git")
+
+    monkeypatch.setattr(privatise, "_git", _no_origin)
+    rev, why = privatise.baseline_rev()
+    assert rev is None and "no origin/main" in why, (rev, why)
+
+    # AT the pin: passes, and says the PIN is the ceiling rather than a merge base.
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (1, "0" * 16))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 0, "a tree AT the recorded pin is not an increase"
+    out = capsys.readouterr().out
+    assert "the PIN is the ceiling, not a merge base" in out, out
+
+    # ABOVE the pin: reds, and names the ceiling as frozen rather than a tree.
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (0, "0" * 16))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, (
+        "with no `origin/main` the pin is the ceiling, and a tree ABOVE it must still red")
+    err = capsys.readouterr().err
+    assert "the PIN is the only ceiling here, and it is frozen" in err, err
+    assert "--baseline REV" in err, f"the red must name the way out of the degraded path: {err!r}"
 
 
 def _git_repo(path: Path) -> Path:
