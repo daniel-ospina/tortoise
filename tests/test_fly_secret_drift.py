@@ -2157,6 +2157,59 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "deploy-set value"
     )
 
+    # ── #7879: the record's DENSE-leg arm/rollback lever, the fourth exception ──
+    # `TORTOISE_RECORD_VECTOR_LEG` arrived on Fly undeclared and the fail-closed
+    # provenance gate refused every `deploy-hosted` run that reached it (run
+    # `45454704119`: `UNDECLARED — 'TORTOISE_RECORD_VECTOR_LEG' is on Fly but
+    # declared nowhere`). It is declared `fly-only:` and NOT `workflow` — the route
+    # the sibling tunable above took — because `#13610` makes all three of its
+    # states a PRODUCT decision: `unset` armed for the read, explicit falsy the
+    # ROLLBACK, explicit truthy (`1`/`true`/`yes`/`on`) the only posture
+    # `arm_is_explicit()` accepts (the arm that retires the in-graph vector index).
+    # A staged literal therefore ships one of those as a side effect of deploy
+    # plumbing, and `flyctl secrets set` being ADDITIVE means it would silently
+    # re-arm a rollback an operator took — the failure #13209's ruling refuses one
+    # member above.
+    #
+    # Pinned by KIND and in BOTH directions, because each wrong route is one
+    # plausible "helpful" edit away: `gh-secret:`/`fly-toml-env` make the deploy the
+    # managing source, an `ARGS+=(…=…)` line in `deploy-hosted.yml` does the same
+    # through the payload, and `unmanaged` is the #4126 defect the gate exists to
+    # refuse.
+    dense_leg = "TORTOISE_RECORD_VECTOR_LEG"
+    assert declared[dense_leg] == "fly-only:#7879", declared[dense_leg]
+    assert dense_leg not in workflow_refs, (
+        "TORTOISE_RECORD_VECTOR_LEG must stay OUT of the deploy payload — its "
+        "value is a PRODUCT decision (#13610: `0` is the rollback, `1` retires the "
+        "in-graph index) and no deploy may set it (#7879)"
+    )
+    assert dense_leg not in env_keys, (
+        "TORTOISE_RECORD_VECTOR_LEG is versioned in fly.toml [env], so it is NOT "
+        "out-of-band any more — REVERT the [env] entry: the `fly-only:` "
+        "declaration IS the recorded decision (#7879), and `fly-toml-env` would "
+        "re-introduce a deploy-set value"
+    )
+    # ⛔ The PAYLOAD, not `secrets.…` references: an `ARGS+=(NAME=…)` literal never
+    # appears as `secrets.NAME`, so `workflow_refs` alone cannot see the one edit
+    # that most directly reverses this declaration. Filter on the name, not on a
+    # value — a second site at another value is the same defect.
+    # ⛔ COMMENTS STRIPPED, with the gate's own rule (`(?:^|\s)#`), because
+    # `deploy-hosted.yml` documents operator commands in exactly this shape
+    # (`#   fly secrets set REGISTRY_STREAM_KEY=…`, `# … MOCK=1`); a comment-blind
+    # scan would red a correct documentation edit and blame it for assigning the
+    # value.
+    payload_sites = [
+        line for line in REAL_WORKFLOW.read_text().splitlines()
+        if re.search(rf"\b{dense_leg}=", re.split(r"(?:^|\s)#", line)[0])
+    ]
+    assert not payload_sites, (
+        "deploy-hosted.yml now ASSIGNS TORTOISE_RECORD_VECTOR_LEG, so the deploy "
+        "states a product decision on every run (an explicit `1` retires in-graph "
+        "indexes, `0` rolls the dense leg back) and `flycli secrets set`'s additive "
+        f"semantics silently re-arm an operator's rollback: {payload_sites}. "
+        "Delete the assignment — the lever is operator-only (#7879, #13209)"
+    )
+
     # ── #13674 / #13926: the embedder warm-up's EMERGENCY SWITCH ──────────────
     # The route is `fly-toml-env` (route (b) of the #4126 block): the value is
     # version-controlled in `fly.toml [env]` and the manifest names that source,
@@ -6816,3 +6869,93 @@ def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatc
     )
     with pytest.raises(AssertionError, match="never labels itself"):
         test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
+
+
+# ── #7879 — the dense-leg lever's declaration, proved against the REAL gate ───
+#
+# The manifest pins above say the LINE says the right thing. They cannot say the
+# line is what makes the deploy pass: the gate is a subprocess, the Fly secret
+# list is an input, and the pre-fix tree was red on a name that appeared in NO
+# manifest at all. So this runs the shipped gate twice over one Fly state — with
+# the declaration, and with the declaration DELETED — and requires the verdict to
+# flip. That is the mutation proof, and it is also the non-vacuity guard for the
+# pins above: removing the declaration reds HERE by the gate, not only by a
+# string comparison in the test file.
+_DENSE_LEG_ENV = "TORTOISE_RECORD_VECTOR_LEG"
+
+
+def _fly_state_naming(name: str) -> Path:
+    """A Fly secret list holding `name` plus every other `fly-only:` member.
+
+    The other members have to be present too: the gate refuses a `fly-only:`
+    declaration whose name is not on Fly, so a fixture that carried only the name
+    under test would red on the three pre-existing members and say nothing about
+    this one.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    fly_only = sorted(n for n, s in sources.items() if s.startswith("fly-only:"))
+    assert name in fly_only, f"{name} is not declared fly-only in the shipped manifest"
+    return _fixture(
+        "dense-leg-fly-state.json",
+        json.dumps([{"name": n} for n in [name, *fly_only]]),
+    )
+
+
+def _manifest_without_the_dense_leg_declaration() -> Path:
+    lines = REAL_MANIFEST.read_text().splitlines(True)
+    kept = [line for line in lines if not line.startswith(_DENSE_LEG_ENV)]
+    assert len(kept) == len(lines) - 1, (
+        "the mutation removed more than the one declaration line — this probe "
+        "would then be measuring a different manifest than the one it names"
+    )
+    return _fixture("manifest-without-dense-leg.txt", "".join(kept))
+
+
+def test_the_dense_leg_declaration_is_what_clears_the_provenance_gate():
+    """`UNDECLARED — 'TORTOISE_RECORD_VECTOR_LEG' …` must be gone, and by THIS line.
+
+    Measured on the deploy run that blocked production: run `45454704119`, step
+    `Check Fly secret provenance (fail-closed)`, reported exactly that string and
+    `1 violation(s)` — the last undeclared name in the set. The pre-fix manifest
+    does not mention the name, so the gate's verdict is a property of the
+    DECLARATION and of nothing else in this change.
+    """
+    fly_state = _fly_state_naming(_DENSE_LEG_ENV)
+
+    fixed = _run(
+        fly_state,
+        manifest=REAL_MANIFEST,
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+    )
+    assert fixed.returncode == 0, (
+        "the shipped manifest does not clear the gate on the Fly state that "
+        "blocked production — the declaration is not accepted as a managing "
+        f"source:\n{fixed.stdout}\n{fixed.stderr}"
+    )
+    # ⛔ NO `name not in fixed.stdout` ASSERT HERE. Exit 0 prints ONE summary line
+    # ("OK: all N Fly secret(s) are declared …") with counts and no names, so an
+    # assert on the name in that output could never fire — the dead-assert class
+    # this file deletes elsewhere (`returncode == 0` is the whole control
+    # predicate). The mutation below is what proves the verdict depends on the
+    # declaration.
+
+    # The mutation: same Fly state, same workflow, the declaration deleted. A probe
+    # that cannot red is not evidence, and this is the exact state the deploy was
+    # in before this change.
+    broken = _run(
+        fly_state,
+        manifest=_manifest_without_the_dense_leg_declaration(),
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+    )
+    assert broken.returncode == 1, (
+        "deleting the declaration left the gate green, so the declaration is not "
+        f"what the verdict depends on (exit {broken.returncode}):\n{broken.stdout}"
+    )
+    assert "UNDECLARED" in broken.stdout and _DENSE_LEG_ENV in broken.stdout, (
+        "the mutated run did not report the UNDECLARED violation this change "
+        f"closes, so it is red for some other reason:\n{broken.stdout}\n{broken.stderr}"
+    )

@@ -4718,6 +4718,7 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 | TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
+| TORTOISE_RECORD_VECTOR_LEG | ✅ **A live Fly secret — the record's DENSE (vector) leg's arm/rollback lever** (a **three-state switch**, not a credential — no secret material to rotate; `unset` = **armed for the READ** since `#13610`, an explicit falsy (`0`/`false`/`no`/`off`) = **the ROLLBACK**, and any explicit truthy (`1`/`true`/`yes`/`on` — `env_truthy.TRUTHY`) = the only posture `arm_is_explicit()` accepts, i.e. the arm that **retires the in-graph vector index** at setup). Set and reverted OUT-OF-BAND — declared `fly-only:#7879`, so it is deliberately absent from version control and **no deploy sets it**; the `fly secrets unset` in §"Arming the DENSE (vector) leg" below must delete that declaration in the same change. ⛔ This row asserts **no value**: the deploy never assigns the name, so whatever is live is carried across untouched, and the live value is the operator's decision | — (the dense read is served from the Postgres record **where the per-label coverage count verifies**; until it does the graph answers and keeps its copy — see §"Arming the DENSE (vector) leg" below) | — (no GitHub secret, and one must not exist: a value stated by CI would ship a product decision — an explicit arm retires indexes, a rollback disarms the leg — as a side effect of deploy plumbing, and `flyctl secrets set` being additive means it would silently re-arm an operator's rollback on the next deploy) |
 | TORTOISE_RECORD_ALLOCATE | ✅ **The record allocator's CUTOVER switch** (a **mode flag**, not a credential — no secret material to rotate; shipped default **OFF**, and a value it cannot parse reads OFF too) — set out-of-band with `fly secrets set TORTOISE_RECORD_ALLOCATE=1` **only after** every graph is seeded and armed, per §"Arming the allocator's cutover" below. Declared `fly-only:#12894`, so it is deliberately absent from version control; the `fly secrets unset` below must delete that declaration in the same change. ⛔ **Unsetting is NOT the revert** — read the section before touching it | — | — (no GitHub secret, and one must not exist: an assignment from CI would either arm a graph nobody seeded or never run at all) |
 | TORTOISE_EMBEDDER_WARMUP | ✅ **The embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — the value is **version-controlled** in `fly.toml [env]` (`TORTOISE_EMBEDDER_WARMUP = "0"`, production's live value) and declared `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (#13923 / #13926), so flipping it is a merged `[env]` edit, not an out-of-band secret. ⛔ **While a Fly secret of this name is on the app it SHADOWS `[env]`** — true as of **2026-11-20**, and a VOLATILE fact, so re-measure (`flyctl secrets list -a tortoise-y4mjjq`) rather than trusting this sentence — so the versioned value is dead until that secret is unset **after** a deploy applied `[env]` — the four steps and their failure modes live in the manifest's route-(b) block, and the transition is tracked in #13923. See §"The embedder warm-up switch" below | — | — (no GitHub secret, and it must stay OUT of the deploy payload: the manifest's own VCS declaration is the source) |
 
@@ -4949,6 +4950,57 @@ load-bearing:
 - ⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:`
   name that no longer exists on Fly, so the `flyctl secrets unset` above must delete that line in
   the same change — fail-closed on purpose, so a revert is visible in review.
+
+### Arming the DENSE (vector) leg — `TORTOISE_RECORD_VECTOR_LEG` (epic #7879 R1, #11642 / #13610)
+
+> ⛔ **THIS IS NOT `TORTOISE_RECORD_DSN` AND NOT `TORTOISE_RECORD_SERVE`.** The DSN is the record
+> being **reachable**; `TORTOISE_RECORD_SERVE` selects **which store answers a read**; this switch is
+> whether the record answers the **dense (vector)** read — `tortoise/record_vector.py::ARMING_ENV`,
+> read through `cutover_armed()` (the READ) and `arm_is_explicit()` (the in-graph index RETIREMENT).
+> Arming it does not make the record the source of anything it has not got: the read is gated per
+> label on a coverage COUNT (`record_vector.coverage`), so a deployment that has not backfilled keeps
+> answering from the graph **and** keeps writing the graph copy (`mirror_required`).
+
+The three states (`#13610` moved the default; every one of them is a product decision, which is why
+**no deploy sets this value**):
+
+| value | the READ | the in-graph index | when to use it |
+|---|---|---|---|
+| *unset* / blank / unrecognised (**DEFAULT**) | **armed** — the record answers where coverage verifies, the graph elsewhere | **kept, and created at the next setup if missing** — `arm_is_explicit()` is false, so the setup takes `main`'s create path (`projection._ensure_indexes`: *"keep an index found, create one that is missing"*), so a store is never left with neither an in-graph index nor a record leg, and a label with no index keeps `#4997`'s WARNING | the shipped default since `#13610`. A typo is *not* an operator statement, so it reads this row, not the rollback row |
+| **`0` / `false` / `no` / `off`** | **ROLLED BACK** — the graph branches answer the dense read exactly as they did before the move | the SAME index disposition as the row above (`arm_is_explicit()` is false on both): kept, and created if missing. ⛔ **The rollback is a READ-path statement, not an index statement** — nothing is dropped, and nothing stored is lost, because the graph write was retained while coverage was unverified | **the documented revert.** Take it when the record must not answer the dense read |
+| **`1` / `true` / `yes` / `on`** (explicit truthy, `env_truthy.TRUTHY`) | armed, exactly as the default row | ⛔ **RETIRED at the next setup** — an existing `Point.embedding` HNSW index is DROPPED and never re-created | only when the record is expected to serve the dense read for the whole corpus. This is the one posture a **typo cannot** produce, and the one that changes a store's shape |
+
+```bash
+fly secrets set TORTOISE_RECORD_VECTOR_LEG=1 -a tortoise-y4mjjq     # explicit arm (retires the in-graph index at setup)
+fly secrets set TORTOISE_RECORD_VECTOR_LEG=0 -a tortoise-y4mjjq     # THE ROLLBACK — the graph answers the dense read again
+fly secrets unset TORTOISE_RECORD_VECTOR_LEG -a tortoise-y4mjjq     # back to the shipped default (armed for the read, index KEPT)
+```
+
+⚠️ `set`/`unset` restart the Machine. Distinguish the last two: `unset` is **not** the rollback —
+the default is armed for the read, so unsetting returns the arm to ON-for-reads with the index kept,
+while `=0` is what actually puts the dense read back on the graph. ⚠️ **Neither `unset` nor `=0`
+retires anything, and neither one leaves a store index-less**: both take `arm_is_explicit()`'s false
+branch, which keeps an index it finds **and creates one it is missing** — that is `main`'s posture and
+it is deliberate (`projection._ensure_indexes`'s *"keep an index found, create one that is missing"*).
+The index DISPOSITION changes on the explicit-truthy row only.
+
+⛔ **Arming is an OWNER action.** Nothing in the code sets it, and **no deploy sets it**. Its
+provenance is declared `fly-only:#7879` in `.github/scripts/fly-managed-secrets.txt`, which is why
+the fail-closed Fly secret-provenance gate no longer reports it as `UNDECLARED`:
+
+- ⛔ **Do not "fix" it by declaring `gh-secret:` / `fly-toml-env`, or by adding an
+  `ARGS+=(TORTOISE_RECORD_VECTOR_LEG=…)` line to `deploy-hosted.yml`.** Each of those makes the
+  deploy the managing source, so the deploy would state a value on every run: `=1` retires in-graph
+  indexes as a side effect of a deploy, `=0` rolls the leg back — and because `fly secrets set` is
+  ADDITIVE, a value the deploy states silently re-arms an operator's rollback on the next deploy.
+- ⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:`
+  name that no longer exists on Fly, so running the `unset` above must delete that manifest line in
+  the same change — fail-closed on purpose, so the revert is visible in review.
+- ⚠️ **This section asserts no current value**, and an operator should not read one into it. The
+  shipped default is armed-for-the-read; what production runs is whatever is live on the app.
+  Measure it (`fly secrets list` shows names, never values): the arm's own evidence is the
+  `mechanism: pgvector` marker on a dense read and the `#4997` WARNING's presence or absence at
+  setup — not this page.
 
 ### Arming the allocator's cutover — `TORTOISE_RECORD_ALLOCATE` (#12894)
 
