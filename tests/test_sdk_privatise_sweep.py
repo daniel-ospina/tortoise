@@ -1043,13 +1043,17 @@ def test_a_tool_only_diff_selects_this_suite():
     step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
     count of typed references that survive, never this suite's arms.
 
-    ⛔ WHAT THAT LEAVES UNGRADED, named exactly — the loose version of this paragraph is
+    ⛔ WHAT THAT LEAVES UNGRADED — the loose version of this paragraph is
     false: the pin's SHAPE (rows > 0, and a digest separating SHAPES and COUNTS), the
     vacuous-map REFUSAL (an empty map must exit 2 with its own diagnosis — without it a map
     that silently derived nothing still exits 1, but reported as `the residue SET moved off
     its pin`, which sends the reader to the pin instead of to the map), the
-    `SWEEP_NAMES == 66` non-vacuity floor, the
-    scope-local typing arms and the refspec arms. ⛔ AND NOT "the next `core`-selecting PR
+    `SWEEP_NAMES == 66` non-vacuity floor, the map/private-spelling assertions of
+    `test_the_pinned_base_still_derives_the_whole_batch`, the import-shape arm
+    `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
+    scope-local typing arms and the refspec arms — the WHOLE suite is unselected, so the
+    list is illustrative rather than exhaustive.
+    ⛔ AND NOT "the next `core`-selecting PR
     reds on the prose": `#14439` (B8, `8c373f59a15b`) cut this suite from 36 arms to 11 and
     deleted `_residue_block()` together with the published-extent and prose grading, so no
     prose arm remains to catch that. That cut is `main`'s decision and is NOT restored here;
@@ -1058,8 +1062,10 @@ def test_a_tool_only_diff_selects_this_suite():
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
     to `tier1`. ⛔ THE MECHANISM IS A UNION, NOT A SKIP: `tier1` is unioned into EVERY PR
-    selection (`files = set(tier1)` in `select()`), so a tier-1 membership selects this suite
-    unconditionally. ⛔ AND WHAT THAT COSTS IS THE SUITE-SELECTION ASSERT ONLY: with the row
+    selection (`files = set(tier1)` in `select()`, and none of the later subtractions — `slow`,
+    `carve`, `uri_requiring_files`, `on_demand_files` — removes a tier-1 member), so a tier-1
+    membership selects this suite unconditionally. ⛔ AND WHAT THAT COSTS IS THE
+    SUITE-SELECTION ASSERT ONLY: with the row
     deleted the `core`-surface assert still reds, so the row's removal is still caught; what a
     tier-1 join takes away is this arm's discrimination on the selection side — the suite assert
     would pass over a row that no longer selects anything. Measured: with this file injected

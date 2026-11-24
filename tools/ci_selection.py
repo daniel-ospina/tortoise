@@ -1797,17 +1797,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # pair itself (`test_the_residue_pin_is_a_reading_of_the_whole_set`) and the
              # addresses the block publishes (`test_every_addressed_rev_names_a_fetchable_refspec`,
              # which grades `_ARM_REFSPECS` rather than the pin).
-             # ⛔ WHAT THE GAP IS, EXACTLY — the loose version of this comment is FALSE: the
+             # ⛔ WHAT THE GAP IS — the loose version of this comment is FALSE: the
              # required `surface-guard` step runs `--check`, which DOES compare the
              # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
-             # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded is the
-             # pin's SHAPE (rows > 0, and a digest that separates SHAPES and COUNTS, not only
-             # counts), the vacuous-map REFUSAL (an empty map must exit 2 with its own
+             # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded — the
+             # whole suite, since `surfaces: []` selects ZERO of its files — includes, but is
+             # not limited to: the pin's SHAPE (rows > 0, and a digest that separates SHAPES
+             # and COUNTS, not only counts), the
+             # vacuous-map REFUSAL (an empty map must exit 2 with its own
              # diagnosis — without it a map that silently derived nothing still exits 1, but
              # reported as `the residue SET moved off its pin`, which sends the reader to the
              # pin instead of to the map), the
-             # `SWEEP_NAMES == 66` non-vacuity FLOOR, the scope-local typing arms and the
-             # refspec arms.
+             # `SWEEP_NAMES == 66` non-vacuity FLOOR, the map/private-spelling assertions of
+             # `test_the_pinned_base_still_derives_the_whole_batch`, the import-shape arm
+             # `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
+             # scope-local typing arms and the refspec arms.
              # ⛔ SCOPED TO WHAT SURVIVES: `#14439` (B8, `8c373f59a15b`) cut this suite from
              # 36 arms to 11 and deleted `_residue_block()` together with the published-extent
              # and prose grading. That is `main`'s decision and this row does NOT restore it —
