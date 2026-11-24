@@ -99,10 +99,12 @@ ledger when ANOTHER episode kind answers `SKIPPED_WINDOW` in the same call
 armed). With NO incident channel there is
 no `SKIPPED_WINDOW` gate to hold the release, so `notify.resolve_abuse_episode`
 re-arms the local ledger on the FIRST confirmed episode end — the bound in that shape
-is the EPISODE, and the 24h window is only the ceiling for a continuously breaching
-org. ⛔ WHICH shape applies DECIDES that bound, so do not restate it as the flat
-"the bound is the WINDOW" — a previous cut of this paragraph did, two lines after
-saying the opposite. What holds in EVERY shape is narrower: the window is what a
+is the EPISODE, and the 24h window is the ceiling only for a continuously breaching
+org — or for a new episode FOLDED into a window whose predecessor's end the engine
+could not observe (the out-of-band residual: no episode end ever arrives, so the
+armed window still bounds it). ⛔ WHICH shape applies DECIDES that bound, so do not
+restate it as the flat "the bound is the WINDOW" — a previous cut of this paragraph
+did, two lines after saying the opposite. What holds in EVERY shape is narrower: the window is what a
 message SPENDS, and an episode end (or any per-outcome release) is what re-arms
 it — never a mute.
 The in-process claim below stays as the ATTEMPT bound (it self-heals a store
@@ -1894,8 +1896,10 @@ class AbuseEngine:
         #14407. Two facts belong to the same event and are set here together, so
         a caller cannot get one without the other:
 
-        * the DELIVERY window is re-armed, because a NEW episode must page at
-          once — the episode end is the RELEASE. Which BOUND that window is
+        * the DELIVERY window is re-armed WHEREVER the release fires (always on
+          the NO-INCIDENT-CHANNEL path; with a store, when the close resolves or
+          the store did not answer `SKIPPED_WINDOW`), because a NEW episode must
+          page at once — the episode end is the RELEASE SITE. Which BOUND that window is
           depends on the shape: on the NO-INCIDENT-CHANNEL path it is the
           ceiling only for a CONTINUOUSLY breaching subject, because there a
           flapping rule pages once per episode end (no `SKIPPED_WINDOW` gate

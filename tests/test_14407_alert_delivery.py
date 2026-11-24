@@ -292,7 +292,9 @@ def test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode(
     while the delivery LEDGER is still armed — and this PR's own docstring records
     how it stops being: a resolve leg that RAISES or answers `CloseCooldown`
     leaves `skipped_window` false, so `resolve_abuse_episode` pops the ledger at
-    EVERY episode end (*"measured: 6 crossings = 6 messages"*).
+    that episode end unless ANOTHER episode kind reports `SKIPPED_WINDOW` in the
+    same call — the flag is per CALL, not per kind (*"measured: 6 crossings = 6
+    messages"*, with one incident kind on record).
 
     The incident stays OPEN across those crossings (the resolve failed), so each
     crossing is a `DEDUP` detection with `deliver=True` — this reminder. A human

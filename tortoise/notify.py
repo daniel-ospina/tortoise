@@ -620,8 +620,10 @@ def release_abuse_delivery(kind: str, subject: str) -> None:
 
     Released on the episode end the engine OBSERVES (the clean window that
     persisted ``flag_clear``, plus its bounded retry, and equally a close that
-    RAISES or is backing off — that leaves ``skipped_window`` false, so the gate
-    does not hold) — and, kind-agnostically, by the per-outcome releases (a
+    RAISES or is backing off — that leaves ``skipped_window`` false UNLESS another
+    episode kind answers ``SKIPPED_WINDOW`` in the same call, the flag being per
+    CALL and not per kind, so the gate normally does not hold) — and,
+    kind-agnostically, by the per-outcome releases (a
     deferred filing, a lifted suppression, a failed send), which is why a
     flapping rule can page once per crossing. The failed-close release is NOT in
     that kind-agnostic set: it loops ``_episode_delivery_kinds()``, which excludes
@@ -1006,8 +1008,14 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         reason=f"{reason}{tail}")
                 return
         else:
-            # The bound is the WINDOW, with a bounded RE-ALARM, and the ledger is
-            # what holds it (`_claim_delivery`). Arm the window here on EVERY
+            # While the ledger stays ARMED the bound is the WINDOW, with a bounded
+            # RE-ALARM, and the ledger is what holds it (`_claim_delivery`) — but
+            # an armed window is not the bound of an EPISODE: a release ends it
+            # (that is the point of `release_abuse_delivery`), and store-side a
+            # close that raises or backs off fires one at every episode end
+            # (`_INCIDENT_DELIVERY_WINDOW_S`: "not a universal … measured: 6
+            # crossings = 6 messages"), so do not restate this as a flat bound.
+            # Arm the window here on EVERY
             # outcome so the first repeat cannot page again in the same minute:
             # the create-once path has already pushed the episode's first message
             # when it FILED, and on DEDUP the ledger alone decides whether the
@@ -1049,7 +1057,7 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
                                      "while the delivery window holds; a close "
                                      "that FAILS or is backing off (a cooldown) "
-                                     "re-arms it, so a rule that flaps can page "
+                                     "can re-arm it, so a rule that flaps can page "
                                      "once per crossing. Repeats inside a held "
                                      "window are folded"
                                      # ⛔ ONLY the arm that NAMES an issue may
