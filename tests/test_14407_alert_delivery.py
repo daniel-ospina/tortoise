@@ -138,6 +138,17 @@ def test_one_incident_is_one_push_for_its_whole_lifecycle(delivered):
     assert "issue #1" in message, f"not attributable: {message!r}"
     assert "rule=point_create" in message, "the triager's rule context was dropped"
     assert "count=600" in delivered.filed[0][1], "the count belongs on the issue"
+    # ⛔ THE LABEL, pinned (review cycle 5). The episode's single push is now the
+    # STORE's create-once template (`AlertStore._telegram_text`), because that is
+    # the one decision both channels share — the old `🚨 Tortoise Security» text
+    # belonged to the per-detection sender this change removes, so it survives on
+    # the unattributed/digest paths only. The consequence is a visible relabelling
+    # of a security alert into the DR vocabulary, which is fine ONLY while it is
+    # stated and watched: the runbook's `ABUSE_FLAG_RAISED` row names it, and this
+    # assertion makes any future template change visible instead of silent.
+    assert message.startswith("🚨 DR alert: ABUSE_FLAG_RAISED"), (
+        "the episode push no longer carries the store's create-once template — "
+        f"if that is deliberate, update the runbook row and this pin: {message[:60]!r}")
 
 
 def test_the_incident_subject_is_rule_scoped(delivered):
