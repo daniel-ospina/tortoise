@@ -231,23 +231,6 @@ RESIDUE_INTERVAL_END = "d5ecef0d72"     # measured: that commit's parent, the la
 RESIDUE_PR_HEAD = "d523c9be8c"          # `refs/pull/14108/head`
 RESIDUE_REWRITE_PARENT = "2fe01fc775e"  # the capture rewrite's parent (`#14068`'s squash)
 
-# The interval's TWO published counts, as the block prints them. They live here so the PROSE arm
-# can grade the WORDS against the same numbers the PREMISES arm measures against the repository —
-# before this, `SIX`→`SEVEN` and `EIGHT`→`NINE` both left the suite GREEN (review, round 12), which
-# is the defect class the block polices in its own words: the numeral IS the substance of the
-# finding-2 fix ("six of the eight still carry the line"), not a decoration around it.
-RESIDUE_INTERVAL_COMMITS = 8            # `git rev-list --reverse 2fe01fc775e..d523c9be8c` → 8
-RESIDUE_CARRIER_COUNT = 6               # interval trees still holding `seen.update(` → 6
-# Word forms, so a change to either constant can never leave the prose silently mismatched.
-RESIDUE_COUNT_WORDS = {6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE"}
-
-# The re-cut pair and the TREE that derives it (review, round 13, P2). The pair is `--repin`'s
-# output on `1b82cc7063` — the capture rewrite — and NOT "the pair THIS head pins": this head
-# pins `(11844, "70d6cfdcd8b769e4")`, so the relative form asserted a pair this head does not
-# carry, the very class the block fixes one sentence above for `e022fc935b`.
-RESIDUE_PAIR_REV = "1b82cc7063"         # the rewrite's own tree, which DERIVES the pair
-RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
-
 
 def _rev_present(rev: str) -> bool:
     """Is `rev` carried by THIS clone? The `test` job is `fetch-depth: 1` (no objects)."""
@@ -403,127 +386,6 @@ def _requires(*revs: str) -> None:
             f"wrong. Re-arm with `{_rearm_command(missing)}`.")
 
 
-#: The PRs that legitimately OWN `RESIDUE_REWRITE_PARENT`: its squash subject reads
-#: `fix(12943): read a tenant's cache graph, never derive it from the credential (#13337) (#14068)`,
-#: so `#13337` is the PR the commit came from and `#14068` the squash that landed it.
-RESIDUE_REWRITE_PARENT_PRS = frozenset({"#14068", "#13337"})
-
-#: How close a PR number must sit to a named sha to BE an attribution of it. Beyond this the
-#: block is talking about a different tree (it legitimately discusses `#14108`, `#14101`,
-#: `#14078` and `#13994` itself within a paragraph), so distance is the boundary between an
-#: attribution and a neighbouring statement — the same windowed shape the arms above use.
-_ATTRIBUTION_WINDOW = 45
-
-
-#: A past-tense / measurement qualifier: what turns "the ref IS `d523c9be8c`" into
-#: "the ref WAS `d523c9be8c` when this was measured".
-_PAST_OR_MEASURED = re.compile(
-    r"(?i)\b(?:was|were|resolved|measured|at\s+the\s+time|when\s+measured)\b")
-
-#: A PRESENT-TENSE binding of a sha to something: `it is `sha``, `the ref pins `sha`` …
-#: ⛔ `resolves to` / `resolved to` are NOT in this set: they are the dated form, and the
-#: arm below requires a qualifier to be ABSENT before it charges one.
-_MOVING_REF_TARGET = re.compile(
-    r"(?i)\b(?:is|pins?|names?|equals?|points?\s+at|resolves?\s+to)\s+`[0-9a-f]{7,40}`")
-
-
-#: ⛔ THE ONE ISSUE NUMBER IN THIS BLOCK THAT CANNOT ADDRESS A TREE (review, round 13, P2).
-#: `#14108` resolves to `refs/pull/14108/head`, which TRACKS a branch head — so a tree cited by
-#: that number is a moving address, and the block's own sentence is what says so. Other numbers
-#: in the block (`#14068 tree`, `#14067`) name MERGED pull requests and are stable, which is why
-#: this is keyed on the OBJECT and not on the shape `#<n> tree`: a shape-keyed arm red the honest
-#: `on the #14068 tree`, which is the false-block this file rejects everywhere else.
-_PR_REF_AS_TREE = re.compile(
-    r"(?:#14108|refs/pull/14108/head)`?[\s,]*"
-    r"(?:(?:PRE-MERGE|PRE-REWRITE|PRE-FIX|pre-merge|pre-rewrite|pre-fix)\s+)?(?:tree|tip)\b")
-
-#: A relative pin address: "the pair THIS head pins" / "this commit's `origin/main`" — a claim
-#: that is true only for the tree it was written on, in a block that has already been re-cut under
-#: it twice (PR body §4, review round 13, P2).
-#:
-#: ⛔ KEYED ON THE SHAPE, NOT ON ONE PHRASE (review, round 17, P3). Clause 1 was the whole of the
-#: round-13 arm and it matched the LITERAL `THIS head`, so the same defect spelled `THIS COMMIT
-#: pins` / `this tree pins` / `the head pins` stayed GREEN — narrower than the "SHAPE, NOT PHRASE"
-#: contract this arm's own docstring claims. An address a rebase falsifies is a POINTER defect, so
-#: what is charged is a relative head **as the subject of a pin verb** (clause 2): the verb is what
-#: makes it a BINDING rather than a measurement, and that distinction is load-bearing — the block
-#: legitimately says the pair was `--repin`-printed or measured `on THIS tree`, which is honest and
-#: must not red. Which is also why clause 1 keeps `head` and does NOT widen to `tree`: `THIS tree`
-#: is an honest measurement qualifier, and widening it there false-blocked
-#: "the pin is the pair `--repin` printed on THIS tree".
-#: ⛔ A POSSESSIVE RELATIVE TREE AS THE SUBJECT OF A PRINT VERB (PR #14209 review). The `#14164`
-#: paragraph said "the SAME pair this branch's tree prints". Clause 2 cannot see it — the noun
-#: sits behind `branch's`, and the verb is `prints` rather than `pins` — so that sentence graded
-#: nothing until a reader caught it, and `(11843, "6aed5368ffa10513")` read as current on a tree
-#: that prints `(11857, …)`. The pair-bound arm added with the same fix reads the pair out of the
-#: SHAPE, which needs a quoted pair in the sentence; this clause closes the shape itself.
-#: ⛔ PRESENT TENSE ON PURPOSE: `this branch's tree printed at `72c104bcbb`` is a MEASUREMENT with
-#: its rev named and must not red, while the unqualified present tense is the binding that the
-#: next re-pin falsifies — the same measurement-vs-binding line clause 1 already draws.
-#: ⛔ THE REVERSED ORDER — CLAUSE 1's OWN BLIND SPOT (#14282 fix lane, P3-class, measured).
-#: Clause 1 puts the `pair`/`pin` noun BEFORE the relative head, so the sentence `At THIS head the
-#: committed pair is `11861`` graded NOTHING and shipped GREEN on the merged head — where the
-#: committed pair is `11864` and `--check` exits 0 against it, so the sentence asserted a pair the
-#: head it ships on does not carry, the exact defect clause 1 exists to charge. The passive
-#: "committed pair"/"committed pin" is a BINDING (it states what the head commits), never the
-#: honest measurement qualifier `--check` exits 0 `on THIS tree` / `on the SAME pair` — which is
-#: why this clause keys on that noun instead of on every `pair` within reach of a relative head:
-#: that widening would charge `main`'s stale-marked `on the SAME pair` sentence, whose refutation
-#: sits in the paragraph BELOW it and so outside `_refuted`'s forward window.
-_RELATIVE_PIN_ADDRESS = re.compile(
-    r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
-    r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
-    r"|\b(?:THIS|this)\s+(?:branch|commit|PR|pr)'?s\s+(?:tree|tip)\s+(?:pins?|prints?)\b"
-    r"|\bthis\s+commit'?s\s+`?origin/main`?"
-    r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|revision|rev)\b[^.\"]{0,40}"
-    r"\bcommitted\s+(?:pair|pin)\b")
-
-#: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
-#: `1b82cc7063`; the rewrite's PARENT — the tree every row above is measured against — is
-#: `2fe01fc775e`. Presenting the draft as the parent is the misattribution round 8 removed
-#: (PR body §1, review round 13, P2).
-_PARENT_CLAIM = re.compile(
-    r"(?i)\b(?:parent|pre-rewrite\s+tree|pre-rebase\s+tree)\b[^.]{0,40}`83e94826a8a`"
-    r"|`83e94826a8a`[^.]{0,40}\b(?:is|was)\s+the\s+parent\b"
-    r"|\bthis\s+commit'?s\s+PRE-REWRITE\s+tree")
-
-
-#: A PAIR bound to the tree the READER is standing on: "the pair below is `(11840, …)`" / "the
-#: SAME pair this branch's tree prints". Both are the #14174 class in this block's own words — "an
-#: address that resolves to a different tree" — and both shipped GREEN on every arm until PR
-#: #14209's review F2: the pair below IS `SWEEP_RESIDUE`, and those two sentences claimed 11840 and
-#: 11843 after the merges with `main` had re-measured it to 11857.
-#:
-#: ⛔ KEYED ON THE PAIR, NOT ON THE PHRASE — the discipline this file already applies to the
-#: abbreviation and pointer arms. The block legitimately writes "the pair below was RE-DERIVED …
-#: on THIS merge tree", and legitimately quotes ANOTHER tree's pair beside it (`main` at
-#: `fbcd24760b` "for ITS tree"), so banning the words would false-block honest measurements. What
-#: is charged is a QUOTED PAIR bound to a relative subject in the PRESENT tense — the form that
-#: rots the moment the tree moves — and only where the pair is NOT the one the file carries.
-_PAIR_BELOW_CLAIM = re.compile(
-    r'(?i)(?:the\s+)?pair\s+below\s+is\b[^.]{0,90}?\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)'
-    r'|\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)[^.]{0,90}?\bthis\s+branch\'?s\s+tree\s+prints?\b'
-    r'|\bthis\s+branch\'?s\s+tree\s+prints?\b[^.]{0,90}?\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)')
-_QUOTED_PAIR_RE = re.compile(r'\((\d{4,5}),\s*["\']([0-9a-f]{16})["\']\)')
-
-
-#: Direction 1 of the `#14068` arm: a DIFF verb and the tree it diffs against, both inside one
-#: window, with the tree named by SHA.
-#:
-#: ⛔ NOT PHRASE-KEYED (review, round 17, P3). The arm required the literal
-#: "`git diff` … between `A` and `B`", so an honest rewording of the SAME claim —
-#: "diffing `A` against `B`" — was a RED. That is the over-specified-shape defect this file
-#: removes from `_abbreviation_length_claims` and `_already_counted_anchors`, and the wrong
-#: BINDING it exists to catch is already refused by direction 2 (`_PR_REF_AS_TREE`). What is
-#: graded here is the presence of both shas beside the diff command, not the vocabulary.
-_DIFF_VERB = re.compile(r"(?i)\bdiff\w*")
-
-
-#: The `#14058` note's ORIGINAL, refuted reason for citing a pre-rebase commit by issue number.
-_PREFIX_REASON_RE = re.compile(
-    r"(?i)reachable from no ref|disappears on the next\s*`?gc`?|unreproducible address")
-
-
 def _arm_refspecs_literal_keys() -> list[str]:
     """Every KEY EXPRESSION written in the `_ARM_REFSPECS` dict literal, in source order.
 
@@ -571,8 +433,9 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     size restated in THIS sentence. ⛔ SCOPED TO THIS SENTENCE, DELIBERATELY (#14282 review, P3):
     an earlier cut of this clause said "no arm grades a size restated in prose", which is FALSE of
     the tree and its wrong outcome is deletion of a live arm — `tools/sdk_privatise.py`'s `SIX`/`EIGHT`
-    are graded through this file's `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants (they
-    are defined HERE, not in the tool), by the arms here, because the numerals there are load-bearing. The rule is about a
+    WERE graded through this file's `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants (they
+    were defined HERE, not in the tool), by the arms here, because the numerals there are load-bearing;
+    that grading was CUT in the B8 test-volume cut (2026-11-23), so the two numerals are UNGRADED now. The rule is about a
     figure published HERE without a grader, never about prose generally. A reader who needs the
     population's size reads `expected`.
 
@@ -876,77 +739,6 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
     assert ":" in printed.lstrip("+"), (
         f"the printed remedy `{printed}` is the SOURCE-ONLY form measured above as inert")
 
-
-# ── a rev's OWN published PIN is a pair, and the pair must be that rev's ────────
-#
-# ⛔ THE DEFECT THIS GRADES (review, round 14, P2): the `#14068` attribution published
-# `d523c9be8c`'s OWN pin as `(11839, "0a7e60fa05aa31b9")` — the PARENT's pair — while that rev
-# commits `(11838, "de5664dc98549d56")`, and `git rev-parse d523c9be8c^{tree}
-# 1b82cc7063^{tree}` returns ONE sha. So the same paragraph said `d523c9be8c` "inherits that
-# deletion" (the capture rewrite's own row set) AND that it carries the parent's figures — a
-# published pair belonging to another tree, which is the class this block polices everywhere
-# else. Nothing graded a published PAIR: `test_the_residue_pin_is_a_reading_of_the_whole_set`
-# grades the SHAPE of `SWEEP_RESIDUE`, so mutating a true pair left the suite green.
-#
-# No `--repin` here: `--repin` is ~70 s per rev and re-derives a number, while the claim is
-# about what a REV CARRIES. `git show <rev>:tools/sdk_privatise.py` reads that rev's own
-# committed pin — deterministic and offline.
-#
-# ⛔ TWO ARMS, BECAUSE ONE ARM COULD NOT RUN IN CI (review, round 16, P2). This used to be a
-# single arm that `git show`ed each rev behind `_requires(...)`, so it SKIPPED in every job that
-# runs this file — the sharded `test` job checks out at `fetch-depth: 1`, and the one depth-0 job
-# runs `--check`, not pytest. Measured: restoring the pre-fix pair left the suite UNCHANGED
-# (19 passed / 4 skipped), so the round-14 correction was gated by nothing in the merge path.
-# A guard a gating job cannot run is not a guard — the same class round 10 fixed for the two
-# prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
-# graded against each rev's committed pin by the premise arm that follows it.
-_OWN_PIN_CLAIM_RE = re.compile(
-    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
-#: ⛔ THE PHRASE IS `(?i:…)` BECAUSE THE BLOCK WRITES IT IN CAPITALS WHERE IT EMPHASISES (#14282
-#: review cycle 6, P1, measured). This block's own convention is to set the operative verb in caps
-#: — `origin/main` `1b0db0489408` **COMMITS** `(11843, "6aed5368ffa10513")` — and a case-sensitive
-#: pattern silently skipped that clause while BOTH new guards passed: parity saw 8 clauses and 8
-#: claims (the clause was invisible to the loose pattern too, because it carries the same phrase),
-#: and the orphan arm saw no missing key because the rev was never in `OWN_PINS` either. So a wrong
-#: pair typed into that clause would have passed everything. Scoped to the PHRASE, deliberately:
-#: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED —
-#: the uppercase-digest mutant reds the claims-vs-clauses parity arm (one clause with no claim).
-#: GRADED, not restated: `test_the_scoped_case_fold_still_reds_a_capitalised_digest` asserts the
-#: loose clause pattern counts one MORE clause than the claim pattern parses, which is what fires
-#: that arm. This sentence used to publish the mutant's two observed counts, measured at cycle 6's
-#: head; cycle 7 added two clauses and made the figure FALSE without touching the sentence — the
-#: same drift the extent figure is graded against (#14282), so no count is typed here at all.
-#: How many clauses the pattern must match is NOT typed: it is counted off the block below.
-#: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
-#: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
-#: `is` but NOT between `Its` and `own`, so re-wrapping one sentence put `Its` at the end of a line
-#: and the clause stopped matching. `10e51693f1`'s published pair then passed a mutant that set it
-#: to `(99999, "aaaaaaaaaaaaaaaa")`: the whole suite stayed green, which is a FALSE PASS — the
-#: exact failure this file exists to catch, introduced by a prose edit. The pattern now breaks at
-#: ANY of those word boundaries, AND the parity assertion below makes a silent drop impossible
-#: however the sentence is wrapped next.
-_OWN_PIN_CLAUSE_TEXT_RE = re.compile(
-    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\(")
-#: ⛔ THE PARITY PARTNER IS DELIBERATELY LOOSER THAN `_OWN_PIN_CLAIM_RE` IN EXACTLY ONE DIMENSION: it
-#: stops after the OPENING BACKTICKED PAREN, so it does not grade the pair's CONTENTS. It therefore
-#: catches a failure the matcher's own tolerances cannot — a PAIR that was wrapped or malformed (the
-#: digest split across lines, or `[\"']` lost) still reads as a clause to the loose form and not to
-#: the strict one. A bare `commits` in prose does NOT count, because the loose form requires the
-#: opening paren: `commits` appears as an ordinary word many times in this block, in several
-#: positions relative to a pair, and an earlier cut of this assertion counted every one of them and
-#: reded an honest block with `6 == 18` — the arm grading the WRONG POPULATION, which is the same
-#: defect class as the wrap it was written to catch, one level up. ⛔ AND NO POPULATION COUNT IS
-#: PUBLISHED HERE (#14282 review, P3): this sentence published one and a fresh reader measured it
-#: wrong at the same head. Publishing the correction would be the same defect with a newer number,
-#: and nothing in this file grades a number written in prose — measured: adding one more such
-#: claim would leave this sentence wrong with every arm still green, the same shape as the
-#: orphaned `OWN_PINS` entry above. So the shape is described and left uncounted, and the
-#: assertion below measures it directly instead of trusting a number written here.
-#: ⛔ AND IT USES `[\s#:]+` BETWEEN
-#: THE PHRASE'S OWN WORDS, not `\s+`: this block's line breaks are `\n#: `, so the `#:` is INSIDE the
-#: gap and `\s+` alone matched one claim fewer than the matcher did — measured, and that asymmetry
-#: is why the word-level separator must match the matcher's while only the pair body is relaxed.
-_BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 #: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
 #: ⛔ THE OBJECT-FREE HALF: a dict lookup needs no git object, so
