@@ -317,9 +317,10 @@ def _restore_quarantine(quarantine: Path, path: Path) -> bool:
     VACATED by the caller's ``rename``, so the peer's record existed NOWHERE while
     the peer still believed it held — and this process won the next ``link``, i.e.
     the two-holder window this module exists to close, with the only copy of the
-    evidence destroyed and the warning going to the stderr a session discards
-    (#14480 cycle-17 review, P3). "Honoured rather than deleted" is not a promise
-    that holds only while the honouring is convenient.
+    evidence destroyed and the warning going to the stderr a session discards.
+    ``link(2)`` lists EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside
+    EEXIST, and ENOSPC/EDQUOT on a spool directory is the ordinary case, not the
+    exotic one.
 
     A filesystem that refuses hard links (``EPERM``/``EXDEV``/``EMLINK``/``ENOSYS``)
     is the reachable case, and it has a restore that needs no link: ``rename`` the
@@ -333,7 +334,8 @@ def _restore_quarantine(quarantine: Path, path: Path) -> bool:
 
     Returns ``True`` when the object is back at ``path`` or a NEWER object holds it,
     and ``False`` when it could not be put back — in which case the quarantined copy
-    is LEFT IN PLACE for whoever looks next, NEVER unlinked.
+    is LEFT IN PLACE for whoever looks next, NEVER unlinked. That is BOUNDED: the
+    ``.tmp-`` infix is what the scratch sweeper collects by mtime.
     """
     try:
         os.link(quarantine, path)
@@ -343,6 +345,12 @@ def _restore_quarantine(quarantine: Path, path: Path) -> bool:
             os.unlink(quarantine)
         return True
     except OSError as exc:
+        # ⛔ THE ONLY OTHER COPY. The rename already vacated `path`, so on a
+        # non-`EEXIST` failure this quarantined file is ALL that is left of a live
+        # holder's claim — and this used to warn and then unlink it, answering HELD
+        # over an EMPTY path so the next `link` won and two holders coexisted for up
+        # to `TTL/3`, silently. So it is RECOVERED, not merely spared: while the
+        # path is still free, `rename` (which needs no hard link) puts it BACK.
         if not os.path.lexists(path):
             # The path is still free, and `rename` needs no hard link: put the
             # object BACK rather than leave a live holder's record stranded.
@@ -361,9 +369,8 @@ def _restore_quarantine(quarantine: Path, path: Path) -> bool:
         print(
             f"tortoise.drain_claim: an unreadable object at {path} could not be "
             f"restored ({exc}) — the path is OCCUPIED, so it is not replaced — "
-            "and the "
-            f"copy is PRESERVED at {quarantine}; it is honoured as a holder, so "
-            "this pass must not run beside it",
+            f"the copy is PRESERVED at {quarantine}; it is honoured as a holder, "
+            "so this pass must not run beside it",
             file=sys.stderr)
         return False
     with contextlib.suppress(OSError):

@@ -902,6 +902,63 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     fresh.release()
 
 
+def test_a_DISPLACED_claim_is_PRESERVED_when_its_restore_FAILS(tmp_path, monkeypatch):
+    """⛔ THE DISPLACEMENT PATH OBEYS THE SAME RULE AS THE RESTORE (review, cycle 16).
+
+    `_dispose_quarantine` puts a displaced claim BACK with `link` when the bytes are
+    not the ones it judged stale. On a non-`EEXIST` failure the quarantined file is
+    the ONLY copy of that holder's claim — the rename vacated the path — so unlinking
+    it turns "restore failed" into "claim destroyed" and frees the path for the next
+    `link`, which is the double-holder window this whole module closes. That branch
+    now keeps the object and returns `False` (fail closed: `acquire` answers `None`).
+
+    The Pi leg's row asserts BOTH of its primitives
+    (`tortoise-capture.test.ts`, "a FAILED restore does not delete the only copy of a
+    peer claim" — `restoreQuarantine` **and** `disposeQuarantine`); this leg's row
+    covered only `_restore_quarantine`, so half of the same fix was unpinned here.
+
+    MUTATION THAT REDS THIS: delete the `return False` from `_dispose_quarantine`'s
+    `except OSError` arm (the pre-fix code unlinked the quarantine and returned
+    `False` either way, so the RETURN VALUE alone cannot tell the two apart — the
+    preservation assertion is the whole pin).
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    path = drain_claim.claim_path(root)
+    moved = drain_claim._takedown(path, "contender")
+    assert moved is not None, "the fixture never reached the displacement"
+    quarantine, data = moved
+    assert not path.exists(), "the takedown must vacate the claim path"
+
+    real_link = os.link
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-take-" in Path(src).name:
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        restored = drain_claim._dispose_quarantine(
+            quarantine, data, path, b"<not what was judged stale>")
+    finally:
+        monkeypatch.undo()
+    assert restored is False, "a restore that could not happen must give up this tick"
+    # The INVARIANT — the displaced claim's bytes are still on disk — and, because
+    # this takedown left the path FREE, the RECOVERY arm: `rename` needs no hard
+    # link, so the claim goes BACK instead of being stranded for the sweeper to
+    # collect minutes later (which would destroy it just as surely, only slowly).
+    # The both-restores-refused arm has its own row below.
+    survivors = [p for p in (path, quarantine) if p.exists()]
+    assert survivors, (
+        "the only copy of the displaced claim was DELETED when the restore failed")
+    assert survivors[0].read_bytes() == data, (
+        "the surviving object must be the claim that was displaced, byte for byte")
+    assert path.exists() and not quarantine.exists(), (
+        "with the path free the displaced claim is renamed BACK, not left aside")
+
+
 def test_a_FUTURE_version_claim_is_unattributable_not_reinterpreted(tmp_path):
     """The version field is load-bearing: a record this build does not understand
     must be staled out (then re-verifiable by expiry), never read with today's
@@ -2414,9 +2471,10 @@ def test_the_measurement_is_NO_VERDICT_when_a_process_never_arrived():
 def test_the_measurement_is_NO_VERDICT_when_the_winner_RELEASED_early():
     """⛔ THE THIRD WAY OF MEASURING NOTHING, and the one no case exercised.
 
-    Every other F2 case passes `bounded=True`, so the `bounded is False` row of
-    `_no_verdict` could be deleted with the suite still green (#14480 review,
-    cycle 13 P2). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
+    Every other case in this family passes `bounded=True`, so the `bounded is False`
+    row of `_no_verdict` could be deleted with the suite still green (#14480 review,
+    cycle 15 P2 — the round that added it, not cycle 13, whose two P2s are the
+    `processes - 1` hold and the Pi leg's `held` wiring). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
     receipt then exits 0 — byte-indistinguishable from a real two-drainer
     FINDING, which is exactly the fail-open this field exists to close.
 
@@ -2650,51 +2708,6 @@ def test_a_FAILED_restore_does_not_delete_the_only_copy(tmp_path, monkeypatch):
         "with the path free the object is put BACK, not stranded in the quarantine")
 
 
-def test_the_DISPLACEMENT_path_obeys_the_same_restore_rule(tmp_path, monkeypatch):
-    """`_dispose_quarantine` is the OTHER restore in this module (the stale-takeover
-    path, not the obstruction clear), and it had the same defect: a non-`EEXIST`
-    `link` failure warned and then `unlink`ed the only copy of a claim that a third
-    process had installed in the takedown window. Leaving it aside is the minimum;
-    the recovery is the one `_restore_quarantine` uses — while the path is still
-    free, `rename` needs no hard link, so the displaced claim goes BACK.
-
-    Driven at the primitive on purpose: the interleave that reaches this arm end to
-    end (a third process's claim landing between `_takedown` and the install) is
-    what the neighbouring rows already stage, and what this row grades is the
-    DISPOSAL's failure path.
-
-    MUTATION THAT REDS THIS: `unlink` the quarantine on the non-`EEXIST` failure
-    (the object is gone), or answer `True` from the rename-back arm (the caller then
-    believes it may keep the claim).
-    """
-    root = tmp_path / "spool"
-    root.mkdir(parents=True)
-    claim = root / "drain.claim"
-    peer_raw = b'{"token": "peer-token"}\n'
-    quarantine = root / "drain.claim.tmp-take-1234-abcd"
-    quarantine.write_bytes(peer_raw)          # the object we moved aside
-    assert not claim.exists(), "this row is about the FREE-path arm"
-
-    real_link = os.link
-
-    def link_fails(src, dst, *a, **kw):
-        if ".tmp-take-" in str(src):
-            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
-        return real_link(src, dst, *a, **kw)
-
-    monkeypatch.setattr(os, "link", link_fails)
-    try:
-        ours = drain_claim._dispose_quarantine(
-            quarantine, peer_raw, claim, b"<the bytes we judged>")
-    finally:
-        monkeypatch.undo()
-    assert ours is False, (
-        "a displaced claim is not ours to keep: the caller must give up this tick")
-    assert claim.exists() and claim.read_bytes() == peer_raw, (
-        "the displaced claim must be BACK at the path — rename needs no hard link")
-    assert not quarantine.exists(), "a successful rename-back leaves no quarantine"
-
-
 def test_the_DISPLACEMENT_path_PRESERVES_a_copy_it_cannot_restore(tmp_path, monkeypatch):
     """Both restores refused on the displacement path: the quarantined copy is the
     only surviving evidence of the held claim, so it is LEFT IN PLACE.
@@ -2729,3 +2742,80 @@ def test_the_DISPLACEMENT_path_PRESERVES_a_copy_it_cannot_restore(tmp_path, monk
     assert quarantine.exists() and quarantine.read_bytes() == peer_raw, (
         "the only copy must be preserved, not deleted")
     assert not claim.exists(), "both restores failed, so the path stays as it was"
+
+
+def test_an_UNREADABLE_quarantined_claim_whose_RESTORE_FAILS_is_kept(
+        tmp_path, monkeypatch):
+    """⛔ THE `_restore_quarantine` HALF, WHICH THE ROW ABOVE DOES NOT REACH (review,
+    cycle 16, P1).
+
+    The row above drives `_dispose_quarantine`: its peer claim is READABLE, so
+    `landed is not None` and the `_lstat_is_regular` branch — the one that calls
+    `_restore_quarantine` — never executes. `grep -rn _restore_quarantine tests/`
+    returned zero hits, so the function's own failure branch was unpinned, and it
+    still unlinked the only copy.
+
+    This row makes the quarantine UNREADABLE (so `landed is None` and the lstat says
+    regular), makes `link` fail with `ENOSPC` (a non-`EEXIST` errno — the ordinary
+    full-disk case on a spool directory), and requires the peer's bytes to survive
+    the failed restore.
+
+    MUTATION THAT REDS THIS: restore the unconditional `os.unlink(quarantine)` in the
+    `except OSError` branch (the object vanishes and the "still on disk" assertion
+    fails).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+    real_link = os.link
+
+    def read_fails_in_the_quarantine(path):
+        # A REGULAR file whose BYTES cannot be had: `landed is None`, and the lstat
+        # below still says regular — the `_restore_quarantine` branch.
+        if ".tmp-clear-" in str(path):
+            return None
+        return real_read_raw(path)
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-clear-" in str(src):
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", read_fails_in_the_quarantine)
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
+    # The INVARIANT (the peer's bytes are still on disk), not one mechanism: this
+    # row's `link` refuses with ENOSPC while the path is FREE, so the object is
+    # RENAMED BACK — strictly stronger than leaving it for the sweeper, and the arm
+    # `test_the_clear_PRESERVES_the_copy_it_cannot_restore` covers for the case where
+    # even that fails.
+    survivors = [p for p in (fifo, *root.glob("*.tmp-clear-*")) if p.exists()]
+    assert survivors, (
+        "the only copy of the peer's claim was DELETED when the restore failed")
+    assert json.loads(survivors[0].read_text())["token"] == "peer-token"
