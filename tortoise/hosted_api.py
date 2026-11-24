@@ -15640,6 +15640,409 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     return props
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# ── #14592 Phase A: read parity for the ontology's other three layers ────────
+#
+# The REST door could CREATE Points, Objects and Subjects and READ back only
+# Points; Sources had no route at all, and neither relations nor confidence had
+# one. Every read below already existed behind the MCP door, so each handler is
+# a transport adapter over a function that door already calls — the delegation
+# table is `tortoise/entity_reads.py`'s module docstring, and the PR body
+# restates it. NO MCP tool and NO public SDK method is added or renamed: the two
+# reads with no reusable function are free functions over a projection there.
+#
+# Shape is `/v1/points`' own (this is REST parity, not a new contract): the same
+# `_require_scope(…, "graphs:read")`, the same off-loop construction
+# (`_data_sdk_offloaded`) and the same dedicated read lane (`_read_offload`),
+# the same `truncation` instrument for a capped page, and the same 404-on-absence
+# answer for a by-id read.
+#
+# ⛔ These reads do NOT consult `TORTOISE_RECORD_SERVE` — the record seam is
+# armed on the ANCHORED single-Point read only, and `GET /v1/points` (the LIST
+# route this parity mirrors) does not consult it either. See
+# `entity_reads`' module docstring for why a second, divergent arm of a seam with
+# six named fallback reasons would be worse than saying plainly which store is
+# read (there is one).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+async def _resolve_entity_off_loop(org: dict, entity_id: str, *, surface: str
+                                  ) -> tuple[object, list[dict]]:
+    """``(sdk, resolved)`` for one by-id entity read, off the loop.
+
+    ``FalkorProjection._resolve_entity`` with all three identity arms, which is
+    the exact resolution ``TortoiseSDK.get_entity`` (the ``tortoise_get_entity``
+    MCP door) performs — one resolution over the canonical label→key table, so a
+    url-keyed ``:Source`` is addressable here for the same reason it is there
+    (#5448) and there is no second table to drift.
+
+    The SDK is returned so the caller can apply the layer's own payload rule
+    without opening a second handle: the read lane and the construction lane are
+    both bounded, and paying them twice for one request is the shape #10602
+    removed from the point read.
+    """
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    resolved = await _read_offload(
+        lambda: sdk._get_proj()._resolve_entity(
+            entity_id, by_id=True, by_eventId=True, by_url=True),
+        op=f"{surface}.resolve")
+    return sdk, resolved
+
+
+def _layer_payload(entry: dict) -> dict:
+    """One resolved node's properties, under its layer's own disclosure rule.
+
+    A ``:Source`` goes through ``projection.entities.filter_source_props`` — the
+    ONE home of the #3998 rule (the graph indexes the raw; it is not the raw
+    store) that ``get_entity`` itself applies, so this route cannot re-open a
+    disclosure that door closed. Every other layer's properties are returned as
+    stored.
+    """
+    props = dict(entry.get("properties") or {})
+    if entry.get("label") == "Source":
+        from tortoise.projection.entities import filter_source_props
+
+        props, _denied = filter_source_props(props)
+    return props
+
+
+async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
+                                surface: str) -> dict:
+    """Read ONE entity, refusing an id that names a node of another layer.
+
+    ⛔ A 404 here is NOT "this id is unknown to the product" — a Point's id
+    passed to ``GET /v1/objects/{id}`` is a perfectly real entity that this
+    route's layer does not name. That is the honest answer for a LAYER-SCOPED
+    route (the caller asked this layer), and the same id stays reachable at the
+    route that owns its label, plus at ``/v1/entities/{id}/relations`` and
+    ``/v1/entities/{id}/belief``, which are deliberately layer-agnostic.
+    """
+    _sdk, resolved = await _resolve_entity_off_loop(org, entity_id, surface=surface)
+    for entry in resolved:
+        if entry.get("label") != label:
+            continue
+        return _layer_payload(entry)
+    raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
+def _paged(body_key: str, rows: list[dict], *, delivered: int,
+           candidates: int) -> dict:
+    """The capped-page envelope `/v1/points` publishes, one layer over.
+
+    ``candidates`` is the EXACT match population (a real ``count()`` under the
+    same WHERE), so ``exact=True`` is the honest flag and a truncated page
+    carries ``total_available`` rather than leaving the caller to guess. A
+    complete page is positively marked complete rather than left un-marked.
+    """
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    sink: dict = {}
+    mark_truncation(sink, returned=delivered, candidates=candidates, exact=True)
+    body: dict = {body_key: rows, "count": delivered}
+    body.update(truncation_field(sink))
+    return body
+
+
+async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
+                            kind: str | None, limit: int, offset: int) -> dict:
+    """One handler body for every layer list, so the two cannot diverge."""
+    from tortoise import entity_reads
+
+    _require_scope(org, "graphs:read", surface)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    rows, total = await _read_offload(
+        lambda: entity_reads.list_layer(
+            sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),
+        op=surface)
+    return _paged(body_key, rows, delivered=len(rows), candidates=total)
+
+
+@app.get("/v1/objects")
+async def list_objects(
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list Objects in the org's graph (the STATE layer's persistent things).
+
+    The read this layer never had — ``POST /v1/objects`` existed and there was no
+    way to ask *what do you know about?* Optional ``kind`` filters on the
+    ``objectKind`` the write door accepts. Paged over a TOTAL order
+    (``name``, then the node's internal id), so walking ``offset`` visits every
+    row exactly once. ENDED rows (``deprecated`` and the rest of the terminal
+    vocabulary) are excluded from the listing and stay retrievable by id — the
+    same tombstone contract, read through the same shared predicate, as
+    ``GET /v1/points``.
+
+    Delegates to :func:`tortoise.entity_reads.list_layer`. See
+    ``/v1/objects/{id}`` for the single-node read.
+    """
+    return await _list_layer_route(org, "Object", "list_objects", "objects",
+                                   kind, limit, offset)
+
+
+@app.get("/v1/objects/{entity_id}")
+async def get_object(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get a single Object by id — the STATE layer's by-name read.
+
+    Delegates to ``FalkorProjection._resolve_entity`` (the resolution
+    ``TortoiseSDK.get_entity`` — the ``tortoise_get_entity`` MCP door — is built
+    on). A 404 means *this layer names no such id*: an id that belongs to
+    another layer is a real entity this route does not serve, and stays
+    reachable at its own layer's route.
+    """
+    return await _read_labelled_entity(org, entity_id, label="Object",
+                                       surface="get_object")
+
+
+@app.get("/v1/subjects")
+async def list_subjects(
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list Subjects in the org's graph — the actors/roles layer.
+
+    Mirrors ``GET /v1/objects`` exactly (same paging contract, same tombstone
+    rule, same truncation instrument); ``kind`` filters on ``subjectKind``, the
+    property ``POST /v1/subjects`` writes. Delegates to
+    :func:`tortoise.entity_reads.list_layer`.
+    """
+    return await _list_layer_route(org, "Subject", "list_subjects", "subjects",
+                                   kind, limit, offset)
+
+
+@app.get("/v1/subjects/{entity_id}")
+async def get_subject(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get a single Subject by id. See ``/v1/objects/{id}``."""
+    return await _read_labelled_entity(org, entity_id, label="Subject",
+                                       surface="get_subject")
+
+
+#: ``GET /v1/sources``' page bound. ``_list_sources`` returns the whole
+#: provenance-Source population (it is a bounded, per-graph set keyed by ONE
+#: aggregating query), so this route pages it in Python rather than issuing a
+#: second query — a second query would be a second implementation of "what is a
+#: provenance Source" (the ``documentKind IS NULL`` partition, D10) and the two
+#: would drift. Same ceiling as ``/v1/points``.
+_SOURCES_MAX_LIMIT = 1000
+
+
+@app.get("/v1/sources")
+async def list_sources(
+    limit: int = Query(50, ge=1, le=_SOURCES_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list provenance Sources with their point counts.
+
+    There was no ``/v1/sources`` route at all, so "where did this come from?"
+    was unanswerable through the app door. Delegates to
+    ``TortoiseSDK.list_knowledge(kind='source')`` — the SAME arm the
+    ``tortoise_list_knowledge`` MCP tool serves — so the two doors cannot
+    disagree about what a provenance Source is.
+
+    ⚠️ A row's address is its ``url`` (``{url, sourceKind, points}``): a
+    provenance Source is keyed by ``url`` in the graph, and ``GET
+    /v1/sources/{id}`` resolves it by that value. Ordering is the callee's own
+    (most-connected first), and a truncated page carries ``total_available``.
+    """
+    _require_scope(org, "graphs:read", "list_sources")
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    rows = await _read_offload(
+        lambda: sdk.list_knowledge(kind="source"), op="list_sources")
+    rows = list(rows or [])
+    page = rows[offset:offset + limit]
+    return _paged("sources", page, delivered=len(page), candidates=len(rows))
+
+
+@app.get("/v1/sources/{entity_id:path}")
+async def get_source(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get one Source by id OR by url.
+
+    ``entity_id`` may be a Source's ``id`` or its ``url`` — the graph keys a
+    provenance Source by ``url`` and the resolution covers both arms (#4649), so
+    a client can walk straight from a ``/v1/sources`` row (which carries the
+    url) to the document.
+
+    ⛔ THE PATH CONVERTER IS ``:path``, and it is load-bearing rather than
+    cosmetic: a URL contains ``/``, so a bare ``{entity_id}`` segment cannot
+    match one at all (the router sees the decoded path, so ``%2F`` is ``/`` by
+    the time it matches) and the request 404s in ROUTING with Starlette's own
+    "Not Found" — an absence reported by the router rather than by this handler,
+    which is the shape a caller cannot diagnose (measured on this tree before the
+    converter was added). A caller still percent-encodes the url as a matter of
+    HTTP hygiene; the converter is what makes the DECODED value reachable.
+
+    ⛔ The payload is filtered through ``filter_source_props``: the graph indexes
+    a document's raw text, it is not the raw store (#3998), and this route must
+    not become the one that hands it back.
+    """
+    return await _read_labelled_entity(org, entity_id, label="Source",
+                                       surface="get_source")
+
+
+@app.get("/v1/entities/{entity_id}/relations")
+async def get_entity_relations(
+    entity_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: every DIRECTED edge touching one entity, of ANY predicate.
+
+    Each row is ``{direction, predicate, mechanism, other, idx, declaredBy}``:
+    which way the edge runs (``out``/``in``), the verb, the stored edge type
+    (``IMPL``/``NAND`` for an operator's typed edge, the predicate itself for a
+    structural edge), the other endpoint as ``{id, label, name}``, the
+    operator-position axis where one exists, and **which packs declare the
+    predicate**.
+
+    ⛔ ``declaredBy`` is THREE-VALUED, and the third value is the point:
+    ``["dev"]`` = declared by those packs; ``[]`` = declared by no installed
+    pack (a core/structural predicate — legal); and ``declarationsReadable:
+    false`` at the top level = the registry could not be asked, in which case
+    ``declaredBy`` is ``null`` rather than a list. An unreadable registry
+    rendered as ``[]`` would be a positive claim that nothing declares a
+    vocabulary we could not see.
+
+    Layer-agnostic on purpose: pass an Object, a Subject, a Point or a Source id
+    (or a Source's url). Delegates to
+    :func:`tortoise.entity_reads.entity_relations` — see its docstring for why
+    the two nearest existing reads (``navigation.entityProfile``, which follows
+    every edge but drops direction, and ``sdk._expand_relationships``, which
+    keeps direction but only for the epistemic predicates) cannot answer this,
+    and for the shared identity table it resolves the anchor through.
+    """
+    from tortoise import entity_reads
+
+    _require_scope(org, "graphs:read", "get_entity_relations")
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    body, candidates = await _read_offload(
+        lambda: entity_reads.entity_relations(
+            sdk._get_proj(), entity_id, limit=limit, offset=offset),
+        op="get_entity_relations")
+    if not body.get("entity"):
+        raise HTTPException(status_code=404, detail="Entity not found")
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total needs a second COUNT over every edge of the node, and publishing the
+    # probe's own ``limit + 1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (``truncation.py``). A truncated page therefore
+    # takes the contract's third state — incomplete, total unknown — and a
+    # complete one is positively marked complete rather than left un-marked.
+    sink: dict = {}
+    mark_truncation(sink, returned=body.get("count", 0),
+                    candidates=candidates, exact=False)
+    body.update(truncation_field(sink))
+    return body
+
+
+@app.get("/v1/entities/{entity_id}/belief")
+async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: one entity's current EP belief, when it last moved, and why.
+
+    Returns the current posterior (``mean``/``variance``/``alpha``/``beta`` — the
+    EP α/β), the newest ``ConfidenceChanged`` event that committed a value for
+    THIS node (so *when* it last moved is answered from the store's own record
+    rather than inferred), and the evidence chain behind the claim.
+
+    ⚠️ **THIS GET CAN WRITE, exactly as the MCP door it delegates to does.**
+    ``TortoiseSDK.check_confidence(claim_id=…)`` reaches ``get_confidence``,
+    whose lazy-consistency pass dreams a DIRTY root; that is why the
+    ``tortoise_check_confidence`` MCP tool is tiered ``maintenance`` and not
+    ``read``. A ``graphs:read`` scope is deliberately sufficient (the same
+    posture that door states), and ``GET /v1/packs`` (#9583) is the existing
+    precedent for a REST GET that can write. Stated and not hidden: a client
+    must not treat this route as one that cannot.
+
+    ⛔ An UNCALIBRATED graph REFUSES the confidence read (``CalibrationError``,
+    fail-closed since #344) — answered here as **409** with the SDK's own
+    sentence, because the precondition that failed is the graph's state, not the
+    request, and the remedy is to calibrate. It is deliberately not a 200 with
+    a substituted number: a topology-only figure reported as EP would be the
+    silent-uncalibrated-EP class #7478 targets.
+
+    ⛔ ``lastBeliefWrite`` is what a ``ConfidenceChanged`` event COMMITS (the
+    values EP wrote), not a before→after delta — one event does not carry the
+    prior. The delta, and a decision-level ``PreferenceFlipped`` event, are
+    Phase C and are NOT claimed here.
+    """
+    from tortoise import event_store
+    from tortoise.exceptions import CalibrationError
+
+    _require_scope(org, "graphs:read", "get_entity_belief")
+    sdk, resolved = await _resolve_entity_off_loop(
+        org, entity_id, surface="get_entity_belief")
+    if not any(entry.get("label") for entry in resolved):
+        raise HTTPException(status_code=404, detail="Entity not found")
+    label = resolved[0].get("label")
+    try:
+        view = await _read_offload(
+            lambda: sdk.check_confidence(claim_id=entity_id),
+            op="get_entity_belief.confidence")
+    except CalibrationError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "EP_UNCALIBRATED",
+                "message": str(e),
+                "remedy": ("calibrate the graph before reading EP confidence — "
+                           "`dream`/`compute_confidence` on a calibrated graph"),
+            }) from e
+    proj = sdk._get_proj()
+    last = await _read_offload(
+        lambda: event_store.latest_for_node(proj, "ConfidenceChanged", entity_id),
+        op="get_entity_belief.last")
+    # Provenance is a :Point read (`TortoiseSDK._provenance` calls `_get_point`),
+    # so it is asked only for a Point — asking it of an Object would return the
+    # callee's own "Point … not found" error INSIDE a successful response, which
+    # is a worse answer than saying the evidence chain is not recorded there.
+    provenance: dict | None = None
+    if label == "Point":
+        provenance = await _read_offload(
+            lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
+    entity = resolved[0].get("properties") or {}
+    return {
+        "entity": {
+            "id": entity_id,
+            "label": label,
+            "name": (entity.get("name") or entity.get("content")
+                     or entity.get("url") or entity.get("eventId")),
+        },
+        "current": view,
+        "lastBeliefWrite": (
+            None if last is None else {
+                "at": last.get("ts"),
+                "seq": last.get("seq"),
+                "committed": {
+                    "confidence": (last.get("payload") or {}).get("confidence"),
+                    "posteriorAlpha": (last.get("payload") or {}).get(
+                        "posterior_alpha"),
+                    "posteriorBeta": (last.get("payload") or {}).get(
+                        "posterior_beta"),
+                },
+            }),
+        # ⛔ The WINDOW is published, not hidden: `latest_for_node` scans the
+        # newest N events of this type, so a null `lastBeliefWrite` means "not in
+        # that window", never "this node never changed".
+        "lastBeliefWriteScan": {
+            "eventType": "ConfidenceChanged",
+            "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
+        },
+        "evidence": {
+            # `null` for a non-Point entity: the chain is recorded on Points
+            # (#1423's "who decided this?"), and saying so is not the same as
+            # saying there is no evidence.
+            "provenance": provenance,
+            "provenanceRecordedFor": "Point",
+        },
+    }
+
+
 @app.post("/v1/dream")
 async def dream(
     full: bool = False,

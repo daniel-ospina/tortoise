@@ -1011,6 +1011,71 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     return out
 
 
+#: How many rows a `latest_for_node` scan will LOOK AT before reporting that it
+#: did not find the node. A bound, not a default to tune: the read must be able
+#: to answer "not found" *and* be able to prove it looked somewhere finite, so
+#: the answer is a WINDOW rather than an unbounded reverse walk over the whole
+#: retention window (which is ``event_retention_days`` x the write rate).
+LATEST_FOR_NODE_SCAN = 2000
+
+
+def latest_for_node(proj, type_: str, node_id: str, *,
+                    scan: int = LATEST_FOR_NODE_SCAN) -> dict | None:
+    """The NEWEST event of ``type_`` whose payload names ``node_id``.
+
+    ``read_after`` is a forward cursor: it answers "what happened after X",
+    which is the subscriber's question. This answers the OBSERVER's — "when did
+    this node's <thing> last change, and what did it change from/to" — for the
+    read surfaces that must report a node's last transition without asking a
+    client to replay the whole feed. #14592 Phase A's ``…/belief`` is that
+    caller: ``ConfidenceChanged`` events already exist and already carry the
+    committed ``confidence``/``posterior_alpha``/``posterior_beta``, so the
+    transition IS recorded — it simply had no reader.
+
+    ⛔ **THE WINDOW IS REPORTED, NOT HIDDEN.** The scan looks at the newest
+    ``scan`` events of this type; ``None`` therefore means *"no such event in
+    the newest ``scan``"*, never *"this node never changed"*. A caller that
+    renders ``None`` as "never changed" would state something this read cannot
+    know, so the scan bound rides the answer (``latest_for_node_scan``) for the
+    caller to publish alongside it. Events are pruned by retention
+    (``purge_expired``) and by the size cap (``purge_overflow``), so a bounded
+    window is the honest shape of the store, not a shortcut.
+
+    ``payload`` is stored as a JSON STRING, so the id is matched on the PARSED
+    payload — never on a substring match against the text (an id that is a
+    prefix of another id, or a value that merely contains the id, would then
+    select the wrong row and report another node's transition as this one's).
+
+    Ordering is ``seq DESC``, the store's own total order — the same key
+    ``read_after`` pages by — so "newest" cannot depend on wall-clock ``ts``
+    ties within one write burst.
+    """
+    if not isinstance(scan, int) or isinstance(scan, bool) or scan < 1:
+        raise ValueError(f"scan must be a positive whole number, got {scan!r}")
+    rows = proj.g.query(
+        "MATCH (e:GraphEvent) WHERE e.type = $type "
+        "RETURN properties(e) ORDER BY e.seq DESC LIMIT $scan",
+        params={"type": type_, "scan": scan},
+    ).result_set
+    for (props,) in rows:
+        if not isinstance(props, dict):
+            continue
+        payload = props.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("id") != node_id:
+            continue
+        out = dict(props)
+        out["payload"] = payload
+        return out
+    return None
+
+
 def purge_expired(proj, retention_days: int = 30) -> int:
     """Delete :GraphEvent nodes older than `retention_days` (ISO8601 ts cutoff).
 

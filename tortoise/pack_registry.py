@@ -666,6 +666,62 @@ def declared_relation_predicates() -> frozenset[str] | None:
     except Exception:  # noqa: BLE001, RUF100 — never raise into a caller's gate
         return None
 
+
+def declared_relation_packs() -> dict[str, tuple[str, ...]] | None:
+    """``{predicate: (pack namespace, ...)}`` — WHO declares each predicate.
+
+    The ATTRIBUTION half of :func:`declared_relation_predicates`, which answers
+    only *whether* a predicate is declared. A read that shows an edge to a
+    client has to answer the next question too — *"who says this predicate
+    means anything?"* — and the answer already exists in every row
+    ``PackRegistry.list_relations()`` returns (``{"pack": ns, "predicate": …}``
+    is its own documented shape). This is that row set, indexed by predicate,
+    so no caller re-derives it.
+
+    ``None`` means the declarations could not be read (no registry, an
+    unreadable row). A caller must render the ABSENCE of the answer rather than
+    invent one — for a READ that means *"not declared by any installed pack"*
+    is not the same statement as *"the registry could not be asked"*, and the
+    two must not be flattened into one empty list (#14592 Phase A's own rule for
+    the relations route).
+
+    Sorted and deduped per predicate: two packs may declare the same verb (that
+    is legal — ``hasPart`` is declared by more than one), and a caller renders
+    a SET, so an order that depended on pack-load order would make the same
+    graph answer differently between deployments.
+
+    Lazy import for the same cycle reason as :func:`declared_relation_predicates`:
+    ``domain_loader`` imports this module.
+    """
+    try:
+        from .domain_loader import _get_registry
+
+        reg = _get_registry()
+        if reg is None:
+            return None
+        rows = reg.list_relations()
+        if not isinstance(rows, list):
+            return None
+    except Exception:  # noqa: BLE001, RUF100 — never raise into a caller's read
+        return None
+    out: dict[str, set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        predicate = row.get("predicate")
+        pack = row.get("pack")
+        if not isinstance(predicate, str) or not predicate.strip():
+            continue
+        if not isinstance(pack, str) or not pack.strip():
+            # A row with no pack cannot attribute anything; the predicate is
+            # still DECLARED (that half is `declared_relation_predicates`'s
+            # answer), so it keeps its key with no attributor rather than
+            # vanishing from the map.
+            out.setdefault(predicate.strip(), set())
+            continue
+        out.setdefault(predicate.strip(), set()).add(pack.strip())
+    return {pred: tuple(sorted(packs)) for pred, packs in out.items()}
+
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
 # accepts its predicate. This is the ONE place that decides which declared
