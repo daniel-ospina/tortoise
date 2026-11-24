@@ -55,39 +55,31 @@ version: 1
 # 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
-# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
-# this PR's OWN row in `fast_pool()` (`tests/test_14560_operator_vectors.py`, `core`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs two shards at 825.7 s (c, d) and nine at 825.8 s
-# (a, b, e, f, g, h, i, j, k), so `ceil(825.8/60 x 2)` = 28 m governs (a shard's job-level wall
-# clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
+# MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
+# parents: a fold that keeps two re-derivations makes the guard read the clause twice, which is a
+# red no reader of the prose can see. On THIS tree — `origin/main` `69dda95ab9f` folded in over
+# `#14565`'s merge base, which brought `#14548`'s residue RATCHET and `#14565`'s reaper-schedule row
+# (`tests/test_14559_reaper_schedule.py`, `core`, flat 2.0 s) — THIS PR's own row
+# (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s `DEFAULT_FAST_WEIGHT`) is
+# the ONE `fast_pool()` addition that is this fold's, and the verb packs the pool into two bins:
+# nine shards at 825.8 s (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so
+# `ceil(825.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree
+# by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: measured with the verb against `origin/main`
-# `10f0107689b9`'s own map, that tree alone packs eleven shards at 825.6 s — quoted WITHOUT a name
+# `69dda95ab9f`'s own map, that tree alone packs eleven shards at 825.6 s — quoted WITHOUT a name
 # list on purpose, because a second clause would parse as a claim about THIS tree and red the
 # guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1331 files at this head against 1330 on `main`, and the ONE addition
-# is this PR's `tests/test_14560_operator_vectors.py`. ⛔ `#14415`'s two rows
+# small: `fast_pool()` holds 1331 files at this head against 1330 on `main`, and the ONE addition is
+# this PR's `tests/test_14560_operator_vectors.py`. ⛔ `#14415`'s two rows
 # (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) and `#14559`'s
 # `tests/test_14559_reaper_schedule.py` are `main`'s at this head, NOT this PR's: each was that
-# PR's own addition and each landed before this fold. Re-derived on THIS tree with
-# `--emit-push-matrix`, never adjusted by arithmetic from either parent's reading.
-# MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
-# parents (a fold that keeps two re-derivations makes the guard read the clause twice). On THIS
-# tree — `origin/main` `6a1190f5590b` folded in, which brought `#14548`'s residue ratchet and
-# `#14565`'s reaper-schedule row (`tests/test_14559_reaper_schedule.py`, `core`, flat 2.0 s) —
-# THIS PR's own row (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) is the one `fast_pool()` addition that is this fold's: the verb packs the
-# pool into two bins, nine shards at 825.8 s (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d),
-# so `ceil(825.8/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree by construction rather
-# than by a hand re-read. Re-derived with `--emit-push-matrix` on THIS tree, never adjusted by
-# arithmetic from either parent's reading. The name lists above are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
-# graded claim about this head rather than the per-file letters the fenced span below warns about —
-# a fold re-derives them with the verb; it never carries them.
+# PR's own addition and each landed before this fold. The name lists above are what the guard
+# COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
+# about this head rather than the per-file letters the fenced span below warns about — a fold
+# re-derives them with the verb; it never carries them. Re-derived with `--emit-push-matrix` on THIS
+# tree, never adjusted by arithmetic from either parent's reading.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
