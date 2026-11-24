@@ -439,9 +439,12 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 
     ``lane`` names the swallow site (one stable token per site) so an alert is
     attributable to the handler that dropped the increment rather than to
-    "metering failed somewhere". The eight lanes are ``write_op``,
+    "metering failed somewhere". The nine lanes are ``write_op``,
     ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
-    ``mcp_write_op``, ``ask_ledger``, ``embed`` and ``retrieval``.
+    ``mcp_write_op``, ``ask_ledger``, ``embed``, ``retrieval`` and
+    ``batch_ingest`` (the last added by #14219: a batch item moves the same
+    ``capture_extraction`` dimension, and its own token keeps the drop
+    attributable to the site that absorbed it).
 
     Never raises: the alert itself must not become a new failure path (a signal
     that can raise is a refusal by another name). The incident — a GitHub issue

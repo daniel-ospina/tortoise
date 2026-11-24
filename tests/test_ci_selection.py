@@ -9164,8 +9164,9 @@ _PER_FILE_SHARD_LETTER_RE = re.compile(
 #: have exempted exactly the claim that rotted.
 _HISTORICAL_LETTERS_RE = re.compile(
     r"\u26d4 HISTORICAL-LETTERS-BEGIN.*?\u26d4 HISTORICAL-LETTERS-END", re.DOTALL)
-#: How far past an operand its stated minute may sit. The manifest's own prose form —
-#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
+#: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
+#: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
+#: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
 
 
@@ -9219,20 +9220,29 @@ def _emission_block_header(manifest_text: str) -> str:
 #: five earlier de-splices were found by reviewers reading the block rather than by a check. SENTENCE
 #: matching cannot either — the splice lands mid-sentence, which is what leaves a severed fragment
 #: like "…flat 2.0 s at 28 m." behind. A DOUBLE-QUOTED span is masked first, because this block
-#: legitimately quotes a clause it RETRACTED (the record of a dead claim is not a live second claim).
+#: legitimately quotes clauses (the record of a dead claim is not a live second claim).
 #: ⛔ The masking is therefore DELIBERATE and its cost is named: a duplicate INSIDE a double-quoted
-#: span is ungraded by this arm (measured: repeating the block's own 15-word quoted retraction
-#: returns `0` spans). That is accepted — a retraction recorded twice claims nothing new, so it can
-#: red no figure — and it is stated rather than left as a hole, because the case it excludes is the
-#: one this block deliberately quotes.
+#: span is ungraded by this arm (measured on the block at THIS head: its longest quoted span is 14
+#: words, and repeating it returns `0` spans). That is accepted — a quotation recorded twice claims
+#: nothing new, so it can red no figure — and it is stated rather than left as a hole, because the
+#: case it excludes is the one this block deliberately quotes. ⛔ At this head the mask is not
+#: load-bearing either way: UNMASKED the block states 0 repeats too (measured), because `main`'s
+#: #14415 cut the 2 × 13-word quoted pair that once made it bite. It is kept because that pair is a
+#: shape a future fold can re-introduce, and the `quoted` fixture below grades the rule directly.
 #:
-#: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative. This block
-#: states ONE instruction verbatim twice ("never carry the last revision's minute, seconds, or
-#: split." — `grep -c` on the block returns exactly 2, in the per-registration and the
-#: `--emit-push-matrix` paragraphs), so a 9-word window reds on CLEAN prose —
-#: **2 spans, one per copy** — and 10 is the smallest window on which the guard is quiet over the
-#: tree it guards (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 are
-#: one instruction seen twice, not two defects. The cost is that a repeated span SHORTER than the
+#: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative, taken on
+#: the block that the spliced fold carried: it stated ONE instruction verbatim twice ("never carry
+#: the last revision's minute, seconds, or split." — `grep -c` on that block returned exactly 2, in
+#: the per-registration and the `--emit-push-matrix` paragraphs), so a 9-word window red on CLEAN
+#: prose — **2 spans, one per copy** — and 10 was the smallest window on which the guard was quiet
+#: over that tree (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 were
+#: one instruction seen twice, not two defects. ⛔ THAT INSTRUCTION IS NOT IN THE BLOCK AT THIS HEAD:
+#: `main`'s #14415 cut took it out (`grep -c` on `config/ci-surfaces.yml` returns 0), so the sweep on
+#: this head is **0 at every window from 8 to 12** (measured), not 0-because-10. The threshold stays
+#: 10 because that is the calibrated value for the shape that produced the false positive — and the
+#: false-positive edge is still measurably below it AT THIS HEAD: at window 7 this block reds on **2
+#: legitimate spans of 7 words** (measured), so lowering the bound to "catch more" is a measured
+#: false positive on clean prose, not a hypothetical one. The cost is that a repeated span SHORTER than the
 #: window — and a header with fewer than this many words at all — is silently ungraded here, which
 #: is why the arm below asserts the real block is long enough to be gradable rather than trusting
 #: this bound. A DIVERGENT pair is a DIFFERENT residual, not a shorter one: the repeats stop at the
@@ -9253,7 +9263,8 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on a ~2,900-word block. jscpd's clone taxonomy draws the same line: divergent
+#: bounds the read on the ~1,900-word block this head carries (measured: 1,936 words; the spliced
+#: fold's block was ~2,950). jscpd's clone taxonomy draws the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
 #:
@@ -9422,8 +9433,9 @@ def _emission_block_claims(
     # than being redded for a headroom it never used.
     # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
     # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
-    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
+    # header's history clause used (`shard_watchdog_minutes()` rounds `… /60 x 2.0` up to `… m`;
+    # the fixture below keeps that form after #14415 folded the clause away). A false block is the
+    # one failure this check must not produce.
     headrooms = {float(h) for _est, h, _minutes in ceil_matches}
     assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
         f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
@@ -9454,9 +9466,10 @@ def _emission_block_claims(
         # block can claim two different watchdog minutes and still read as one.
         #
         # ⛔ Scoped to the GRADED ests — the partition's own operands plus the derived one —
-        # because the header legitimately quotes HISTORY at other operands (the S=10 paragraph's
-        # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
-        # is the one failure this check must not produce.
+        # because a header may legitimately quote HISTORY at other operands (the S=10 paragraph's
+        # `…/60 x 2.0 up to … m` clause, which #14415 removed from the block and the fixture below
+        # still exercises). Measured: an unscoped version reds a real block carrying one, which is
+        # the one failure this check must not produce.
         graded = {float(est_str)} | {float(est) for est in groups}
         conflicting: dict[float, int] = {}
         for operand in _EMISSION_DERIVATION_RE.finditer(header):
@@ -9535,9 +9548,12 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 def test_the_fast_shards_header_block_states_no_span_twice():
     """#14481: a fold must not splice this block into a second copy of itself.
 
-    The block names the mechanism in its own words — a claim that is "graded by nothing" "rots",
-    and "a rule stated in prose was not enough" (the per-file shard letter, `config/ci-surfaces.yml`
-    §"NO PER-FILE SHARD LETTER") — and a `merge=union` fold is exactly a claim arriving twice.
+    The block names the mechanism in its own words — "a claim that must be re-derived on every fold
+    and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
+    values" (the per-file shard letter, `config/ci-surfaces.yml` §"NO PER-FILE SHARD LETTER") — and
+    a `merge=union` fold is exactly a claim arriving twice. ⛔ That quotation is read off the JOINED
+    block (`_emission_block_header`), which is the subject this arm grades: the sentence wraps across
+    two comment lines in the file, so a line-based `grep` finds its halves and neither the whole.
     Measured: THREE passages arrived twice on the `45dd35ba9a` fold while every arm stayed GREEN: the
     fold applies both parents' hunks, raises no conflict marker, and the duplicated span is prose
     rather than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
@@ -9549,8 +9565,9 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
-    # below would be decoration on the one file it exists to grade. This block is ~2,900 words; the
-    # floor is an order of magnitude below that, not a tuned value.
+    # below would be decoration on the one file it exists to grade. This block is ~1,900 words at
+    # this head (measured: 1,936; the spliced fold's was ~2,950), so the floor is roughly 19x below
+    # it — not a tuned value.
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
         f"{_SPLICE_SHINGLE_WORDS}-word repeated-span window to grade anything, so the arm below "
@@ -9819,10 +9836,10 @@ def test_the_emission_block_guard_is_not_vacuous():
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
-    # …and the check is SCOPED to the est the block grades, so the header's historical derivation
-    # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
-    # about a tree that is not this one — must NOT red. Without this negative the arm could be
-    # satisfied by a pattern that simply rejects the manifest's real block.
+    # …and the check is SCOPED to the est the block grades, so a historical derivation at a
+    # DIFFERENT operand — the `840.2 s` clause the header carried until #14415 folded it away,
+    # which is prose about a tree that is not this one — must NOT red. Without this negative the
+    # arm could be satisfied by a pattern that simply rejects any block carrying history.
     historical = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2)` = 28 m\n"
@@ -9839,9 +9856,9 @@ def test_the_emission_block_guard_is_not_vacuous():
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
     # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
-    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
-    # never produce, and a string compare would produce it.
+    # header's history clause used (`shard_watchdog_minutes()` rounds `… /60 x 2.0` up to `… m`)
+    # — must NOT red. A false block is the one failure that check must never produce, and a string
+    # compare would produce it.
     spelled = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
@@ -11228,6 +11245,18 @@ ROWED_BY_THIS_FOLD = (
     # every entry above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
     # file nobody listed has no `durations:` row and nothing reds.
     "test_14232_ingest_ack_split.py",
+    # #14219 F4 (PR #14415) — the batch-ingest pair. A fold this PR ADDED, and the
+    # registration half was incomplete in the FIRST cut of the merge fix: both files
+    # went on `core` only, while they drive `tortoise/hosted_api.py` (an EXACT `api`
+    # SOURCE_PATTERNS match, which REPLACES the `core` fallback), so a
+    # `hosted_api.py`-only diff selected NEITHER — `--surface-audit` names the
+    # mismatch and `--changed-files tortoise/hosted_api.py` selected 486 test files
+    # with none of these two among them. `--integrity` stayed green over it (it reads
+    # classification, not reachability), which is why the pair is listed here: the
+    # ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed has no
+    # `durations:` row and nothing reds.
+    "test_14219_batch_ingest.py",
+    "test_14219_batches_api.py",
     # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the seven
     # conditions under which a write may be deferred (four correctness arms, the
     # unimportable loop, and the two switches). A file this fold ADDED and registered
