@@ -59,7 +59,9 @@ submission at all) reds 1; a submission to a different pool reds 1; dropping the
 turning the containing function into a coroutine function reds 3; and any second
 reference to the chain — an inline `_stamp_chain()` beside a surviving (even
 unreachable) submission, an extra inline call next to the real one, or
-`_CAPTURE_EXECUTOR.submit(_stamp_chain)` — reds 4.
+`_CAPTURE_EXECUTOR.submit(_stamp_chain)` — reds 4; and every submission sitting
+under a folded-false `if`/`while` reds 5 (a statically-false guard the interpreter
+discards is not a submission: the chain would never run).
 
 ⛔ WHY ARM 4 EXISTS AT ALL (review finding, measured on `/tmp` mutants): arms 1
 and 2 asked whether an awaited submission **of that name** exists ANYWHERE, which
