@@ -62,7 +62,8 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
 # `ae9bf0f959`, three landings past `f379299c64` — and this head's merge target is one further,
-# `6a72cfd661`, whose `#14482` touches no `durations` weight and so re-emits the same partition) the
+# `2f380536` (`#14406`), whose parent `6a72cfd661` (`#14482`) touches no `durations` weight and so
+# re-emits the same partition) the
 # verb packs five shards at 837.7 s (a, c, d, e,
 # k) and six at 837.6 s (b, f, g, h, i, j) — a 0.1 s split — so `ceil(837.7/60 x 2)` = 28 m governs (a
 # shard's job-level wall clock is the SLOWEST shard's), and the same emission prints

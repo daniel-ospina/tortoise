@@ -21952,15 +21952,12 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # the next commit — the scan reads THIS file and the two fixtures below, so any number
 # re-stales on the next edit, which is the "a record quoting a figure its instrument
 # does not return" defect this PR repairs, one level up. Re-derive it instead:
-#     python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
+#     uv run python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
 #                print(len(t._cut_claims()), [c for c in t._cut_claims() if c[3]])"
 # and the pin itself asserts non-vacuity, so the number is not load-bearing.
 # ⚠️ Count the ROWS the helper returns, not the verdicts a commit message enumerates:
 # `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
 _CUT_CLAIM_WINDOW = 200
-#: How far a restoration may sit from the name, at the outside. The binding is by CLAUSE
-#: (see the clause-bounds helper), not by distance; this only bounds the block scan.
-_CUT_CLAIM_RESTORED_SPAN = 400
 #: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
 #: `#14481`" / "restored by <sha>". A bare `restored` must not defuse, or the false claim
 #: this pin exists to catch passes by carrying the word in an unrelated clause.
@@ -22039,19 +22036,28 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     return claims
 
 
+#: Block openers. Markdown bullets AND their `#`-comment spellings, because 4 of the 6
+#: files this pin scans are comment prose — a separator set that only knows `- ` splits
+#: nothing there, and the measured consequence was a FALSE RED: one `# - ` bullet's verdict
+#: charged the arm in the next bullet. (`#- `, `# * ` and `#  - ` are the spellings the
+#: repo actually uses.)
+_BLOCK_SEPARATORS = ("\n\n", "\n- ", "\n* ", "\n# - ", "\n#- ", "\n# * ", "\n#  - ",
+                     "\n#   - ")
+
+
 def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
     """The bullet/paragraph holding `pos` — a verdict belongs to the block it is IN.
 
     A distance window alone reaches into the neighbouring bullet: measured on the plan
     ledger, `test_split_rejects_non_list`'s "**SURVIVES** (never cut)" was read as
     carrying the PREVIOUS bullet's cut verdict, i.e. a clean record charged with a
-    contradiction it never states. Blocks are the unit a reader uses (a `- ` bullet, a
-    blank-line paragraph), so they are the unit the verdict is searched in.
+    contradiction it never states. Blocks are the unit a reader uses, so they are the unit
+    the verdict is searched in — in BOTH spellings, markdown and `#`-comment.
     """
-    starts = [i for i in (text.rfind(sep, 0, pos) for sep in ("\n\n", "\n- ", "\n* "))
+    starts = [i for i in (text.rfind(sep, 0, pos) for sep in _BLOCK_SEPARATORS)
               if i != -1]
     lo = (max(starts) + 1) if starts else 0
-    ends = [i for i in (text.find(sep, pos) for sep in ("\n\n", "\n- ", "\n* "))
+    ends = [i for i in (text.find(sep, pos) for sep in _BLOCK_SEPARATORS)
             if i != -1]
     return lo, (min(ends) if ends else len(text))
 
@@ -22071,16 +22077,17 @@ def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
     a marker in the next bullet, or after a full stop, is a different statement.
     """
     lo, hi = _claim_block_bounds(text, pos)
-    clause = text[lo:hi]
-    rel = pos - lo
-    for sep in (". ", "; "):
-        cut = clause.rfind(sep, 0, rel)
+    block_lo = lo          # ⛔ `cut` is an offset into the BLOCK, so the end bound must be
+    clause = text[lo:hi]   # computed against the block start, never the advanced `lo`:
+    rel = pos - lo         # mixing them inflated the clause past its own full stop whenever
+    for sep in (". ", "; "):   # the sentence had a preamble, which let an unrelated later
+        cut = clause.rfind(sep, 0, rel)   # "RESTORED by …" defuse the verdict (measured).
         if cut != -1:
-            lo = max(lo, lo + cut + len(sep))
+            lo = max(lo, block_lo + cut + len(sep))
     for sep in (". ", "; "):
         cut = clause.find(sep, rel)
         if cut != -1:
-            hi = min(hi, lo + cut + 1)
+            hi = min(hi, block_lo + cut + 1)
     return lo, hi
 
 
@@ -22088,10 +22095,12 @@ def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -
     """Does a restoration in THIS NAME'S OWN CLAUSE defuse its verdict?
 
     ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT — and not to a distance at all. Two measured
-    false passes came from weaker rules: a ±`_CUT_CLAIM_RESTORED_SPAN` window let ONE
+    false passes came from weaker rules: a fixed ±N-character window let ONE
     `RESTORED by #14481` defuse EVERY verdict near it (a live arm's false verdict spared
-    by a label 325 characters away in another bullet), and a "no other arm name between"
-    rule still let a PRECEDING marker defuse a name that followed a full stop.
+    by a label 325 characters away in another bullet), a "no other arm name between"
+    rule still let a PRECEDING marker defuse a name that followed a full stop, and a
+    clause bound computed against an already-advanced start inflated the clause past
+    its own full stop. Distance is not used at all now.
 
     The rule that survives both directions is attributive in the only way prose supports:
     a marker defuses `name` when the marker's OWN CLAUSE names `name`, or names no arm at
@@ -22131,13 +22140,11 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     removes.
 
     `contradicts` is True only when this file DEFINES that name and no ATTRIBUTED
-    restoration ("RESTORED by `#14481`", "restored by <sha>") is recorded within
-    `_CUT_CLAIM_RESTORED_SPAN` on either side AND bound to THIS name — no other arm
-    name may sit between the verdict and the marker, or the marker is another arm's
-    (see `_cut_claim_restoration_defuses`; the unbound version was a measured false
-    PASS). That is the pair no reviewer should have to catch, because the tree, not
-    the prose, is the authority for what is graded. A bare `restored` does not
-    defuse — see `_CUT_CLAIM_RESTORED_RE`.
+    restoration ("RESTORED by `#14481`", "restored by <sha>") is recorded in the
+    name's OWN CLAUSE — see `_cut_claim_restoration_defuses`; no distance window is
+    consulted at all. That is the pair no reviewer should have to catch, because the
+    tree, not the prose, is the authority for what is graded. A bare `restored` does
+    not defuse — see `_CUT_CLAIM_RESTORED_RE`.
     """
     claims = []
     found = [(m, m.group(1)) for m in _CUT_CLAIM_NAME_RE.finditer(text)]
@@ -22254,8 +22261,11 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "it, so the record contradicts the tree and the next lane reads a live "
         "grader as retired — or as an ungraded by-hand hazard, which is how a "
         "conservative rule gets justified by a reader that is in fact grading. "
-        "Record the restoration in the same passage (`RESTORED by `#14481`` — an "
-        "unattributed `restored` does not count), or fix the verdict: "
+        "Record the restoration in the SAME SENTENCE as the arm it restores, or name "
+        "the arm inside the restoration's own sentence (which is what a joint record "
+        "`A` and `B` were CUT … RESTORED by `#14481` already does); `RESTORED by "
+        "`#14481`` must be attributed and a bare `restored` does not count. Or fix the "
+        "verdict: "
         f"{contradictions!r}")
 
 
