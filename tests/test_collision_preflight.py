@@ -9638,8 +9638,18 @@ class CollisionPreflightTest(unittest.TestCase):
         if not pi.exists():
             shutil.copy("/bin/sleep", pi)
         env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-        proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(cwd), env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # ⛔ THE CHILD'S STDERR IS THE ONLY EVIDENCE A DEAD FIXTURE HAS (#14506). #14388
+        # exists so this harness can "name its own cause" and then closed the child's
+        # stderr to `DEVNULL` — so every DEAD FIXTURE the CI pool produced reported
+        # `EXITED with rc=1` and NOTHING else (four of them in one shard, twice at the same
+        # head). It is captured beside the fixture's other scratch state instead, and read
+        # back into the failure message by `_fake_lane_stderr_note`.
+        errs = self._fake_pi_stderr_paths()
+        err_log = self.tmp / f"fake-pi-{len(errs)}-{os.getpid()}.stderr"
+        with open(err_log, "wb") as err_fh:
+            proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON,
+                                    cwd=str(cwd), env=env, stdout=subprocess.DEVNULL, stderr=err_fh)
+        errs[proc.pid] = err_log
         # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
         # lane must be SERVED to it as well (`_write_ps_stub`). Without this the
         # lane is invisible to the tool and every test built on it — the (c2)
@@ -9647,6 +9657,33 @@ class CollisionPreflightTest(unittest.TestCase):
         # would pass VACUOUSLY: nothing would be standing anywhere.
         self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
         return proc
+
+    def _fake_pi_stderr_paths(self) -> dict[int, Path]:
+        """pid -> the stderr file `_start_fake_pi` gave that child. Lazily created."""
+        errs = getattr(self, "_fake_pi_errs", None)
+        if errs is None:
+            errs = {}
+            self._fake_pi_errs = errs
+        return errs
+
+    def _fake_lane_stderr_note(self, pid: int) -> str:
+        """What the dead lane itself said — an `rc` with no text is not a cause (#14506).
+
+        Returns `""` for a pid this fixture did not spawn (a caller may hand
+        `_wait_for_pi_cwd` its own `proc`, as the DEAD-FIXTURE arm's own test does), so the
+        note never claims to explain a child it never saw. The text is appended AFTER the
+        identity line by the caller, so nothing here can reach the failure signature.
+        """
+        path = self._fake_pi_stderr_paths().get(pid)
+        if path is None:
+            return ""
+        try:
+            text = " ".join(path.read_text(encoding="utf-8", errors="replace").split())
+        except OSError as exc:  # pragma: no cover — the fixture's tmp dir was removed
+            return f"; its stderr could not be read back ({exc})"
+        if not text:
+            return "; its stderr was captured and was EMPTY — the child died without a word"
+        return f"; its stderr: {text[:400]!r}"
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -9738,13 +9775,30 @@ class CollisionPreflightTest(unittest.TestCase):
             fatal = (
                 f"; the fake lane pid {pid} EXITED with rc={rc} — a dead process has no "
                 "readable cwd, so no wait could ever attribute it (a DEAD FIXTURE, not a "
-                "census gap)"
+                f"census gap){self._fake_lane_stderr_note(pid)}"
                 if rc is not None else
                 f"; the fake lane pid {pid} is still running — so this IS a census gap"
             )
+        # ⛔ LINE 1 IS A GATE IDENTITY, NOT PROSE — DO NOT PUT A MEASUREMENT ON IT (#14506).
+        # `ci_exemption.py::_signature_from` reads pytest's FIRST `E   ` line of the
+        # FAILURES block, so the pre-merge exemption decision compares line 1 and nothing
+        # else. #14388 appended the measurement tail to line 1 (a `f"(...)"` with no
+        # newline), and every datum in that tail is per-run: the HOST's `pi` pid list, the
+        # fixture's temp dir, the child's rc. The identity therefore differed on every
+        # run — including from the identity `main`'s own table holds for these SAME ids
+        # (pre-#14388, byte-identical to line 1 below) — so the predicate read main's
+        # ambient flake as a NEW failure and BLOCKED PRs that cannot reach this fixture:
+        # measured on #14506, four of these ids refused `python-ci-gate`'s required check
+        # on a PR whose diff is a test-file deletion, twice at an unchanged head, while
+        # `main` failed the identical ids at 7/17. #12399 records the same ids blocked for
+        # the same reason (`signature differs from main's`) — a gate reporting a verdict it
+        # cannot compute. The measurements are all still here, on the lines AFTER the
+        # identity, where a triager reads them and the signature does not; line 1 is
+        # byte-identical to the pre-#14388 message on purpose. Pinned by
+        # `test_the_census_failure_IDENTITY_is_its_first_line_not_its_measurements`.
         self.fail(
             "the process census never saw the fake pi lane — the test cannot "
-            "discriminate process-cwd liveness "
+            "discriminate process-cwd liveness\n"
             f"(the census returned: {returned!r} (err={last_err!r}); of those, this "
             f"fixture's: {matching!r}; cwd reader err={last_cerr!r}; wanted cwd "
             f"{want!r}{fatal})"
@@ -9870,6 +9924,54 @@ class CollisionPreflightTest(unittest.TestCase):
         msg = str(caught.exception)
         self.assertIn("DEAD FIXTURE", msg)
         self.assertIn(f"pid {dead.pid} EXITED with rc=0", msg)
+        self.assertNotIn("its stderr", msg,
+                         "a pid this fixture did NOT spawn has no captured stderr to report")
+
+    def test_the_census_failure_IDENTITY_is_its_first_line_not_its_measurements(self):
+        """⛔ LINE 1 OF THIS MESSAGE IS A GATE IDENTITY — a measurement on it is a bypass.
+
+        `ci_exemption.py::_signature_from` reads pytest's FIRST `E   ` line of the FAILURES
+        block, and the pre-merge exemption decision compares THAT and nothing else. Every
+        datum this message measures is per-run (the host's `pi` pid list, the fixture's
+        temp dir, the child's rc), so #14388's tail-on-line-1 made the identity different
+        on every run — including from the identity `main`'s own failure table holds for
+        these same ids — and the predicate then read main's ambient flake as a NEW failure.
+        Measured on #14506: four of these ids refused the required `python-ci-gate` twice at
+        an unchanged head, on a diff that only deletes test arms, while `main` failed the
+        identical ids at 7/17 (`signature differs from main's`). #12399 records the same
+        ids blocked for the same reason.
+
+        So line 1 is pinned BYTE-FOR-BYTE to the message `main` already recorded, and the
+        measurements — and the DEAD FIXTURE / census-gap classification, which is why this
+        arm exists at all — live on the lines after it. A triager reads the whole block; the
+        engine reads line 1.
+
+        Mutation: move any measurement (or a `\n`, or a reworded sentence) onto line 1 and
+        this reddens — that is the point, because the failure it prevents is silent.
+        """
+        mod = _tool_module()
+        dead = subprocess.Popen(["/bin/true"])
+        dead.wait(timeout=10)
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([{"pid": 12345}], "")), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=dead)
+        finally:
+            if dead.poll() is None:  # pragma: no cover — /bin/true is already reaped
+                dead.kill()
+        msg = str(caught.exception)
+        first, _, rest = msg.partition("\n")
+        self.assertEqual(
+            first,
+            "the process census never saw the fake pi lane — the test cannot "
+            "discriminate process-cwd liveness",
+            "line 1 IS the exemption engine's identity — it must stay byte-identical to "
+            "the message main's failure table already holds (#14506)")
+        self.assertTrue(rest, "the measurements must survive, on the lines after the identity")
+        for measured in ("the census returned", "wanted cwd", "DEAD FIXTURE"):
+            self.assertIn(measured, rest)
+            self.assertNotIn(measured, first)
 
     def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
         """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
