@@ -357,18 +357,18 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2**, and exits **2** again when a run's schema statement did not install (`schema_complete: false` — a population measured without the schema it claims must not be quoted as one); `1` is reserved for a produced verdict, so a refusal never shares it |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
-**No product code changed. No graph write changed. No record read changed. Nothing deleted.**
-`git diff --name-only origin/main...HEAD -- 'tortoise/*.py'` lists two files —
-`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
-a `#` comment. That is MEASURED, not restated, because the line counts move with every rebase:
-`git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
-prints `0` at this head, so no changed body line is anything but a comment. Each block carries a
-count this PR re-derived
-(`160` distinct cite targets above the pivot from `727` in all, over `208` citing files —
-`uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
-`--check` grades the two note blocks against the same measurement, so none of them is a hand
-count), not a
-change to what the code does.
+**The census commit (`f9f480a55ab3`, `#14164`) changes no product code: no graph write, no record
+read, nothing deleted.** That is MEASURED against the COMMIT, which is the only form in which the
+claim holds: `git show --name-only --format= f9f480a55ab3 -- 'tortoise/*.py'` prints nothing, i.e.
+the commit touches no `tortoise/*.py` file at all.
+
+⛔ An earlier form of this paragraph measured `git diff origin/main...HEAD -- 'tortoise/*.py'` and
+claimed two files with comment-only deltas. It was **false on `main` the moment it landed** (that
+diff is empty there) and false on any branch carrying other work (it lists whatever that work
+touched — comments and feature code alike), so a merger could read "no product code changed" beside
+thousands of changed lines. A claim about a diff that moves with every rebase is not a measurement.
+
+Each block carries a count this PR re-derived (`160` distinct cite targets above the pivot from `727` in all, over `208` citing files — `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and `--check` grades the two note blocks against the same measurement, so none of them is a hand count), not a change to what the code does.
 
 ---
 
