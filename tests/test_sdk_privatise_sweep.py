@@ -3235,3 +3235,36 @@ def test_an_empty_baseline_string_is_a_refusal_not_an_absent_flag(tmp_path, monk
     monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", ""])
     assert privatise.main() == 2, "an EMPTY named baseline must refuse with exit 2"
     assert "CANNOT ANSWER" in capsys.readouterr().err
+
+
+def test_py_files_refuses_a_failed_ls_files(tmp_path, monkeypatch):
+    """The OTHER half of cycle 5's fix: a FAILED `git ls-files` must raise, not return `[]`.
+
+    ⛔ `walked == 0` cannot see a PARTIAL failure: if the tracked walk succeeds and the untracked
+    one alone fails, `walked > 0`, the refusal never fires, and every un-added `.py` file silently
+    leaves `now` — exactly the state a lane is in when it runs `--check` before committing. The
+    `check=True` on both reads is what turns that into an error; this arm executes the REAL
+    `py_files()` (the zero-walk arm next door stubs it out) against a directory that is not a repo.
+    """
+    monkeypatch.setattr(privatise, "ROOT", tmp_path)  # not a git repo: `ls-files` exits 128
+    with pytest.raises(subprocess.CalledProcessError):
+        privatise.py_files()
+
+
+def test_py_files_asks_both_git_reads_to_fail_loudly(monkeypatch):
+    """Graded on the CALL, because the partial-failure shape is one boolean away from silent.
+
+    A stub that raises proves nothing about `check=True` (it would propagate either way), so the
+    kwargs are asserted directly: BOTH `git ls-files` invocations must carry `check=True`.
+    """
+    seen = []
+
+    def fake(args, **kwargs):
+        seen.append((list(args), kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert privatise.py_files() == [], "the fixture lists nothing, so nothing is measured"
+    assert len(seen) == 2, f"py_files must run exactly two git reads: {seen}"
+    assert all(kwargs.get("check") is True for _args, kwargs in seen), (
+        f"every git read must be check=True, or a failed one measures nothing: {seen}")
