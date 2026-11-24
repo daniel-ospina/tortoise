@@ -1792,7 +1792,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class as the rows above, and MEASURED before this entry: `--changed-files
              # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, and only the tier-1
              # smoke set selected, with `test_sdk_privatise_sweep.py` ABSENT. (No count is
-             # quoted: that set is `tier1 - slow - uri_requiring - on_demand`, whose size today
+             # quoted: that set is `manifest["tier1"] - slow - uri_requiring - on_demand`, whose size today
              # equals `len(manifest["tier1"])` but is NOT that population — it moves with every
              # registration, and the `tier1:` block's own comment forbids typing it.) `tools/` is a flat `NON_PYTHON_PREFIXES`
              # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
@@ -1812,13 +1812,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # reported as `the residue SET moved off its pin`, which sends the reader to the
              # pin instead of to the map), the
              # import-shape arm `test_reading_the_approved_set_does_not_shadow_the_package_star_import`,
-             # the scope-local typing arms and the refspec arms. ⛔ NOT the `SWEEP_NAMES == 66`
-             # floor: `--check` already carries it (a map of the wrong size is `VACUOUS CHECK`,
-             # exit 2, on every PR) — listing it here would repeat the mistake this paragraph
-             # corrects one sentence earlier. ⛔ AND NOT the map/private-spelling assertions of
-             # `test_the_pinned_base_still_derives_the_whole_batch`, which this row does NOT
-             # recover: that arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it SKIPS on the
-             # `fetch-depth: 1` `test` job the row selects and only runs at depth 0.
+             # the scope-local typing arms and the refspec arms. ⛔ `--check` carries only PART
+             # of the floor: it compares the DERIVED map's size against `SWEEP_NAMES` (a map of
+             # the wrong size is `VACUOUS CHECK`, exit 2, on every PR), so a re-pin that moved
+             # `SWEEP_BASE` and `SWEEP_NAMES` together (66 -> 60) stays GREEN there. The literal
+             # `SWEEP_NAMES == 66` floor is pinned ONLY by the depth-0 `assert` inside
+             # `test_the_pinned_base_still_derives_the_whole_batch`, which this row still does
+             # NOT recover on a PR: that arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it
+             # SKIPS on the `fetch-depth: 1` `test` job the row selects. The arm's
+             # map/private-spelling assertions are ungraded on a PR for the same reason.
              # ⛔ THIS INCLUDES THE GRADED PROSE, and that is the point: the block's own
              # published extent is asserted against `_residue_block()`'s walk, so a re-cut that
              # grows or shrinks the `#:` run reds THAT arm — but only on a diff that selects the

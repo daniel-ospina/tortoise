@@ -2340,10 +2340,11 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
     before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
     `full: false`, and the tier-1 smoke set selected, THIS FILE ABSENT. (That selected set is
-    `tier1 - uri_requiring - on_demand` — the docs-only return at `tools/ci_selection.py`'s
-    `if not changed:` — which today equals `len(manifest["tier1"])` but is NOT that population;
-    it moves with every registration and is deliberately not typed — the arm's own failure
-    message prints `len(files)`, the size of that SELECTED list.) `--check` (the required `surface-guard`
+    `manifest["tier1"] - slow - uri_requiring - on_demand` — the subtraction chain the docs-only
+    return at `tools/ci_selection.py`'s `if not changed:` applies; its size today equals
+    `len(manifest["tier1"])` but is NOT that population; it moves with every registration and is
+    deliberately not typed — the arm's own failure message prints `len(files)`, the size of the
+    list the selector returned.) `--check` (the required `surface-guard`
     step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
     count of typed references that survive, never this suite's arms.
 
@@ -2355,12 +2356,13 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     import-shape arm
     `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
     scope-local typing arms and the refspec arms — the WHOLE suite is unselected, so the
-    list is illustrative rather than exhaustive. ⛔ TWO ITEMS ARE DELIBERATELY ABSENT from it:
-    the `SWEEP_NAMES == 66` floor is already graded by `--check` (`VACUOUS CHECK`, exit 2, on
-    every PR), and the map/private-spelling assertions of
-    `test_the_pinned_base_still_derives_the_whole_batch` are NOT recovered by this row — that
+    list is illustrative rather than exhaustive. ⛔ `--check` covers only PART of the floor:
+    it compares the DERIVED map's size against `SWEEP_NAMES` (`VACUOUS CHECK`, exit 2, on every
+    PR), so a re-pin that moved `SWEEP_BASE` and `SWEEP_NAMES` together (66 -> 60) stays green
+    there. The literal `SWEEP_NAMES == 66` assertion, and the map/private-spelling assertions of
+    `test_the_pinned_base_still_derives_the_whole_batch`, are NOT recovered by this row — that
     arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it SKIPS on the `fetch-depth: 1`
-    `test` job the row selects.
+    `test` job the row selects, and those assertions run only at depth 0.
     ⛔ THE COST OF THE GAP IS THE GRADED PROSE ITSELF: `_residue_block()`'s own walk is asserted
     against the figure its docstring publishes, so a re-cut that grows or shrinks the `#:` run
     reds that arm — and nothing else does. Without this row the first diff to notice a stale
