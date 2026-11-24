@@ -530,49 +530,10 @@ def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
     )
 
 
-def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
-    """Prose that quotes a document's line range must be the range the document carries at THIS head.
+# ⛔ CUT (B4 test-bureaucracy cut, 2026-11-23): `test_the_epic_bundles_i7_prose_cites_the_range_
+# its_row_carries` lived here. It compared a `:START-END` label printed in
+# `tests/test_7949_capstone_measure.py` against `04-plan.md`'s I7 row — progress-DOC prose, and
+# both of its inputs are deleted by this batch (the label went with the org_info span pin). The
+# arm cannot run without them, and the alternative — planting the label in a surviving comment —
+# would leave it grading prose that nothing else verifies.
 
-    ⛔ WHY THIS CROSS-FILE ARM EXISTS (#14038 review cycle 13, P3). `04-plan.md`'s I7 row is graded
-    structurally in `tests/test_7949_capstone_measure.py`, which parses whatever range the row carries —
-    so the COMMENT BLOCKS beside that guard, which quote the same range in prose, were graded by nothing.
-    They read `:15557-15634` while the row had already been re-derived to `:15563-15640` by the commit
-    that moved it, and the same blocks still attributed the move to "this branch's own 108 inserted
-    lines" when `hosted_api.py` grows 114 against `main`. That is this file's own subject one level down:
-    a figure re-measured in one place and CARRIED in another.
-
-    ⛔ IT LIVES HERE, NOT THERE, on purpose: `test_7949_capstone_measure.py`'s `durations` row pins that
-    file's own `^def test_` count in handwritten prose, so adding a case there would demand a re-write of
-    that row's long enumeration for no benefit — and an arm placed INSIDE the existing bundle test would
-    be INERT the moment that function reds — and a guard that is dead exactly when its sibling is
-    failing is the shape this file exists to catch, whatever the cause of the sibling's red.
-
-    Head-free on purpose: the rule is "the citation labelled `at this head` equals the row's", so it
-    needs no history, no `main` and no pin — and it cannot pass by agreeing with itself, because the ROW
-    is the authority and the COMMENT is the claim.
-
-    ⛔ RESTORED (round 4, P1) after the test-bureaucracy cut dropped it with the deleted document's
-    apparatus: it grades two SURVIVING files, it has no `_AUDIT` dependency, and it was green at this
-    head when run. B2 retires the census document's arms, not every arm that happened to sit nearby.
-    """
-    _plan = REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md"
-    _rows = [ln for ln in _plan.read_text(encoding="utf-8").splitlines() if "| **I7** |" in ln]
-    assert len(_rows) == 1, (
-        f"I7 must be exactly ONE line of `04-plan.md` to scope its range cite to, found {len(_rows)} — "
-        "re-word this guard rather than letting it bind the easier of two")
-    _cite = re.search(r"`hosted_api\.py:(\d+)-(\d+)`", _rows[0])
-    assert _cite is not None, (
-        "`04-plan.md` I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
-        "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
-    _start, _end = int(_cite.group(1)), int(_cite.group(2))
-    _src = (REPO / "tests/test_7949_capstone_measure.py").read_text(encoding="utf-8")
-    _here = re.findall(r"`:(\d+)-(\d+)` at this head", _src)
-    assert _here, (
-        "no `:START-END` in the bundle test is labelled `at this head`, so this arm cannot run — keep the "
-        "label on the citation that names the CURRENT head's range, do not delete the arm")
-    for _start_s, _end_s in _here:
-        assert (int(_start_s), int(_end_s)) == (_start, _end), (
-            f"the bundle test calls `:{_start_s}-{_end_s}` the range 'at this head', but `04-plan.md`'s "
-            f"I7 row carries `:{_start}-{_end}`. A citation labelled for this head that disagrees with the "
-            "document is the re-derived-number-carried-instead-of-re-derived class: re-derive it from "
-            "the row, or label it with the head it was actually taken at.")
