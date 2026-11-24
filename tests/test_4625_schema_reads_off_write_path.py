@@ -822,3 +822,55 @@ def test_a_commented_out_ALTER_cannot_reach_exactly_one_reader(monkeypatch, tmp_
             "`jsonb` name set gains a column the schema does not have")
     finally:
         rp._release_schema_cache()
+
+
+def test_a_partial_tree_pays_one_parse_per_plan_not_one_per_parameter(
+        monkeypatch, tmp_path):
+    """The incomplete branch must not re-parse per BOUND PARAMETER (#4625 review).
+
+    `jsonb_columns()` is consulted once per bound string parameter by
+    `_jsonb_or_scalar`, and on an absent/partial tree the SQL is deliberately not
+    memoised — so without a SQL-keyed memo for its answer the parse ran once per
+    PARAMETER, per record, inside `replay_plan`. Measured on a tree missing one
+    migration: 0.854 s for 20 records against 0.025 s on the complete tree (35x),
+    with 40 parses for 20 records — the very stack shape #4625 exists to remove,
+    reintroduced on the self-healing branch. Pre-#4625 the 5 s TTL masked it.
+
+    ⚠️ WHAT THIS DOES NOT CLAIM: the READ is still paid per consult on a partial
+    tree. That is the price of self-healing without a TTL or a per-call `stat`, and
+    it is stated in `_resident_entry` rather than hidden.
+
+    FALSIFIER (executed): drop the `jsonb_columns_partial` short-circuit and the
+    count below is one per consult.
+    """
+    source = _real_migrations()
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        if name != _PARTIAL_JSONB_OMITTED:
+            shutil.copy(source / name, tree / name)
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    parses = {"n": 0}
+    real_parse = rp._declared_types_from_chunks
+
+    def counting_parse(chunks):
+        parses["n"] += 1
+        return real_parse(chunks)
+
+    monkeypatch.setattr(rp, "_declared_types_from_chunks", counting_parse)
+    rp._release_schema_cache()
+    try:
+        first = rp.jsonb_columns()
+        assert rp._resident_entry()["sql"] is None, (
+            "the fixture did not produce a partial read — this pin is about the "
+            "branch that memoises nothing")
+        for _ in range(20):
+            rp.jsonb_columns()
+        assert parses["n"] == 1, (
+            f"a PARTIAL tree parsed the declared types {parses['n']} time(s) for 21 "
+            "consults; `jsonb_columns()` is called once per bound parameter, so a "
+            "per-consult parse is a per-parameter parse inside `replay_plan` — the "
+            "#4625 stack. Cache the answer against the SQL text it came from.")
+        assert rp.jsonb_columns() == first
+    finally:
+        rp._release_schema_cache()

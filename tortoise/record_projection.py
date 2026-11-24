@@ -2122,8 +2122,10 @@ def _resident_entry() -> dict[str, Any]:
     `tests/test_health_build_identity_10447.py`; a patched resolver is honoured
     by the NEXT resolution, i.e. after :func:`_release_schema_cache`.
 
-    ⚠️ AN ABSENT-OR-INCOMPLETE SCHEMA DOES SELF-HEAL HERE, and the cost of that
-    is bounded. `_entry_sql_state` memoises a read only when every registered
+    ⚠️ AN ABSENT-OR-INCOMPLETE SCHEMA DOES SELF-HEAL HERE, and the cost of that is
+    BOUNDED PER CONSULT BUT NOT PER PLAN — stated no wider than the code, because
+    an earlier revision of this paragraph said "bounded" and that read as though a
+    whole plan paid it once. `_entry_sql_state` memoises a read only when every registered
     migration was actually read, so neither a total absence nor a
     PARTIALLY-present tree is frozen — a partial tree is the silent shape (the
     read SKIPS absent files, so the join is non-empty and simply short), and
@@ -2144,10 +2146,15 @@ def _resident_entry() -> dict[str, Any]:
     rebuilt/installed before a process consults them — and it is disclosed rather
     than closed because closing it means a per-consult resolver probe, which is the
     `stat` pass #4625 exists to remove.
-    While the tree is not complete the process pays one read per consult, on a
-    path that is already raising or degraded; once a COMPLETE set is readable the
-    parse is memoised and the zero-filesystem-operations property holds from then
-    on.
+    While the tree is not complete the process pays one read per CONSULT, and a
+    consult is not one per plan: `table_columns`/`refused_props_names` are read
+    once per plan, while `jsonb_columns` is read once per BOUND STRING PARAMETER
+    (`_jsonb_or_scalar`) — so on a degraded tree that leg re-reads the present
+    files per parameter. Its PARSE is cached per SQL text (see
+    :func:`jsonb_columns`), which is what keeps an incomplete tree from
+    re-parsing once per parameter, but the READ is not avoided: this branch trades
+    it for the self-heal. Once a COMPLETE set is readable the read stops too and
+    the zero-filesystem-operations property holds from then on.
     """
     with _SCHEMA_CACHE_LOCK:
         entry = _RESIDENT_SCHEMA.get("entry")
@@ -2639,9 +2646,10 @@ def _jsonb_cache_clear() -> None:
     on a private dict. ⛔ A process — or a pin — that must PROVE a fresh read asks
     :func:`_release_schema_cache`, the one verb that can see an edit; this one
     re-parses the same certified bytes and cannot. The pin that asserts an edit is
-    seen (`tests/test_9548_record_search_keys_shape.py`) sees it through the
-    EXPLICIT-DIRECTORY path's per-call re-read — this function is only its
-    `finally:` reset — and
+    seen is `tests/test_9548_record_search_keys_shape.py::test_a_synthetic_tree_reaches_the_forward_and_fail_closed_arms`,
+    which drives the EXPLICIT-DIRECTORY path's per-call re-read and never calls
+    this function at all — this function is only a `finally:` reset in the
+    parse-CONT pin beside it, which makes no edit-visibility assertion — and
     `tests/test_4625_schema_reads_off_write_path.py::test_the_jsonb_reset_cannot_make_an_edit_visible`
     pins that difference on the RESIDENT path, so the sentence above is
     executable rather than asserted.
@@ -2650,8 +2658,12 @@ def _jsonb_cache_clear() -> None:
         resident = _RESIDENT_SCHEMA.get("entry")
         if resident is not None:
             resident["parsed"].pop("jsonb_columns", None)
+            # …and the SQL-keyed memo the incomplete branch uses (#4625): leaving
+            # it behind would let the next consult sit on a stale answer.
+            resident["parsed"].pop("jsonb_columns_partial", None)
         for entry in _SCHEMA_CACHE.values():
             entry["parsed"].pop("jsonb_columns", None)
+            entry["parsed"].pop("jsonb_columns_partial", None)
 
 
 def _scan_sql(sql: str):
@@ -3030,42 +3042,45 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
         return _jsonb_columns_for_dir(migrations_dir)
     entry = _resident_entry()
     names = entry["parsed"].get("jsonb_columns")
-    if names is None:
-        # ⛔ THE RESIDENT PATH PARSES THE CERTIFIED SQL, NOT THE DIRECTORY (#4625
-        # review, fourth round). This reader used to re-read the files through its
-        # own parser, and that made it the ONE reader that could disagree with
-        # `table_columns()` / `refused_props_names()`: those answer from the schema
-        # entry's memoised SQL, so an EDIT or a REMOVAL under an already-resolved
-        # entry left the column map on the old parse while a re-reading jsonb map
-        # saw the new tree — the column kept, the `jsonb` name lost (or the other
-        # way round), and `_jsonb_or_scalar` then binds that parameter on the wrong
-        # side of the encoding rule. Measured: `payload` still in the column map,
-        # gone from the name set, `_jsonb_or_scalar("payload", "raw string")`
-        # returning the raw string, no error anywhere. Sharing the certified bytes
-        # makes the documented trade ("an edit is seen by the next RESOLUTION, not
-        # by the next record") true for ALL THREE READERS instead of two, and it
-        # costs ZERO filesystem operations: the SQL is already in memory.
-        sql, complete = _entry_sql_state(entry)
-        # ⛔ `sql` is already comment-stripped by `_entry_sql_state`, and the other
-        # two readers parse that same string — do NOT strip again here, or this
-        # reader sees a different TEXT than they do (the divergence the module's
-        # freshness block measures).
-        declared = _declared_types_from_chunks([sql]) if sql else {}
-        if not declared:
-            raise RecordProjectionError(
-                "the record schema is not on disk — no CREATE TABLE for any "
-                f"record table was found in {entry['base']}. The jsonb encoding "
-                "rule reads the DECLARED column types from those files, and an "
-                "empty answer would silently stop serialising a scalar bound to a "
-                "jsonb column — the row-drop class #9548 exists to end.")
-        names = frozenset(
-            column
-            for table, columns in declared.items()
-            for column, type_name in columns.items()
-            if type_name == "jsonb"
-        )
-        if complete:
-            entry["parsed"]["jsonb_columns"] = names
+    if names is not None:
+        return names
+    # ⛔ THE PARSE IS CACHED PER SQL TEXT, NOT ONLY PER COMPLETE ENTRY (#4625
+    # review). This reader is consulted once per BOUND STRING PARAMETER
+    # (`_jsonb_or_scalar`), and on an ABSENT/PARTIAL tree the SQL is deliberately
+    # NOT memoised — so without this the parse ran once per parameter, per record,
+    # inside `replay_plan`. Measured on a tree missing one migration: 0.854 s for
+    # 20 records against 0.025 s on the complete tree (35x), 40 parses for 20
+    # records — the stack shape #4625 exists to remove, reintroduced on the branch
+    # that self-heals. Keying on the SQL STRING keeps the self-heal: a new read
+    # yields a new string, so the cache misses and the answer is recomputed.
+    sql, complete = _entry_sql_state(entry)
+    # ⛔ `sql` is already comment-stripped by `_entry_sql_state`, and the other two
+    # readers parse that same string — do NOT strip again here, or this reader sees
+    # different TEXT than they do (the divergence the freshness block measures).
+    partial_memo = entry["parsed"].get("jsonb_columns_partial")
+    if sql and partial_memo is not None and partial_memo[0] == sql:
+        return partial_memo[1]
+    declared = _declared_types_from_chunks([sql]) if sql else {}
+    if not declared:
+        raise RecordProjectionError(
+            "the record schema is not on disk — no CREATE TABLE for any "
+            f"record table was found in {entry['base']}. The jsonb encoding "
+            "rule reads the DECLARED column types from those files, and an "
+            "empty answer would silently stop serialising a scalar bound to a "
+            "jsonb column — the row-drop class #9548 exists to end.")
+    names = frozenset(
+        column
+        for table, columns in declared.items()
+        for column, type_name in columns.items()
+        if type_name == "jsonb"
+    )
+    if complete:
+        entry["parsed"]["jsonb_columns"] = names
+    else:
+        # …the incomplete answer is cached against the bytes it came from, so a
+        # partial tree pays ONE parse per plan instead of one per bound parameter,
+        # and heals as soon as the read yields different bytes.
+        entry["parsed"]["jsonb_columns_partial"] = (sql, names)
     return names
 
 
