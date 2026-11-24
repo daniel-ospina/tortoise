@@ -9959,10 +9959,12 @@ class CollisionPreflightTest(unittest.TestCase):
         # FAILURES block. For this file's `unittest.TestCase` ids that block is never
         # attributed — its header is dotted (`_____ Class.test _____`) while the join keys
         # on `nodeid.split("::")[-1]` — so the identity is the ` - <detail>` of the short
-        # summary instead, which pytest CLIPS AT THE MESSAGE'S FIRST NEWLINE. Both paths
-        # therefore read line 1, and the short-summary one is ALSO terminal-width sensitive
-        # (too long and the detail is dropped, leaving the id unsigned and exempt by
-        # nothing) — so line 1 must stay BOTH a single line AND short.
+        # summary instead, and THAT door's `_SUMMARY_RE` is LINE-ANCHORED, so only the first
+        # line is ever signed. Both paths therefore read line 1 (#14506 review, cycle 3 — the
+        # earlier version of this comment claimed pytest width-clips the detail; on CI it
+        # emits it verbatim, newlines and all, and the first-line-only behaviour is the
+        # PARSER's, not pytest's). Keep the identity first and every measurement after the
+        # first newline.
         # #14388 appended the measurement tail to line 1 (a `f"(...)"` with no
         # newline), and every datum in that tail is per-run: the HOST's `pi` pid list, the
         # fixture's temp dir, the child's rc. The identity therefore differed on every
@@ -10112,12 +10114,18 @@ class CollisionPreflightTest(unittest.TestCase):
         """⛔ LINE 1 OF THIS MESSAGE IS A GATE IDENTITY — a measurement on it is a bypass.
 
         `ci_exemption.py` compares ONE stable string per failure, and which path produces
-        it depends on the test's SHAPE (#14506 review, P2): for a function-based test it is
-        the FIRST `E   ` line of the FAILURES block, but for these `unittest.TestCase` ids
-        that block is never attributed (its header is dotted, the join key is
-        `nodeid.split("::")[-1]`), so it is the ` - <detail>` of the short summary — which
-        pytest clips at the message's first newline AND drops entirely on a narrow terminal.
-        So the message must be ONE SHORT LINE whose first line is the stable identity.
+        it depends on the test's SHAPE (#14506 review, cycle 2 + 3): for a function-based
+        test it is the FIRST `E   ` line of the FAILURES block, but for these
+        `unittest.TestCase` ids that block is never attributed (its header is dotted, the
+        join key is `nodeid.split("::")[-1]`), so it is the ` - <detail>` of the short
+        summary — and THAT door's `_SUMMARY_RE` is LINE-ANCHORED, so only the first line is
+        ever signed. (Cycle 3 correction: the earlier version of this docstring claimed
+        pytest clips the detail and drops it on a narrow terminal. It does not — on CI
+        `_get_line_with_reprcrash_message` emits the message verbatim, newlines and all;
+        the first-line-only behaviour is the PARSER's, and the width-sensitive rendering is
+        a local console's, never the gate's input.) So the message must keep its identity
+        first and every measurement after the first newline, always.
+
         Every datum this message measures is per-run (the host's `pi` pid list, the
         fixture's temp dir, the child's rc), so #14388's tail-on-line-1 made the identity
         different on every run — including from the identity `main`'s own failure table
@@ -10301,11 +10309,55 @@ class CollisionPreflightTest(unittest.TestCase):
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
-        with self.assertRaises(ProcessLookupError,
-                               msg="a `sleep` outlived the teardown — every arm leaves one, "
-                                   "and a leaked process is the ambient state this suite's "
-                                   "own census arms exist to stop trusting"):
-            os.killpg(proc.pid, 0)
+        # ⛔ BOUNDED, NOT INSTANT (#14506 review, cycle 3). `sleep` was never OUR child, so
+        # after the group SIGTERM the shell is reaped by `proc.wait()` while the sleeper is
+        # briefly an unreaped ZOMBIE reparented to init — and a zombie keeps the process
+        # group alive. MEASURED on the module's own helpers: 28/400 and 23/300 teardowns
+        # left the group signalable for ~1-3 ms, every residual member `[sleep] <defunct>`.
+        # So the teardown was never leaking; an instant assertion was simply over-strict,
+        # and a red here would cost an exemption cycle in the very door this PR repairs. A
+        # genuine live orphan never disappears, so the bounded wait still reds on it.
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                break
+            if time.monotonic() > deadline:
+                self.fail("a `sleep` outlived the teardown — every arm leaves one, and a "
+                          "leaked process is the ambient state this suite's own census "
+                          "arms exist to stop trusting")
+            time.sleep(0.02)
+
+    def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
+        """#14506 review, cycle 3 — the `returncode` guard had no arm of its own.
+
+        Several arms reap the lane themselves (`_wait_for_pi_cwd` polls it on the
+        DEAD-FIXTURE path) and then call `_stop_fake_lane` in `finally`. By then the pid is
+        FREE, so an unconditional `killpg` could signal whatever group now holds that
+        number — on a runner shared with the fleet, another lane's work. Deleting the guard
+        left the whole suite green, which is the "claimed and pinned by nothing" class this
+        commit opened for the group reap.
+
+        Mutation: remove `if proc.returncode is not None: return` and this reddens.
+        """
+        proc = _fake_lane(self.tmp)
+        try:
+            # ⛔ The SHELL alone (no group), so it actually EXITS and can be reaped — the
+            # pre-#14506 teardown shape, and the state `_wait_for_pi_cwd` leaves behind
+            # when it polls a dead lane. `returncode` is set only once we have reaped it.
+            with suppress(OSError):
+                proc.terminate()
+            proc.wait(timeout=10)
+            with mock.patch.object(os, "killpg") as killpg:
+                _stop_fake_lane(proc)
+            killpg.assert_not_called()
+        finally:
+            _FAKE_LANE_STDERR.pop(proc.pid, None)
+            # The lane's group still holds the orphaned sleeper; reap it so this arm
+            # leaves nothing behind (the same way `_stop_fake_lane` would).
+            with suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
 
     def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
         """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
@@ -10381,13 +10433,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # ⛔ LINE 1 IS THIS FAILURE'S GATE IDENTITY TOO (#14506 review, P2 — the same rule
         # as `_wait_for_pi_cwd`): the exemption decision compares one stable string per
         # failure, and for a `unittest.TestCase` id it is the short summary's ` - <detail>`,
-        # which pytest clips at the message's first newline and drops on a narrow terminal —
-        # so line 1 must stay BOTH one line AND short. `pid`, `want` (a per-run temp path),
-        # `timeout` and `last` are all per-run, so a one-line message here is a different
-        # identity on every run and the `pr <= main` subset test can never be satisfied —
-        # the `signature differs from main's` block this change exists to remove, for a
-        # different set of ids. Its callers are census/cwd arms that fail on the same pooled
-        # hosts.
+        # whose `_SUMMARY_RE` is LINE-ANCHORED — only the first line is signed (cycle 3: the
+        # earlier note here claimed pytest width-clips it; on CI the detail is emitted
+        # verbatim and the line-anchoring is the PARSER's). `pid`, `want` (a per-run temp
+        # path), `timeout` and `last` are all per-run, so a one-line message here is a
+        # different identity on every run and the `pr <= main` subset test can never be
+        # satisfied — the `signature differs from main's` block this change exists to remove,
+        # for a different set of ids. Its callers are census/cwd arms that fail on the same
+        # pooled hosts.
         self.fail(
             "the tool's own cwd reader could not attribute the fake lane to the worktree\n"
             f"pid {pid} was not attributed to {want!r} within {timeout:.0f}s (last read: "
