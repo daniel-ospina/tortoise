@@ -3693,6 +3693,43 @@ def _effective_decl(body: str, prop: str) -> str | None:
     return last
 
 
+def _css_last_declaring_body(css: str, selector: str, prop: str) -> str | None:
+    """The LAST non-media rule naming `selector` that DECLARES `prop` — or None.
+
+    This is the body a caller should hand to `_effective_decl`, and the
+    difference from `_css_rules_with_scope(...)[-1]` is not cosmetic: `[-1]` is
+    the last rule whose PRELUDE is that selector text, whether or not it says
+    anything about `prop`, so ANY later `.pricing-card { … }` rule that does not
+    repeat `display` hides the rule that does.
+
+    Measured (#14406 review round 13) on the tree at `f091cc8dedb2`, with the
+    class's own rows and the page restored byte-identically after every mutant:
+
+        .pricing-card { align-self: stretch }        RED  "`.pricing-card` is not a flex container"
+        .pricing-card { border-color: #fff }         RED  "`.pricing-card` is not a flex container"
+        .pricing-card .btn { border-radius: 2rem }   RED  "the card's CTA does not take the leftover height"
+
+    Every one of those is a page that renders all four CTAs on the shared
+    baseline — the card IS a flex container and its CTA DOES take the slack —
+    and the first is the very edit review round 12 declared GREEN, which it
+    measured written INSIDE the existing block. The same edit written as its own
+    rule still red, with a message naming a property the page satisfies: a
+    maintainer's correct edit cannot clear it, and the guard's own docstring
+    says why that matters ("a guard that reds the page it ships is a guard a
+    maintainer deletes").
+
+    Resolution stays LAST-WINS, so the override the rows exist for is still
+    caught — `_effective_decl` reports the winning declaration inside the body,
+    and this helper picks the last body that declares the property at all. An
+    appended `.pricing-card { display: block }` is therefore still the owner and
+    still reds (measured: RED before and after this reader).
+    """
+    declaring = [body for body, inside_media
+                 in _css_rules_with_scope(css, selector)
+                 if not inside_media and _effective_decl(body, prop) is not None]
+    return declaring[-1] if declaring else None
+
+
 def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
     """Every style rule as `(prelude, body, inside_media)`, comment-blanked.
 
@@ -11905,15 +11942,24 @@ def _border_px_of(body: str, where: str) -> float:
 
 
 def _popular_border_extra_px(css: str) -> float:
-    """How much MORE of the bottom content box the popular card's border eats."""
-    popular = [body for body, inside_media
-               in _css_rules_with_scope(css, ".pricing-card.popular")
-               if not inside_media]
-    assert popular, "`.pricing-card.popular` declares no rule"
-    base_card = [body for body, inside_media
-                 in _css_rules_with_scope(css, ".pricing-card")
-                 if not inside_media][-1]
-    return (_border_px_of(popular[-1], ".pricing-card.popular")
+    """How much MORE of the bottom content box the popular card's border eats.
+
+    ⛔ BOTH BORDERS ARE THE PROPERTY'S OWNER, NOT A SELECTOR'S LAST MATCH
+    (#14406 review round 13). These two reads were `[...][-1]` — the last rule
+    whose PRELUDE is the selector — so a later `.pricing-card { … }` rule that
+    repeats no `border` hid the rule that declares it, and the row above red a
+    page whose border was untouched (measured: `.pricing-card { border-color:
+    #fff }`, CTA baselines unmoved, `_border_px_of` receiving "").
+    """
+    base_card = _css_last_declaring_body(css, ".pricing-card", "border")
+    assert base_card is not None, (
+        "no rule naming `.pricing-card` declares `border`, so this relation has "
+        "no base operand")
+    popular = _css_last_declaring_body(css, ".pricing-card.popular", "border")
+    assert popular is not None, (
+        "no rule naming `.pricing-card.popular` declares `border`, so its "
+        "thicker border is gone")
+    return (_border_px_of(popular, ".pricing-card.popular")
             - _border_px_of(base_card, ".pricing-card"))
 
 
@@ -11929,9 +11975,12 @@ def _expected_popular_block_end_pad(css: str) -> str:
     fixed the one row it was looking at; the reviewer then measured the same
     false RED three more times. One helper, so there is no fifth copy to pin.
     """
-    base_card = [body for body, inside_media
-                 in _css_rules_with_scope(css, ".pricing-card")
-                 if not inside_media][-1]
+    base_card = _css_last_declaring_body(css, ".pricing-card", "padding")
+    assert base_card is not None, (
+        "no rule naming `.pricing-card` declares `padding`, so the base inset "
+        "the compensation is derived from is gone — same reader as the border "
+        "reads (#14406 review round 13: `.pricing-card { align-self: stretch }` "
+        "appended as its own rule left this reading an empty padding)")
     base_pad = _css_block_end(
         "padding", _effective_decl(base_card, "padding") or "")
     extra_px = _popular_border_extra_px(css)
@@ -12022,24 +12071,42 @@ class TestProductTeamsPricingCardCtaBaseline:
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
         css = _product_teams_html()
-        card_rules = [body for body, inside_media
-                      in _css_rules_with_scope(css, ".pricing-card")
-                      if not inside_media]
-        assert card_rules, "`.pricing-card` declares no rule"
-        assert _effective_decl(card_rules[-1], "display") == "flex", (
+        # ⛔ THE PROPERTY'S OWNER, NOT THE LAST RULE WITH THE SELECTOR (#14406
+        # review round 13). `_css_rules_with_scope(...)[-1]` is the last rule
+        # whose PRELUDE is `.pricing-card`, so any later card rule that does not
+        # repeat `display` shadows the rule that does — measured on the tree at
+        # `f091cc8dedb2`: appending `.pricing-card { align-self: stretch }` (the
+        # edit round 12 declared GREEN, written as its own rule instead of
+        # inside the block) or even `.pricing-card { border-color: #fff }` red
+        # this row with "is not a flex container" about a card that is one.
+        # `_css_last_declaring_body` picks the last rule that DECLARES the
+        # property, so the override shape still loses none of its teeth:
+        # `.pricing-card { display: block }` still owns `display` and still reds.
+        card_display = _css_last_declaring_body(css, ".pricing-card", "display")
+        assert card_display is not None, (
+            "no rule naming `.pricing-card` declares `display`, so this row "
+            "would compare None to 'flex' — the card's container is gone "
+            "(#13645 item 6)")
+        assert _effective_decl(card_display, "display") == "flex", (
             "`.pricing-card` is not a flex container, so `margin-top: auto` on "
             "its CTA has no free space to absorb and the four buttons go back "
             "to their content-length heights (three baselines, 70.2px apart at "
             "1440x900 — #13645 item 6)")
-        assert _effective_decl(card_rules[-1], "flex-direction") == "column", (
+        card_direction = _css_last_declaring_body(
+            css, ".pricing-card", "flex-direction")
+        assert card_direction is not None, (
+            "no rule naming `.pricing-card` declares `flex-direction`, so the "
+            "children stack along the browser default `row` (#13645 item 6)")
+        assert _effective_decl(card_direction, "flex-direction") == "column", (
             "`.pricing-card` is a flex ROW, so its children sit side by side "
             "instead of stacking — the card renders as one line of text "
             "(#13645 item 6)")
-        cta_rules = [body for body, inside_media
-                     in _css_rules_with_scope(css, ".pricing-card .btn")
-                     if not inside_media]
-        assert cta_rules, "`.pricing-card .btn` declares no rule"
-        assert _effective_decl(cta_rules[-1], "margin-top") == "auto", (
+        cta_slack = _css_last_declaring_body(
+            css, ".pricing-card .btn", "margin-top")
+        assert cta_slack is not None, (
+            "no rule naming `.pricing-card .btn` declares `margin-top`, so the "
+            "CTA does not take the leftover height (#13645 item 6)")
+        assert _effective_decl(cta_slack, "margin-top") == "auto", (
             "the card's CTA does not take the leftover height, so it sits "
             "wherever its tier's copy ends and the four buttons do not share a "
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
@@ -12336,9 +12403,30 @@ class TestProductTeamsPricingCardCtaBaseline:
         # The relation lives in `_expected_popular_block_end_pad` (module level)
         # because FOUR sibling rows need the same value and each had its own copy
         # of the literal (#14406 review round 12).
-        base_card = [body for body, inside_media
-                     in _css_rules_with_scope(css, ".pricing-card")
-                     if not inside_media][-1]
+        #
+        # ⛔ AND EVERY OPERAND IS A PROPERTY'S OWNER, NOT A SELECTOR'S LAST MATCH
+        # (#14406 review round 13). `_css_rules_with_scope(...)[-1]` is the last
+        # rule whose PRELUDE is the selector, so a later `.pricing-card { … }`
+        # rule that repeats none of `border`/`padding` shadows the rule that
+        # does — measured on the tree at `f091cc8dedb2`: `.pricing-card {
+        # border-color: #fff }` (an unrelated card edit, CTA baselines unmoved)
+        # red this row with "declares `border: `, whose bottom width cannot be
+        # read", and `.pricing-card { padding: 2rem }` with its compensation
+        # derived from a padding the page no longer has.
+        base_border = _css_last_declaring_body(css, ".pricing-card", "border")
+        assert base_border is not None, (
+            "no rule naming `.pricing-card` declares `border`, so the base "
+            "card's width — the other operand of the compensation relation — "
+            "cannot be read")
+        popular_border = _css_last_declaring_body(
+            css, ".pricing-card.popular", "border")
+        assert popular_border is not None, (
+            "`.pricing-card.popular` declares no `border`, so its thicker "
+            "border — the reason the compensation exists — is gone")
+        base_card = _css_last_declaring_body(css, ".pricing-card", "padding")
+        assert base_card is not None, (
+            "no rule naming `.pricing-card` declares `padding`, so the base "
+            "inset the compensation is derived from is gone")
         base_pad = _css_block_end(
             "padding", _effective_decl(base_card, "padding") or "")
         extra_px = _popular_border_extra_px(css)
@@ -12346,8 +12434,8 @@ class TestProductTeamsPricingCardCtaBaseline:
             "the popular card's bottom border is not WIDER than its siblings', "
             f"so the 1px compensation this row exists for is stale (measured "
             f"{extra_px:g}px, expected a positive difference)")
-        popular_border_px = _border_px_of(popular[-1], ".pricing-card.popular")
-        base_border_px = _border_px_of(base_card, ".pricing-card")
+        popular_border_px = _border_px_of(popular_border, ".pricing-card.popular")
+        base_border_px = _border_px_of(base_border, ".pricing-card")
         expected_pad = _expected_popular_block_end_pad(css)
 
         assert winner == expected_pad, (
@@ -12617,6 +12705,92 @@ class TestCssDesktopReachAndSpecificity:
         page = _product_teams_html()
         assert "</style>" in page, "the page has no <style> block to extend"
         return page.replace("</style>", f"\n{rule}\n</style>", 1)
+
+    def test_a_later_rule_that_declares_another_property_does_not_shadow_the_pin(self):
+        """The pinned reads resolve the PROPERTY's owner, not the last selector match.
+
+        `_css_rules_with_scope(...)[-1]` is the last rule whose PRELUDE is the
+        selector, so a later rule for the same selector that says nothing about
+        the property being pinned hides the rule that does — and the row reports
+        the property as missing rather than as shadowed.
+
+        Measured (#14406 review round 13) at `f091cc8dedb2`, each mutant applied
+        to the tracked page and restored byte-identically:
+
+            .pricing-card { align-self: stretch }        FLEX ROW RED "is not a flex container"
+            .pricing-card { border-color: #fff }         FLEX ROW RED "is not a flex container"
+            .pricing-card .btn { border-radius: 2rem }   FLEX ROW RED "does not take the leftover height"
+
+        None of those moves a CTA — the card is a flex container, its CTA does
+        take the slack — and the first is the edit round 12 fixed, measured
+        written INSIDE the existing block; as its own rule it still red. A
+        guard that reds the page it ships is the one a maintainer deletes.
+
+        The LAST-WINS half is what keeps this from weakening the guard:
+        `_effective_decl` reports the winning declaration in a body, and this
+        test's non-vacuity arm proves an appended `.pricing-card { display:
+        block }` still becomes the owner — so the override shape the rows exist
+        for is untouched.
+        """
+        pairs = ((".pricing-card", "display"),
+                 (".pricing-card", "flex-direction"),
+                 (".pricing-card .btn", "margin-top"),
+                 (".pricing-card", "border"))
+
+        def owner(css: str, selector: str, prop: str):
+            body = _css_last_declaring_body(css, selector, prop)
+            return _effective_decl(body, prop) if body is not None else None
+
+        pristine = {(sel, prop): owner(_product_teams_html(), sel, prop)
+                    for sel, prop in pairs}
+        missing = [k for k, v in pristine.items() if v is None]
+        assert missing == [], (
+            f"the unmutated page declares nothing for {missing!r}, so the rows "
+            "below cannot tell a caught shadow from a page that never had the "
+            "declaration")
+
+        for mutant, shadow_selector, hidden in (
+                (".pricing-card { align-self: stretch }",
+                 ".pricing-card", "display"),
+                (".pricing-card { border-color: #fff }",
+                 ".pricing-card", "display"),
+                (".pricing-card .btn { border-radius: 2rem }",
+                 ".pricing-card .btn", "margin-top")):
+            mutated = self._page_with(mutant)
+            # The mutant really does shadow the pre-fix `[-1]` read — otherwise
+            # this arm would pass on the reader it exists to replace.
+            shadow = [body for body, inside_media
+                      in _css_rules_with_scope(mutated, shadow_selector)
+                      if not inside_media][-1]
+            assert _effective_decl(shadow, hidden) is None, (
+                f"`{mutant}` does not shadow the last-selector read for "
+                f"`{hidden}` (its body still declares it), so this arm is "
+                "VACUOUS — pick a mutant that actually hides the pinned "
+                "declaration")
+            for selector, prop in pairs:
+                assert owner(mutated, selector, prop) == pristine[(selector, prop)], (
+                    f"appending `{mutant}` changed the resolved `{prop}` on "
+                    f"`{selector}` from {pristine[(selector, prop)]!r} to "
+                    f"{owner(mutated, selector, prop)!r}. The rule does not "
+                    "touch "
+                    f"`{prop}`, so the page still renders identically — the "
+                    "reader resolved the LAST selector match instead of the "
+                    "last rule that DECLARES the property (#14406 review "
+                    "round 13, measured)")
+
+        # Non-vacuity: an appended rule that DOES declare the property is still
+        # its owner, so the override shape the pinned rows exist for still reds.
+        assert owner(self._page_with(".pricing-card { display: block }"),
+                     ".pricing-card", "display") == "block", (
+            "an appended `.pricing-card { display: block }` is no longer read "
+            "as the owner of `display`, so the row that pins the card's flex "
+            "container is blind to the ordinary override (measured RED before "
+            "and after this reader)")
+        assert owner(self._page_with(".pricing-card { border: 2px solid #f00 }"),
+                     ".pricing-card", "border") == "2px solid #f00", (
+            "an appended `.pricing-card { border: … }` is no longer read as the "
+            "owner of `border`, so the popular card's compensation relation "
+            "would be derived from the border the page no longer has")
 
     def test_a_type_qualified_override_of_the_popular_cards_inset_wins_the_cascade(self):
         """`section .pricing-card.popular` is (0,2,1) — a browser applies it.
