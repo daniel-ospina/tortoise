@@ -10403,6 +10403,55 @@ class CollisionPreflightTest(unittest.TestCase):
                           "arms exist to stop trusting")
             time.sleep(0.02)
 
+    def test_the_status_peek_reports_the_rc_of_a_dead_lane_WITHOUT_reaping_it(self):
+        """#14506 review, cycle 5 — the helper's status path was pinned by nothing.
+
+        Replacing its body with `proc.poll()` — the exact revert of this commit — left all
+        459 green, because every dead `proc` the suite handed `_wait_for_pi_cwd` had already
+        been reaped by a `wait()`. The property under test is NOT "the status is right", it
+        is "the status is right AND the child was NOT reaped": a reaped pid frees its process
+        group, so the caller's `finally: _stop_fake_lane(proc)` can no longer kill it and the
+        lane's `sleep` is orphaned into the temp dir `tearDown` deletes.
+
+        Two deaths, because they take different `si_code` branches: a normal exit (the lane
+        runs its `sleep` out) and a signalled one.
+        """
+        proc = _fake_lane(self.tmp, seconds=0)
+        try:
+            deadline = time.monotonic() + 10
+            rc = None
+            while rc is None and time.monotonic() < deadline:
+                rc = _peek_child_status(proc)
+                time.sleep(0.01)
+            self.assertEqual(rc, 0, "a lane that ran out its `sleep 0` exits 0")
+            self.assertIsNone(proc.returncode,
+                              "the status was read by REAPING it — `poll()` frees the pid "
+                              "and the group with it")
+        finally:
+            _stop_fake_lane(proc)
+            _FAKE_LANE_STDERR.pop(proc.pid, None)
+
+        proc = _fake_lane(self.tmp)
+        try:
+            self.assertTrue(_wait_for_grandchild(proc.pid))
+            proc.terminate()
+            deadline = time.monotonic() + 10
+            rc = None
+            while rc is None and time.monotonic() < deadline:
+                rc = _peek_child_status(proc)
+                time.sleep(0.01)
+            self.assertEqual(rc, -signal.SIGTERM,
+                             "a signalled death reports the negative signal, exactly as "
+                             "`poll()` would")
+            self.assertIsNone(proc.returncode)
+        finally:
+            _stop_fake_lane(proc)
+            _FAKE_LANE_STDERR.pop(proc.pid, None)
+
+    @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
+                         "_wait_for_grandchild reads /proc — without it the premise cannot "
+                         "be constructed, and `assertTrue` would report a FALSE red")
     def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
         """#14506 review, cycle 3 — the `returncode` guard had no arm of its own.
 
