@@ -3791,7 +3791,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never go red shipped in the first place. With the entry: `surfaces:
              # ['core']` and the file is selected. Pinned by
              # tests/test_14192_read_wave_tool.py::test_a_tool_only_diff_selects_this_pin.
-             "tools/read_wave_latency.py")
+             "tools/read_wave_latency.py",
+             # #14429 review P2 ("neither headline invariant has an assertion"): the
+             # spool-drain rehearsal instrument owns tests/test_spool_drain_rehearsal.py
+             # (registered `core`), and this is the #1349/#3332/#3616 silent-drop class
+             # one tool over — MEASURED before this entry:
+             # `--changed-files tools/spool_drain_rehearsal.py --event pull_request` ->
+             # `surfaces: []`, `full: false`. That is the fail-OPEN direction for THIS
+             # file specifically: its two load-bearing claims are "the source spool was
+             # never written" and "never point the drain at production", both enforced
+             # only inside its own control flow, so the diff most worth guarding is the
+             # one that weakens `_gate_uri` or `_source_unchanged`. With the entry:
+             # `surfaces: ['core']` and the pin is selected. Pinned by
+             # tests/test_spool_drain_rehearsal.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/spool_drain_rehearsal.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

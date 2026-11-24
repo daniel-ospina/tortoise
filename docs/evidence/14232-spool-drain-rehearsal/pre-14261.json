@@ -1,0 +1,99 @@
+{
+  "corpus": {
+    "copied_entries": 3,
+    "source_before": {
+      "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+      "bytes": 1683451,
+      "entries_meta": 265,
+      "entries_turns": 265,
+      "files": 530
+    }
+  },
+  "graph_after_pass_1": {
+    "capture_ok_true": 2,
+    "entities": 0,
+    "extracted_points": 2,
+    "phase_in_flight": 1,
+    "sessions": 3,
+    "turn_points": 12
+  },
+  "graph_after_pass_2": null,
+  "graph_settled": {
+    "capture_ok_true": 3,
+    "entities": 0,
+    "extracted_points": 3,
+    "phase_in_flight": 0,
+    "sessions": 3,
+    "turn_points": 13
+  },
+  "invariant_source_untouched": true,
+  "mode": "pre-14261",
+  "observations": {
+    "ack_ms_max": 10005.9,
+    "ack_ms_p50": 10002.0,
+    "ack_ms_p95": 10002.4,
+    "posts": 3,
+    "posts_per_min": 8.8,
+    "rate_limited": 0,
+    "refusal_bodies": [
+      {
+        "body": "{\"detail\":\"The server's wait budget for this request was exceeded before a response was ready. The work may still complete on the server. Wait for the advertised delay before retrying, and retry only if repeating the operation is safe.\",\"stage\":\"capture_extract\",\"stages_ms\":{\"pre_handler\":74.9,\"capture_gates\":172.4,\"capture_write\":697.6}}",
+        "status": 504
+      },
+      {
+        "body": "{\"detail\":\"The server's wait budget for this request was exceeded before a response was ready. The work may still complete on the server. Wait for the advertised delay before retrying, and retry only if repeating the operation is safe.\",\"stage\":\"capture_extract\",\"stages_ms\":{\"pre_handler\":51.0,\"capture_gates\":70.2,\"capture_write\":31.4}}",
+        "status": 504
+      },
+      {
+        "body": "{\"detail\":\"The server's wait budget for this request was exceeded before a response was ready. The work may still complete on the server. Wait for the advertised delay before retrying, and retry only if repeating the operation is safe.\",\"stage\":\"capture_extract\",\"stages_ms\":{\"pre_handler\":57.0,\"capture_gates\":84.4,\"capture_write\":55.3}}",
+        "status": 504
+      }
+    ],
+    "stage_strings": [
+      "capture_extract"
+    ],
+    "status_counts": {
+      "504": 3
+    }
+  },
+  "passes": [
+    {
+      "exit": 0,
+      "label": "drain-1",
+      "seconds": 30.71,
+      "stderr": "spool drain: cleared terminal state on 0 entries \u2014 retrying\nspool drain: filed 3, deferred 0, skipped 0 (0 waiting on backoff), held back 0, probe refusals 0, terminal 0 (kept, not retried; re-file with 'tortoise session drain --retry-terminal'), discarded 0\nspool drain: outcome unrecorded 3 (237b3503-c021-4d9f-9926-ecfd974635eb, f0387b0b-e04f-4c93-9170-2349e9a69792, 9ad4113e-1ea6-4655-aa88-39088e4f1fe4)\n",
+      "stdout": ""
+    }
+  ],
+  "settle": {
+    "capture_ok_true": 3,
+    "entities": 0,
+    "extracted_points": 3,
+    "phase_in_flight": 0,
+    "reached_zero": true,
+    "seconds": 4.1,
+    "sessions": 3,
+    "turn_points": 13
+  },
+  "source_after": {
+    "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+    "bytes": 1683451,
+    "entries_meta": 265,
+    "entries_turns": 265,
+    "files": 530
+  },
+  "spool_after_pass_1": {
+    "attempts_gt_0": 0,
+    "attempts_max": 0,
+    "attempts_min": 0,
+    "attempts_p50": 0,
+    "backoff_max_seconds": 0,
+    "backoff_p50_seconds": 0,
+    "backoff_waiting": 0,
+    "entries": 3,
+    "filed_key_present": 3,
+    "terminal_failure": 0,
+    "terminal_reasons": {}
+  },
+  "spool_after_pass_2": null
+}
