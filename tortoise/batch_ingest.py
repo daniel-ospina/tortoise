@@ -760,6 +760,19 @@ class _BatchStoreFault(RuntimeError):
     """
 
 
+class _BatchMaybeAccepted(_BatchStoreFault):
+    """The acceptance may have LANDED — the caller must CHECK, never blindly resend.
+
+    Raised when a create write faulted and the row could not be read back. The item
+    rows this call wrote stay in `pending_batches()`' ITEM arm, so the recovery scan
+    adopts and drains them after the reclaim window — and the cross-batch dedup only
+    matches items already `indexed`, so a resend ingests and charges the same content
+    twice. Distinct from `_BatchStoreFault` because the route's copy differs:
+    "nothing was accepted; retry" is right for a fault with nothing at stake, and a
+    lie here.
+    """
+
+
 # ── storage: durable rows in the tenant graph ──────────────────────────────
 class BatchStore(Protocol):
     """The durable record (§2.0: the record is truth — a batch must be
@@ -2410,7 +2423,7 @@ class BatchCoordinator:
             try:
                 created = self._store.put_batch_if_absent(batch)
                 break
-            except Exception as exc:
+            except Exception:
                 if _attempt < 2:
                     _logger.warning(
                         "batch %s: the create write faulted (attempt %d of 2) — "
@@ -2442,18 +2455,32 @@ class BatchCoordinator:
                 # `_BatchStoreFault`, and a row that moved past every takeover state
                 # returns the RECORD as the truth.
                 try:
-                    current = self._store.get_batch(org_id, bid)
-                except Exception:
-                    raise _BatchStoreFault(
-                        f"batch {bid!r}: the create write failed and the row could "
-                        "not be read") from exc
-                if current is None:
-                    # Positively no row: nothing this call wrote is live, so the
-                    # compensating rollback is the right answer. Re-raise the write
-                    # fault to reach it.
-                    raise
-                created = False
-                break
+                    present = self._store.get_batch(org_id, bid) is not None
+                except Exception as read_exc:
+                    # ⛔ UNKNOWN IS NOT "NOTHING WAS ACCEPTED" (round 25, P1 — measured).
+                    # The item rows this call wrote survive, and `pending_batches()`
+                    # selects them through its ITEM arm, so they are adopted and drained
+                    # after the reclaim window. Telling the caller "nothing was
+                    # accepted; retry" invites a second batch over the same content —
+                    # and the cross-batch dedup only matches items already `indexed`, so
+                    # two batches draining concurrently both miss it. The copy must send
+                    # them to the LIST surface, not to a resend.
+                    raise _BatchMaybeAccepted(
+                        f"batch {bid!r}: the create write faulted and the row could "
+                        "not be read back") from read_exc
+                if present:
+                    # ⛔ OUR OWN WRITE LANDED (round 25, P1 — measured). Attempt 1
+                    # committed and both round trips faulted, so the row is
+                    # `created_at == stamp` and `accepted` — the reachable shape (a
+                    # seconds-old acceptance cannot be adopted: `_resume_batch` defers
+                    # orphans for `BATCH_RECLAIM_AFTER_S`). Raising here answered
+                    # "nothing was accepted; retry shortly" over a row `pending_batches`
+                    # already returns, so the instructed retry opened a SECOND batch
+                    # and charged twice. Hand it to the takeover arm below instead,
+                    # which ACKs the record it finds.
+                    created = False
+                    break
+                raise
         if not created:
             # Lost the create. Do not pretend it is ours — and do NOT discard:
             # `discard(org_id, bid)` removes the batch row AND its item rows, and
@@ -2567,6 +2594,11 @@ class BatchCoordinator:
                 # RECORD is then the truth and the ACK reports it; raising here is
                 # the 503-over-recorded-work defect this arm exists to remove.
                 return current, items
+            # ⛔ BOTH `_BatchIdConflict` ARMS MUST UNLINK (round 25, P2 — measured).
+            # This arm skips the rollback for the same reason the early one does, so
+            # nothing else ever removes the documents staged above it: measured, the
+            # bytes stayed on disk permanently (no sweeper exists for `_batches/`).
+            _unlink_staged_paths(staged_paths)
             raise _BatchIdConflict(f"batch id {bid!r} was created concurrently")
         return batch, items
 

@@ -3723,19 +3723,14 @@ def test_a_create_write_fault_never_discards_a_published_batch():
     except BaseException as exc:      # asserted below, never swallowed
         raised = exc
 
-    # ⛔ THE TAKEOVER, NOT A REFUSAL (#14415 recut review, MEDIUM — measured).
-    # This pin used to assert `raised is not None` — i.e. it pinned the DEFECT.
-    # The published row carries OUR OWN stamp (`created_at=batch.created_at`
-    # above; a real recovery adoption copies it from our item rows), so ownership
-    # is PROVABLE and the lost-create block below already has the machinery for
-    # this exact row shape: a CAS takeover plus the identity write. Refusing it
-    # instead left the rows live and billable while the route told the customer
-    # "nothing was accepted" — and invited a retry that opens a second batch over
-    # the same content and charges for it twice, which is the harm this guard was
-    # written to prevent, arriving through the copy rather than through a delete.
-    assert raised is None, (
-        f"a create fault over a row carrying OUR OWN stamp refused provable work: "
-        f"{type(raised).__name__}: {raised}")
+    # ⛔ AND IT MUST **ACK**, NOT SAY "NOTHING WAS ACCEPTED" (round 25, P1 — measured).
+    # The row is OURS (`created_at == stamp`), `pending_batches()` already returns it,
+    # and the recovery scan drains and bills it — so "retry" invites a second batch
+    # over the same content, and the cross-batch dedup only matches items already
+    # `indexed`. The takeover arm ACKs the record it finds instead.
+    assert not isinstance(raised, BaseException), (
+        "a create fault over a row that LANDED told the customer nothing was "
+        f"accepted — the instructed retry duplicates the ingest: {raised!r}")
     assert store.attempts == 2, (
         f"the create write was not retried once ({store.attempts} attempts)")
     assert store.discarded == [], (
@@ -3787,6 +3782,94 @@ def test_a_create_fault_over_ANOTHER_writers_row_still_refuses():
         "a refusal discarded another writer's batch: "
         f"{store.discarded}")
     assert store.attempts == 2, store.attempts
+
+
+def test_an_unreadable_create_fault_says_check_before_resending():
+    """⛔ "MAY HAVE BEEN ACCEPTED" MUST NOT BE RENDERED AS "NOTHING WAS ACCEPTED"
+    (round 25, P1 — measured).
+
+    When the create write faults twice AND the row cannot be read back, this call's
+    ITEM rows survive — `pending_batches()` selects them through its item arm, and the
+    recovery scan adopts and drains them after `BATCH_RECLAIM_AFTER_S`. The generic
+    fault copy ("nothing was accepted; retry") therefore invites a second batch over
+    the same content, and the cross-batch dedup only matches items already `indexed`,
+    so both ingest and charge. The caller must be sent to the LIST surface instead —
+    which is why this arm raises its own type.
+    """
+    class _UnreadableCreateStore(InMemoryBatchStore):
+        """The pre-write read is free; the CREATE write faults and the row cannot be
+        read back. A MINTED id means `submit`'s own pre-check is skipped, so the free
+        read is the in-`try` pre-write one and the guard's re-read is the fault."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def put_batch_if_absent(self, batch) -> bool:
+            raise RuntimeError("graph statement timeout (write)")
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads <= 1:
+                return None
+            raise RuntimeError("graph probe timeout")
+
+    store = _UnreadableCreateStore()
+    coord = BatchCoordinator(store)
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md"])
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert isinstance(raised, bi_module._BatchMaybeAccepted), (
+        "an unreadable create fault must not share the 'nothing was accepted' copy "
+        f"— the item rows survive and are adopted: {raised!r}")
+
+
+def test_a_lost_create_refusal_unlinks_the_bytes_it_staged(tmp_path):
+    """⛔ THE *LATE* `_BatchIdConflict` ARM LEAKS TOO (round 25, P2 — measured).
+
+    Both conflict arms skip the rollback by design, so each must unlink the documents
+    staged above it. The early arm ("already exists") was pinned; this one — raised
+    from the takeover when the row belongs to another writer — was not, and measured
+    left `…-00000.md`/`…-00001.md` on disk permanently (no sweeper for `_batches/`).
+    """
+    class _ForeignStampStore(InMemoryBatchStore):
+        """Both pre-write reads see nothing; the create loses; the row is foreign."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads <= 2:
+                return None            # submit's check and _submit_rows' own
+            return Batch(batch_id=batch_id, org_id=org_id,
+                         state=BatchState.RUNNING,
+                         created_at="2026-01-01T00:00:00+00:00",
+                         updated_at="2026-01-01T00:00:00+00:00")
+
+        def put_batch_if_absent(self, batch) -> bool:
+            return False
+
+    store = _ForeignStampStore()
+    coord = BatchCoordinator(store)
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md", "/d/b.md"], contents=["one", "two"],
+                     stage_base=str(tmp_path), batch_id="b-lost")
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert isinstance(raised, ValueError), f"no conflict raised: {raised!r}"
+    assert "created concurrently" in str(raised), (
+        f"the pin did not reach the LATE arm: {raised!r}")
+    written = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert written == [], (
+        "the late conflict refusal left the caller's documents on disk for ever: "
+        f"{[str(p) for p in written]}")
 
 
 def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
