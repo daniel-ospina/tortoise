@@ -236,25 +236,33 @@ class TestCreatePointRetrySafety:
         # is made. Mutation: restore an angle-bracket placeholder and this REDs.
         assert "<" not in out
 
-    def test_the_success_hint_does_not_print_a_url_credential(self, tmp_path, capsys):
-        """The success path prints `api_url` into the transcript, so it must mask
-        it exactly as the doctor row does.
+    def test_the_success_hint_masks_the_url_user_as_well_as_the_password(
+            self, tmp_path, capsys):
+        """STRICTLY STRONGER than `test_the_success_hint_never_prints_a_url_credential`.
 
-        ⛔ WHY THIS PIN EXISTS: the masking is a SECURITY control, not formatting.
-        `api_url` is store-supplied — and `_resolve_config_path` passes it through
-        VERBATIM, while `./.tortoise` is repo-controllable — so a store holding
-        `https://user:pw@host` would otherwise put that credential into a
-        transcript the user pastes into a ticket. The SAME class is pinned twice on
-        the doctor row (`test_the_hosted_row_does_not_print_a_url_credential`,
-        `test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row`); the
-        success path had no equivalent at all.
+        That test (added by `f7d769fb66e6`) asserts only `"…password" not in out`,
+        i.e. it is satisfied by masking the PASSWORD while leaving the USERNAME in
+        the transcript. Measured: masking only the password (`:pw@` → `:***@`, user
+        kept) leaves that test GREEN and reds this one (at "svc:").
 
-        Measured before this pin: reverting the interpolation to
-        `_printable(api_url or '')` left EVERY test green (173 passed), so a future
-        "simplify the f-string" could delete the mask silently.
+        This pin therefore covers the two things it does not:
+          * the USER half of the userinfo is masked too; and
+          * the mask is not OVER-broad — the host and path must survive, because a
+            "fix" that redacts the URL into uselessness breaks the instruction the
+            hint exists to carry (mutant: `***/v1/search?q=WORD` reds this).
 
-        Mutation: drop `_mask_display_target(...)` from the hint and this REDs
-        (observed).
+        ⛔ CORRECTION, recorded rather than re-worded: an earlier version of this
+        docstring claimed the success path had *no* equivalent witness and cited a
+        `173 passed` measurement. Both were false at this head — that figure was
+        taken over `45beda518b42..65d4028a3d`, BEFORE `f7d769fb66e6` added the
+        password-class test, and was never re-taken. The witness existed; what was
+        missing was the USERNAME half and the not-over-broad half, which is all
+        this test claims.
+
+        Why it still matters: `api_url` is store-supplied and
+        `_resolve_config_path` passes it through verbatim, while `./.tortoise` is
+        repo-controllable — so userinfo in that value reaches a transcript users
+        paste into issues (`_mask_display_target`'s own docstring, `:3765`).
         """
         d = tmp_path / ".tortoise"
         d.mkdir(parents=True, exist_ok=True)
