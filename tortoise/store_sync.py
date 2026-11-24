@@ -516,6 +516,16 @@ def _summary_dict(summary) -> dict[str, Any]:
         "held_by_backoff": getattr(summary, "held_by_backoff", 0),
         "terminal": getattr(summary, "terminal", 0),
         "discarded": len(getattr(summary, "discarded", []) or []),
+        # #14350 (D1): this leg drains the WHOLE spool, so it takes the same claim
+        # the SessionStart drain does — and when that drain is already running,
+        # this leg files nothing. Without these two keys the receipt would say
+        # `filed: 0` with nothing explaining it, which is the silent-backlog
+        # shape the claim exists to make visible. `getattr` keeps older fakes
+        # working (they have no such fields).
+        "held_by_claim": bool(getattr(summary, "held_by_claim", False)),
+        "claim_unavailable": bool(getattr(summary, "claim_unavailable", False)),
+        "lost_claim": bool(getattr(summary, "lost_claim", False)),
+        "capacity_stopped": bool(getattr(summary, "capacity_stopped", False)),
     }
 
 

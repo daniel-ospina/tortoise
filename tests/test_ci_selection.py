@@ -13755,11 +13755,14 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 
 #: The `fast_shards` header block is the ONE place in the manifest that restates
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
-#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head —
-#: re-derive them with that verb rather than trusting them", and the same block had
-#: already gone stale twice before that promise was written (#11298 review cycle 5,
-#: #14015). A promise in prose is not a guard, so the sentence is graded against the
-#: live emission here instead.
+#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
+#: above — re-derive them with that verb rather than trusting them", and the same block
+#: had gone stale before this guard existed (#11298 review cycle 5, #14015, #14296) —
+#: and it has been caught going stale AGAIN since (#14434's and #14220's registrations
+#: each re-packed the bins), which is what this guard is for. ⛔ No tally is carried here
+#: on purpose: the number of times moves with every landing, so the instances are named
+#: and the count is left to whoever re-derives it. A promise in prose is not a
+#: guard, so the sentence is graded against the live emission here instead.
 #:
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
 #: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
@@ -13772,7 +13775,8 @@ _EMISSION_COUNT_WORDS = {
 _EMISSION_CLAUSE_RE = re.compile(
     r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
-_EMISSION_CEIL_RE = re.compile(r"`ceil\((?P<est>\d+\.\d)/60 x 2\)` = (?P<minutes>\d+) m")
+_EMISSION_CEIL_RE = re.compile(
+    r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -13783,6 +13787,19 @@ _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z]
 #: parents' sentences, and the readable clause was graded while that one was invisible.
 #: A figure nobody reads is the same no-op-gate class as a pattern that matches nothing.
 _EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
+#: A watch-minute DERIVATION, anchored on the OPERAND (`X.X/60`) rather than on a spelling.
+#: `_EMISSION_CEIL_RE` above reads exactly one spelling of it, so any other spelling in the block
+#: is a minute graded by NOTHING — the no-op-gate class `_EMISSION_UNREAD_SENTENCE_RE` covers on
+#: the partition side. Measured 2026-11-23 against the real manifest, with the partition untouched:
+#: `` `ceil(837.0/60 * 2)` = 29 m ``, `836.9/60 x 2 → 30 m` and the prose `… rounds 837.0/60 x 2.0
+#: up to 29 m` each kept BOTH rows green while the block claimed two different minutes. A first
+#: attempt matched `[x\u00d7X]` and `=|up to` and was itself spelling-bound (it missed `*`, `→`,
+#: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
+_EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
+_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
+#: How far past an operand its stated minute may sit. The manifest's own prose form —
+#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
+_DERIVATION_LOOKAHEAD = 60
 
 
 def _emission_names(phrase: str) -> set[str]:
@@ -13805,14 +13822,14 @@ def _emission_block_header(manifest_text: str) -> str:
     """The `fast_shards` block, bounded at the key and joined into one string.
 
     The subject is bounded to the header so a shard-count sentence elsewhere in the
-    1.18 MB map cannot be mistaken for this block's claim, and comment line breaks are
+    map cannot be mistaken for this block's claim, and comment line breaks are
     PRESENTATION — a sentence wraps at will — so the block is joined before reading it;
     otherwise a figure that happens to land on the next line makes a claim unread,
     which is the no-op-gate class this guard's own message names.
     """
     key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
     assert key is not None, (
-        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE 1.18 MB "
+        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE "
         "file rather than the block this guard claims to read — fail closed here instead of "
         "silently widening the subject a renamed key would hand it.")
     header = manifest_text[:key.start()]
@@ -13824,7 +13841,18 @@ def _emission_block_claims(
     """Read the `fast_shards` header block's stated emission.
 
     Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
-    states; `None` when the block (the text above the `fast_shards:` key) states none.
+    states; `None` when the block (the text above the `fast_shards:` key) states none, or
+    when it carries a correct `ceil(...)` derivation but no partition clause to grade.
+
+    ⛔ It RAISES rather than returning `None` on THREE conditions, so the caller reds with the
+    real reason instead of the generic "states no emission" message: an `AssertionError` if
+    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole map),
+    one if any `ceil(...)` multiplier is not
+    `ci_selection.WATCHDOG_HEADROOM` — the block would then state an arithmetic the code does
+    not perform — and one if an est this block GRADES is derived to a different minute in a
+    spelling `_EMISSION_CEIL_RE` cannot read (so that minute would be graded by nobody). The
+    headroom check runs BEFORE the empty-partition return on purpose, so a
+    wrong multiplier is never reported as an absent sentence.
     """
     header = _emission_block_header(manifest_text)
     groups: dict[float, set[str]] = {}
@@ -13851,10 +13879,72 @@ def _emission_block_claims(
         # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
         # test is not a reason to move a pinned count.
         groups[est] = groups[est] | names
-    ceil_match = _EMISSION_CEIL_RE.search(header)
-    if not groups or ceil_match is None:
+    ceil_matches = _EMISSION_CEIL_RE.findall(header)
+    if not ceil_matches:
         return None
-    return groups, float(ceil_match.group("est")), int(ceil_match.group("minutes"))
+    # The multiplier is `ci_selection.WATCHDOG_HEADROOM`, not a literal this guard owns. Read
+    # from the code so a change there REDS here with an accurate reason instead of returning
+    # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
+    # but it would send the next reader looking for a missing sentence rather than a moved
+    # constant). ⛔ This runs BEFORE the empty-`groups` check on purpose: a header carrying a
+    # wrong multiplier but NO partition clause must raise for the headroom, not fall down the
+    # generic `None` path this check exists to avoid. The `not ceil_matches` guard above stays
+    # ahead of it, because a block that states no derivation at all must read as `None` rather
+    # than being redded for a headroom it never used.
+    # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
+    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
+    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
+    headrooms = {float(h) for _est, h, _minutes in ceil_matches}
+    assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
+        f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
+        f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
+        "no longer states the code's own multiplier, so the figures beside it are not the ones "
+        "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    if not groups:
+        return None
+    est_str, _headroom, minutes_str = ceil_matches[0]
+    if len(ceil_matches) > 1:
+        # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
+        # doctrine as `<est X stated twice>` for the partition clauses, which also fires on an
+        # IDENTICAL second clause at one `est` (measured, not assumed). Here it needs its own arm
+        # because `.search()` used to take the FIRST match: measured 2026-11-23, a block stating
+        # both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH guard rows
+        # stayed green while the block visibly claimed two different minutes. That is exactly the
+        # shape a rebase produces (two sides of one paragraph interleaved).
+        #
+        # ⛔ This is deliberately ANY second clause, an exact restatement included, so that this
+        # helper has ONE rule for repeats rather than an exception nobody would remember — a block
+        # that states its derivation twice is redundancy in a paragraph this tight, whatever the
+        # two clauses say. Both shapes are pinned in the vacuity test.
+        groups = {est: names | {f"<ceil stated {len(ceil_matches)} times>"}
+                  for est, names in groups.items()}
+    else:
+        # ⛔ …and the ests this block GRADES must carry ONE minute in EVERY spelling they are
+        # derived in. A derivation `_EMISSION_CEIL_RE` cannot read is graded by nobody, so the
+        # block can claim two different watchdog minutes and still read as one.
+        #
+        # ⛔ Scoped to the GRADED ests — the partition's own operands plus the derived one —
+        # because the header legitimately quotes HISTORY at other operands (the S=10 paragraph's
+        # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
+        # is the one failure this check must not produce.
+        graded = {float(est_str)} | {float(est) for est in groups}
+        conflicting: dict[float, int] = {}
+        for operand in _EMISSION_DERIVATION_RE.finditer(header):
+            minute = _EMISSION_MINUTE_AFTER_RE.search(
+                header[operand.end():operand.end() + _DERIVATION_LOOKAHEAD])
+            if minute is None:
+                continue
+            est, stated = float(operand.group("est")), int(minute.group("minutes"))
+            if est in graded and stated != int(minutes_str):
+                conflicting[est] = stated
+        assert not conflicting, (
+            f"the block derives {sorted(conflicting)} s to {sorted(conflicting.values())} m in a "
+            f"spelling `_EMISSION_CEIL_RE` cannot read, but its graded clause says {minutes_str} m "
+            "— a derivation nothing grades is how a block claims two different watchdog minutes "
+            "and still reads as one. Spell every derivation of these ests the way "
+            "`_EMISSION_CEIL_RE` reads it, or delete the extra one.")
+    return groups, float(est_str), int(minutes_str)
 
 
 def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
@@ -13890,7 +13980,7 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
         f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
         "its figures; a carried emission is the class this block exists to warn "
-        "about (and that it has now gone stale on three times).")
+        "about — and the reason this guard grades it instead of trusting it.")
     assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
         "the block's watchdog derivation disagrees with the emission — stated "
         f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
@@ -13946,7 +14036,7 @@ def test_the_emission_block_guard_is_not_vacuous():
         "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
         "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
         "subject is not truncated at the key")
-    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the bound is
+    # A RENAMED key must not silently widen the subject to the whole file: the bound is
     # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
     # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
     # every shard-count sentence in the map and still return a readable claim. It fails closed on
@@ -13993,22 +14083,149 @@ def test_the_emission_block_guard_is_not_vacuous():
     assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
         "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
         f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
-    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
-    # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
-    # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
-    # branch could be deleted with both rows still green, and the map's other spelling
-    # would silently become an unread claim (the no-op-gate class this file keeps
-    # re-learning). Measured: neutering the pattern reds this assertion and nothing else.
-    ranged = _emission_block_claims(
-        "# nine shards at 721.8 s (a–e, g, i–k) and two at 721.7 s (f, h)\n"
+    # A SECOND `ceil(...)` clause is that same repeat one line over — and it was UNGRADED while the
+    # reader used `.search()`: measured 2026-11-23, a block stating both `ceil(836.4/60 x 2)` = 28 m
+    # and `= 29 m` returned `(836.4, 28)` and BOTH guard rows stayed green, so the block visibly
+    # claimed two different minutes and nothing redded. That is precisely the shape a rebase
+    # produces when it interleaves the two sides of one paragraph, so it needs its own witness.
+    duplicate_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 29 m\n\nfast_shards: 11\n")
+    assert duplicate_ceil is not None
+    # ⛔ The witness is the MARKER, and its paired NEGATIVE — not `partition != live_groups`. That
+    # comparison is satisfied by any live-emission drift as well, so it would stop witnessing the
+    # arm exactly when the block went stale (which it has been caught doing again since this
+    # guard landed — #14434's and #14220's registrations each re-packed the bins): an assertion
+    # that cannot fail for the
+    # reason it names is the class this file keeps re-learning. The single-clause block below
+    # proves the marker is caused by the duplicate.
+    assert all("<ceil stated 2 times>" in names for names in duplicate_ceil[0].values()), (
+        "the duplicate `ceil(...)` marker did not reach EVERY group — an arm that marks one group "
+        "and not the other still leaves a live-looking partition beside a marked one, and "
+        f"`next(iter(...))` would not have seen it: {duplicate_ceil[0]}")
+    single_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert single_ceil is not None and not any(
+        marker.startswith("<ceil")
+        for names in single_ceil[0].values() for marker in names), (
+        "ONE `ceil(...)` clause picked up the duplicate marker — the arm fires on the count of "
+        f"clauses, not on a repeat: {single_ceil[0]}")
+    # An EXACT restatement is a repeat too, and it is pinned rather than left to chance: the sibling
+    # `<est X stated twice>` arm also reds on an identical second clause at one `est` (measured), so
+    # the helper has ONE rule for repeats instead of an exception nobody would remember.
+    exact_repeat = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert exact_repeat is not None and all(
+        "<ceil stated 2 times>" in names for names in exact_repeat[0].values()), (
+        "an EXACT restatement of the derivation was read as one statement — the same repeat rule "
+        f"as the partition clauses must apply to every group: {exact_repeat[0]}")
+    # ⛔ A SECOND DERIVATION of a GRADED est in a spelling `_EMISSION_CEIL_RE` cannot read is the
+    # same false PASS one spelling over, and it is NOT covered by the repeat marker above: the
+    # marker counts canonical matches, so an alternate spelling is a minute nothing grades.
+    # Measured 2026-11-23 against the real manifest with the partition untouched (so only the
+    # minute could differ), each of these kept BOTH rows green before this check existed. The set
+    # deliberately includes `*` and `→` — the first attempt at this arm matched `[x×X]` and
+    # `=|up to` and was itself spelling-bound.
+    for alt_spelling in (
+            "# `ceil(836.4 / 60 x 2)` = 29 m\n",
+            "# `ceil(836.4/60 \u00d7 2)` = 29 m\n",
+            "# `ceil (836.4/60 X 2)` = 29 m\n",
+            "# `ceil(836.4/60 * 2)` = 29 m\n",
+            "# 836.4/60 x 2 \u2192 29 m\n",
+            "# 836.4/60 x 2 -> 29 m\n",
+            "# and `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 up to 29 m\n"):
+        with pytest.raises(AssertionError, match="derivation nothing grades"):
+            _emission_block_claims(
+                "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
+                "836.3 s (f, g, i)\n"
+                "# `ceil(836.4/60 x 2)` = 28 m\n" + alt_spelling + "\nfast_shards: 11\n")
+    # …and a derivation at an est the block's own PARTITION names is graded too: `836.3` below is a
+    # live group, so a conflicting minute on it must red rather than be excused as "historical".
+    with pytest.raises(AssertionError, match="derivation nothing grades"):
+        _emission_block_claims(
+            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+            "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
+    # …and the check is SCOPED to the est the block grades, so the header's historical derivation
+    # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
+    # about a tree that is not this one — must NOT red. Without this negative the arm could be
+    # satisfied by a pattern that simply rejects the manifest's real block.
+    historical = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n"
+        "# (an earlier split was 840.2 s, and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 "
+        "up to 29 m)\n\nfast_shards: 11\n")
+    assert historical is not None and (historical[1], historical[2]) == (836.4, 28), (
+        "a historical derivation at a DIFFERENT operand is legitimate prose about another tree "
+        f"and must not red: {historical}")
+    # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
+    # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
+    # it reds with that reason rather than reading as "no emission stated".
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims(
+            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+            "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
+    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
+    # never produce, and a string compare would produce it.
+    spelled = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
+    assert spelled is not None and (spelled[1], spelled[2]) == (836.4, 28), (
+        "`x 2.0` is the same multiplier as `x 2` and must read identically — a spelling-sensitive "
+        f"comparison would refuse a CORRECT block: {spelled}")
+    # A clause WRAPPED across two comment lines must still be read. The block itself wrapped exactly
+    # there at `2d57abb3e98c` (`… and two at` / `# 721.7 s (f, h)`), so without the comment-line join
+    # the `721.7` group is silently lost and the guard REDS A CORRECT BLOCK. Nothing else in this
+    # suite reaches the join branch, so without this fixture `re.sub(r"\n\s*#\s?", " ", …)` can be
+    # deleted with both rows still green (measured against the live manifest: identical claim).
+    wrapped = _emission_block_claims(
+        "# nine shards at 721.8 s (a–e, g, i–k) and two at\n"
+        "# 721.7 s (f, h)\n"
         "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
-    assert ranged is not None and ranged[0][721.8] == set("abcdegijk"), (
-        "the RANGE spelling this block used at `4ff7964acc`/`29a2da4c9c` is unread — an arm "
+    assert wrapped is not None and wrapped[0] == {
+        721.8: set("abcdegijk"), 721.7: {"f", "h"}}, (
+        "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
+        f"happens to land on the next line then makes a claim unread: {wrapped}")
+    # ⛔ ROUND 5 SPLIT THE GUARD, so BOTH halves of the split need a witness or the split is
+    # reversible with everything green. The measurement was taken BEFORE these two fixtures
+    # existed (restoring the pre-round-5 order left this suite at 2 passed, and deleting the
+    # `not groups` return did too); with them present BOTH mutants now red — which is the whole
+    # point, so the numbers are stated with the state they belong to rather than in the present
+    # tense, where a reader re-measuring here would get the opposite answer. These two fixtures
+    # carry a `ceil(...)` clause and NO partition clause — the shape that makes the two branches
+    # disagree.
+    #   1. wrong multiplier → MUST raise for the headroom, not fall down the generic `None` path
+    #      this check exists to avoid (that is the whole reason the assert now precedes the
+    #      empty-`groups` return);
+    #   2. correct multiplier → MUST be `None`, because the block states no emission to grade.
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims("# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    assert _emission_block_claims(
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n") is None, (
+        "a block with a correct derivation but NO partition clause states no emission to grade — "
+        "it must read as `None`, not as a claim")
+    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
+    # `29a2da4c9c` (`a–e, i, j`). ⛔ `wrapped` above reaches this same arm with the `a–e, g, i–k`
+    # mix, so this fixture deliberately uses the OTHER historical spelling — otherwise the two
+    # would be the same test twice, and the claim that it pins `29a2da4c9c`'s spelling would be
+    # prose about a string the file never contains (which is what an earlier cut of this comment
+    # did). ⛔ `ranged` is NOT the sole witness for the range arm: `wrapped` above reds on the same
+    # mutation (measured — deleting this fixture and neutering `_EMISSION_RANGE_RE` leaves one
+    # failure, at `wrapped`). It is kept as the single-line control that pins `29a2da4c9c`'s
+    # spelling specifically, and both assertions red when the pattern is neutered.
+    ranged = _emission_block_claims(
+        "# seven shards at 721.8 s (a–e, i, j) and two at 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert ranged is not None and ranged[0][721.8] == set("abcdeij"), (
+        "the RANGE spelling this block used at `29a2da4c9c` (`a–e, i, j`) is unread — an arm "
         "that only reads explicit lists turns the map's other spelling into an unread claim: "
         f"{ranged}")
     # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
-    # is not hypothetical: it is the shape the rebase onto `origin/main` actually produced at
-    # `b766b779af`, where the block held this branch's readable clause AND a stale one that
+    # is not hypothetical: it is the shape the rebase onto `origin/main` actually produced,
+    # where the block held this branch's readable clause AND a stale one that
     # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
     # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
     # stating two different emissions.
