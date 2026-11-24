@@ -1986,8 +1986,10 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
     writes `ok` / merge the previous record into every write": this pass FILES an
     entry, so it holds the claim AND attempted something, and the clearing arm pops
     the fields again after any merge — measured GREEN under that mutant, which made
-    the earlier sentence an unattributable catch. The Pi twin says the same thing for
-    the same reason (#14480 review, cycle 12 F3 / cycle 14 P3).
+    the earlier sentence an unattributable catch. The Pi twin reaches the same VERDICT
+    by a DIFFERENT route — its spool is EMPTY on purpose, so `attempted == 0` and that
+    `ok` write never executes at all — so its reasoning cannot simply be borrowed: two
+    legs, two mechanisms, one conclusion (#14480 review, cycle 12 F3 / cycle 14 P3).
     """
     root = tmp_path / "spool"
     root.mkdir(parents=True)

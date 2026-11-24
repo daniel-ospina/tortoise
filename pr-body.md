@@ -118,7 +118,7 @@ Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the
 All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
 (`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
 family count moves with `main` and is re-run rather than arithmetic'd from the last head. Cycle 13's
-two Python cases and cycle 14's one are folded in by re-running, not by adding: `69`→`71` and
+two Python cases are folded in by re-running, not by adding: `69`→`71` and
 `768`→`770` are the same two suites on the same tree, and `317`→`320` is the three new Pi rows
 (the `held`-contention row, the unreadable-landed-object row, and the `raced` row).
 
@@ -319,19 +319,15 @@ three rounds gave, and found one of them (the measurement's own verdict) could n
 | **P3 — F4** the Pi leg's `gone`/`done` retry was the ONE lost-race arm that did not `markRaced()`, so two exhausted attempts left `state` empty, the path empty and no record — and `flushSpool` then ran the whole pass UNCLAIMED and stamped `claimUnavailable` with the default reason *"the spool root cannot hold a claim"*, which is FALSE (the root is fine; the object moved). The Python leg fails closed in the same state. | **fixed**: `markRaced(); continue;` — one line, as the review predicted. A new row drives two `gone` retries through `acquireDrainClaim` and asserts `state.raced === true`; the consumer (`raced` → `heldByClaim`, not unclaimed) is already pinned by *"an unmakeable root is UNAVAILABLE, not a lost RACE"*. Verified RED (`actual: false, expected: true`). |
 | **P3 — F5** two record figures were not re-derived after cycle 12 moved the bytes: `pr-body.md:247` named `SWEEP_RESIDUE` as `(11901, "953c70c0…")` (the pin ships `(11911, "3e92044bab08cc3d")`), and the cycle-11 row's present-tense claim about the seam digest was contradicted by this body's own Residuals section. | **fixed by re-deriving, and by dating the figures**: the fold paragraph now states that `(11901, "953c70c0…")` is THAT FOLD's pair, not the pin to verify, and names `(11911, "3e92044bab08cc3d")` at the head this record ships; the cycle-11 row is now past tense ("then stated `932d74a2…` at that head") with this head's re-derived `fc1b7c71…` given beside it. A digest that is not quoted AT A HEAD is not a claim a reader can check. |
 
-**Cycle 14** (a fresh-context reviewer at `b249a7b8` — the cycle-13 fixes) — 1 **P2**, 1 P3.
+**Cycle 14** (a fresh-context reviewer at `c7c4d013` — the head after the cycle-13 fixes) — 5 P3,
+no mechanism defect: the round re-verified the durable-fact rule, the clear's `HELD`/`GONE`
+judgement, the measurement gate, the residue pin and the generation-33 digest by reading the code
+AND by running the named mutants, and found nothing to change there. Each item below is fixed at
+the source and each fix was verified RED under the mutation it prevents:
 
 | finding | disposition |
 |---|---|
-| **P2** the measurement could still not reach the finding it exists for: the winner's hold waited on markers written only AFTER a release, so two winners still deadlocked into `bounded: false` → NO VERDICT | **fixed at the barrier**: every process marks its ATTEMPT (won or lost, and `BARREN` too) BEFORE the hold, and the hold waits for `processes` attempts. A two-winner run now reaches the parent as `winners: 2, bounded: true, supported: false` and exits 0 — pinned by a row that drives real subprocesses against a stubbed two-holder protocol (a receipt alone was not enough: it asserted a state the producer could not emit). |
-| **P3-minor** `withClaimTerm`'s doc block had been left attached to the function that now precedes it (`applyClaimPolicy`), so the operator-line function — the PR's headline claim — carried no doc comment, and a hover on the policy showed two blocks describing different functions | ⛔ **NOT fixed in that round, and not recorded by it** — an honest gap rather than a fixed row: the round's fix commit closed the P2 and left this one standing, so the log stopped at cycle 13 and a reader could not tell the finding had been raised at all. Fixed in cycle 15 (row below), which is also where the missing record is supplied. |
-
-**Cycle 15** (a fresh-context reviewer at `c7c4d013` — the cycle-14 fixes) — 5 P3, no mechanism
-defect. Each is fixed at the source and each fix was verified RED under the mutation it prevents:
-
-| finding | disposition |
-|---|---|
-| **P3** `withClaimTerm`'s doc block was *still* stacked above `applyClaimPolicy` at `c7c4d013` (cycle 14's F2 was unrecorded and unfixed — the record's log stopped at cycle 13) | **fixed**: the block sits above `withClaimTerm` again, and cycle 14 now has its own row above. |
+| **P3** `withClaimTerm`'s doc block was stacked above `applyClaimPolicy`, so the operator-line function — this PR's headline claim — carried no doc comment and a hover on the policy showed two blocks describing different functions. ⛔ The finding had been RAISED BY MORE THAN ONE EARLIER ROUND and left unfixed, and **no row in this log recorded it** (verified: `grep -n withClaimTerm pr-body.md` matched only the cycle-10 P1 row, which is about the parity pin, not this) — so the log's silence is corrected here rather than being attributed to a round whose table cannot carry it. | **fixed**: the block sits above `withClaimTerm` again; `applyClaimPolicy` keeps only its own. |
 | **P3** the two legs wrote DIFFERENT `claim_unavailable_reason` values for the same pass when the reason was `""` — Python tested truthiness (`""` defaulted), the Pi leg tested nullish (`""` written verbatim) — a divergence in a SHARED on-disk record, in the predicate class `client_captured_at_source` was fixed for in this same file | **fixed**: both use truthiness, and a `("", unavailable)` row is added to BOTH cross-leg matrices. Verified: flipping either leg back to nullish reds the parity row on that leg. |
 | **P3** `test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact` (Python) named a mutant that cannot red it (the clearing arm pops the fields again afterwards), while its Pi twin documented exactly that defect — an R6-class disagreement IN WRITING about the same row | **fixed**: the docstring names the mutant that does red it — deleting the `elif held_claim:` clearing arm — with the reason the merge-the-prior-record mutant is green, mirroring the Pi twin. Verified RED. |
 | **P3** the record's cycle-13 Python-case count said "four" while the same sentence's own arithmetic said `+2` | **fixed**: "two", re-counted from `git show … | grep -c '^+def test_'`. |
