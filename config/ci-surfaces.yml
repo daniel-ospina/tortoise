@@ -2039,7 +2039,8 @@ surfaces:
   # `core` below, because this PR gave that file a FOURTH guarded subject,
   # `tools/reap_empty_test_graphs.py`, which matches NO `SOURCE_PATTERNS` row: a
   # `tools/` path is in `NON_PYTHON_PREFIXES`, so the `api` row alone left the
-  # reaper's own 97 tests (its four refusals and `TestMemoryDelta`) UNRUN on a
+  # reaper's own 91 tests (its four refusals and `TestMemoryDelta`; measured
+  # at this head with `--collect-only`, never carried) UNRUN on a
   # reap-tool-only diff — the fail-open direction that file's own comment names.
   # Dual registration is the #14407 precedent, and `fast_pool()` carries it once,
   # so the graded partition is unmoved by the second row.
