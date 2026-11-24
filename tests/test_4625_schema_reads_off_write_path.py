@@ -1,0 +1,272 @@
+"""#4625 — a record write performs ZERO filesystem operations on the migrations.
+
+WHAT THIS PINS, and what each pin would RED on.
+
+The production defect (`Measured at: e74cf1d13da76ba7176c73ebacd96cef843378f5`,
+hosted `tortoise-y4mjjq`): a record write was caught inside
+`replay_plan → _jsonb_or_scalar → jsonb_columns → _jsonb_columns_for_dir →
+_declared_types_for_dir → pathlib.read_text`, on the single serving thread, inside
+a **52.406 s** loop block (`loop_blocks.max_age_s`), with `capture.in_flight
+16/16` and `capacity_refused_total 152` in the same window.
+
+The mechanism measured for this lane, in-process, is the SCHEMA CACHE SHAPE and
+not a volatile fingerprint (`_migrations_fingerprint` over the unchanged
+directory returns an equal tuple across calls, and the production stack does not
+reach it at all — that frame chain is guarded by a 5 s TTL, not a fingerprint).
+So the property the fix establishes is stated as a count, not a timing:
+
+    a WARM process serving a record write touches no migration file — no
+    `read_text`, no `open`, no `stat`, no `exists`.
+
+That is what these pins assert. A wall-clock number beside an assertion re-stales
+against the run it came from, and the census bar elsewhere in this repo says the
+same thing for the same reason.
+
+⛔ WHY THIS IS NOT "CACHE FOREVER AND HOPE". The freshness the old TTL and the
+per-call fingerprint bought is now a VERB: `_release_schema_cache()` and
+`_jsonb_cache_clear()`. `test_the_refresh_verb_re_resolves_the_resident_schema`
+pins both halves — that the resident schema is NOT re-checked per call (the
+fix), and that an explicit refresh DOES see an edit (what is still guaranteed) —
+so a future edit cannot keep the fix and silently drop the refresh.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tortoise import record_projection as rp
+
+
+def _real_migrations() -> Path:
+    """The migrations the PROCESS would read — `_migrations_dir()`'s own answer.
+
+    ⛔ NOT a second derivation of the repo path (#4625 review): a constant built
+    from `__file__` agrees with `_migrations_dir()` only while that resolver
+    picks the checkout, so an installed wheel would have this file copying
+    `supabase/migrations` while the process reads `PACKAGED_MIGRATIONS` — the
+    tests green over a tree nothing reads.
+    """
+    return rp._migrations_dir()
+
+
+#: A record shape the projection plans end-to-end. `props` carries a string, so
+#: the plan runs the `jsonb` encoding leg (`_jsonb_or_scalar`) — the frame the
+#: production stack caught — and not only the column/refusal readers.
+RECORD: dict[str, Any] = {
+    "type": "PointAdded",
+    "id": "p-4625",
+    "seq": 1,
+    "point": {
+        "id": "p-4625",
+        "title": "the schema read",
+        "kind": "concept",
+        "status": "active",
+        "labels": ["a"],
+        "properties": {"note": "a string parameter"},
+    },
+}
+
+
+def _plan() -> None:
+    """One record write's plan — the whole projection side of a record.
+
+    `replay_plan` and not `replay`: the DB half of a write is a different
+    surface (#14022's allocator, the tenant GUC) and nothing here is about it.
+    """
+    rp.replay_plan([RECORD], org_id="org-4625", graph_id="graph-4625",
+                   position=False)
+
+
+def _tree(base: Path) -> Path:
+    """A copy of the record migrations the process reads, so a parse is a real one."""
+    source = _real_migrations()
+    target = base / "migrations"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in rp.RECORD_MIGRATIONS:
+        shutil.copy(source / name, target / name)
+    return target
+
+
+@pytest.fixture()
+def fs_ops(monkeypatch) -> list[str]:
+    """Every filesystem operation made ON THE MIGRATION FILES, by name.
+
+    Four entry points, because "read" is not the only way a write path can touch
+    the schema: `read_text`/`open` are the read, `stat`/`exists` are the
+    fingerprint pass. `Path.exists` and `Path.stat` both call through
+    `os.stat`, so a probe that counted only `read_text` would report a warm path
+    as clean while it stat-ed twenty files per record — which is exactly the
+    cheaper half of this defect.
+    """
+    base = rp._migrations_dir()
+    roots = {str(base), str(base.resolve())}
+
+    def _inside(path: Any) -> bool:
+        text = str(path)
+        return any(text == root or text.startswith(root + os.sep) for root in roots)
+
+    ops: list[str] = []
+    for attr in ("read_text", "open", "stat", "exists"):
+        real = getattr(Path, attr)
+
+        def probe(self, *args: Any, _real=real, _attr=attr, **kwargs: Any):
+            if _inside(self):
+                ops.append(f"{_attr}:{Path(str(self)).name}")
+            return _real(self, *args, **kwargs)
+
+        probe.__name__ = attr
+        monkeypatch.setattr(Path, attr, probe)
+    return ops
+
+
+def test_a_warm_record_write_performs_no_migration_filesystem_operation(fs_ops):
+    """THE PIN: the second and every later record write touches no file.
+
+    WHY THE COLD BUILD IS ASSERTED FIRST: a probe that never records anything is
+    indistinguishable from a fix, and this suite would then pass over a process
+    whose schema resolution had moved somewhere the probe cannot see. So the
+    cold plan must be SEEN to read (it is the one resolution a process pays), and
+    every plan after it must be silent.
+
+    FALSIFIER (executed — see the PR body): restoring
+    `key = (str(migrations_dir or _migrations_dir()), _migrations_fingerprint(…))`
+    in `_schema_entry` reds this with a non-empty `fs_ops` naming
+    `stat:`/`exists:` per migration, and restoring the 5 s TTL in
+    `jsonb_columns` reds it with `read_text:`/`open:` per migration.
+    """
+    rp._release_schema_cache()
+    rp._jsonb_cache_clear()
+    _plan()
+    assert fs_ops, (
+        "the FIRST plan build of a fresh process touched no migration file — "
+        "the probe is not observing the schema resolution at all, so the "
+        "assertion below would pass over any implementation")
+    del fs_ops[:]
+    for _ in range(3):
+        _plan()
+    assert fs_ops == [], (
+        "a WARM process re-touched the migration files while writing a record: "
+        f"{sorted(set(fs_ops))} ({len(fs_ops)} operation(s) for 3 records). The "
+        "schema is baked into the deployed image (`migrations_source: "
+        "\"checkout\"`), so this buys nothing a redeploy would not deliver — and "
+        "on the single serving thread it is what held the loop for 52.406 s "
+        "(#4625). Resolve the schema once; refresh through "
+        "`_release_schema_cache()` / `_jsonb_cache_clear()`.")
+
+
+def test_the_write_path_never_fingerprints_the_migrations(monkeypatch):
+    """The stat half of the same property, pinned structurally.
+
+    A count of `stat` calls can be satisfied by a fingerprint that happens to be
+    memoised elsewhere; a fingerprint that RAISES cannot. So the resident path is
+    warmed first and the fingerprint is then poisoned: a record write must
+    complete without ever asking the filesystem which files it has.
+    """
+    rp._release_schema_cache()
+    _plan()  # the one resolution this process pays
+
+    def _poison(base: Path) -> tuple:
+        raise AssertionError(
+            "a record write consulted _migrations_fingerprint — the schema was "
+            "revalidated against the FILESYSTEM on the write path (#4625)")
+
+    monkeypatch.setattr(rp, "_migrations_fingerprint", _poison)
+    # ⛔ POSITIVE CONTROL FIRST: the poison must be REACHABLE, or the silence
+    # below is about a patch that never applied rather than about the resident
+    # path. An explicit-directory read DOES take the fingerprint, so it must
+    # raise the poison's own message.
+    with pytest.raises(AssertionError, match="revalidated against the FILESYSTEM"):
+        rp.table_columns(_real_migrations())
+    _plan()
+    _plan()
+
+
+def test_the_refresh_verb_re_resolves_the_resident_schema(monkeypatch, tmp_path):
+    """BOTH HALVES OF THE TRADE, so neither can be dropped on its own.
+
+    1. An edit to the files of a RUNNING process is NOT seen by its next record.
+       That is the deliberate cost of the fix (and it is why the deployed
+       immutability matters), stated here rather than left to be discovered.
+    2. An explicit refresh IS seen. `_release_schema_cache()` is the verb the
+       S6 surface (`#9558`) and every dev/test editing session depend on, and a
+       future change that keeps (1) and loses (2) would red here rather than
+       quietly turn "resolve once" into "never".
+    """
+    tree = _tree(tmp_path)
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        assert "refresh_probe_column" not in rp.table_columns()["point"]
+        target = tree / rp.RECORD_MIGRATIONS[-1]
+        target.write_text(
+            target.read_text(encoding="utf-8")
+            + "ALTER TABLE public.point ADD COLUMN refresh_probe_column text;\n",
+            encoding="utf-8")
+        assert "refresh_probe_column" not in rp.table_columns()["point"], (
+            "an edit to the migrations was seen by the RESIDENT read without a "
+            "refresh — then the read is not resolved once, and #4625's cost is "
+            "still on the write path")
+        rp._release_schema_cache()
+        assert "refresh_probe_column" in rp.table_columns()["point"], (
+            "`_release_schema_cache()` did not re-resolve the resident schema — "
+            "the refresh verb is the ONLY way a running process may see an "
+            "edited migration now, so losing it makes the cache unfalsifiable")
+    finally:
+        rp._release_schema_cache()
+
+
+def test_a_named_directory_is_still_revalidated_per_call(tmp_path):
+    """The OTHER mode of `_schema_entry`, pinned so the split is not tidied away.
+
+    Every S6 pin (`tests/test_9558_record_write_cost.py`) drives an EXPLICIT
+    directory and depends on file-level invalidation with no refresh verb. That
+    mode is what a tool asking "what does THIS tree say right now" needs, and it
+    is the mode a later simplification is most likely to delete in the name of
+    "resolve once". It is pinned here at the seam rather than only through its
+    consequences.
+    """
+    tree = _tree(tmp_path)
+    rp._release_schema_cache()
+    try:
+        assert "direct_probe_column" not in rp.table_columns(tree)["point"]
+        target = tree / rp.RECORD_MIGRATIONS[-1]
+        target.write_text(
+            target.read_text(encoding="utf-8")
+            + "ALTER TABLE public.point ADD COLUMN direct_probe_column text;\n",
+            encoding="utf-8")
+        assert "direct_probe_column" in rp.table_columns(tree)["point"], (
+            "an EXPLICIT migrations directory was served from a stale parse — "
+            "the fingerprint mode that `#9558`'s edit-detection pins depend on "
+            "is gone")
+    finally:
+        # …and no entry keyed to a `tmp_path` outlives this test: the cache is
+        # process-global, so leaving one behind hands the next test a tree that
+        # no longer exists.
+        rp._release_schema_cache()
+
+
+def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops):
+    """The exact frame the production stack caught, pinned on its own.
+
+    `jsonb_columns()` is called once per STRING PARAMETER of every statement, so
+    it was guarded by a 5 s TTL — and a TTL that expires re-reads twenty files.
+    The production stack is that expiry, seen from inside `replay_plan`
+    (`record_projection.py:2608 → :2524 → :2481 → pathlib.py:1027 read_text` at
+    `e74cf1d13d`). It must now be a dict lookup.
+    """
+    rp._release_schema_cache()
+    rp._jsonb_cache_clear()
+    rp.jsonb_columns()
+    assert fs_ops, "the cold read touched nothing — the probe proves nothing"
+    del fs_ops[:]
+    for _ in range(3):
+        rp.jsonb_columns()
+    assert fs_ops == [], (
+        "`jsonb_columns()` re-read the migration files on a warm process: "
+        f"{sorted(set(fs_ops))} — this is the #4625 stack frame, and it runs "
+        "once per bound string parameter of every statement")
