@@ -134,7 +134,7 @@ version: 1
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 -> 837.7 s). So NO arithmetic on the
+# reading of this pool while the seconds moved under it (835.5 -> 837.9 s). So NO arithmetic on the
 # minute can catch a carried figure - only the `est_seconds` partition can, which is why the
 # sentence is GRADED above instead of trusted.
 #
@@ -149,17 +149,17 @@ version: 1
 #
 # That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `i`) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# shard `i`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# shard `j` at this head) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# shard `j` at this head) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
 # one main fold from rounding again.
 # The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
 # a measurement, never an inference from a neighbouring row): #14409's
-# `tests/test_14371_offline_embed_json.py` (shard k), #14434's `tests/test_7879_record_chain.py`
-# (shard i), #14220's `tests/test_14186_embedder_seam_batching.py` (shard f), #14423's
-# `tests/test_14350_drain_convergence.py` (shard d), #14038's
-# `tests/test_13998_capacity_notice.py` (shard i) and #14429's
-# `tests/test_spool_drain_rehearsal.py` (shard i) - FIVE of them on top of #14038's row, which the
+# `tests/test_14371_offline_embed_json.py` (shard c), #14434's `tests/test_7879_record_chain.py`
+# (shard j), #14220's `tests/test_14186_embedder_seam_batching.py` (shard g), #14423's
+# `tests/test_14350_drain_convergence.py` (shard e), #14038's
+# `tests/test_13998_capacity_notice.py` (shard j) and #14429's
+# `tests/test_spool_drain_rehearsal.py` (shard j) - FIVE of them on top of #14038's row, which the
 # 836.4 s baseline below
 # already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
 # it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
