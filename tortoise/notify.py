@@ -27,12 +27,21 @@ different decisions and had drifted apart:
 
 * :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
   incident lifecycle, so the store's create-once path files the issue AND emits
-  the episode's first push, and the message names the issue. While the episode
-  stays OPEN it re-alarms at most once per
+  the episode's first push, and the message names the issue. While the delivery
+  window HOLDS it re-alarms at most once per
   :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
   carries one (a placeholder or a post-close tombstone has no number, and the
-  message says so instead); the engine closes the incident and re-arms delivery
-  at episode end.
+  message says so instead); the episode-end release re-arms it for the RULE-episode
+  kinds — including a close that RAISES or is backing off, unless the sibling
+  episode kind answers ``SKIPPED_WINDOW`` in the same call (the flag is per CALL
+  and not per kind) — and a failed send re-arms ANY kind, kind-agnostically.
+  ``abuse_suspended`` has no rule episode, so no episode end ever re-arms its
+  window. So a window is what a message
+  SPENDS, and where releases fire often enough the effective bound is per
+  EPISODE, not per window. At episode end the engine closes the RULE-episode
+  kinds' incidents — once their recovery window is satisfied — and re-arms their
+  delivery wherever that close's gate permits; ``abuse_suspended`` witnesses
+  neither.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
   digest rather than one message per detector window.
@@ -100,11 +109,19 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
-#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open — the reminder names the
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` **while the delivery window holds** — re-armed
+#: for the RULE-episode kinds by the episode-end release (including a close that
+#: RAISES or is backing off, unless the sibling episode kind answers
+#: ``SKIPPED_WINDOW`` in the same call, the flag being per CALL and not per kind),
+#: and for ANY kind kind-agnostically by a failed send — ``abuse_suspended`` is
+#: excluded from ``_EPISODE_INCIDENT_KINDS``, so no episode end ever re-arms its
+#: window — so a flapping rule can page once per crossing — and the reminder
+#: names the
 #: issue when the sentinel carries one, says `an open incident with no issue
 #: number on record` when it does not, and says the number `could not be read
-#: just now` when the read itself raised — and one ✅ close at episode end,
-#: never one message per detection.
+#: just now` when the read itself raised — and one ✅ close at episode end for the
+#: RULE-episode kinds (``abuse_suspended`` has no rule episode, so it gets no
+#: close), never one message per detection.
 #: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
 #: nothing at all, which is how an alert arriving in the owner's chat could be
 #: attributed by no issue, no runbook and no search.
@@ -171,20 +188,50 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
     where this ledger is the only delivery there is.
 
     Returning BOTH vocabularies per incident kind costs one dict walk and makes
-    the release independent of which spelling a caller used — the bound is the
-    episode (``#4872``/R2), and an episode end must never leave a stale window
-    behind in any spelling.
+    the release independent of which spelling a caller used — an episode end
+    releases the window whatever spelling armed it, and must never leave a stale
+    window behind in any spelling.
     """
     kinds = list(_EPISODE_INCIDENT_KINDS)
     kinds.extend(event for event, incident in _INCIDENT_KIND_OF_EVENT.items()
                  if incident in _EPISODE_INCIDENT_KINDS and event not in kinds)
     return tuple(kinds)
 
-#: Delivery windows (#14407). One message per ``(kind, subject)`` per window.
+#: Delivery windows (#14407). One message per ``(kind, subject)`` per window —
+#: ⛔ WITH TWO SHAPES AS THE EXCEPTION, and only for the two RULE-EPISODE kinds:
+#: in the NO-INCIDENT-CHANNEL fallback a confirmed episode end re-arms the ledger
+#: unconditionally, so THERE the bound for a rule that flaps is one message per
+#: episode (one per crossing for an alternating rule, which is the pre-fix rate),
+#: and that window is the ceiling only for a CONTINUOUSLY breaching subject — or
+#: for an episode end the engine cannot observe, where the armed window FOLDS the
+#: new episode (the residual below). On the STORE path the release is gated on the
+#: store's ``SKIPPED_WINDOW``, unsatisfied until ``DR_RECOVERY_STREAK`` consecutive
+#: clean observations — so WHERE THAT GATE APPLIES an alternating rule stays
+#: inside the window and the 24h bound holds (measured, default config: 24
+#: alternating evaluations over 36h = 2 pushes store-side, 12 no-channel). It is
+#: not a universal: a resolve leg that raises or answers ``CloseCooldown`` leaves
+#: ``skipped_window`` false and pops the ledger at that episode end (measured: 6
+#: crossings = 6 messages, with ONE incident kind on record), and
+#: ``ALERT_RECOVERY_STREAK=1`` does the same. ⛔ ``skipped_window`` is ONE flag for
+#: the whole CALL, not per kind, so that pop is conditional a second way: a raise
+#: on one episode kind does NOT pop the ledger when ANOTHER episode kind answers
+#: ``SKIPPED_WINDOW`` in the same call (reproduced: raise for one kind,
+#: ``SKIPPED_WINDOW`` for the other — the ledger stays armed).
+#: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
+#: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
+#: kind-agnostic per-outcome releases (a LIFTED suppression, a filing whose issue
+#: issue-number read-back failed, a failed send) and by the ledger's own cap eviction (``_enforce_delivery_cap``
+#: drops the soonest-to-expire LIVE keys once the population passes
+#: ``_MAX_DELIVERY_KEYS``), so a second suspension of the same subject inside 24h
+#: is normally folded — but it IS delivered when one of those fires in between (the
+#: lifted-suppression arm: two messages inside one window, no episode end).
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
-#: RE-ALARM bound while the episode stays open (the `DEDUP` outcome). 24h keeps a
+#: RE-ALARM bound while the delivery **window HOLDS** (the `DEDUP` outcome) — not
+#: while the episode stays open, which the episode-end release breaks wherever its
+#: gate permits and every kind-agnostic per-outcome release breaks outright (the
+#: shapes above state both). 24h keeps a
 #: persistent breach from going silent without paging a human every window: the
 #: pre-fix code re-paged hourly (``_claim_notify``'s window expiry) for a breach
 #: that was already tracked by ONE issue, so a single org over its R1 threshold
@@ -198,8 +245,12 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: `latest_flag_at() is None` read: the same read returns None for a flag this
 #: process just wrote when the read is stale (#3631), and releasing on it re-pages
 #: per detection and can close the incident of an org still over threshold. The
-#: runbook row names the manual close. The same window bounds the
-#: no-incident-channel fallback, where it is the only bound there is.
+#: runbook row names the manual close. In the NO-INCIDENT-CHANNEL fallback this
+#: window is NOT the bound: the ledger is the only delivery there is and a
+#: confirmed episode end re-arms it unconditionally, so the bound is per episode
+#: (see `resolve_abuse_episode`) and this ceiling applies only to a continuously
+#: breaching subject — or where the engine could not observe the episode end, in
+#: which case the armed window folds the new episode (the residual above).
 #:
 #: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
 #: detector cadence — R3 re-arms every 5 minutes (288 detections/day at
@@ -567,16 +618,29 @@ def _enforce_delivery_cap(now: float) -> None:
 
 
 def release_abuse_delivery(kind: str, subject: str) -> None:
-    """Re-arm delivery for a ``(kind, subject)`` — the EPISODE ended (#14407).
+    """Re-arm the DELIVERY window for a ``(kind, subject)`` (#14407).
 
-    The bound is the episode, never a wall-clock cooldown: a genuinely new
-    episode must alert at once, and only the engine knows a rule's window went
-    clean (``AbuseEngine._evaluate``). Without this release a long-lived fallback
-    window would mute the second episode — the direction a security signal must
-    never fail in (#4872).
+    A window is what a delivery SPENDS, not what bounds the episode: while no
+    release fires, a continuously breaching subject
+    re-alarms at most once per ``_INCIDENT_DELIVERY_WINDOW_S``, and any release
+    ends that window so the next message goes out at once — which is why on the
+    no-incident-channel path a flapping rule's bound is per EPISODE (measured: 12
+    messages in 36 h over 24 alternating evaluations), not per window. Only the engine knows
+    a rule's window went clean (``AbuseEngine._evaluate``), so without the
+    episode-end release a long-lived fallback window would mute the second
+    episode — the direction a security signal must never fail in (#4872).
 
     Released on the episode end the engine OBSERVES (the clean window that
-    persisted ``flag_clear``, plus its bounded retry). An episode cleared out of
+    persisted ``flag_clear``, plus its bounded retry, and equally a close that
+    RAISES or is backing off — that leaves ``skipped_window`` false UNLESS another
+    episode kind answers ``SKIPPED_WINDOW`` in the same call, the flag being per
+    CALL and not per kind, so the gate normally does not hold) — and,
+    kind-agnostically, by the per-outcome releases (a lifted
+    suppression, a filing whose issue-number read-back failed, a failed
+    send), which is why a
+    flapping rule can page once per crossing. The failed-close release is NOT in
+    that kind-agnostic set: it loops ``_episode_delivery_kinds()``, which excludes
+    ``abuse_suspended``. An episode cleared out of
     band — the ``abuse_unsuspend`` SQL function, a manual ``flag_clear`` — is not
     observed, so its window stays armed and a new episode inside it is folded;
     the reminder at the window's end still fires and names the open issue. That
@@ -642,14 +706,33 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # removes, and a stale OPEN incident is visible while a wrong ✅ is not. The
     # runbook row names the legacy path as the manual close.
     subjects = (subject,)
-    # The DELIVERY window is re-armed only by a CONFIRMED episode end — see the
-    # `skipped_window` gate below. A release on every clean evaluation would
+    # The DELIVERY window is re-armed by a CONFIRMED episode end OR by a
+    # kind-agnostic per-outcome release (a lifted suppression, a filing whose issue
+    # issue-number read-back failed) —
+    # but not by an ordinary clean evaluation: see the `skipped_window` gate below. A release on every clean evaluation would
     # undo the episode bound for a rule that hovers at its threshold: each
     # crossing would re-arm the ledger and page a reminder, so the 24h reminder
     # window would degenerate back into one message per crossing.
     #
-    # The no-channel shape keeps the old behaviour below (the ledger is local
-    # and is the ONLY delivery there is, so an ended episode must re-arm it).
+    # The no-channel shape re-arms the ledger on EVERY confirmed episode end
+    # (below), because the ledger is local and is the ONLY delivery there is —
+    # with no store there is no `skipped_window` gate to hold it. ⛔ THE BOUND
+    # THAT FOLLOWS IS PER EPISODE, NOT PER 24h, and every claim about this path
+    # says so (round 5, P2): a rule that flaps pages once per episode — measured
+    # 12 messages in 36 h over 24 alternating evaluations — while a continuously
+    # breaching org stays at the one-per-window bound, and so does a NEW episode
+    # whose predecessor's end the engine could not observe — it is FOLDED into the
+    # armed window (the residual documented on _INCIDENT_DELIVERY_WINDOW_S).
+    #
+    # ⛔ AND THE FLAPPING VOLUME IS NOT IMPROVED HERE, which an earlier cut of
+    # this comment wrongly claimed: for an ALTERNATING rule one episode spans
+    # exactly one detection, and pre-#14407 released its claim on every clean
+    # window too (`_release_notify(… EVENT_FLAG)` gated only on `ended`), so a
+    # flap pages once per crossing in BOTH worlds. What this shape improves is
+    # (a) ATTRIBUTION — the message now names the missing incident channel instead
+    # of saying nothing — and (b) the CONTINUOUSLY breaching rate (pre-fix one per
+    # engine window, now one per 24h). The flapping rate is unchanged and is
+    # stated as unchanged rather than sold as a win.
     store, reason = _abuse_alert_store()
     if store is None:
         for kind in _episode_delivery_kinds():
@@ -846,8 +929,15 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     ``DEDUP`` means the human was already told for this incident and the issue is
     live: repeats inside the delivery window are folded (the store records them
     on the ISSUE, agent-visible, bounded to one a day by #12243), and at most one
-    RE-ALARM per window is sent while the episode stays open so a persistent
-    breach cannot go silent. ``SUPPRESSED`` means an operator paused the kind in
+    RE-ALARM per window is sent while those folds hold so a persistent
+    breach cannot go silent. The window is the LEDGER's, not the episode's: for
+    the RULE-episode kinds the episode-end release re-arms it — including a close
+    that RAISES or is backing off, unless the sibling episode kind answers
+    ``SKIPPED_WINDOW`` in the same call (the flag is per CALL and not per kind) —
+    and a failed send re-arms ANY kind, kind-agnostically (``abuse_suspended``
+    has no rule episode, so no episode end ever re-arms its window), so a rule
+    that flaps can page once per crossing.
+    ``SUPPRESSED`` means an operator paused the kind in
     ``ops/suppression.json`` — an explicit decision, which is honoured.
 
     When no incident can be established at all the message is delivered ANYWAY,
@@ -936,8 +1026,14 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         reason=f"{reason}{tail}")
                 return
         else:
-            # The bound is the EPISODE, with a bounded RE-ALARM, and both are the
-            # delivery ledger's (`_claim_delivery`). Arm the window here on EVERY
+            # While the ledger stays ARMED the bound is the WINDOW, with a bounded
+            # RE-ALARM, and the ledger is what holds it (`_claim_delivery`) — but
+            # an armed window is not the bound of an EPISODE: a release ends it
+            # (that is the point of `release_abuse_delivery`), and store-side a
+            # close that raises or backs off fires one at every episode end
+            # (`_INCIDENT_DELIVERY_WINDOW_S`: "not a universal … measured: 6
+            # crossings = 6 messages"), so do not restate this as a flat bound.
+            # Arm the window here on EVERY
             # outcome so the first repeat cannot page again in the same minute:
             # the create-once path has already pushed the episode's first message
             # when it FILED, and on DEDUP the ledger alone decides whether the
@@ -956,14 +1052,45 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             except Exception:  # noqa: BLE001, RUF100 — NEVER raise from the alert path
                 number_known = False
             if outcome is OpenOutcome.DEDUP and deliver:
-                # A persistent breach must not go silent: an episode that stays
-                # open re-alarms at most once per window, and the message NAMES
-                # the incident so the human can see it is the same one — the
-                # pre-fix code pushed every window with no reference at all.
+                # A persistent breach must not go silent: an episode whose
+                # delivery window still HOLDS re-alarms at most once per window,
+                # and the message NAMES the incident so the human can see it is
+                # the same one — the pre-fix code pushed every window with no
+                # reference at all. The window is the LEDGER's, not the episode's:
+                # for the RULE-episode kinds the episode-end release re-arms it —
+                # including a close that RAISES or is backing off, unless the
+                # sibling episode kind answers `SKIPPED_WINDOW` in the same call
+                # (the flag is per CALL and not per kind) — and a failed send
+                # re-arms ANY kind, kind-agnostically (`abuse_suspended` has no
+                # rule episode), so a flapping rule can page once per crossing.
                 ref = (f"issue #{number}" if number
                        else ("an open incident whose issue number could not be "
                              "read just now" if not number_known
                              else "an open incident with no issue number on record"))
+                # ⛔ The re-arm clause is RENDERED from the tuple, never restated
+                # (round 13, P2). This arm is reached for EVERY member of
+                # :data:`ABUSE_INCIDENT_KINDS`, and ``abuse_suspended`` is one of
+                # them — but it is deliberately EXCLUDED from
+                # :data:`_EPISODE_INCIDENT_KINDS` (it records an operator
+                # decision, not a rule's flag window), so NO episode end ever runs
+                # for it and no close can therefore FAIL or back off. The flat
+                # sentence told an operator holding a suspension reminder to look
+                # for a failed close that cannot exist for that kind, and at "a
+                # rule that flaps", which is not what a suspension is. This is the
+                # surface the human READS; the log line in
+                # :func:`_deliver_unattributed` already derives its clause this
+                # way, and the two must not diverge again.
+                re_arm_note = (
+                    "a close that FAILS or is backing off (a cooldown) can "
+                    "re-arm it, as can a LIFTED suppression, a filing whose "
+                    "issue-number read-back failed, or a FAILED SEND, so a "
+                    "rule that flaps can page once per crossing"
+                    if kind in _episode_delivery_kinds() else
+                    "this kind has NO rule episode, so no episode end ever "
+                    "re-arms it; a LIFTED suppression, a filing whose "
+                    "issue-number read-back failed, a FAILED SEND or the "
+                    "ledger's own cap eviction can end the window early"
+                )
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
                 chat_id = _env("TELEGRAM_CHAT_ID")
                 channel_ok = not (
@@ -973,9 +1100,18 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         kind, org_id, details,
                         attribution=(f"Still open — {ref}. One reminder per "
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
-                                     "while the episode stays open; repeats "
-                                     "inside that window are folded (the issue "
-                                     "comment trail is the recurrence record)."),
+                                     "while the delivery window holds; "
+                                     f"{re_arm_note}. Repeats inside a held "
+                                     "window are folded"
+                                     # ⛔ ONLY the arm that NAMES an issue may
+                                     # point at its comment trail (round 5, P2):
+                                     # the two number-less arms say in the same
+                                     # sentence that there is no issue number, so
+                                     # a pointer to "the issue comment trail"
+                                     # referenced a record that does not exist —
+                                     # the over-claiming class this PR removes.
+                                     + (" (the issue comment trail is the "
+                                        "recurrence record)." if number else ".")),
                         folded=folded)):
                     # A failed send must not consume the reminder window.
                     release_abuse_delivery(kind, subject)
@@ -1080,11 +1216,53 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     chat_id = _env("TELEGRAM_CHAT_ID")
     if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
         return
+    # ⛔ The bound sentence is RENDERED from the code, never restated (round 6,
+    # P2). This helper is reached for EVERY member of
+    # :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
+    # :func:`_episode_delivery_kinds` can be re-armed BY AN EPISODE END (the
+    # kind-agnostic per-outcome releases — a lifted suppression, a filing whose
+    # issue-number read-back failed — re-arm any kind): ``abuse_suspended`` is
+    # deliberately excluded from :data:`_EPISODE_INCIDENT_KINDS` (it records an
+    # operator decision, not a rule's flag window), and even for the rule-episode
+    # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
+    # gated on ``SKIPPED_WINDOW`` while that gate applies (a resolve leg that raises
+    # or answers ``CloseCooldown`` leaves it false and pops the ledger at that
+    # episode end — unless ANOTHER episode kind reports ``SKIPPED_WINDOW`` in the
+    # same call, since the flag is per CALL, not per kind; and
+    # ``ALERT_RECOVERY_STREAK=1`` closes per crossing), so an
+    # alternating rule normally stays inside the window there; only the
+    # no-incident-channel ledger is released on every confirmed episode end.
+    # Stating one kind's rule for all three sends an operator diagnosing a page
+    # that did not arrive to look for an episode end that never runs for that
+    # kind. Deriving both facts from the tuple and the shape means a kind added
+    # to `_EPISODE_INCIDENT_KINDS` gains the clause automatically and an excluded
+    # one can never inherit it.
+    re_arm = (
+        ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
+        " (with a store, the release is gated on its `SKIPPED_WINDOW` while that"
+        " gate applies, so the 24h limit normally holds there — a release that is"
+        " not the episode end, a LIFTED suppression, a filing whose"
+        " issue-number read-back failed or a FAILED SEND, re-arms"
+        " it regardless) — a rule"
+        " that FLAPS therefore pages once per episode in that shape, one message"
+        " per crossing, which is the pre-#14407 rate (this path's gain is"
+        " attribution and the continuous-breach rate, not flapping volume),"
+        " while a continuously breaching org stays at that ceiling"
+        if kind in _episode_delivery_kinds() else
+        ", NOT re-armed by an episode end — this kind has NO rule episode (it"
+        " records an operator decision), so no episode end ever re-arms it; it"
+        " is bounded by that window like every other outcome, and the generic"
+        " per-outcome releases (a LIFTED suppression, a filing whose"
+        " issue-number read-back failed, a"
+        " FAILED SEND) end the window early — as does the ledger's own cap"
+        " eviction, which drops the soonest-to-expire live keys past its maximum"
+        " — so a repeat about the same subject inside the window is normally"
+        " folded")
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "
-        "per subject until the incident channel is repaired (#14407).",
-        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
+        "per subject%s, and it is never silent (#14407).",
+        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600), re_arm)
     if not _send_abuse(bot_token, chat_id, _abuse_message(
             kind, org_id, details,
             attribution=(

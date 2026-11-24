@@ -14,8 +14,14 @@ These tests pin the fixed contract:
 
 1. a filing class pushes exactly ONCE per incident lifecycle, and the message
    names the issue (attribution);
-2. a new EPISODE (the incident was resolved) pushes exactly once more — the bound
-   is the episode, never a mute;
+2. a new EPISODE (the incident was resolved) pushes exactly once more — a
+   COMPLETED episode end releases the window, so a new episode after one is not
+   folded. "Never folded" would be the over-claim this file's siblings remove:
+   an end whose release gate HOLDS (a `SKIPPED_WINDOW` close — the first clean
+   window, or a sibling kind answering `SKIPPED_WINDOW` in the same call, the
+   flag being per CALL) and an end the engine never OBSERVES (an out-of-band
+   `abuse_unsuspend` or a manual `flag_clear`) both leave the window armed, and
+   the new episode is FOLDED into it;
 3. a measurement class (R3/R4/R8) files nothing BY DESIGN (#10156's ACTIVITY
    register) and delivers a bounded digest instead of one message per window;
 4. when the incident channel cannot be built at all the human is STILL told — the
@@ -169,8 +175,16 @@ def test_the_incident_subject_is_rule_scoped(delivered):
     assert "key_create" in delivered.filed[1][0]
 
 
-def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatch):
+def test_a_HELD_window_re_alarms_at_most_once_per_24h(delivered, monkeypatch):
     """A persistent breach must not page every window, and must not go silent.
+
+    Named for what it exercises: NO release fires here, so the window stays
+    ARMED for the whole test. The retired name (``…open_episode…``) stated the
+    bound as a property of the OPEN EPISODE — which
+    ``test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode``
+    falsifies ~100 lines below: with the episode still open, a failed close
+    releases the ledger and TWO reminders land with no clock advance at all.
+    Both names described one bound and disagreed, and nothing reddened.
 
     Measured shape (#10576): ONE org stayed over its R1 threshold for 21 days
     behind ONE open issue, while the pre-fix code re-claimed the alert hourly —
@@ -194,6 +208,9 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
     assert len(delivered.pushes) == 2, delivered.pushes
     assert "Still open" in delivered.pushes[-1]
     assert "issue #1" in delivered.pushes[-1], "a reminder must name the incident"
+    # The OTHER half of the arm-conditional pointer (round 7): the NUMBERED arm must
+    # KEEP it, or a mutant deleting the parenthetical from all three arms stays green.
+    assert "the issue comment trail is the recurrence record" in delivered.pushes[-1]
     # ⛔ THE SECOND ALERT LABEL, pinned (#14407 review cycles 6–8). One episode emits
     # THREE messages and each wears its own string: the OPENING push is the store's
     # create-once template (`🚨 DR alert: …`, shared with every incident kind), this
@@ -263,10 +280,89 @@ def test_a_reminder_over_a_number_less_sentinel_says_which_state_it_is(monkeypat
     assert "could not be read" not in reminder, (
         "the number-less arm borrowed the RAISE arm's string — a reader is told the "
         f"read failed when it did not: {reminder!r}")
+    # Round 5, P2: the sentence also said "the issue comment trail is the recurrence
+    # record", naming a record that cannot exist in an arm whose own clause says
+    # there is no issue number. The pointer is now arm-conditional and pinned here.
+    assert "issue comment trail" not in reminder, (
+        "the reminder points at a comment trail on an incident it just said has no "
+        f"issue: {reminder!r}")
     notify.reset_abuse_delivery_for_tests()
 
 
-# ── 2. the bound is the EPISODE, never a mute ────────────────────────────────
+def test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode(
+        monkeypatch):
+    """The reminder must not promise 24 h across a release it cannot see (#14487 F1).
+
+    The `DEDUP` reminder said, unconditionally, *"One reminder per 24h while the
+    episode stays open; repeats inside that window are folded"*. That holds only
+    while the delivery LEDGER is still armed — and this PR's own docstring records
+    how it stops being: a resolve leg that RAISES or answers `CloseCooldown`
+    leaves `skipped_window` false, so `resolve_abuse_episode` pops the ledger at
+    that episode end unless ANOTHER episode kind reports `SKIPPED_WINDOW` in the
+    same call — the flag is per CALL, not per kind (*"measured: 6 crossings = 6
+    messages"*, with one incident kind on record).
+
+    The incident stays OPEN across those crossings (the resolve failed), so each
+    crossing is a `DEDUP` detection with `deliver=True` — this reminder. A human
+    therefore receives the flat-24h sentence once per crossing, i.e. the message
+    falsifies its own rate in a shape the same PR measures. Stating a shape-flat
+    bound the diff itself disproves is the over-claiming class this PR removes.
+
+    Pinned as a pair so a revert reddens: the flat clause must be ABSENT and the
+    scoped one PRESENT. Neither had any pin before — the bound clause lived in an
+    f-string the new tests only ever matched the pointer half of.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    class _OpenIncidentStore:
+        """A live incident whose every CLOSE attempt raises (#5143: stays OPEN)."""
+
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": 7}
+
+        def resolve_incident_state(self, kind, subject="", **kw):
+            raise RuntimeError("close failed (#5143)")
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_OpenIncidentStore(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    def _detect() -> None:
+        notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 600,
+                             "threshold": 500, "window_s": 3600})
+
+    _detect()
+    assert len(sent) == 1, sent          # the open incident's reminder
+    assert notify.resolve_abuse_episode("org-a", "point_create") is False
+    _detect()
+    # TWO reminders with no clock advance at all — the release is what re-arms it.
+    assert len(sent) == 2, (
+        "the raise shape did not re-arm the ledger, so this test is no longer "
+        f"exercising the shape F1 names: {sent!r}")
+
+    for reminder in sent:
+        assert "while the delivery window holds" in reminder, (
+            "the reminder states a flat 24h bound that a release which is not an "
+            f"episode end falsifies: {reminder!r}")
+        assert "while the episode stays open" not in reminder, (
+            "the bound is scoped to the EPISODE here, but it is the LEDGER that "
+            f"holds it — a failed close breaks it inside one episode: {reminder!r}")
+        assert "issue #7" in reminder, reminder
+    notify.reset_abuse_delivery_for_tests()
+
+
+# ── 2. a new episode pages at once — bounded, never a mute ─────────────────
 def test_a_pre_14407_rule_less_incident_is_adopted_not_duplicated(delivered):
     """Subjects became rule-scoped here, so an existing ``{org}`` incident must
     be ADOPTED — otherwise the first recurrence files a second issue for one
@@ -1459,6 +1555,346 @@ def test_a_missing_incident_channel_delivers_anyway_and_names_the_reason(
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
+        monkeypatch, caplog):
+    """The operator log must not credit the episode re-arm to every kind (#14407 r6).
+
+    ``_deliver_unattributed`` is reached for EVERY member of
+    :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
+    :func:`_episode_delivery_kinds` can be re-armed BY AN EPISODE END:
+    ``abuse_suspended`` is deliberately EXCLUDED from
+    :data:`_EPISODE_INCIDENT_KINDS` (it records an operator decision, not a rule's
+    flag window). ⛔ Its window is NOT therefore "never re-armed": the
+    kind-agnostic per-outcome releases (a lifted suppression, a filing whose
+    issue-number read-back failed) re-arm any kind, measured delivering a second
+    message inside one window — so
+    what this test pins is the CLAUSE's scope, not an unbreakable limit.
+
+    Pre-fix the same sentence claimed "RE-ARMED by a confirmed episode end … a rule
+    that FLAPS pages once per episode" for all three kinds, so an operator
+    diagnosing a suspension page that never arrived was told a re-arm had happened
+    and pointed at episode-end plumbing that never runs for that kind.
+
+    BOTH polarities are pinned: a fix that deletes the clause from every kind would
+    under-report the rule-episode kinds' real (true) re-arm and must red too.
+    """
+    import tortoise.notify as notify
+
+    captured: dict[str, str] = {}
+
+    def _emit(kind: str) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: sent.append(text))
+        monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (
+            None, "no alert channel configured (DR_ISSUES_PAT unset)"))
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        notify.reset_abuse_delivery_for_tests()
+        with caplog.at_level("WARNING", logger="tortoise.notify"):
+            notify.notify_abuse(kind, {"org_id": "org-a"},
+                                {"rule": "point_create", "count": 900})
+        captured[kind] = "\n".join(
+            r.getMessage() for r in caplog.records
+            if "with NO attributable incident" in r.getMessage())
+        caplog.clear()
+        assert len(sent) == 1, (kind, sent)  # the alert itself still goes out
+
+    _emit("abuse_suspended")
+    log = captured["abuse_suspended"]
+    assert "RE-ARMED by a confirmed episode end" not in log, (
+        "the log credits an episode re-arm to a kind that has no rule episode; its "
+        f"runbook row says an episode end never re-arms it: {log!r}")
+    assert "NOT re-armed by an episode end" in log, (
+        f"the suspension shape must state the limit it actually has: {log!r}")
+    assert "NO rule episode" in log, log
+    # ⛔ "NEVER re-armed early" was the previous pin and it was FALSE (round 7 of the
+    # #14487 review): the episode-end release is not the only re-arm site — the
+    # kind-agnostic per-outcome releases (a lifted suppression, a filing whose
+    # issue-number read-back failed) re-arm this kind too: on the
+    # lifted-suppression arm two messages land inside
+    # one window with no episode end anywhere. The pin is on the truthful clause,
+    # and the retired absolute is absent.
+    assert "NEVER re-armed early" not in log, (
+        "the log restates the retired absolute a generic release disproves: "
+        f"{log!r}")
+    assert "per-outcome releases" in log, (
+        f"the suspension shape must name what CAN re-arm it: {log!r}")
+    # Round-9 (P2, F5): the "only" set was still incomplete — ``_enforce_delivery_cap``
+    # drops the soonest-to-expire LIVE keys once the ledger passes
+    # ``_MAX_DELIVERY_KEYS`` (its own docstring records a live population of 4596
+    # over a 4096 cap), which ends an armed window with NO release firing at all.
+    # An operator reading "only ... a lifted suppression, a deferred filing, a FAILED
+    # SEND" would not look at the ledger's own eviction for a page they were not
+    # expecting. Deleting the clause reddens.
+    assert "cap eviction" in log, (
+        "the 'only' set omitted the ledger's own cap eviction, which can end a "
+        f"live window with no release firing: {log!r}")
+    # F2 (#14487): the list was an "only" that omitted a release site in the SAME
+    # function — a send that does not land releases the window for EVERY kind (the
+    # DEDUP arm's `release_abuse_delivery`, and the `_deliver_unattributed` tail's).
+    # Named by LABEL, not by line number: this head's own insertions shift the line
+    # numbers and a citation that moves with neither head misleads its reader.
+    # Deleting the phrase reddens: an operator reading "only a lifted suppression or
+    # a deferred filing" would not look at a failed send, which is the shape a chat
+    # outage produces.
+    assert "FAILED SEND" in log, (
+        f"the 'only' list must name the failed-send release it omitted: {log!r}")
+    # The LIST MEMBERS, not only its tail (round 14, P3): deleting
+    # "LIFTED suppression" or the filing member from this clause used to leave the
+    # suite GREEN, so an operator-facing sentence could lose a release site
+    # silently — an "only" set is wrong when it is TRUNCATED, not just when its
+    # last member is missing.
+    assert "LIFTED suppression" in log, (
+        f"the suspension log lost the lifted-suppression release site: {log!r}")
+    assert "issue-number read-back failed" in log, (
+        "the suspension log names a 'deferred filing' as a release site, but the "
+        "release fires on a filing whose number could not be READ BACK, not on "
+        f"a filing that carries no number: {log!r}")
+
+    _emit("abuse_flag")
+    log = captured["abuse_flag"]
+    assert "RE-ARMED by a confirmed episode end" in log, (
+        f"a rule-episode kind lost its (true) re-arm clause: {log!r}")
+    assert ("NEVER re-armed early" not in log and "NO rule episode" not in log
+            and "per-outcome releases" not in log), log
+    # Parity with the suspended arm above: the ENTIRE release list is pinned, so
+    # deleting the whole `, a LIFTED suppression, … or a FAILED SEND` clause —
+    # byte-for-byte the mutant this file already rejects on the SENT surface —
+    # reddens here too instead of passing as a shorter sentence.
+    assert "LIFTED suppression" in log and "FAILED SEND" in log, (
+        f"the rule-episode log lost a kind-agnostic release site: {log!r}")
+    assert "issue-number read-back failed" in log, (
+        f"the rule-episode log still names a bare 'deferred filing': {log!r}")
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_the_sent_reminder_credits_a_close_re_arm_only_to_a_kind_that_has_one(
+        monkeypatch):
+    """The SENT reminder must scope its re-arm clause exactly as the log does
+    (#14407 round 13, P2).
+
+    The ``DEDUP`` arm of ``_notify_abuse_incident`` is reached for EVERY member of
+    :data:`ABUSE_INCIDENT_KINDS`, and ``abuse_suspended`` is one of them — but it
+    is deliberately EXCLUDED from :data:`_EPISODE_INCIDENT_KINDS`, so **no episode
+    end ever runs for it** and no close can therefore FAIL or back off. The
+    reminder's re-arm clause was still the flat rule-episode sentence, so an
+    operator holding a suspension reminder was pointed at a failed close that
+    cannot exist for that kind, and at "a rule that flaps", which is not what an
+    operator suspension is.
+
+    ⛔ This is the surface a HUMAN READS (the message that is actually sent), which
+    is why it is pinned separately from the ``logger.warning`` clause: the log was
+    scoped and tested in round 6 while the sent text kept the flat claim, so the
+    code comment above the string and the string itself disagreed.
+
+    BOTH polarities are pinned: deleting the clause from every kind would
+    under-report the rule-episode kinds' real (true) re-arm and must red too.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _HeldOpenIncident:
+        """A live incident whose delivery window has expired (DEDUP + deliver)."""
+
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": 7}
+
+        def resolve_incident_state(self, kind, subject="", **kw):
+            raise RuntimeError("close failed")
+
+    def _reminder(kind: str) -> str:
+        sent.clear()
+        monkeypatch.setattr(notify, "_abuse_alert_store",
+                            lambda: (_HeldOpenIncident(), ""))
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: sent.append(text))
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        notify.reset_abuse_delivery_for_tests()
+        notify.notify_abuse(kind, {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 900})
+        assert len(sent) == 1, (kind, sent)
+        return sent[0]
+
+    reminder = _reminder("abuse_suspended")
+    assert "a close that FAILS" not in reminder, (
+        "the reminder points a suspension at a failed close, but that kind has no "
+        f"rule episode so no episode end ever runs: {reminder!r}")
+    assert "NO rule episode" in reminder, (
+        f"the suspension reminder must state the limit it actually has: {reminder!r}")
+    # The retired absolute and the complete re-arm set, same discipline as the log:
+    # ``abuse_suspended`` IS re-armed early in some shapes, so neither "never" nor
+    # a truncated list may be stated.
+    assert "NEVER re-armed early" not in reminder, (
+        f"the reminder restates the absolute a generic release disproves: {reminder!r}")
+    assert "FAILED SEND" in reminder, (
+        f"the re-arm set omitted the release a chat outage produces: {reminder!r}")
+    # Parity with the log pin: the SENT clause names the kind-agnostic release
+    # sites too, and dropping either of these two from it leaves an operator
+    # holding a suspension reminder looking only at a chat outage and the cap.
+    # Measured: before this pair, deleting "LIFTED suppression, a deferred
+    # filing" from the suspended clause left the whole suite GREEN.
+    assert "LIFTED suppression" in reminder and (
+        "issue-number read-back failed" in reminder), (
+        f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
+    assert "cap eviction" in reminder, (
+        f"the re-arm set omitted the ledger's own cap eviction: {reminder!r}")
+
+    reminder = _reminder("abuse_flag")
+    assert "a close that FAILS" in reminder, (
+        f"a rule-episode kind lost its (true) close re-arm clause: {reminder!r}")
+    # ⛔ The OTHER half of the clause, unpinned until here: the rule-episode arm
+    # names the same three kind-agnostic sites, and the sibling log test
+    # (`test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one`)
+    # argues at length why an "only" list that omits the failed send misleads its
+    # reader. Measured: deleting the whole `, as can a LIFTED suppression, a
+    # deferred filing or a FAILED SEND` clause left the suite GREEN — the same
+    # vacuity this test exists to close, one arm over.
+    assert "LIFTED suppression" in reminder and (
+        "issue-number read-back failed" in reminder), (
+        f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
+    assert "FAILED SEND" in reminder, (
+        f"the sent re-arm set omitted the release a chat outage produces: {reminder!r}")
+    assert "NO rule episode" not in reminder, reminder
+    notify.reset_abuse_delivery_for_tests()
+
+
+# ── 4b. the runbook's own cells agree with the code's classification ────────
+
+def _runbook_row(kind: str) -> str:
+    """The triage-table row for ``kind`` from the DR runbook (#14487 round 12)."""
+    from pathlib import Path
+
+    runbook = (Path(__file__).resolve().parent.parent
+               / "docs/ops/registry-backup-dr.md")
+    for line in runbook.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"| {kind} |"):
+            return line
+    raise AssertionError(f"no triage row for {kind!r} in {runbook}")
+
+
+def test_the_runbook_calls_a_failed_close_the_episode_end_release_it_is():
+    """Two surfaces described ONE event two ways, and this PR rewrote both.
+
+    ``release_abuse_delivery``'s docstring says a close that RAISES or is backing
+    off is part of the EPISODE-END release (it leaves ``skipped_window`` false —
+    UNLESS another episode kind answers ``SKIPPED_WINDOW`` in the same call, the
+    flag being per CALL and not per kind — so the ``if not skipped_window:`` gate
+    inside ``resolve_abuse_episode`` normally does not hold) and states explicitly
+    that it is NOT in the kind-agnostic
+    per-outcome set. The runbook's ``ABUSE_FLAG_RAISED`` row classified the same
+    event the other way — *"a release that is not an episode end (a failed
+    close, ...)"* — so an operator got two answers for one event.
+
+    Mechanically it IS the episode-end release: the release loop sits inside
+    ``resolve_abuse_episode``, which the engine calls on the ``ended`` branch
+    only (``AbuseEngine._end_alert_episode``).
+    """
+    row = _runbook_row("ABUSE_FLAG_RAISED")
+    assert "not an episode end (a failed close" not in row, (
+        "the row calls the failed-close release something other than the "
+        f"episode-end release the code performs: {row!r}")
+    assert "EPISODE-END release" in row, (
+        f"the row must name the release that actually re-arms the window: {row!r}")
+    # Round 14 (P2): the clause described the per-CALL `skipped_window` flag as a
+    # per-kind fact. A close that FAILS for ONE episode kind does not release the
+    # ledger when the SIBLING kind answers `SKIPPED_WINDOW` in the same call
+    # (`notify.py` `skipped_window` is one flag for the whole loop), so the row
+    # must carry the caveat every code site carries. Deleting it reddens — this
+    # caveat has now had to be added to four separate surfaces, which is why it is
+    # pinned here rather than trusted to prose discipline.
+    assert "per CALL, not per kind" in row, (
+        "the row states the release gate flat, but `skipped_window` is ONE flag "
+        f"for the whole call: {row!r}")
+    # BOTH polarities: a fix that deleted the clause would under-report the
+    # genuinely kind-agnostic releases this row exists to name.
+    assert "FAILED SEND" in row, row
+
+
+def test_the_suspended_runbook_row_names_the_re_arm_sites_the_code_has():
+    """The cap-eviction fix reached ``notify.py`` and stopped there.
+
+    ``_INCIDENT_DELIVERY_WINDOW_S`` names ``_enforce_delivery_cap`` as a re-arm
+    site for ``abuse_suspended``: it evicts the soonest-to-expire LIVE keys once
+    the population passes ``_MAX_DELIVERY_KEYS``, ending an armed window with NO
+    release firing. The runbook row for that same kind enumerated the re-arm set
+    without it, so the operator-facing surface was the one place the F5 fix did
+    not reach. Deleting the clause reddens; so does dropping FAILED SEND.
+    """
+    row = _runbook_row("abuse_suspended")
+    assert "cap eviction" in row, (
+        "the runbook's re-arm set omits the ledger's own cap eviction, which "
+        f"notify.py names for this kind: {row!r}")
+    assert "FAILED SEND" in row, row
+
+
+def _notify_window_declaration() -> str:
+    """The ``_INCIDENT_DELIVERY_WINDOW_S`` declaration block (#14487 round 15)."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent
+              / "tortoise/notify.py").read_text(encoding="utf-8")
+    start = source.index("#: Delivery windows (#14407)")
+    end = source.index("_INCIDENT_DELIVERY_WINDOW_S", start)
+    return source[start:end]
+
+
+@pytest.mark.parametrize("surface", [
+    "tortoise/abuse.py module docstring",
+    "notify._INCIDENT_DELIVERY_WINDOW_S",
+    "runbook abuse_review_needed row",
+])
+def test_every_surface_names_the_episode_end_as_a_re_arm_site(surface):
+    """The ROUND-12 fix reached `ABUSE_FLAG_RAISED` and stopped one surface short.
+
+    Three surfaces still classified the re-arm set as *"a release that is not an
+    episode end"* — the exact dichotomy the runbook's `ABUSE_FLAG_RAISED` row was
+    corrected away from, because mechanically the failed close IS the episode-end
+    release (the release loop sits inside ``resolve_abuse_episode``, which
+    ``AbuseEngine._end_alert_episode`` calls on its ``ended`` branch only).
+
+    * ``abuse.py``'s module docstring — rewritten by this very PR, and it
+      contradicted ITS OWN closing sentence two paragraphs down (*"an episode end
+      (or any per-outcome release) is what re-arms it"*);
+    * ``notify.py``'s ``_INCIDENT_DELIVERY_WINDOW_S`` block — contradicted by the
+      next sentence of the same block (*"The engine releases the window when it
+      OBSERVES the episode end"*);
+    * the runbook's ``abuse_review_needed`` ROW — so the triage table gave an
+      operator two answers for one event, in two adjacent rows.
+
+    Both polarities are pinned: the dichotomy must be ABSENT and the episode-end
+    release must be NAMED, or deleting the clause wholesale would pass by default.
+    Parametrized so EACH surface reddens on its own — a revert of one of them must
+    not be masked by the other two.
+    """
+    from tortoise import abuse as abuse_module
+
+    texts = {
+        "tortoise/abuse.py module docstring": abuse_module.__doc__ or "",
+        "notify._INCIDENT_DELIVERY_WINDOW_S": _notify_window_declaration(),
+        "runbook abuse_review_needed row": _runbook_row("abuse_review_needed"),
+    }
+    name, text = surface, texts[surface]
+    assert "release that is not an episode end" not in text, (
+        f"{name} still frames the re-arm set as releases that are NOT an "
+        "episode end — but the episode-end release is the primary re-arm "
+        "site (and the failed close IS that release): "
+        f"{[s for s in text.split('. ') if 'not an episode end' in s]!r}")
+    assert "episode-end release" in text, (
+        f"{name} must NAME the episode-end release as a re-arm site; a fix "
+        "that deletes the clause instead of correcting it under-reports the "
+        "release the code actually performs")
+
+
+
 # ── 5. the engine owns the episode, so it must end it ───────────────────────
 
 def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
@@ -1767,6 +2203,12 @@ def test_a_failing_incident_read_never_raises_from_the_alert_path(monkeypatch):
     # removes, on the arm where the read is the thing that broke.
     assert "could not be read" in sent[0], sent[0]
     assert "no issue number on record" not in sent[0], sent[0]
+    # Round 6, P3: this is the THIRD arm the arm-conditional pointer changes, and its
+    # ABSENCE was unpinned. Mutating the condition to `if (number or not number_known)`
+    # restores the pointer on this arm — which says the number could not be read, so a
+    # comment trail on an issue it never named cannot exist — and nothing reddened.
+    assert "issue comment trail" not in sent[0], (
+        f"the raise arm points at a comment trail on an issue it never named: {sent[0]!r}")
     notify.reset_abuse_delivery_for_tests()
 
 

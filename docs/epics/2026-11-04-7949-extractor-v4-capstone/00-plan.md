@@ -187,7 +187,7 @@ value (`tortoise/projection/edges.py`), and no extraction path sets one
 (`edges.py:1213`). Recorded with that annotation, never as a target.
 
 **R8 · Two owner assertions sit on a recorded decision or an open question — ROUTED, not decided
-(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:975-984` *"extraction emits `statement` only"*, option B
+(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:977-986` *"extraction emits `statement` only"*, option B
 2026-08-12, `#1022` MERGED). A3 vs **D6** — *"Two distinct connection sets — within-batch and to-graph,
 both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1400` — the **D6** row; `:1095` — "D6 as ruled"),
 with §13.8 (`:2085`, under the heading at `:2057`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:2061` recording
@@ -516,7 +516,7 @@ behaviour.
 > `04-plan.md` §8.4 **AM7**, `05-verify.md` item 3. The fork below is kept verbatim as the history of the
 > question — **do not read it as open**, and do not set the percentage target fork (a) proposed.
 
-**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:975-984`, option B 2026-08-12, `#1022` MERGED).**
+**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:977-986`, option B 2026-08-12, `#1022` MERGED).**
 A4 ("0.6 % typed is the ceiling the capstone must beat") points **opposite** to D3. A later owner ruling
 may reverse an earlier one (§16.3/O4) — but the reversal must be recorded where the next lane reads it.
 **The fork:**
