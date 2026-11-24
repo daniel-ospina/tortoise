@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2032 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (EXTENT_TBD lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -364,6 +364,11 @@ def _residue_block() -> str:
     the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
     fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
     the extent moved with the pair here instead of only with a merge,
+    — and the `#14548` review fixes below REPLACED three false statements in that fold's own record
+    (`#14491` → `#14506` for the row that moved the census, the `-3` → the TWO rows between `11912`
+    and this tree, and the two time-relative "on `origin/main` today" claims anchored to
+    `2cccf90f4dd4`), which reflowed the run by three lines, so the figure above is RE-MEASURED
+    here at 1957 rather than carried forward — the fourth reading this arm has forced:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2741,6 +2746,32 @@ def test_an_added_file_is_not_baseline_rows(tmp_path, monkeypatch):
     base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
     assert sum(base.values()) == 1, f"`b.py` is added, so the baseline holds only `a.py`: {base}"
     assert "b.py" not in base_files, base_files
+
+
+def test_the_sdk_class_body_is_read_from_the_same_bytes_as_the_blob(tmp_path, monkeypatch):
+    """`class_body(src)`, not `class_body()`: the body is enumerated from the BLOB too.
+
+    The no-argument form re-reads `SDK_SRC` from DISK, so for the SDK file's own baseline blob the
+    bodies came from the working tree while the spans came from the blob. Residue-neutral today
+    (this file's `def`s are all private), wrong by construction — and it is exactly the read that
+    makes `edits_for`'s `src=` contract unkeepable the moment a public `def` returns.
+    """
+    repo = _git_repo(tmp_path / "r")
+    sdk = repo / "sdk.py"
+    blob = "class TortoiseSDK:\n    def update(self, x):\n        return x\n"
+    sdk.write_text(blob, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    monkeypatch.setattr(privatise, "SDK_SRC", sdk)
+    rmap = {"update": "_update"}
+    # the WORKING TREE no longer holds that `def` at all; the blob does.
+    sdk.write_text(
+        "class TortoiseSDK:\n    def renamed(self, x):\n        return x\n", encoding="utf-8")
+
+    e = privatise.edits_for(sdk, rmap, src=blob)
+    assert [d[3] for d in e.defs] == ["_update"], (
+        "the blob's `def update` must be an EDIT, enumerated from the bytes it was parsed from — "
+        f"reading the body off disk found the working tree's `renamed` instead: {e.defs}")
 
 
 def test_a_rename_out_of_archive_does_not_donate_baseline_rows(tmp_path, monkeypatch):

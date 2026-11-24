@@ -2088,18 +2088,18 @@ SWEEP_NAMES = 66
 #: accepted as a flake: `main`'s rewrite of `tests/test_collision_preflight.py` adds exactly one
 #: untyped `.update` receiver, `seen.update(kwargs)` in its new `spy()` fixture, and that merge
 #: deleted no `.update` line anywhere (`#4625`'s own -2 is still in that tree: `_JSONB_CACHE.update`
-#: is 2 rows on `origin/main` and 0 there). A rising pin is the direction the guard exists to CATCH,
+#: is 2 rows on `2cccf90f4dd4` and 0 there — and 0 on `origin/main` TODAY, which `#14459` retired). A rising pin is the direction the guard exists to CATCH,
 #: and there the row is main's, so the pin followed `main` — measured `--repin` on that merged tree,
 #: never arithmetic on the old number.
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE,
 #: because the fold's own tree is a THIRD tree: that merge brought main's durable
 #: `claim_unavailable` self-heal, whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one
 #: new untyped `.update(` receiver, and `--repin` on THAT resolved tree printed
-#: **(11910, "3216395d35345904")**. The -3 between that and that `main`'s committed 11911 is
-#: attributed ROW BY ROW, not waved through:
+#: **(11910, "3216395d35345904")**. The movement from that `main`'s COMMITTED 11911 is **-1**, and
+#: from its own tree's derived **11912** it is **-2** — attributed ROW BY ROW, not waved through:
 #:   * that `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1
 #:     is `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which
-#:     arrived with `#14491`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
+#:     arrived with `#14506`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
 #:     that `main` ITSELF (the `#14062` recurrence the blocks above record a sixth time); this
 #:     branch inherits main's row set, not main's number.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
@@ -2142,6 +2142,20 @@ SWEEP_NAMES = 66
 #: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
 #: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
 #: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
+#:
+#: ⛔ REBASED ONTO `origin/main` `af40c97ca3` (the PR was `CONFLICTING` in BOTH files this pin lives
+#: in), AND THE BRANCH'S OWN FOLD RECORD IS NOT KEPT BESIDE THIS ONE BECAUSE IT RECORDS THE SAME
+#: FOLDS: the branch had walked `11908` -> `11909` -> `(11910, "3216395d35345904")` over the
+#: `#4625` and `6a02515d14ad` folds, which is byte-for-byte the history the paragraphs above derive,
+#: so keeping both copies would double the graded run to publish one measurement twice. What the
+#: branch's copy added BEYOND this one is fixed here rather than carried: the `-3`, the `#14491`
+#: attribution for `seen.update(kwargs)` and the `_JSONB_CACHE.update` reading on `origin/main`.
+#: ⛔ AND THIS PR CHANGES NO PIN VALUE, WHICH IS THE POINT OF IT: the ratchet below compares the
+#: measured count against a baseline it derives at check time, so `SWEEP_RESIDUE` is printed as a
+#: HISTORICAL reading and gates nothing. The pair carrying `main`'s own numeral rather than this
+#: branch's is therefore the honest resolution of the conflict — it is `main`'s measurement of
+#: `main`'s tree, which `#14544` re-cut deliberately (`-7`, attributed row by row above), and it is
+#: neither inherited as a verdict nor re-derived as a gate.
 SWEEP_RESIDUE = (11903, "1fb861e2c8163aec")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
@@ -2853,6 +2867,11 @@ def edits_for(path: Path, rmap: dict[str, str], src: str | None = None) -> FileE
     ratchet measures a baseline row set from the merge base's blob without checking the tree out
     (a file that no longer exists in the working tree still needs its old identity for the SDK
     self-measurement, and `Path.resolve()` is non-strict, so the path need not exist).
+
+    ⛔ EVERY read below comes from the bytes it parsed — `class_body(src)` and the `lines` handed
+    to `_def_name_span` included. A read that goes back to `path` on disk measures a baseline blob
+    against the WORKING TREE: it raises `FileNotFoundError` for a deleted path and invents
+    `def <name> (span not located)` residue (headroom) for a modified one.
     """
     if src is None:
         src = path.read_text(encoding="utf-8")
@@ -2964,9 +2983,14 @@ def edits_for(path: Path, rmap: dict[str, str], src: str | None = None) -> FileE
                     defs.append((m.lineno, span[0], span[1], rmap[m.name]))
 
     if in_sdk:
-        for m in class_body().body:
+        # ⛔ `class_body(src)`, not `class_body()`: the no-argument form re-reads the file from
+        # DISK, so a baseline blob's `TortoiseSDK` body was enumerated from the working tree's
+        # bytes while the spans were taken from the blob — the same two-sources defect the `lines`
+        # argument above closes for the stand-in arm. Residue-neutral today (every `def` this file
+        # carries is already private), wrong by construction.
+        for m in class_body(src).body:
             if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name in rmap:
-                span = _def_name_span(SDK_SRC, m, m.name)
+                span = _def_name_span(SDK_SRC, m, m.name, lines)
                 if span is None:
                     raise SystemExit(
                         f"cannot locate the name span for `def {m.name}` at "
