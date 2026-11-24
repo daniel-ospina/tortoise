@@ -108,6 +108,24 @@ routes:
   - method: POST
     path: /v1/backups/restore
     class: tenant
+  # #14219 F4 (PR #14415): the bulk-ingest surface. The four routes are the
+  # batch face of the SAME ingest promise `/v1/index/docs` makes (declare an
+  # intent, work it asynchronously, report per-item truth), so they are `tenant`
+  # — not exempt. Declared here because `tests/test_rest_surface_inventory.py`
+  # fails closed on a live route absent from this file (#3875), which is the
+  # whole point of the inventory: the MCP/SDK approval rule never reached REST.
+  - method: POST
+    path: /v1/batches
+    class: tenant
+  - method: GET
+    path: /v1/batches
+    class: tenant
+  - method: GET
+    path: /v1/batches/{batch_id}
+    class: tenant
+  - method: POST
+    path: /v1/batches/{batch_id}/cancel
+    class: tenant
   - method: POST
     path: /v1/billing/checkout
     class: tenant

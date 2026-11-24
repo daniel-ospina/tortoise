@@ -712,7 +712,36 @@ jobs:
       - name: Heal the pip prefix (pool-runner stash residue, #14407)
         run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package (parity check imports tortoise.pricing)
-        run: pip install -e . --quiet
+        # ⛔ A FALLBACK, and it is surfaced as one: the box state it repairs is a
+        # RUNNER defect, not a property of this repository.
+        #
+        # `setup-python`'s interpreter lives in the runner's SHARED tool cache
+        # (`pythonLocation` = `…/_work/_tool/Python/3.12.14/…`), so a `pip install -e .`
+        # here writes `tortoise-graph` into site-packages that EVERY later job on this
+        # box inherits. A job killed mid-uninstall leaves pip's `~tortoise-graph` /
+        # `~` rename behind and the distribution with no `RECORD` file, and the next
+        # run then dies BEFORE it can repair itself — measured 2026-11-24 on this job:
+        #
+        #     WARNING: Ignoring invalid distribution ~ortoise-graph (…)
+        #     error: uninstall-no-record-file
+        #     × Cannot uninstall tortoise-graph None
+        #     ╰─> The package's contents are unknown: no RECORD file was found …
+        #
+        # (job 138211937683). That took this REQUIRED context red on a tree it never
+        # inspected — a `pricing-artifact` failure that said nothing about pricing —
+        # and it would have red-ed every later job on the box the same way.
+        #
+        # `--ignore-installed` is pip's own documented recovery for a distribution
+        # whose contents are unknown (its hint names it), so it installs OVER the
+        # corrupt copy instead of trying to remove it. It is the FALLBACK, never the
+        # default: the plain install stays the primary path, so a genuine uninstall
+        # problem is still an error here. The warning names the runner so the state
+        # gets cleaned instead of being absorbed silently.
+        run: |
+          if ! pip install -e . --quiet; then
+            echo "::warning::pip could not uninstall the pre-existing tortoise-graph — the runner's shared tool-cache site-packages carries a corrupt distribution (no RECORD file; pip's own recovery hint is `--ignore-installed`). Installing over it so the parity check can run. This is a RUNNER defect (see this step's comment, job 138211937683), not a pricing drift."
+            pip install -e . --quiet --ignore-installed
+          fi
       - name: pricing.json present
         run: test -f product/pricing.json || { echo "product/pricing.json missing — canonical pricing artifact (#682)"; exit 1; }
       - name: parity (billing table == pricing.json)
