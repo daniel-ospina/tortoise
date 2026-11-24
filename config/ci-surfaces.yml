@@ -168,10 +168,16 @@ version: 1
 # ⛔ HISTORICAL-LETTERS-END
 # A claim that must be re-derived on every fold
 # and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
-# values: read the letter off `--emit-push-matrix` at the head you are citing and never infer it
-# from a neighbouring row — `tests/test_14407_alert_delivery.py` is registered on TWO surfaces (`api`
-# beside `test_abuse`, `core` beside `test_notify`) and its `core` row sits in a DIFFERENT bin than
-# `test_notify`'s precisely because a `core` neighbour packs elsewhere.
+# values: read the letter off `--emit-push-matrix` at the head you are citing, and never infer it
+# from a neighbouring row. ⛔ The worked example this paragraph used to carry was ITSELF false: it
+# claimed `tests/test_14407_alert_delivery.py`'s `core` row "sits in a DIFFERENT bin than
+# `test_notify`'s precisely because a `core` neighbour packs elsewhere". It cannot — `fast_pool()`
+# folds every surface into one `classified` set and returns `sorted(...)` of it
+# (`tools/ci_selection.py`, `fast_pool`), so a file registered on TWO surfaces (`api` beside
+# `test_abuse`, `core` beside `test_notify`) contributes ONE pool entry and therefore ONE bin.
+# Measured at this head both of those files land in the same one. A dual registration is exactly the
+# case where a neighbour's bin tells you nothing, which is why the rule is to read the letter off the
+# verb rather than to remember a pairing.
 #
 # The registrations the reading above counts are `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows:
 # #14409's `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`,
