@@ -287,7 +287,21 @@ def _door_references_outside_call_position(
 def _off_loop_submissions(
     tree: ast.Module,
 ) -> list[tuple[int, str | None, str | None, bool]]:
-    """Every `_run_off_loop(...)` in the module: (line, pool, fn, awaited)."""
+    """Every `_run_off_loop(...)` in the module: (line, pool, fn, awaited).
+
+    ⛔ THE CALLEE IS A BARE NAME, and that is DECLARED because it is the ONE site
+    where the resolver stays `ast.Name`-only: the door population and the `fn`
+    ARGUMENT both go through `_callable_name`, which accepts `obj.name` as well,
+    but an attribute-spelled CALLEE (`hosted_api._run_off_loop(…)`) is outside
+    this population. Declared rather than widened because widening it would let a
+    same-named attribute satisfy "the owner is submitted" for a local `def` that
+    is never handed to the pool — #14535's tracked FAIL-OPEN, which the `fn`
+    argument already carries. The direction is the SAFE one (measured): because
+    `_submitted_names` cannot see that spelling either, the owner has no visible
+    submission and arm 1 REDs, i.e. a false RED on a legal refactor rather than a
+    silent pass. `test_the_submission_callee_spelling_is_declared_not_silently_widened`
+    pins both halves so widening is a deliberate act here, not a silent one.
+    """
     awaited = {
         id(node.value)
         for node in ast.walk(tree)
@@ -1782,6 +1796,52 @@ def test_the_arms_agree_on_what_a_reference_is() -> None:
             if is_submission
         )
         assert submitted and submitted == reported
+
+
+def test_the_submission_callee_spelling_is_declared_not_silently_widened() -> None:
+    """The submission CALLEE is a bare name — declared, and pinned in BOTH directions.
+
+    ⛔ THE DECLARATION `_off_loop_submissions`' docstring now states, measured
+    rather than asserted in prose. The arm's own words say the owner "must be
+    handed to `_run_off_loop(_CAPTURE_EXECUTOR, …)`" without naming a spelling, so
+    a reader infers the attribute form counts; it does not, and it is NOT widened
+    here because a same-named attribute would then satisfy "submitted" for a
+    local `def` never handed to the pool — the fail-open #14535 owns for the `fn`
+    argument already. Widening the callee would spread that exposure.
+
+    ⛔ AND THE RESIDUAL IS THE SAFE DIRECTION (measured): the attribute-spelled
+    callee is invisible to `_submitted_names` too, so arm 1 REDs — a false RED on
+    a legal refactor, which is friction, not silent loss. This row exists so that
+    widening the callee later is a deliberate act (it reds here) instead of a
+    silent one, and so the residual lives where the walk does rather than only in
+    an issue.
+    """
+    attribute_callee = _tree([
+        "def _stamp_chain(point):",
+        f"    {_STAMP_DOOR}(point)",
+        "",
+        "async def handler():",
+        f"    await hosted_api.{_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+    ])
+    # The declaration: the attribute-spelled CALLEE is outside the population…
+    assert _off_loop_submissions(attribute_callee) == []
+    assert _submitted_names(attribute_callee) == []
+    # …so arm 1 fires — a false RED, never a silent pass.
+    with pytest.raises(AssertionError, match="ever submits to"):
+        _check_stamp_chain_off_loop(
+            attribute_callee, ast.unparse(attribute_callee), "attr-callee")
+
+    # …while the BARE spelling of the same source IS the legal submission, so the
+    # declaration above is about the spelling and not about the fixture.
+    bare_callee = _tree([
+        "def _stamp_chain(point):",
+        f"    {_STAMP_DOOR}(point)",
+        "",
+        "async def handler():",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+    ])
+    assert len(_off_loop_submissions(bare_callee)) == 1
+    _check_stamp_chain_off_loop(bare_callee, ast.unparse(bare_callee), "bare-callee")
 
 
 def test_the_door_arm_grades_every_spelling_the_call_resolver_accepts() -> None:
