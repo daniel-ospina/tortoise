@@ -1712,6 +1712,65 @@ def test_the_suspended_runbook_row_names_the_re_arm_sites_the_code_has():
     assert "FAILED SEND" in row, row
 
 
+def _notify_window_declaration() -> str:
+    """The ``_INCIDENT_DELIVERY_WINDOW_S`` declaration block (#14487 round 15)."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent
+              / "tortoise/notify.py").read_text(encoding="utf-8")
+    start = source.index("#: Delivery windows (#14407)")
+    end = source.index("_INCIDENT_DELIVERY_WINDOW_S", start)
+    return source[start:end]
+
+
+@pytest.mark.parametrize("surface", [
+    "tortoise/abuse.py module docstring",
+    "notify._INCIDENT_DELIVERY_WINDOW_S",
+    "runbook abuse_review_needed row",
+])
+def test_every_surface_names_the_episode_end_as_a_re_arm_site(surface):
+    """The ROUND-12 fix reached `ABUSE_FLAG_RAISED` and stopped one surface short.
+
+    Three surfaces still classified the re-arm set as *"a release that is not an
+    episode end"* — the exact dichotomy the runbook's `ABUSE_FLAG_RAISED` row was
+    corrected away from, because mechanically the failed close IS the episode-end
+    release (the release loop sits inside ``resolve_abuse_episode``, which
+    ``AbuseEngine._end_alert_episode`` calls on its ``ended`` branch only).
+
+    * ``abuse.py``'s module docstring — rewritten by this very PR, and it
+      contradicted ITS OWN closing sentence two paragraphs down (*"an episode end
+      (or any per-outcome release) is what re-arms it"*);
+    * ``notify.py``'s ``_INCIDENT_DELIVERY_WINDOW_S`` block — contradicted by the
+      next sentence of the same block (*"The engine releases the window when it
+      OBSERVES the episode end"*);
+    * the runbook's ``abuse_review_needed`` ROW — so the triage table gave an
+      operator two answers for one event, in two adjacent rows.
+
+    Both polarities are pinned: the dichotomy must be ABSENT and the episode-end
+    release must be NAMED, or deleting the clause wholesale would pass by default.
+    Parametrized so EACH surface reddens on its own — a revert of one of them must
+    not be masked by the other two.
+    """
+    from tortoise import abuse as abuse_module
+
+    texts = {
+        "tortoise/abuse.py module docstring": abuse_module.__doc__ or "",
+        "notify._INCIDENT_DELIVERY_WINDOW_S": _notify_window_declaration(),
+        "runbook abuse_review_needed row": _runbook_row("abuse_review_needed"),
+    }
+    name, text = surface, texts[surface]
+    assert "release that is not an episode end" not in text, (
+        f"{name} still frames the re-arm set as releases that are NOT an "
+        "episode end — but the episode-end release is the primary re-arm "
+        "site (and the failed close IS that release): "
+        f"{[s for s in text.split('. ') if 'not an episode end' in s]!r}")
+    assert "episode-end release" in text, (
+        f"{name} must NAME the episode-end release as a re-arm site; a fix "
+        "that deletes the clause instead of correcting it under-reports the "
+        "release the code actually performs")
+
+
+
 # ── 5. the engine owns the episode, so it must end it ───────────────────────
 
 def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):

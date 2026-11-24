@@ -80,8 +80,9 @@ incident re-paged a human every window (24 messages/day for R1) with no issue
 reference, and `abuse_flag` filed nothing at all. `notify.notify_abuse` now owns
 the delivery contract: a state change files an incident and is pushed once when
 the episode opens, then at most one reminder per 24h **while the delivery window
-holds** (a release that is not an episode end re-arms it — the scopes below say
-where that happens, and the emitted reminder says so too); a
+holds** (the episode-end release re-arms it for the RULE-episode kinds, and the
+kind-agnostic per-outcome releases re-arm ANY kind — the scopes below say where
+each fires, and the emitted reminder says so too); a
 measurement (#10156's ACTIVITY register) files nothing by design and is
 DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
 incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2) of the
