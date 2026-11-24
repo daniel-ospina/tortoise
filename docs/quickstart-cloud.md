@@ -23,14 +23,26 @@ Want to run it yourself instead? See [quickstart-selfhosted.md](quickstart-selfh
 
 ### Zero-email signup (CLI)
 
-No email or dashboard? `tortoise signup` mints a free hosted team + key in one command and saves it to `.tortoise` in the current directory:
+No email or dashboard? `tortoise signup` mints a free hosted team + key in one command and saves it to
+`~/.tortoise/credentials.json` (the user-global store — **not** a file in the current directory; #1708):
 
 ```bash
-tortoise signup
-# ✅ Free team created: agent-abc123
-#    API key: tt_...
-#    Config saved to .tortoise (shown once — store it)
+$ tortoise signup
+Signing up for a free hosted team (anonymous, no email)…
+✅ Free team created: agent-abc123
+   API key: tt_...                      # shown once — store it
+   Config saved to /home/you/.tortoise/credentials.json (shown once — store it)
+   Recovery token: st_...
+   RECOVERY TOKEN — save this: it is the only way back into this team if your key is lost.
+   Next: tortoise create-point "hello world" --kind statement
 ```
+
+Measured 2026-11-23: ~11 s end to end (`docs/evidence/14424-onboarding/`). Keep the recovery token:
+`tortoise recover` is the only way back into that team once the key is lost.
+> ⚠️ The PyPI artefact `tortoise-graph==0.2.0` (uploaded 2026-08-08) predates this verb — its CLI has **no**
+> `signup` command. Until a release is cut, the CLI path requires an install from source
+> (`pip install git+https://github.com/daniel-ospina/tortoise`); the dashboard path and the MCP door are
+> unaffected (tracked in #14424).
 
 2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact <support@premiselabs.co>.
 
