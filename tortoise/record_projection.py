@@ -3031,7 +3031,8 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     cost of a plan build. The answer is memoised ON THE PROCESS'S RESIDENT SCHEMA
     (:func:`_resident_entry`) — parsed at most once per process, then zero
     filesystem operations per call ONCE A COMPLETE SET WAS READABLE (an ABSENT or
-    PARTIALLY-present tree is re-parsed per consult so it can self-heal, pinned by
+    PARTIALLY-present tree is re-READ per consult so it can self-heal — the PARSE
+    is reused while the bytes are unchanged, keyed on the SQL text — pinned by
     `test_a_partial_jsonb_read_does_not_freeze_the_name_set`). ⛔ `_jsonb_cache_clear()`
     drops ONLY this memo, and because this reader now parses the schema entry's
     certified SQL, dropping it re-parses THE SAME BYTES: it is not a way to see an
@@ -3291,10 +3292,15 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
             continue
         extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
         out[table] = out[table] | extra
-    # ⛔ THE MEMO IS TAKEN ONLY WHEN THIS CALL'S OWN READ WAS COMPLETE (#4625
-    # review, F1). `_entry_sql_state` refuses to store an ABSENT or
-    # PARTIALLY-PRESENT read, but the answer derived FROM that read would store
-    # just as permanently: `cached` at the top is tested with `is not None`, so an
+    # ⛔ THE MEMO IS TAKEN ONLY OVER CERTIFIED BYTES — this call's read's flag, or,
+    # on a cache hit, SQL that a PREVIOUS COMPLETE read stored — never over a short
+    # or absent join (#4625 review, F1). ⚠️ Do NOT restate it as "this call's own
+    # read": `replay_plan` calls `table_columns()` and then `refused_props_names()`,
+    # so the first plan already reaches this block on the HIT branch, where no read
+    # happens (the paragraph below is the long form). `_entry_sql_state` refuses to
+    # store an ABSENT or PARTIALLY-PRESENT read, but the answer derived FROM that
+    # read would store just as permanently: `cached` at the top is tested with
+    # `is not None`, so an
     # empty (or SHORT) map memoised on the unfinished path is returned FOREVER
     # without reading again — the §17.5 carve-out this function IS would be
     # silently disabled for the life of the process (refused names land in the
