@@ -174,7 +174,13 @@ _ENDING_WORDS = (
 #:   cancelled` was answered with the population of CANCELLED records, the
 #:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
 #:   is left in the run by the residual below (it is an ordinary noun modifier),
-#:   so the `no longer` spelling is stopped by its own token rather than by `no`;
+#:   so the `no longer` spelling is stopped by its own token rather than by `no`.
+#:   ⛔ AND THE APPROXIMATIVE NEGATORS (`hardly`, `barely`, `scarcely`, `far from`,
+#:   `anything but`) stop ONLY WHERE THEY MODIFY THE ENDING: they leaked `is the
+#:   plan hardly cancelled` to the same polarity-INVERTED population (P1), but they
+#:   are also ordinary ADJECTIVE modifiers inside the NP, so a flat stop word
+#:   would refuse `is the barely visible notice archived` — a real state question.
+#:   The guard's POSITION is the whole point, and it costs no recall;
 #: * FUTURITY / INTENT (`to`, and the PROGRESSIVE `being`) —
 #:   `is the v2 api to be retired` asks about something that has NOT ended, and
 #:   the ended population can only answer it with records that have;
@@ -239,13 +245,21 @@ _ENDING_WORDS = (
 #:   `is_predicate` did not exist on the base module, which refused the same
 #:   string. It is disclosed here so a later round does not present it as a find.
 #:
-#: One word of the subject NP.
-
 #: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
 #: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
 #: refuses those spellings and answers `0 rows`, because the relevance read
 #: excludes terminal statuses.
-_NP_WORD = r"[a-z0-9][a-z0-9'-]*"
+#:
+#: One word of the subject NP. ⛔ AND THE CLASS IS EVERY APOSTROPHE AND EVERY
+#: LETTER, not the ASCII ones: the smart apostrophe in `company’s` (U+2019 — what
+#: macOS/iOS/Word produce when prose is pasted into a search box) and an accented
+#: head noun (`naïve`, `café`) are the same ordinary spellings the paragraph above
+#: is about, and an ASCII-only `[a-z0-9'-]*` answered `0 rows` for each (measured,
+#: PR #14491 review P2) — the #14033 fallthrough, in the spelling a real caller is
+#: most likely to send. Admitting the full letter class costs nothing here
+#: because `detect_state_question` LOWERCASES and whitespace-collapses the query
+#: before any shape is tried, so no case-folding assumption is smuggled in.
+_NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -257,6 +271,23 @@ _NP_STOP = (
     # above: each one changes what the question asks, and a negated predicate is
     # answered with the polarity-INVERTED population)
     r"|not|never|neither|nor|longer"
+    # ⛔ AND THE APPROXIMATIVE NEGATORS, BUT ONLY IN THE PREDICATE SLOT. Measured
+    # (PR #14491 review, P1): `is the plan hardly cancelled`, `… barely
+    # cancelled`, `… scarcely archived`, `… far from cancelled` and `… anything
+    # but cancelled` all routed and were served the population of CANCELLED
+    # records — the polarity-INVERTED answer this whole list exists to stop.
+    # ⛔ THEY ARE NOT FLAT STOP WORDS, and flattening them would have been the
+    # wrong fix: each is ALSO an ordinary ADJECTIVE modifier INSIDE the NP
+    # (`is the barely visible notice archived`, `is the hardly noticeable change
+    # archived`, `is the scarcely used endpoint retired` — all three route
+    # correctly and are real state questions), so a plain stop word buys the
+    # negated spellings by refusing three unnegated ones. The lookahead stops the
+    # negator only where the ENDING follows it within one word (`… hardly
+    # cancelled`, `… hardly been cancelled`) and leaves it in the run everywhere
+    # else, so this closure costs NO recall — which is why it is taken here while
+    # the other dual-use words (`all|some|any|no`) stay disclosed residuals.
+    rf"|(?:hardly|barely|scarcely|far\s+from|anything\s+but)"
+    rf"(?=\s+(?:{_NP_WORD}\s+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.

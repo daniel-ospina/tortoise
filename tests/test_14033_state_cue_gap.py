@@ -90,6 +90,13 @@ NOW_ROUTING = [
     ("were the claims retracted", "is_predicate"),
     ("is the company's policy archived", "is_predicate"),
     ("is the all-hands meeting cancelled", "is_predicate"),
+    # …and the SAME two spellings in the characters a real caller sends: the
+    # smart apostrophe an OS keyboard produces, and a head noun carrying an
+    # accent. An ASCII-only token class answered `0 rows` for all three (#14491
+    # review P2) — the #14033 fallthrough, not a cosmetic miss.
+    ("is the company’s policy archived", "is_predicate"),
+    ("is the naïve plan archived", "is_predicate"),
+    ("is the café plan archived", "is_predicate"),
     # an imperative that asks for the SET by clause, not for one named record.
     # ⛔ `show me the retired onboarding flow` is still refused (it asks for ONE
     # record); the `what we <verb>` clause is what makes this a set request.
@@ -242,11 +249,15 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
     ⛔ A pin has to be able to reach the guard it pins. The
     `is the payment terms clause given the contract was archived` row of
     ``NOT_SELECTED`` (``tests/test_13557_13558_reachable_reads.py``) is refused
-    by the NP STOP — `the` — and by nothing else: measured, relaxing the start
-    anchor, dropping the tail anchor and widening the word bound all leave it
-    refused, and only dropping `_NP_STOP` routes it. So it cannot pin any of the
-    other guards, and the strings below are the ones that go red when a guard is
-    removed:
+    by the NP STOP **and** the three-word bound TOGETHER — two guards at once, so
+    it pins NEITHER on its own. Measured (this docstring previously claimed that
+    "only dropping `_NP_STOP` routes it", which is FALSE and is corrected here):
+    dropping `_NP_STOP` alone leaves it refused, because `given the contract was`
+    is four words past a bound of three; dropping the bound alone leaves it
+    refused, because `the` is still a stop; and only dropping BOTH routes it. It
+    does not red under the start-anchor or tail-anchor mutants either. So it
+    cannot pin any of the six guards, and the strings below are the ones that go
+    red when one is removed:
 
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
@@ -275,12 +286,13 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      TWENTY-THREE measured rows of
+      TWENTY-NINE measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` (the count is
       the tuple's own length, not the review's twelve and not the round-8
-      nineteen: twelve NEGATED — seven plain, four correlative/`no longer`/
-      `any longer`, one standalone `n't` — seven FUTURE, three PROGRESSIVE and
-      one DISJUNCTIVE) —
+      nineteen: eighteen NEGATED — seven plain, six APPROXIMATIVE (the positional
+      arm's own `hardly`/`barely`/`scarcely`/`far from`/`anything but` rows), four
+      correlative/`no longer`/`any longer`, one standalone `n't` — seven FUTURE,
+      three PROGRESSIVE and one DISJUNCTIVE) —
       dropping the `not|never|…|or` line routes that class, which answers the
       question with the POLARITY-INVERTED (or a not-yet-existing, or an
       in-flight) population;
@@ -405,6 +417,17 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan neither deprecated nor retired",
     "is the ticket still not archived",
     "is the plan any longer cancelled",
+    # the APPROXIMATIVE negators — they leak to the polarity-INVERTED population
+    # without the POSITIONAL arm in ``_NP_STOP`` (P1: all six routed before it).
+    # ⛔ They cannot be flat stop words: see
+    # :data:`STOP_WORDS_KEEP_THIS_RECALL` for the three real state questions a
+    # flat word would refuse.
+    "is the plan hardly cancelled",
+    "is the plan barely cancelled",
+    "is the plan scarcely archived",
+    "is the plan far from cancelled",
+    "is the plan anything but cancelled",
+    "is the plan hardly been cancelled",
     # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
     # element may begin with `n` — the guard is live, not inert (see the
     # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
@@ -458,6 +481,14 @@ STOP_WORDS_KEEP_THIS_RECALL = (
     "is the point to point integration archived",
     "is the board of directors report archived",
     "is the list of open tickets archived",
+    # ⛔ THE APPROXIMATIVE NEGATORS ARE ADJECTIVE MODIFIERS HERE, not predicate
+    # ones, so the negation arm must NOT reach them: a flat stop word refuses all
+    # three of these real state questions in order to close the negated spellings
+    # (`… hardly cancelled`), which is why that guard is POSITIONAL (#14491 review
+    # P1 measured the flat fix as a recall loss, not a closure).
+    "is the barely visible notice archived",
+    "is the hardly noticeable change archived",
+    "is the scarcely used endpoint retired",
 )
 
 
