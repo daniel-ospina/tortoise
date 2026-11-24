@@ -101,8 +101,11 @@ version: 1
 # #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
 # at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
 # unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
-# them into the seven/four at 837.5 s and 837.4 s stated above (this sentence read "nine/two" —
-# #14429's reading — until #14481 re-cited it against the block it sits under).
+# them into the nine/two at 837.3 s this sentence used to state, and #14471's flat-default
+# registration re-packed THOSE into the seven/four at 837.5 s and 837.4 s stated above — the
+# attribution the block's own measurement sentence carries (measured, not inferred: withholding
+# #14471's row packs 837.3/837.2 and restoring it packs 837.5/837.4, so charging the seven/four to
+# #14429 would be false; this sentence read "nine/two at 837.3 s" until #14481 re-cited it).
 # ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
 # why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
@@ -9670,7 +9673,7 @@ surfaces:
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
   #   * the `durations:` row → the ENTRY RULE pin
   #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`,
-  #     CUT in the B7 test cut on 2026-11-23 — nothing pins this now), which saw ONLY
+  #     cut in the B7 test cut on 2026-11-23 and RESTORED by #14481, so it pins this again), which saw ONLY
   #     the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a 0.90 RATIO
   #     with headroom and is silent over one missing row.
   # The three are added together because a lane that adds one and stops is red in a leg

@@ -3427,9 +3427,7 @@ jobs:
     # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
     # watchdog` asserts cap > the LARGEST emitted shard watchdog, and
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` also asserts cap
-    # <= `_CAP_CEILING_FACTOR` (3x) that watchdog (the `_shard_bounds_*` arm the B7
-    # cut took and #14481 restored:
-    # `test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it`).
+    # <= `_CAP_CEILING_FACTOR` (3x) that watchdog (the `_shard_bounds_*` arm `test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it`, cut by B7 and restored by #14481).
     timeout-minutes: 30
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
