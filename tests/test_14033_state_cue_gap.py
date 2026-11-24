@@ -110,11 +110,23 @@ NOW_ROUTING = [
     # `detect_state_question`: all three answered `None`, i.e. `0 rows` from the
     # relevance read — the #14033 defect class in yet another spelling. A
     # decomposed (NFD) accent was the same miss (`cafe` + U+0301), which is why the
-    # fold is NFKC and not a longer character class (#14491 review cycle 3, P2).
+    # fold normalises rather than the class getting longer (#14491 review cycle 3,
+    # P2).
     ("is the all‐hands meeting cancelled", "is_predicate"),
     ("is the all‑hands meeting cancelled", "is_predicate"),
     ("is the all–hands meeting cancelled", "is_predicate"),
     ("is the cafe\u0301 plan archived", "is_predicate"),
+    # ⛔ AND THESE TWO PIN THE NORMALISATION FORM, which is NFC and NOT NFKC. A
+    # single word character is what `_NP_WORD` accepts, and compatibility
+    # normalisation EXPANDS some of them into a sequence carrying a non-word
+    # character — `NFKC("½")` is `1` + U+2044 FRACTION SLASH + `2` — so the run
+    # breaks and the question answers `0 rows` (measured, PR #14491 review cycle
+    # 5, P1: it routed before the fold). NFC composes the accent above and leaves
+    # these alone. ⛔ Switching the fold back to NFKC REDS these two rows: that is
+    # the point of them. The cost of NFC — compatibility forms (full-width,
+    # ligatures) are not folded — is stated in `detect_state_question`.
+    ("is the ½ price plan archived", "is_predicate"),
+    ("is the ¼ price plan archived", "is_predicate"),
     # an imperative that asks for the SET by clause, not for one named record.
     # ⛔ `show me the retired onboarding flow` is still refused (it asks for ONE
     # record); the `what we <verb>` clause is what makes this a set request.
@@ -297,7 +309,7 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       routes, and so does one with a bare quantifier subject (`is the plan some
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
-      six residuals;
+      SEVEN residuals;
     * …and the same stop is what refuses an ADJUNCT: `is the data safe once
       archived`, `is the report still accurate once archived` and
       `is the policy unless bookings were cancelled` — the ending there belongs
@@ -310,11 +322,11 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       the rows that then route — never by tallying the tab, because a tab heading
       is a comment and a count read off it is how this number went stale three
       times: NEGATED 11, APPROXIMATIVE 14, CONTRACTION 9, FUTURE (the frame) 6,
-      `of`-COMPLEMENT 4, PROGRESSIVE 3, ADJUNCT/LINKER 3, DISJUNCTION 1. ⛔ Those
-      sum to 51, NOT 56: five rows are refused by MORE THAN ONE guard, so removing
-      one arm still leaves them refused and no single-guard mutant can isolate
-      them. That is a property of the rows, not a miscount — re-measure, never
-      re-derive.
+      `of`-COMPLEMENT 4, PROGRESSIVE 3, ADJUNCT/LINKER 7, DISJUNCTION 1. ⛔ Those
+      sum to 55, NOT 56: exactly ONE row (`is the plan not going to be
+      cancelled`) is isolated by no arm in this table, because the NP `{0,3}`
+      bound refuses it before any modifier arm is reached — 55 + 1 = 56. That is
+      a property of the rows, not a miscount — re-measure, never re-derive.
       Dropping the stop routes that class, which answers the question with the
       POLARITY-INVERTED (or a not-yet-existing, or an in-flight) population.
       ⛔ The APPROXIMATIVE rows are the ones that pin the POSITIONAL arm: a flat
@@ -413,7 +425,9 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 #: before the `['’-]` contraction arm landed — i.e. the hole created by the two
 #: changes together, which existed on neither alone:
 #:
-#: EIGHT classes, each with its own failure, and none of them is the question
+#: FOUR failure modes, one per bullet below — ⛔ the per-GUARD count is larger
+#: (eight arms; see the breakdown in the falsifier docstring above), because one
+#: failure mode is closed by more than one arm. None of them is the question
 #: asked:
 #:
 #: * NEGATION — `is the plan not cancelled` was served the population of
@@ -431,18 +445,6 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 #:   token and its own rows here.
 #: * DISJUNCTION — `is the ticket still open or cancelled` asks about two states
 #:   at once, and one population cannot answer both.
-#:
-#: ⛔ ATTRIBUTION, row by row, because a pin must be able to reach its guard:
-#: measured against the pre-fix head (`git show 4aecc782d3^:tortoise/
-#: state_intent.py`), 47 of these 52 route there and FIVE do not:
-#: `is the plan not going to be cancelled` (the NP bound `{0,3}` already refused
-#: it — a BOUNDARY pin, not a non-vacuity row) and the four SMART-APOSTROPHE
-#: contractions, which the pre-fix ASCII token class never matched at all. ⛔ Those
-#: four are non-vacuity pins only against the INTERMEDIATE head that widened
-#: `_NP_WORD` before the `['’-]` contraction arm landed — they are named here
-#: rather than left to look like ordinary rows, and they are the reason the
-#: reconciliation had to fix a hole that existed on neither lane alone.
-#: Every other row was measured leaking.
 MODIFIED_PREDICATE_STAYS_OUT = (
     # negation
     "is the plan not cancelled",

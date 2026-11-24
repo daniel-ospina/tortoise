@@ -855,10 +855,24 @@ def detect_state_question(text: str | None) -> StateQuestion:
     #     is the all‑hands meeting cancelled     (U+2011)
     #     is the all‐hands meeting cancelled     (U+2010)
     #     is the café plan archived             (NFD `e` + U+0301)
-    # Folding here fixes them all at once, and keeps the regexes readable; NFKC
-    # also maps compatibility forms (ligatures, full-width) onto their plain
-    # spellings. The transform is idempotent, so a caller that already sent ASCII
-    # passes through unchanged.
+    # Folding here fixes them all at once, and keeps the regexes readable.
+    # ⛔ NFC, NOT NFKC, AND THE DIFFERENCE IS LOAD-BEARING. Compatibility
+    # normalisation also expands characters the word-run accepts into sequences
+    # that contain a NON-word character — `NFKC("½")` is `1` + U+2044 FRACTION
+    # SLASH + `2`, and U+2044 is not `[^\W_]`, so the run breaks and
+    # `is the ½ price plan archived` answers `None` (measured, PR #14491 review
+    # cycle 5, P1: it routed before the fold). NFC composes the NFD accent that
+    # motivated the normalisation in the first place (`cafe` + U+0301 -> `café`)
+    # and leaves fractions alone. ⛔ THE COST IS STATED: compatibility forms —
+    # full-width Latin, ligatures — are NOT folded, so a question typed in
+    # full-width still keeps the relevance read. That is the pre-fold behaviour,
+    # not a regression; manufacturing a regression to gain it is the trade this
+    # refuses.
+    # ⛔ THE ORDER MATTERS AND IS TRANSFORM -> LOWER -> NORMALISE: normalising LAST
+    # means the composed form is what the shapes see, and lowering before the
+    # composition means a decomposed accent still composes afterwards. The
+    # transform is idempotent on its own output, so a caller that already sent
+    # ASCII passes through unchanged.
     folded = str(text).translate(
         {
             0x2018: "'", 0x2019: "'", 0x02BC: "'",  # quotes / modifier apostrophe
@@ -866,7 +880,7 @@ def detect_state_question(text: str | None) -> StateQuestion:
             0x2013: "-", 0x2014: "-", 0x2212: "-",  # dashes / minus sign
         }
     )
-    t = " ".join(unicodedata.normalize("NFKC", folded).lower().split())
+    t = " ".join(unicodedata.normalize("NFC", folded.lower()).split())
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
