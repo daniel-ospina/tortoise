@@ -2098,7 +2098,7 @@ def test_a_cancel_stops_the_queued_set_in_one_statement():
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     refs = [f"/d/{i}.md" for i in range(50)]
-    batch, items = coord.submit(ORG, refs)
+    batch, _items = coord.submit(ORG, refs)
 
     per_item: list[str] = []
     real_cas = store.put_item_if_state

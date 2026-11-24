@@ -1213,8 +1213,8 @@ class GraphBatchStore:
             # and the second OVERWRITES the first instead of adding (200 spent,
             # 200 billed, `tokens_spent: 100`). The addition is done by the
             # database, so both increments apply.
-            + (f"i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
-               f"i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
+            + ("i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
+               "i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
                if token_delta is not None
                else "i.tokens_in=$tin, i.tokens_out=$tout, ")
             + "i.attempts=$attempts, i.content_changed=$changed, "
@@ -1229,6 +1229,13 @@ class GraphBatchStore:
                         else item.tokens_in),
              "tout": int(token_delta[1] if token_delta is not None
                          else item.tokens_out),
+             # ⛔ `attempts` IS NAMED BY THE SET ABOVE, so it must be in the map
+             # (#14415 review round 13). The `token_delta` refactor rebuilt this
+             # dict and dropped the key, and the statement then failed at the
+             # engine with `Missing parameters` on EVERY compare-and-set — the
+             # claim, the settle, the cancel, the resume. Only the live test saw
+             # it; the hermetic ones use a fake `query`.
+             "attempts": int(item.attempts),
              "changed": bool(item.content_changed),
              "updated": item.updated_at,
              # Sent only when the pattern above names it, so an unused parameter
