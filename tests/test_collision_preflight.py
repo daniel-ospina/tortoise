@@ -63,6 +63,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -643,30 +644,114 @@ FAKE_LANE_PROGRAM = "/bin/sh"
 def _fake_lane_argv(seconds: int = 120) -> list[str]:
     """argv for a process the census reads as `pi` that stays inside its cwd.
 
-    ⛔ THE TRAILING `; :` IS LOAD-BEARING. A POSIX shell `exec`s a `-c` command
-    it would run LAST, which replaces argv[0] `pi` with `sleep` — the census then
-    sees no lane, and the failure reads as a process-census gap instead of as the
-    fixture's own doing. The second command keeps the shell as the process.
+    ⛔ THE TRAILING `; :` IS LOAD-BEARING, AND ONLY ON SOME SHELLS. Given a `-c`
+    string, a shell is FREE to `exec` the LAST command instead of waiting for it
+    (an optimization, not a POSIX requirement) — which replaces argv[0] `pi` with
+    `sleep`, so the census sees no lane and the failure reads as a process-census
+    gap instead of as the fixture's own doing.
+
+    Which shells take that optimization, MEASURED (`/proc/<pid>/cmdline`, 0.4 s
+    after the spawn):
+
+    ==========  ===================  =====================
+    program     `-c 'sleep 3'`      `-c 'sleep 3; :'`
+    ==========  ===================  =====================
+    `/bin/dash` argv[0] `pi`         argv[0] `pi`
+    `/bin/bash` argv[0] `sleep`      argv[0] `pi`
+    ==========  ===================  =====================
+
+    So on Ubuntu CI (`/bin/sh` is dash) the tail is inert, and on every box where
+    `/bin/sh` is bash (macOS, Fedora) it is the ONLY thing keeping the lane
+    visible. ⛔ Do not "verify" this on Ubuntu and delete the tail: that is the one
+    platform where it cannot fail, and the deletion takes every census arm with it
+    on the platforms where it does. (Review of #14506 measured both rows; the
+    earlier comment here claimed the optimization was POSIX-mandated, which dash
+    disproves.)
     """
     return ["pi", "-c", f"sleep {seconds}; :"]
 
 
+#: pid -> the spool a fake lane's stderr was written to. An `rc` with no text is not a
+#: cause, and the harness #14388 built to "name its own cause" closed the child's
+#: stderr to `DEVNULL` — so every DEAD FIXTURE the CI pool produced reported
+#: `EXITED with rc=1` and NOTHING else (#14506).
+#:
+#: The capture lives HERE, inside the one spawn, not in one caller: registering it only
+#: in `_start_fake_pi` left the five arms that call `_fake_lane` directly reporting an
+#: `rc` with no text — which is the very hole the note exists to close, and worse under
+#: the shell argv, where the `; :` tail turns a failed `sleep` into `rc=0` (review of
+#: #14506). Keyed by pid; a reused pid overwrites its own entry, which is the right
+#: collision: the previous holder is dead and its note has already been read or lost.
+_FAKE_LANE_STDERR: dict[int, io.BufferedRandom] = {}
+
+
 def _fake_lane(cwd, *, env: dict[str, str] | None = None,
-               stderr=subprocess.DEVNULL, seconds: int = 120) -> subprocess.Popen:
+               stderr=None, seconds: int = 120) -> subprocess.Popen:
     """A live `pi`-named process standing in `cwd` — the census fixtures' ONE spawn.
 
-    One helper, so the argv[0]/program contract above is stated once and every
-    arm that needs a lane inherits it instead of re-deriving it (six sites did,
-    and the `executable=PYTHON` form #12358 introduced outlived the environment
-    it was verified on).
+    One helper, so the argv[0]/program contract above is stated once and every arm
+    that needs a lane inherits it instead of re-deriving it (six sites did, and the
+    `executable=PYTHON` form #12358 introduced outlived the environment it was
+    verified on).
 
-    `stderr` is passed through so a fixture that dies can be asked WHAT IT SAID —
-    an `rc` with no text is not a cause (`_fake_lane_stderr_note`).
+    Three things it owns so that no caller has to remember them:
+
+    * **`start_new_session=True`** — the lane is a SHELL whose child is `sleep`, so a
+      bare `terminate()` signals only the shell and reparents the sleeper to init,
+      where it outlives the temp dir it stands in (measured: ~11 orphans per full run
+      of this file, each living up to two minutes). Tear a lane down with
+      `_stop_fake_lane`, which kills the GROUP.
+    * **captured stderr** — an `rc` with no text is not a cause. Read it back with
+      `_fake_lane_stderr_note(pid)`.
+    * **an unlinked spool** (`tempfile.TemporaryFile`) — no path to leak and nothing
+      for `tearDown` to miss; the fd stays open in THIS process, so the parent can
+      still seek and read it after the child has been reaped.
     """
-    return subprocess.Popen(
+    capture = stderr is None
+    if capture:
+        # ⛔ NOT a context manager on purpose (SIM115): the spool must outlive this
+        # call — the child writes to it while it runs, and the note seeks and reads it
+        # back after the child has been reaped. A `with` would close it on return and
+        # `_fake_lane_stderr_note` would then answer "could not be read back".
+        stderr = tempfile.TemporaryFile()  # noqa: SIM115
+    proc = subprocess.Popen(
         _fake_lane_argv(seconds), executable=FAKE_LANE_PROGRAM, cwd=str(cwd),
         env=env if env is not None else os.environ.copy(),
-        stdout=subprocess.DEVNULL, stderr=stderr)
+        stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True)
+    if capture:
+        _FAKE_LANE_STDERR[proc.pid] = stderr
+    #: The group this lane leads, so `_stop_fake_lane` can reap the whole thing. Only
+    #: a lane gets it: a plain `Popen`'s pid is NOT a process-group id, and `killpg`
+    #: on a bare pid can signal an unrelated group.
+    proc.pi_lane_pgid = proc.pid
+    return proc
+
+
+def _stop_fake_lane(proc: subprocess.Popen) -> None:
+    """Reap a fake lane AND its `sleep` child — `terminate()` leaves an orphan.
+
+    MEASURED (review of #14506): `proc.terminate()` signals only the shell, so every
+    arm left a `sleep 120` with `ppid 1`, holding a cwd inside a temp dir that
+    `tearDown` then deletes. On a runner shared with the fleet, a leaked process is
+    exactly the ambient state this suite's own census arms exist to stop trusting.
+
+    Safe on ANY `Popen`: only a proc `_fake_lane` spawned carries `pi_lane_pgid`; for
+    anything else it signals that pid alone.
+    """
+    pgid = getattr(proc, "pi_lane_pgid", None)
+    if pgid is None:
+        with suppress(OSError):
+            proc.kill()
+    else:
+        with suppress(OSError):
+            os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if pgid is not None:
+            with suppress(OSError):
+                os.killpg(pgid, signal.SIGKILL)
+        proc.wait()
 
 
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
@@ -8861,8 +8946,7 @@ class CollisionPreflightTest(unittest.TestCase):
             self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("ADVISORY", self.hit(out, str(wt), surface="local worktrees"))
@@ -9124,8 +9208,7 @@ class CollisionPreflightTest(unittest.TestCase):
             self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("ADVISORY", self.hit(out, ref))
@@ -9312,8 +9395,7 @@ class CollisionPreflightTest(unittest.TestCase):
             self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
             rc, out = self.run_tool()
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         line = self.hit(out, ref)
@@ -9562,8 +9644,7 @@ class CollisionPreflightTest(unittest.TestCase):
             _git(self.repo, "worktree", "prune")
             rc, out = self.run_tool()
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         line = self.hit(out, ref)
@@ -9601,8 +9682,7 @@ class CollisionPreflightTest(unittest.TestCase):
             self._wait_for_pi_cwd(clone, proc=proc)
             rc, out = self.run_tool()
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         line = self.hit(out, ref)
@@ -9685,17 +9765,11 @@ class CollisionPreflightTest(unittest.TestCase):
             fake_bin = self.tmp / "fakebin-empty"
             fake_bin.mkdir(exist_ok=True)
             env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-        # ⛔ THE CHILD'S STDERR IS THE ONLY EVIDENCE A DEAD FIXTURE HAS (#14506). #14388
-        # exists so this harness can "name its own cause" and then closed the child's
-        # stderr to `DEVNULL` — so every DEAD FIXTURE the CI pool produced reported
-        # `EXITED with rc=1` and NOTHING else (four of them in one shard, twice at the same
-        # head). It is captured beside the fixture's other scratch state instead, and read
-        # back into the failure message by `_fake_lane_stderr_note`.
-        errs = self._fake_pi_stderr_paths()
-        err_log = self.tmp / f"fake-pi-{len(errs)}-{os.getpid()}.stderr"
-        with open(err_log, "wb") as err_fh:
-            proc = _fake_lane(cwd, env=env, stderr=err_fh)
-        errs[proc.pid] = err_log
+        # ⛔ THE CHILD'S STDERR IS THE ONLY EVIDENCE A DEAD FIXTURE HAS (#14506), and
+        # `_fake_lane` now captures it for EVERY arm — not only for this one. Nothing
+        # to register here: the spawn owns the spool, and `_fake_lane_stderr_note`
+        # reads it back by pid.
+        proc = _fake_lane(cwd, env=env)
         # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
         # lane must be SERVED to it as well (`_write_ps_stub`). Without this the
         # lane is invisible to the tool and every test built on it — the (c2)
@@ -9704,28 +9778,25 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
         return proc
 
-    def _fake_pi_stderr_paths(self) -> dict[int, Path]:
-        """pid -> the stderr file `_start_fake_pi` gave that child. Lazily created."""
-        errs = getattr(self, "_fake_pi_errs", None)
-        if errs is None:
-            errs = {}
-            self._fake_pi_errs = errs
-        return errs
-
     def _fake_lane_stderr_note(self, pid: int) -> str:
         """What the dead lane itself said — an `rc` with no text is not a cause (#14506).
 
-        Returns `""` for a pid this fixture did not spawn (a caller may hand
+        Returns `""` for a pid this suite did not spawn (a caller may hand
         `_wait_for_pi_cwd` its own `proc`, as the DEAD-FIXTURE arm's own test does), so the
         note never claims to explain a child it never saw. The text is appended AFTER the
         identity line by the caller, so nothing here can reach the failure signature.
+
+        ⛔ THE LOOKUP IS THE MODULE'S, NOT THIS TEST'S (#14506 review). Registering the
+        spool inside `_start_fake_pi` left the five arms that call `_fake_lane` directly
+        with `DEVNULL`: their DEAD FIXTURE read `EXITED with rc=0` and no words at all.
         """
-        path = self._fake_pi_stderr_paths().get(pid)
-        if path is None:
+        fh = _FAKE_LANE_STDERR.get(pid)
+        if fh is None:
             return ""
         try:
-            text = " ".join(path.read_text(encoding="utf-8", errors="replace").split())
-        except OSError as exc:  # pragma: no cover — the fixture's tmp dir was removed
+            fh.seek(0)
+            text = " ".join(fh.read().decode("utf-8", "replace").split())
+        except (OSError, ValueError) as exc:  # pragma: no cover — the spool was closed
             return f"; its stderr could not be read back ({exc})"
         if not text:
             return "; its stderr was captured and was EMPTY — the child died without a word"
@@ -10050,8 +10121,7 @@ class CollisionPreflightTest(unittest.TestCase):
         try:
             self._wait_for_pi_cwd(self.repo, timeout=15.0, proc=proc)
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
 
     def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
         """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
@@ -10761,8 +10831,7 @@ exec {real} "$@"
                 repo_arg=asked_from,
                 env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertEqual(rc, 1, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("working directory names #3061", out)
@@ -10784,8 +10853,7 @@ exec {real} "$@"
             with self.assertRaises(AssertionError) as ctx:
                 self._wait_cwd_attributable(proc.pid, elsewhere, timeout=1.0)
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertIn(str(proc.pid), str(ctx.exception))
         self.assertIn("could not attribute", str(ctx.exception))
 
@@ -10806,8 +10874,7 @@ exec {real} "$@"
         free empty read is the state under test, not a simulated one.
         """
         proc = self._start_fake_pi(self.repo)
-        proc.terminate()
-        proc.wait(timeout=10)
+        _stop_fake_lane(proc)
         with self.assertRaises(AssertionError) as ctx:
             self._wait_cwd_attributable(proc.pid, Path.cwd(), timeout=1.0)
         self.assertIn("could not attribute", str(ctx.exception))
@@ -11205,8 +11272,7 @@ exec {real} "$@"
                 repo_arg=lane_wt, cwd=lane_wt,
                 env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("own sub-agent(s) exempted", out)
@@ -11245,8 +11311,7 @@ exec {real} "$@"
                 repo_arg=lane_wt, cwd=lane_wt,
                 env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertEqual(rc, 1, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("own sub-agent(s) exempted", out)
@@ -11285,8 +11350,7 @@ exec {real} "$@"
                 repo_arg=caller_wt, cwd=caller_wt,
                 env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            _stop_fake_lane(proc)
         self.assertEqual(rc, 1, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("own sub-agent(s) exempted", out)
