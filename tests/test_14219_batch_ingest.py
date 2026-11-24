@@ -482,21 +482,58 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert before.estimate, "the premise: the ACK wrote a non-empty estimate"
     assert before.corpus_name == "handbook", "the premise: the ACK wrote a corpus"
 
+    # ⛔ BACKDATE THE ITEM ROWS — WITHOUT THIS THE GUARD IS VACUOUS (#14415
+    # recut-2 review, P2 — measured). Items written microseconds ago are INSIDE
+    # `BATCH_RECLAIM_AFTER_S`, and round 22's liveness rule reads that as "an
+    # acceptance is in flight" and DEFERS the adoption (`_resume_batch` returns
+    # `None`) BEFORE reaching the write this test exists to pin. Measured on the
+    # pre-fix code (re-read removed + blind `put_batch`): `1 passed` — the guard
+    # could not fail, which is exactly what the mutation-attribution pass exists
+    # to refuse. The ancient stamp is what makes this the CRASH-RESIDUE case the
+    # docstring describes, so the adoption path is genuinely reached; the
+    # reachability assertion at the end proves it was (⛔ NOT a `RESUMING` one:
+    # a freshly accepted batch with every item `queued` is deliberately not
+    # relabelled `resuming`, so that would fail on correct code).
+    for submitted in _items:
+        stale_row = store.get_item(ORG, batch.batch_id, submitted.item_id)
+        assert stale_row is not None
+        stale_row.updated_at = _ancient_stamp()
+        store.put_item(ORG, stale_row)
+
     real_get = store.get_batch
+    real_put = store.put_batch
+    real_absent = store.put_batch_if_absent
     fired = {"done": False}
+    reads = {"n": 0}
+    writes = {"put_batch": 0, "put_batch_if_absent": 0}
 
     def stale_get(org_id, batch_id):
+        reads["n"] += 1
         if not fired["done"]:
             fired["done"] = True
             return None          # the read the scan took BEFORE the row was written
         return real_get(org_id, batch_id)
 
+    def counted_put(batch):
+        writes["put_batch"] += 1
+        return real_put(batch)
+
+    def counted_absent(batch):
+        writes["put_batch_if_absent"] += 1
+        return real_absent(batch)
+
     store.get_batch = stale_get  # type: ignore[method-assign]
+    store.put_batch = counted_put  # type: ignore[method-assign]
+    store.put_batch_if_absent = counted_absent  # type: ignore[method-assign]
     coord.recover(ORG)
 
     assert fired["done"], "the stale read did not fire — the test proves nothing"
     after = real_get(ORG, batch.batch_id)
     assert after is not None, "the adoption DELETED the batch row"
+    # ⛔ NOT `state is RESUMING`: a freshly accepted batch with every item `queued`
+    # is deliberately NOT relabelled `resuming` (recut review round 13 — a scan
+    # that resumed nothing must not mint that word), so that would fail on
+    # correct code. The reachability proof is the LAST assertion instead.
     assert after.estimate == before.estimate, (
         "the adoption overwrote the ACK's estimate with an empty one — owner §4 "
         f"requires it on the record: {before.estimate!r} -> {after.estimate!r}")
@@ -512,6 +549,25 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert after.created_at == before.created_at, (
         "the adoption re-stamped created_at from an orphan item's updated_at, so "
         "the batch's own age is lost")
+    # ⛔ REACHABILITY, asserted LAST so it can never mask a behavioural failure
+    # above (P2 fix). TWO facts, and the second is the direct one:
+    #   * the scan ADOPTED nothing — on the re-read the acceptance's row is there,
+    #     so neither batch-row write is issued. A scan that stopped at the stale
+    #     read, or one that adopted blind, issues one.
+    #   * it went PAST that stale read at all (>1 `get_batch`), which is the
+    #     premature-deferral vacuity this test was measured to have.
+    # Together they pin the RE-READ itself rather than a count: removing just the
+    # re-read leaves the count >1 (the create-if-absent path re-reads) but makes
+    # `put_batch_if_absent` fire, which is what reddens here.
+    assert writes["put_batch"] == 0 and writes["put_batch_if_absent"] == 0, (
+        "the scan ADOPTED the batch (batch-row writes: "
+        f"{writes}) instead of finding the row the acceptance had written — the "
+        "re-read this guard pins did not happen, so the assertions above prove "
+        "nothing")
+    assert reads["n"] > 1, (
+        f"the scan made {reads['n']} read of the batch row and stopped at the "
+        "stale one — the adoption path was never reached, so the assertions "
+        "above prove nothing")
 
 
 def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
@@ -2189,8 +2245,18 @@ def test_the_graph_store_speaks_real_cypher():
     # userinfo at all.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
                   password=unquote(parsed.password) if parsed.password else None)
-    graph_name = parsed.path.strip("/") or "tortoise"
-    graph = db.select_graph(f"{graph_name}_batch_store_probe")
+    # ⛔ PER-TEST-UNIQUE NAME + JOURNAL, not the fixed `<graph>_batch_store_probe`
+    # (#11217 / cycle-6 P1-3, cycle-8 P2-2 — caught by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # on shard `b`, measured). A raw client bypasses `_assert_test_graph` AND the
+    # per-test wipe scope, so a FIXED name is DETACHed by every concurrent session
+    # and a fixed "test-prefixed" name passes the prefix check vacuously; the
+    # journal is what makes the session-end sweep GRAPH.DELETE it, so the leak is
+    # closed rather than renamed. Same shape as `tests/test_search_engine.py:595`.
+    graph_name = f"tortoise_test_batch_store_probe_{os.urandom(4).hex()}"
+    from tests._embedded import _journal_append
+    _journal_append(graph_name)
+    graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
 
     def _query(cypher, params=None, timeout=None):
@@ -2354,8 +2420,13 @@ def test_a_foreign_org_cannot_reach_a_batch():
     # anything about tenants.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
                   password=unquote(parsed.password) if parsed.password else None)
-    graph = db.select_graph(
-        f"{parsed.path.strip('/') or 'tortoise'}_batch_tenant_probe")
+    # ⛔ PER-TEST-UNIQUE NAME + JOURNAL — the sibling arm's note applies verbatim
+    # (#11217 / cycle-8 P2-2): a fixed raw-DETACH name is a shared graph, not a
+    # private one, and only the journal lets the session sweep reclaim it.
+    graph_name = f"tortoise_test_batch_tenant_probe_{os.urandom(4).hex()}"
+    from tests._embedded import _journal_append
+    _journal_append(graph_name)
+    graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
 
     def _query(cypher, params=None, timeout=None):
