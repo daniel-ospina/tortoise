@@ -242,13 +242,13 @@ def _imported_modules(path: Path) -> set[str]:
     reached: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            reached.update(alias.name for alias in node.names)
+            reached |= {alias.name for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             if node.level or not node.module:
-                reached.update(alias.name for alias in node.names)
+                reached |= {alias.name for alias in node.names}
                 continue
             reached.add(node.module)
-            reached.update(f"{node.module}.{alias.name}" for alias in node.names)
+            reached |= {f"{node.module}.{alias.name}" for alias in node.names}
     return reached
 
 

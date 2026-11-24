@@ -16,4 +16,4 @@ License: Apache-2.0 (see client/LICENSE) — this distribution re-licenses
 only the shipped client modules; the engine remains BSL-1.1 (#526).
 """
 
-__version__ = "0.2.0"  # mirrors client/pyproject.toml; lockstep with tortoise-graph minor
+__version__ = "0.2.1"  # mirrors client/pyproject.toml; lockstep with tortoise-graph minor

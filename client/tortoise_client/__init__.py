@@ -23,7 +23,7 @@ from tortoise.mcp_client import (
     status,
 )
 
-__version__ = "0.2.0"  # lockstep with tortoise-graph minor (docs/client-server-split.md)
+__version__ = "0.2.1"  # lockstep with tortoise-graph minor (docs/client-server-split.md)
 
 __all__ = [  # noqa: RUF022
     "MCPKeyEmptyError",
