@@ -2942,7 +2942,8 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
             self.cyphers.append(cypher)
 
             class _Res:
-                result_set: list = []
+                def __init__(self) -> None:
+                    self.result_set: list = []
 
             return _Res()
 
