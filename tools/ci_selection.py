@@ -1790,8 +1790,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
              # #14062 / PR #14445: the privatisation RESIDUE instrument. Same silent-drop
              # class as the rows above, and MEASURED before this entry: `--changed-files
-             # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, 106 test files with
-             # `test_sdk_privatise_sweep.py` ABSENT. `tools/` is a flat `NON_PYTHON_PREFIXES`
+             # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, and only the tier-1
+             # smoke set selected, with `test_sdk_privatise_sweep.py` ABSENT. (No count is
+             # quoted: that population is `len(manifest["tier1"])`, it moves with every
+             # registration, and the `tier1:` block's own comment forbids typing it.) `tools/` is a flat `NON_PYTHON_PREFIXES`
              # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
              # the residue pin runs none of the arms that grade this file's pins — the pinned
              # pair itself (`test_the_residue_pin_is_a_reading_of_the_whole_set`) and the
@@ -1808,18 +1810,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # diagnosis — without it a map that silently derived nothing still exits 1, but
              # reported as `the residue SET moved off its pin`, which sends the reader to the
              # pin instead of to the map), the
-             # `SWEEP_NAMES == 66` non-vacuity FLOOR, the map/private-spelling assertions of
-             # `test_the_pinned_base_still_derives_the_whole_batch`, the import-shape arm
-             # `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
-             # scope-local typing arms and the refspec arms.
+             # import-shape arm `test_reading_the_approved_set_does_not_shadow_the_package_star_import`,
+             # the scope-local typing arms and the refspec arms. ⛔ NOT the `SWEEP_NAMES == 66`
+             # floor: `--check` already carries it (a map of the wrong size is `VACUOUS CHECK`,
+             # exit 2, on every PR) — listing it here would repeat the mistake this paragraph
+             # corrects one sentence earlier. ⛔ AND NOT the map/private-spelling assertions of
+             # `test_the_pinned_base_still_derives_the_whole_batch`, which this row does NOT
+             # recover: that arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it SKIPS on the
+             # `fetch-depth: 1` `test` job the row selects and only runs at depth 0.
              # ⛔ THIS INCLUDES THE GRADED PROSE, and that is the point: the block's own
              # published extent is asserted against `_residue_block()`'s walk, so a re-cut that
              # grows or shrinks the `#:` run reds THAT arm — but only on a diff that selects the
              # suite. Without this row a stale figure can only be caught by the NEXT
-             # `core`-selecting PR, on rows its author never wrote. (`#14439` briefly deleted
-             # those arms; `#14474` restored them, so the rule is written against the suite as
-             # it is rather than against that episode.) With the entry: `surfaces=['core']`
-             # and the suite is selected. Pinned by
+             # `core`-selecting PR, on rows its author never wrote. The claim is written
+             # against the suite AS IT IS — `_residue_block()` and the extent arm are present
+             # today — not against any episode of them being cut and restored, because naming
+             # the wrong commits for such an episode is exactly the ungraded-prose defect this
+             # row exists to catch. With the entry: `surfaces=['core']` and the suite is
+             # selected. Pinned by
              # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_suite.
              "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
