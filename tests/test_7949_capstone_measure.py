@@ -5995,7 +5995,9 @@ class _ManifestShapeError(RuntimeError):
 #: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
 #: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
-#: `_BUNDLE_TOOL_SOURCES` before both were CUT in the B4 test-volume cut. Every number below was verified by READING, which is why
+#: `_BUNDLE_TOOL_SOURCES` — the first is still LIVE (it is the second argument of the
+#: sweep below), the second was CUT in the B4 test-volume cut (2026-11-23).
+#: Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
     "RECONCILE-A1-A2-A5.md":
