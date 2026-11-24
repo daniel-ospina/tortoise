@@ -1918,7 +1918,24 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11901, "953c70c05b55923b")
+#: ⛔ RE-PINNED ON THE RE-CUT ONTO `origin/main` `88cd00a068` (2026-11-24). `MAIN`'S OWN PIN WAS RED
+#: BEFORE THIS BRANCH TOUCHED IT: `--repin` in a detached worktree at `origin/main` `88cd00a068`
+#: prints **(11906, '045a9146647cdfaa')** while that commit's own line carries
+#: `(11901, "953c70c05b55923b")`, so `--check` exits 1 on `main` itself and every open PR is graded
+#: against a number `main` does not derive. That drift belongs to `main`; this branch does not
+#: inherit it. `--repin` on THIS merged tree prints **(11909, 'a2e9571819805904')** and `--check`
+#: exits 0 on it with `typed references still pointing at a public name: 0`.
+#: ⛔ THE +3 OVER `main`'S TREE IS ATTRIBUTED BY A ROW-SET DIFF, never by arithmetic:
+#: `--report --base 28ca66878d7c617a2f28a8025ddaa40352adfcb2 --top 5000` run on this tree and in that
+#: detached worktree at `origin/main` `88cd00a068` yields 862 rows there and 863 here (11,906 →
+#: 11,909 references), differing in EXACTLY two: `_state_route_out.update` **0 → 2** — the `#14033`
+#: state-route sink, a NEW shape and the one this branch declares — and `_truncation_out.update`
+#: **1 → 2**. No row was absorbed in the other direction, so nothing went uncounted and no
+#: undeclared shape appeared.
+#: ⚠️ This pin is the ONE conflicted file of this re-cut that is NOT resolved to `main`'s side: the
+#: other 28 were cite line-number drift, but a pin is a reading of a TREE, so it is taken by
+#: `--repin` on the resolved tree rather than inherited from either parent.
+SWEEP_RESIDUE = (11909, "a2e9571819805904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
