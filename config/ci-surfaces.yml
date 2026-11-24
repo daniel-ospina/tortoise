@@ -61,7 +61,7 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `6a02515d14ad`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `533e256f2c`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
@@ -73,19 +73,8 @@ version: 1
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
-# `8c373f59a1` (#14439's TEST-CUT fold; `da4b76a5851c` is the same fold re-merged) — its B7/B4/B8
-# cuts trim the ARITHMETIC over the durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
-# 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
-# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
-# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on ITS resolved tree — that pair is THAT FOLD'S OWN READING,
-# not a count of the tree a reader is holding: the `#:` run has MOVED with every fold since, and the
-# figure that may be trusted is the one `_residue_block`'s docstring publishes, graded against its
-# own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
-# (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
-# describing a run that had already moved — nothing in this file grades an extent, so a figure here
-# can only be history and is spelled as history) — rather than accepting the
-# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
+# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed, against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue
 # counts — at THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
 # ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
@@ -100,7 +89,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `533e256f2c`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
@@ -227,7 +216,7 @@ version: 1
 #
 # The 1.25x balance band is enforced by `--integrity`'s `workflow_halves_issues()`, which recomputes
 # the ratio from the committed map (the `test_real_workflow_halves_are_consistent` arm that used to
-# sit beside it went with the durations-map arithmetic cut (#14419). The old "single-file floor" argument is
+# sit beside it went with the durations-map arithmetic cut (#14419)). The old "single-file floor" argument is
 # RETIRED: it rested on `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract above cannot hold a
 # MINIMUM either way: it requires a SUPERSET of main's labels, so it forbids a SHRINK and is what
