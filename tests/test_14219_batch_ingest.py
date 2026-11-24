@@ -1536,15 +1536,21 @@ def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
     store = InMemoryBatchStore()
     seen = {"n": 0}
 
-    # ⛔ THE ACCEPTANCE WRITES ITS ITEM SET IN ONE STATEMENT NOW (#14415 review
-    # round 13, P2), so the seam this rollback is pinned at is `put_items` — the
-    # per-item `put_item` call it used to patch is no longer on the path, and a
-    # pin left patching it would pass while testing nothing.
-    def _flaky(org_id, items):
+    # ⛔ THE FAILURE IS INJECTED AT the BATCH ROW, NOT AT THE ITEMS (#14415 review
+    # cycle 2, MEDIUM). The acceptance writes its item set in ONE `UNWIND`
+    # statement now, so patching `put_items` makes the FIRST write raise — no item
+    # row ever lands, `pending_batches()` is empty by construction and
+    # `assert ... == []` below is unfalsifiable. MEASURED: with this seam, deleting
+    # `submit`'s `self._store.discard(org_id, bid)` left every test green, so the
+    # item-row half of the rollback — whose ONLY production caller is that discard —
+    # was ungraded. Patching `put_batch` instead fails the SECOND write, which is
+    # also the real shape the rollback exists for: items landed, the ACK row did
+    # not. Same seam, one statement later.
+    def _flaky(row):
         seen["n"] += 1
         raise TimeoutError("graph timeout")
 
-    store.put_items = _flaky  # type: ignore[method-assign]
+    store.put_batch = _flaky  # type: ignore[method-assign]
     coord = BatchCoordinator(store)
     base = tmp_path / "ingest"
     base.mkdir()
@@ -2082,10 +2088,11 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     coord.recover(ORG)
 
     assert fired["done"], (
-        "the interleaving never fired — the test proves nothing (#14415 review "
-        "cycle 2, MEDIUM: this was the one sibling whose instrumentation was "
-        "unasserted, so a reordering that stops the scan reaching the CAS leaves it "
-        "green while it stops pinning the write it exists for)")
+        "the interleaving never fired — the cancel is issued FROM the resume CAS "
+        "hook, so this can only fail if the hook is gone. It is a DIAGNOSTIC, not "
+        "added coverage: the state assertion below already reddens in that case "
+        "(measured both ways, #14415 review cycle 2). It names the cause in one "
+        "line instead of reporting a `resuming` row as if the CAS had lost.")
     row = store.get_batch(ORG, batch.batch_id)
     assert row.state is BatchState.CANCELLED, (
         "the resume scan overwrote the customer's cancel")
