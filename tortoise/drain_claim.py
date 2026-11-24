@@ -88,6 +88,7 @@ import os
 import secrets
 import socket
 import stat
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -282,6 +283,155 @@ def _read_raw(path: Path) -> bytes | None:
         return None
 
 
+def _lstat_is_regular(path: Path) -> bool:
+    """Whether ``path`` is a REGULAR file, without reading a byte of it.
+
+    :func:`_read_raw` answers ``None`` for a non-regular object AND for a regular
+    file whose read failed, and those two facts must not be collapsed when the
+    question is "may I delete this?" (#14480 review, F3). ``lstat`` still succeeds
+    for a regular file this process cannot read (it needs search permission on the
+    directory, not read permission on the file), so this is the discriminator.
+    """
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def claim_path_unreadable(root: Path) -> bool:
+    """Whether a REGULAR file sits at the claim path that this process cannot READ.
+
+    This is the one arm that blocks the drain PERMANENTLY. A regular claim file we
+    cannot read is HONOURED, never taken over (see :func:`acquire`): a transient local
+    error and a mode `000` file are indistinguishable, so "unprovable reads as ALIVE"
+    is the fail-closed answer. The consequence is that every pass returns
+    ``held_by_claim`` with NO holder identity, ``holder()`` cannot name a pid, nothing
+    is attempted, and the spool stops moving until a human looks — and until now
+    nothing told the human. The operator line said ``capture: DRAINING (n queued)``,
+    which describes a working drain: the residual's justification ("blocks the drain
+    until a human looks") had no surface to be looked AT (#14480 review, P2).
+
+    ⛔ A LIVE PROBE, NOT A DURABLE FACT, and that is deliberate. The other claim-axis
+    fact (`claim_unavailable`) is a statement about a PAST pass, so it has to be
+    recorded; this one is a property of the spool root at READ time, so the health
+    line can simply ask. Probing cannot go stale: the line stops saying it the moment
+    the file is cleaned up or its mode is fixed, with no clearing arm, no carry-forward
+    arm, and no way for a dead lock (pid recycled, lease long expired) to keep the
+    warning alive. It also costs nothing on a healthy box — `lstat` says "not a regular
+    file" or the `open` succeeds, and no bytes are ever read.
+
+    Only a REGULAR file is opened (`lstat` first — opening a FIFO or a socket is the
+    block this module already removed from the claim read), and ``FileNotFoundError``
+    is answered ``False``: a claim released between the two syscalls is not a stall.
+
+    ⛔ AND THAT IS A REPLACE WINDOW, NOT AN ABSOLUTE — stated here rather than implied,
+    because the sibling status gate (`capture_spool.read_capture_status`) carries the
+    identical `lstat` → `open` exposure and states it: an object swapped for a FIFO
+    between the two syscalls IS opened, and this call then blocks. CERT C `FIO32`
+    names exactly this TOCTOU and prescribes `O_RDONLY|O_NONBLOCK` then `fstat`/
+    `S_ISREG` on the FD; that is deliberately NOT adopted here, so that this probe and
+    the status gate stay ONE mechanism with one stated residual, and because the box
+    owner is by definition the only writer that could perform the swap (the confirmation
+    review AT `bcb52e1d` — dated rather than round-cited, because the over-claiming
+    sentence did not exist at any head cycle 19 reviewed; the earlier wording promised
+    more than the two syscalls can).
+    """
+    path = claim_path(root)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+    except OSError:
+        return False
+    try:
+        with path.open("rb"):
+            pass
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _restore_quarantine(quarantine: Path, path: Path) -> bool:
+    """Put a quarantined object BACK, never replacing a newer one.
+
+    ``link`` is the create-if-absent arbiter, so a claim a peer installs while
+    this object sits in quarantine SURVIVES at the path and only the quarantined
+    copy is dropped; ``rename`` REPLACES, which is the "both processes win"
+    hazard :func:`_takedown` exists to avoid.
+
+    This is the disposal for the one object this module cannot judge: a REGULAR
+    file at the claim path whose bytes could not be read. It is a possible holder
+    (the doctrine is "an unprovable read is ALIVE"), so it is honoured rather
+    than deleted — see the call site in :func:`_clear_unusable_claim_path`.
+
+    ⛔ THE FAILURE PATH MUST NOT DELETE THE OBJECT EITHER, and the first cut of this
+    function did: on any ``link`` failure other than ``EEXIST`` it warned and then
+    ``unlink``ed the quarantine unconditionally. The claim path had already been
+    VACATED by the caller's ``rename``, so the peer's record existed NOWHERE while
+    the peer still believed it held — and this process won the next ``link``, i.e.
+    the two-holder window this module exists to close, with the only copy of the
+    evidence destroyed and the warning going to the stderr a session discards.
+    ``link(2)`` lists EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside
+    EEXIST, and ENOSPC/EDQUOT on a spool directory is the ordinary case, not the
+    exotic one.
+
+    A filesystem that refuses hard links (``EPERM``/``EXDEV``/``EMLINK``/``ENOSYS``)
+    is the reachable case, and it has a restore that needs no link: ``rename`` the
+    object back **while the claim path is still free** — the fallback
+    ``filelock``'s stale break takes for exactly this reason
+    (``tox-dev/filelock#843``, ``_util._linked_back``). ``rename`` replaces, so it is
+    used ONLY after ``lexists`` says the path is empty; the window between that
+    check and the rename is the one every check-then-create protocol carries, and
+    it is strictly narrower than the delete it replaces (a peer's newer object
+    keeps the path, and only the quarantined copy waits).
+
+    Returns ``True`` when the object is back at ``path`` or a NEWER object holds it,
+    and ``False`` when it could not be put back — in which case the quarantined copy
+    is LEFT IN PLACE for whoever looks next, NEVER unlinked. That is BOUNDED: the
+    ``.tmp-`` infix is what the scratch sweeper collects by mtime.
+    """
+    try:
+        os.link(quarantine, path)
+    except FileExistsError:
+        # A newer object holds the path; that is a holder either way.
+        with contextlib.suppress(OSError):
+            os.unlink(quarantine)
+        return True
+    except OSError as exc:
+        # ⛔ THE ONLY OTHER COPY. The rename already vacated `path`, so on a
+        # non-`EEXIST` failure this quarantined file is ALL that is left of a live
+        # holder's claim — and this used to warn and then unlink it, answering HELD
+        # over an EMPTY path so the next `link` won and two holders coexisted for up
+        # to `TTL/3`, silently. So it is RECOVERED, not merely spared: while the
+        # path is still free, `rename` (which needs no hard link) puts it BACK.
+        if not os.path.lexists(path):
+            # The path is still free, and `rename` needs no hard link: put the
+            # object BACK rather than leave a live holder's record stranded.
+            try:
+                os.rename(quarantine, path)
+                return True
+            except OSError as rename_exc:
+                print(
+                    "tortoise.drain_claim: an unreadable object at "
+                    f"{path} could not be restored (link: {exc}; "
+                    f"rename: {rename_exc}) and is PRESERVED at {quarantine}; "
+                    "it is honoured as a holder, so this pass must not run "
+                    "beside it",
+                    file=sys.stderr)
+                return False
+        print(
+            f"tortoise.drain_claim: an unreadable object at {path} could not be "
+            f"restored ({exc}) — the path is OCCUPIED, so it is not replaced — "
+            f"the copy is PRESERVED at {quarantine}; it is honoured as a holder, "
+            "so this pass must not run beside it",
+            file=sys.stderr)
+        return False
+    with contextlib.suppress(OSError):
+        os.unlink(quarantine)
+    return True
+
+
 def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:
     """Atomically MOVE the claim aside, so the comparison can be trusted.
 
@@ -330,19 +480,82 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
     ``True`` means the bytes really were ``expected`` (ours / the stale record) and
     the claim is gone. ``False`` means we displaced somebody else's NEW claim — a
     third process installed it between our rename and our write — so the bytes are
-    restored by ``link`` (which cannot replace a claim a FOURTH process has since
-    installed; on ``EEXIST`` the displaced holder loses and will stop at its next
-    refresh, which is the safe direction) and this caller gives up.
+    restored by ``link``, which cannot replace a claim a FOURTH process has since
+    installed.
+
+    ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST, stated accurately because the earlier
+    version of this sentence was FALSE and a false sentence is worse than no
+    sentence — and because the code changed under it: on a non-``EEXIST`` failure the
+    object is first put BACK with ``rename`` while the path is free (it is the only
+    copy of that holder's claim once the rename has vacated that path), and only when
+    that ALSO fails — or the path is occupied — is the copy **left in the
+    quarantine**, with the claim at ``path`` absent in that case. The displaced holder does NOT "stop": it keeps
+    draining until its next `renew`/`renew_if_due` tells it the claim is not ours, up
+    to ``TTL/3`` (≈40 s) away. Two drainers can coexist for that window, and it is
+    BOUNDED BY THE LEASE rather than unbounded, which is the only claim this code
+    makes. The restore attempt is LOGGED rather than swallowed — and it is no longer
+    DELETED: the earlier sentence described an unlink this branch no longer performs
+    (review, cycle 17, P3).
     """
     if data != expected:
-        with contextlib.suppress(FileExistsError, OSError):
+        try:
             os.link(quarantine, path)
+        except FileExistsError:
+            # A fourth process holds the path now. The displaced record's bytes are
+            # gone, and the only honest thing left is to say so.
+            print(
+                "tortoise.drain_claim: a displaced claim could not be restored "
+                f"({path} is held by a newer claim); that holder keeps draining "
+                f"until its next refresh (up to {_ttl_third_hint()})",
+                file=sys.stderr)
+        except OSError as exc:
+            # ⛔ THE ONLY OTHER COPY (review, cycle 16, P1). The rename vacated `path`, so on a
+            # non-`EEXIST` failure this quarantined file is all that is left of a
+            # live holder's claim. Unlinking it turned "restore failed" into "claim
+            # destroyed" and freed the path for the next `link` — two holders for up
+            # to `TTL/3`, silently. `link(2)` lists
+            # EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST.
+            # ⛔ AND THE RECOVERY IS THE SAME ONE :func:`_restore_quarantine` USES:
+            # while the path is still free, `rename` needs no hard link, so the
+            # displaced claim goes BACK instead of being stranded for the sweeper to
+            # collect minutes later. Only when that also fails is the copy left in
+            # place (BOUNDED — the `.tmp-` infix is what the sweeper collects).
+            if not os.path.lexists(path):
+                try:
+                    os.rename(quarantine, path)
+                    return False
+                except OSError as rename_exc:
+                    print(
+                        "tortoise.drain_claim: a displaced claim could not be "
+                        f"restored ({exc}; rename: {rename_exc}) and is PRESERVED "
+                        f"at {quarantine}; it will be re-verified at the holder's "
+                        "next refresh",
+                        file=sys.stderr)
+                    return False
+            print(
+                f"tortoise.drain_claim: a displaced claim could not be restored "
+                f"({exc}); the path is OCCUPIED, so the copy is PRESERVED at "
+                f"{quarantine} and it will be re-verified at the holder's next "
+                "refresh",
+                file=sys.stderr)
+            return False
         with contextlib.suppress(OSError):
             os.unlink(quarantine)
         return False
     with contextlib.suppress(OSError):
         os.unlink(quarantine)
     return True
+
+
+def _ttl_third_hint() -> str:
+    """The bound the restore-failure message quotes: a third of the default lease.
+
+    A function rather than prose so the sentence and the constant cannot drift apart:
+    the earlier comment hard-coded "≤ TTL/3 ≈ 40 s" beside a ``DEFAULT_TTL_S`` of 120
+    — the number was RIGHT and nothing tied the two together, which is how a review
+    finds a comment that describes a different constant than the one in the file.
+    """
+    return f"{DEFAULT_TTL_S / RENEW_FRACTION:.0f} s"
 
 
 def _claim_still_ours(path: Path, token: str) -> bool:
@@ -604,17 +817,46 @@ class DrainClaimUnavailable(RuntimeError):
     """The claim could not be created for an ENVIRONMENT reason (not contention).
 
     Distinct from ``acquire``'s ``None``, which means "another holder has it".
-    This one means the claim FILE could not be written at all — an unwritable or
-    missing spool root. The caller decides; :func:`flush_spool` proceeds
-    UNCLAIMED and says so, because a root that cannot hold a 60-byte claim file
-    cannot hold a spool entry either (both go through ``os.open`` with ``0600`` in
-    the same directory), so the pass about to run can only report the broken
-    spool — and refusing to run would hide that report, which is the false-PASS
-    direction this codebase treats as the worse error.
+    Two causes, and neither is a statement about who else is draining: the claim
+    FILE could not be written at all (an unwritable or missing spool root), or
+    something that cannot be a claim record sits at the path and could NOT be
+    removed. A claim that APPEARS in that window is contention, not this — see
+    ``_CLEAR_HELD``.
+
+    The caller decides; :func:`flush_spool` proceeds UNCLAIMED and says so, because a
+    root that cannot hold a 60-byte claim file cannot hold a spool entry either
+    (both go through ``os.open`` with ``0600`` in the same directory), so the pass
+    about to run can only report the broken spool — and refusing to run would hide
+    that report, which is the false-PASS direction this codebase treats as the worse
+    error.
     """
 
 
-def _clear_unusable_claim_path(path: Path) -> bool:
+#: The answers `_clear_unusable_claim_path` must be able to give. A BOOLEAN could
+#: not, and collapsing two of them into `False` was a live two-drainer hole:
+#: * ``GONE`` — the object vanished under us (a peer released or replaced it). The
+#:   caller must RETRY the loop, not treat the path as unclearable: `git`-less
+#:   reasoning aside, the `ENOENT` of a peer's own `unlink` is the COMMON case, and
+#:   answering "cannot be cleared" sent `flush_spool` down the unclaimed-pass arm
+#:   while the peer's claim sat on disk (#14423 cycle-8 review, P1 — reproduced).
+#: * ``REFUSED`` — the CLAIM PATH could not be cleared (a non-empty directory,
+#:   a permission wall). THIS — and only this — is what `DrainClaimUnavailable`
+#:   means. ⛔ A leftover ASIDE copy is NOT this answer: the rename already
+#:   vacated the path, so it is free (#14480 review at `1a0c29c3`, P2).
+#: * ``DONE`` — it was removed; retry the loop.
+#: * ``HELD`` — the object we moved aside turned out to be a REGULAR file, i.e. a
+#:   peer installed its claim in the window. It has been put BACK and there is a
+#:   real holder to honour, so the caller answers CONTENTION — never "unavailable":
+#:   the spool root is perfectly writable and reporting it otherwise was a false
+#:   operator diagnosis (#14480 review, F2). Retrying would not be safe here either:
+#:   the object is a claim, not junk, so there is nothing to clear.
+_CLEAR_GONE = "gone"
+_CLEAR_REFUSED = "refused"
+_CLEAR_DONE = "done"
+_CLEAR_HELD = "held"
+
+
+def _clear_unusable_claim_path(path: Path) -> str:
     """Remove something at the claim path that is not a readable claim.
 
     A DIRECTORY, a socket or a dangling symlink at `<spool>/drain.claim` is
@@ -626,25 +868,118 @@ def _clear_unusable_claim_path(path: Path) -> bool:
     removed it.
 
     A symlink is removed WITHOUT following it (`unlink` on the link), so this can
-    never reach through to a target outside the spool. A non-empty directory that
-    refuses `rmdir` is left alone and reported: deleting unknown content is the
-    worse error, and the caller's answer for that is :class:`DrainClaimUnavailable`
-    ("run unclaimed, and SAY so") rather than a silent block.
+    never reach through to a target outside the spool.
+
+    ⛔ THE OBJECT IS MOVED ASIDE ATOMICALLY, AND THE OBJECT THAT LANDED IN THE
+    QUARANTINE IS WHAT THIS CALL JUDGES. The `lstat` → re-read `(st_dev, st_ino)` →
+    `unlink` version this replaces NARROWED the check-then-unlink window without
+    closing it: between the re-read and the `unlink` a peer can replace the object
+    with its own VALID claim, and the `unlink` — which is by NAME, not by inode —
+    deletes that claim, after which this process wins the next `link` and two
+    holders coexist for up to `TTL/3`, silently (#14423 cycle-9 review, P2). An
+    inode compare is not sound evidence on its own either: ext4/xfs hand a freed
+    inode straight to the next file, so "same dev+ino" can be a DIFFERENT live
+    lockfile — the `filelock` advisory GHSA-fq56-3cx3-fjxp admits two holders exactly
+    that way. `rename` has neither problem: exactly one contender can move the file,
+    the CONTENT THAT WAS THERE is what lands in the quarantine, and the judgement is
+    over bytes this call provably owns the moment of. That is the same arbiter
+    :func:`_takedown` uses for every other removal in this module, and the consensus
+    outside it (`flufl.lock`, git's lockfile API, and the eviction protocol that
+    renames a stale lock to a unique path and reports a race rather than unlinking).
     """
     try:
-        mode = os.lstat(path).st_mode
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return _CLEAR_GONE
     except OSError:
-        return False
-    try:
-        if stat.S_ISDIR(mode):
+        return _CLEAR_REFUSED
+    if stat.S_ISREG(before.st_mode):
+        # The caller has already decided a REGULAR file is a possible holder; never
+        # remove one here (it is the fail-closed direction).
+        return _CLEAR_REFUSED
+    if stat.S_ISDIR(before.st_mode):
+        try:
             path.rmdir()  # an EMPTY directory; refuses `ENOTEMPTY` otherwise
-            return True
-        # A symlink is unlinked AS A LINK (never followed), and a FIFO/socket too: it
-        # is an object, not content, so `unlink` is the correct removal.
-        os.unlink(path)
-        return True
+            return _CLEAR_DONE
+        except FileNotFoundError:
+            return _CLEAR_GONE
+        except OSError:
+            return _CLEAR_REFUSED
+    # Everything else — a symlink, a FIFO, a socket, a device — is MOVED ASIDE
+    # first. `rename` is the CAS: after it, whatever this call is about to drop is
+    # whatever it can see, and no peer can swap it out from under the decision.
+    # ⚠️ The `.tmp-` INFIX is load-bearing: the scratch sweeper collects abandoned
+    # `*.tmp-*` files under the spool root by mtime, so a process killed between the
+    # rename and the unlink leaves nothing that outlives it.
+    quarantine = path.with_name(
+        f"{path.name}.tmp-clear-{os.getpid()}-{secrets.token_hex(4)}")
+    try:
+        os.rename(path, quarantine)
+    except FileNotFoundError:
+        return _CLEAR_GONE
     except OSError:
-        return False
+        return _CLEAR_REFUSED
+    landed = _read_raw(quarantine)  # bytes ONLY for a regular file, else None
+    if landed is not None:
+        # ⛔ A PEER'S CLAIM LANDED IN THE WINDOW. It was not a claim when we looked
+        # and it is one now, so it is put BACK (`link` cannot replace a newer
+        # object) and the answer is HELD: there is a holder to honour, which is not
+        # the same thing as an unclearable path.
+        _dispose_quarantine(quarantine, landed, path, b"<not a claim we judged>")
+        return _CLEAR_HELD
+    if _lstat_is_regular(quarantine):
+        # ⛔ A REGULAR FILE WE COULD NOT READ IS A POSSIBLE HOLDER, NOT JUNK. `landed`
+        # is `None` for TWO different facts and only one of them says "drop it":
+        # "not a regular file" (a symlink/FIFO/socket/device — corruption, safe to
+        # remove) and "a regular file whose bytes could not be had" (`EMFILE`, `EIO`,
+        # `EACCES` after a mode drift). The second is a peer's claim that arrived in
+        # the window, and `unlink`ing it would let this process win the next `link`,
+        # so two holders coexist for up to `ttl/3` — silently. That is the class the
+        # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
+        # doctrine `acquire` states 40 lines above: a regular file we could not read
+        # is HONOURED and never unlinked (#14480 review, F3).
+        # ⛔ AND THE ANSWER IS STILL `HELD` WHEN THE RESTORE FAILED (review, cycle 16, P1) —
+        # the failure mode was never the answer, it was the DELETION: the restore
+        # used to unlink the only copy and then report HELD anyway, emptying `path`
+        # so the next `link` won it (the two-drainer window this branch exists to
+        # close). `HELD` is the fail-CLOSED answer on this leg: `acquire` returns
+        # None, which `flush_spool` reads as `held_by_claim` and attempts NOTHING.
+        # ⛔ NOT `_CLEAR_REFUSED`, which the review proposed: that raises
+        # `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and
+        # runs the pass UNCLAIMED with the false reason "the spool root cannot hold a
+        # claim" (`capture_spool.py:4412-4473`; the Pi twin takes the same unclaimed
+        # arm at `tortoise-capture.ts:4546`) — strictly worse than a contention
+        # answer. And when the path is still FREE the restore does not merely leave
+        # the copy aside: `_restore_quarantine` `rename`s it back, so the holder
+        # keeps holding instead of being swept up minutes later.
+        if not _restore_quarantine(quarantine, path):
+            print(
+                f"tortoise.drain_claim: the unreadable claim at {path} could not be "
+                "put back; it is left in the quarantine and this pass must not run "
+                "beside it",
+                file=sys.stderr)
+        return _CLEAR_HELD
+    try:
+        os.unlink(quarantine)
+    except OSError as exc:
+        # ⛔ `REFUSED` HERE WOULD BE A LIE, AND AN EXPENSIVE ONE (review at
+        # `1a0c29c3`, P2 — reproduced: the answer was `refused` while
+        # `os.path.lexists(path)` was already False). The `rename` above VACATED the
+        # claim path, so it is FREE right now; the only thing this `unlink` was for
+        # is the aside copy of junk nobody could ever hold. Answering "could not be
+        # cleared" makes `acquire` raise `DrainClaimUnavailable`, whose handler stats
+        # the — now empty — path and runs the WHOLE PASS UNCLAIMED with the false
+        # durable reason "the spool root cannot hold a claim": the two-drainer window
+        # this module exists to close, plus a recorded fact that is not true.
+        # `_CLEAR_DONE` is the measured answer — retry the loop and install the claim
+        # on the free path — and the leftover is collected by the same `*.tmp-*`
+        # sweep the comment above the rename already names, so it is bounded.
+        print(
+            f"tortoise.drain_claim: the cleared obstruction at {path} could not be "
+            f"deleted from the quarantine ({exc}); the claim path is FREE and the "
+            f"leftover is left to the scratch sweeper",
+            file=sys.stderr)
+    return _CLEAR_DONE
 
 
 def acquire(
@@ -721,13 +1056,29 @@ def acquire(
                 # A directory, symlink, FIFO, socket or device: corruption, not a
                 # holder. Rule 1 already says stale, and leaving it would `EEXIST`
                 # every future attempt — a permanent block, which #14350 forbids.
-                if not _clear_unusable_claim_path(path):
+                cleared = _clear_unusable_claim_path(path)
+                if cleared == _CLEAR_REFUSED:
                     # `from None`: the `FileExistsError` we are handling is the
                     # EXPECTED contention signal, not this condition's cause —
                     # chaining it would point a reader at the wrong file (B904).
+                    # ⛔ THE MESSAGE NAMES WHAT WAS MEASURED. The old one said "the
+                    # spool root is not writable by this process", which was a
+                    # FALSE diagnosis for the identity change that used to land
+                    # here (the root was writable; the object moved) and is wrong
+                    # for a non-empty directory too (#14480 review, F2).
                     raise DrainClaimUnavailable(
-                        f"{path} exists and is not a claim, and cannot be cleared — "
-                        "the spool root is not writable by this process") from None
+                        f"{path} is not a claim record and could not be removed, "
+                        "so this pass must not run beside it") from None
+                if cleared == _CLEAR_HELD:
+                    # A peer's claim appeared in the window and was put back: there
+                    # IS a holder, so answer CONTENTION. Raising here would report
+                    # an unwritable root and run the pass unclaimed beside a live
+                    # claim — the two-drainer defect this module removes.
+                    return None
+                # `GONE` or `DONE`: the path changed, so RETRY — the next tick either
+                # installs our claim or judges whatever a peer put there. Answering
+                # "cannot be cleared" for `GONE` ran the whole pass UNCLAIMED beside
+                # a live peer claim, which is the defect this module removes.
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's

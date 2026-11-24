@@ -16,7 +16,6 @@ import {
   chmodSync,
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -109,6 +108,9 @@ import {
   writeSpoolEntry,
   admissionSaturated,
   cheapSpoolScan,
+  clearUnusableClaimPath,
+  applyClaimPolicy,
+  restoreQuarantine,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
 
@@ -7984,6 +7986,33 @@ test("#14350: a FIFO at the claim path is cleared, not a permanent block", async
   claim.release();
 });
 
+test("#14350: a FIFO at status.json does not HANG the health line or the claimed pass", () => {
+  // ⛔ THE READ THIS PR MOVED ONTO THE DRAIN PATH, gated the way the claim read has
+  // been since cycle 5. `recordOutcome` calls `readCaptureStatus` while the one-drainer
+  // claim is HELD (`flushSpool` releases in its `finally`, AFTER the pass returns), so
+  // a FIFO at `<spool>/status.json` blocked `open(2)` forever INSIDE the claimed
+  // section — the spool stayed claimed until its lease was judged stale — and
+  // `captureHealthLine` read the same path, so the health line hung instead of
+  // reporting the box (#14480 review, P1; the Python twin is
+  // `test_a_FIFO_at_the_STATUS_path_does_not_HANG_inside_the_CLAIMED_section`).
+  //
+  // MUTATION THAT REDS THIS: drop the `lstatSync(...).isFile()` gate from
+  // `readCaptureStatus` — THIS LINE HANGS, which is the red (`node --test` times the
+  // case out), the same way the pre-existing FIFO-at-the-claim-path row beside it
+  // reads.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const statusPath = join(spool, SPOOL_STATUS_FILE);
+  try {
+    execFileSync("mkfifo", [statusPath], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  assert.equal(readCaptureStatus(spool), undefined, "a FIFO holds no record");
+  assert.match(captureHealthLine(spool, { apiKey: "present" }).line, /^capture: /,
+    "the health line must render, not block, over a FIFO at status.json");
+});
+
 test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async () => {
   // The restore path: the takedown moves whatever is at the path aside and compares
   // in quarantine, so a release by a holder whose lease expired — after a successor
@@ -8267,4 +8296,690 @@ test("#14350: renew's CAS loses the window to a peer, and the PEER'S claim stand
     JSON.parse(readFileSync(claimPath, "utf8")).token, "peer-token",
     "the peer's fresh claim must be intact: a replace here is two drainers",
   );
+});
+
+// ── #14423 cycle-7 review: the exclusion being OFF is a DURABLE fact ─────────
+
+test("#14350: a recorded claim-unavailable FACT is rendered on the health line", () => {
+  // Both legs read the SAME `<spool>/status.json`, so a box whose claim path is
+  // obstructed must say so in the one line an operator reads — not only on a
+  // stderr the firing path discards. The wording is byte-identical to the Python
+  // leg's (`capture_spool._spool_health_line`); if it drifts, a human who ran the
+  // other leg sees two different answers about one box.
+  //
+  // MUTATION THAT REDS THIS: drop the `claim_unavailable` arm from `spoolHealthLine`
+  // (the line then reports a perfectly healthy drain).
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "/x/drain.claim exists and is not a claim record",
+    updated_at: new Date().toISOString(),
+  });
+  const line = captureHealthLine(spool, { apiKey: "present" }).line;
+  assert.match(line, /NO drain exclusion/, line);
+  assert.match(line, /not a claim record/, "the line must name WHAT stops it: " + line);
+  assert.match(line, /^capture: OK \(0 queued\)/, "the verdict itself must not move");
+});
+
+test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", () => {
+  // ⛔ THE DISTINCTION A BOOLEAN COULD NOT MAKE, and collapsing it ran a whole pass
+  // UNCLAIMED beside a live peer claim: two legs meet at a FIFO at the claim path,
+  // this one looks at it, the peer removes it, and this one's removal step then
+  // answers `ENOENT`. Read as "cannot be cleared", `acquireDrainClaim` returns
+  // `undefined` with `state.obstruction` set and `flushSpool` runs the entire pass
+  // without the exclusion — while the peer's claim sits on disk. `gone` makes the
+  // caller RETRY instead (the Python leg's
+  // `test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable`
+  // drives the same interleave end-to-end).
+  //
+  // The `rename` seam is the same interleave the Python test drives by
+  // monkeypatching `os.rename` — the removal IS a rename since #14480, because
+  // `unlink` is by NAME and could delete a claim a peer installed in the window.
+  //
+  // MUTATION THAT REDS THIS: return `"refused"` from the `ENOENT` arms.
+  // ⛔ THE FIFO IS BUILT THE SAME GUARDED WAY THE PRE-EXISTING TEST ABOVE BUILDS IT
+  // (#14480 review, F4): unguarded, a win32 box (or one without the `mkfifo` binary)
+  // THROWS here, so the suite reds for an environment reason and names none of the
+  // behaviour under test. The Python twin skips instead (`not hasattr(os, "mkfifo")`).
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const fifo = join(tmpSpool(), "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerWins = (): void => {
+    const err = new Error("ENOENT") as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerWins);
+  assert.equal(outcome, "gone",
+    "a peer that removed the obstruction is not an unclearable path: " + outcome);
+});
+
+test("#14350: a leftover ASIDE copy does not report the claim path UNCLEARABLE", () => {
+  // `refused` means THE CLAIM PATH could not be cleared — never "an aside copy
+  // survived" (#14480 review at `1a0c29c3`, P2; reproduced on the Python twin,
+  // which answered `refused` while `os.path.lexists(path)` was already false).
+  //
+  // The obstruction is MOVED ASIDE first, so the claim path is FREE by the time the
+  // junk copy is disposed of. Answering `refused` records an obstruction and
+  // `flushSpool` then runs the WHOLE PASS UNCLAIMED over a writable spool root —
+  // beside any peer that took the free path — and stamps a durable reason that is
+  // not true. `done` is the measured answer; the leftover is swept by `*.tmp-*`.
+  //
+  // MUTATION THAT REDS THIS: return "refused" from the disposal `catch`.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const fifo = join(tmpSpool(), "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — nothing to grade
+  }
+  const junkRefuses = (): never => {
+    const err = new Error("EIO") as NodeJS.ErrnoException;
+    err.code = "EIO";
+    throw err;
+  };
+  const outcome = clearUnusableClaimPath(fifo, undefined, undefined, junkRefuses);
+  assert.equal(outcome, "done",
+    "the rename vacated the claim path, so the clear is done: " + outcome);
+  assert.equal(existsSync(fifo), false,
+    "the obstruction must be gone from the claim path");
+});
+
+test("#14350: the clear NEVER deletes an object it did not judge", () => {
+  // The obstruction clear deletes something that is NOT ours, so it goes through
+  // the same atomic arbiter as every other removal: the object is MOVED ASIDE and
+  // the object that LANDED is what gets judged.
+  //
+  // ⛔ THE PREDECESSOR OF THIS TEST DROVE AN `lstat` SEAM and asserted `refused`
+  // when the identity changed — narrowing the check-then-unlink window without
+  // closing it, and pinning the wrong answer while doing so (#14480 review, F2 and
+  // P2-4): between the re-read and the `unlink` a peer can still install its claim,
+  // and `unlink` deletes by NAME. An inode compare is not sound evidence either —
+  // ext4/xfs reuse a freed inode number, so "same dev+ino" can be a DIFFERENT live
+  // lockfile (`filelock` GHSA-fq56-3cx3-fjxp, two holders).
+  //
+  // So the interleave driven here is the REAL one: a peer replaces the FIFO with its
+  // own VALID claim in the window between this leg's look and the removal. The object
+  // that lands in the quarantine is then a regular file, i.e. a claim: it must be put
+  // BACK and reported as CONTENTION — never deleted, and never reported as an
+  // unclearable path (which ran a whole pass unclaimed beside it).
+  //
+  // MUTATION THAT REDS THIS: unlink/quarantine-delete without judging what landed
+  // (drop the `landedRaw` arm).
+  // ⛔ GUARDED LIKE THE PRE-EXISTING FIFO TEST (#14480 review, F4) — see the note in
+  // the `gone` test above for why an unguarded `mkfifo` is an environment red.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const dir = tmpSpool();
+  const fifo = join(dir, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirst = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirst);
+  assert.ok(installed, "the test never reached the removal");
+  assert.equal(outcome, "held",
+    "a claim that appears in the window is CONTENTION, not an unclearable path: " + outcome);
+  assert.ok(existsSync(fifo), "the live claim this call did not judge was deleted");
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be restored BYTE for byte");
+});
+
+test("#14350: the clear HONOURS a landed REGULAR file it could not READ", () => {
+  // `landedRaw` is `undefined` for TWO different facts and only one of them says
+  // "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption) and
+  // *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES` after a
+  // mode drift). The second is a PEER'S CLAIM that arrived in the window, and
+  // `unlink`ing it lets this process win the next `linkSync` — two holders for up to
+  // `ttl/3`, silently (`filelock` GHSA-fq56-3cx3-fjxp). It also inverts the doctrine
+  // `acquireDrainClaim` states below: a regular claim we could not read is HONOURED
+  // and never unlinked (#14480 review, F3).
+  //
+  // MUTATION THAT REDS THIS: treat `undefined` from the read as "not a claim" and
+  // fall through to `unlinkSync(quarantine)` — the answer becomes `done` and the
+  // peer's claim is gone.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const fifo = join(tmpSpool(), "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);                     // a transient read error on a good file
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirstThenUnreadable);
+  assert.ok(installed, "the test never reached the removal");
+  assert.equal(outcome, "held",
+    "a regular file we could not read is a possible HOLDER, not junk: " + outcome);
+  assert.ok(existsSync(fifo), "a live claim this call could not judge was unlinked");
+  chmodSync(fifo, 0o600);
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be back in the path, byte for byte");
+});
+
+test("#14350: the clear RESTORES by rename when the link is refused", () => {
+  // A filesystem that refuses hard links is the reachable failure of the restore,
+  // and the first cut deleted the object it had just promised to honour: the
+  // `linkSync` raised, the warning went to a stderr the session discards, and the
+  // quarantine was unlinked unconditionally. The claim path had ALREADY been
+  // vacated by the caller's `rename`, so the peer's record existed nowhere while
+  // the peer still believed it held — and this process then won the next
+  // `linkSync`: the two-holder window this mechanism exists to close, with the only
+  // copy of the evidence destroyed (#14480 cycle-17 review, P3).
+  //
+  // `rename` needs no hard link, so it puts the object back while the claim path is
+  // still free — the fallback `filelock`'s stale break takes (`tox-dev/filelock#843`).
+  //
+  // MUTATION THAT REDS THIS: unlink the quarantine on the non-`EEXIST` failure (the
+  // pre-fix body) — the peer's claim is gone and the path is empty.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);                     // a transient read error on a good file
+  };
+  const linkRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-")) {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    }
+    linkSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirstThenUnreadable, linkRefused);
+  assert.ok(installed, "the test never reached the restore");
+  assert.equal(outcome, "held",
+    "the object is a possible HOLDER: contention, not an unclearable path: " + outcome);
+  assert.ok(existsSync(fifo),
+    "the restore must not DELETE the object it could not link back: the path " +
+    "was vacated and the quarantined copy is the only one left");
+  chmodSync(fifo, 0o600);
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be back at the path, byte for byte");
+  assert.deepEqual(readdirSync(spool).filter((n) => n.includes(".tmp-clear-")), [],
+    "a restore that succeeded leaves no quarantine behind");
+});
+
+test("#14350: the clear PRESERVES the copy it cannot restore", () => {
+  // The DOUBLE failure: the link is refused AND the rename back fails. Both
+  // restores are gone, so the quarantined copy is the ONLY surviving evidence of
+  // the holder this call displaced. The answer stays `held`: the displaced holder
+  // still believes it holds, so this pass must not run beside it (`refused` sets
+  // `state.obstruction`, whose flush arm runs the pass UNCLAIMED).
+  //
+  // MUTATION THAT REDS THIS: unlink the quarantine when the restore fails.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);
+      writeFileSync(from, peerRaw);
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);
+  };
+  const renameBackRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-") && to === fifo) {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    peerInstallsFirstThenUnreadable(from, to);
+  };
+  const linkRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-")) {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    }
+    linkSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, renameBackRefused, linkRefused);
+  assert.ok(installed, "the test never reached the restore");
+  assert.equal(outcome, "held",
+    "the displaced holder still believes it holds: `held`, never `refused` " +
+    "(whose flush arm runs the pass unclaimed): " + outcome);
+  const preserved = readdirSync(spool).filter((n) => n.includes(".tmp-clear-"));
+  assert.equal(preserved.length, 1,
+    "the only surviving copy of an object we could neither judge nor restore must " +
+    "be LEFT IN PLACE: " + JSON.stringify(preserved));
+  chmodSync(join(spool, preserved[0]), 0o600);
+  assert.equal(readFileSync(join(spool, preserved[0]), "utf8"), peerRaw,
+    "the preserved copy must be the peer's claim, byte for byte");
+  assert.equal(existsSync(fifo), false,
+    "both restores failed, so the path stays as the caller left it");
+});
+
+test("#14350: a peer claim landing in the clear window is CONTENTION, not an unclaimed pass", () => {
+  // ⛔ THE DISPOSITION, NOT JUST THE PRIMITIVE. The `held` arm of
+  // `acquireDrainClaim` is the whole difference between "somebody holds it, do
+  // nothing" and "run the pass UNCLAIMED beside a live claim" (`flushSpool` takes
+  // the unclaimed arm whenever `state.obstruction` is set, and that arm also stamps
+  // the false reason "…exists and is not a claim record… could not be cleared").
+  // The sibling test above drives `clearUnusableClaimPath` DIRECTLY and asserts its
+  // return value, so reverting the arm (`opts.state.obstruction = path` inside it)
+  // redded NOTHING — rule 1 of the attribution contract, a new guard with no mutant
+  // of its own (#14480 review, F2). The Python twin's
+  // `test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass` drives
+  // `acquire` end to end; this is its Pi counterpart.
+  //
+  // MUTATION THAT REDS THIS: add `if (state) state.obstruction = path;` inside the
+  // `held` arm of `acquireDrainClaim`.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirst = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+  };
+  const state: { raced: boolean; obstruction?: string } = { raced: false };
+  const claim = acquireDrainClaim(spool, {
+    leg: "pi",
+    state,
+    clearClaimPath: (p) => clearUnusableClaimPath(p, peerInstallsFirst),
+  });
+  assert.ok(installed, "the test never reached the clear");
+  assert.equal(claim, undefined, "a peer's claim that landed in the window is a HOLDER");
+  assert.equal(state.obstruction, undefined,
+    "CONTENTION is not an unclearable path: reporting it as one runs the pass " +
+      "UNCLAIMED beside a live claim");
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's live claim was deleted by the clear");
+});
+
+test("#14350: the gone/done retry IS a lost race, and marks it", () => {
+  // Every other lost-race arm sets `state.raced`, which makes `flushSpool` fail
+  // CLOSED (treat it as held). The `gone`/`done` arm was the one that did not: two
+  // exhausted attempts that way leave `state` empty, the path empty and no record,
+  // so `flushSpool` reaches the "no claim AND nothing at the path" arm, runs the
+  // WHOLE pass UNCLAIMED, and stamps `claimUnavailable` with the DEFAULT reason —
+  // "the spool root cannot hold a claim" — which is FALSE (the root is fine; the
+  // object moved). The Python leg fails closed in the same state (`acquire` →
+  // `None` → `held_by_claim`) (#14480 review, F4).
+  //
+  // MUTATION THAT REDS THIS: drop `markRaced()` from the `gone`/`done` arm — the
+  // state then reports no race even though both attempts lost one.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "drain.claim"), { recursive: true });
+  const state: { raced: boolean } = { raced: false };
+  const claim = acquireDrainClaim(spool, {
+    leg: "pi",
+    state,
+    clearClaimPath: () => "gone",
+  });
+  assert.equal(claim, undefined, "both attempts lost the object, so no claim is held");
+  assert.equal(state.raced, true,
+    "the retry lost a race; reading it as 'this root cannot hold a claim' runs the " +
+      "pass unclaimed under a reason that was never measured");
+});
+
+test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", async () => {
+  // The other direction, and the reason the field cannot simply be kept: a durable
+  // marker nobody clears teaches an operator to ignore the line.
+  //
+  // ⛔ THIS TEST USED TO WRITE THE "HEALTHY" RECORD ITSELF, which made it VACUOUS:
+  // it never called `flushSpool`, so the mutation it named could not reach it
+  // (measured — `pass 1 / fail 0` with the stale field kept on the `ok` write,
+  // while the Python twin redded). It now drives a REAL pass.
+  //
+  // MUTATION THAT REDS THIS: delete the `if (summary.claimHeld)` clearing arm of
+  // `applyClaimPolicy` (cycle 12 moved the clearing there: it is ONE exported policy
+  // for both legs now, not a block inside `recordOutcome`, and the mutation named here
+  // was re-aimed at where the code actually lives — #14480 review F1).
+  // ⛔ NOT "keep `previous?.claim_unavailable` on the `ok` write": this spool is EMPTY
+  // ON PURPOSE (see below), so `summary.attempted === 0`, so the `attempted > 0` `ok`
+  // write NEVER EXECUTES and that mutant cannot reach the assertion below. Naming it
+  // was the same unattributable-catch defect cycle 9 fixed on this very test (#14480
+  // review, F3).
+  //
+  // ⛔ THE PASS IS DRIVEN THROUGH THE EXTENSION, not `flushSpool(cfg, {dir})`: the
+  // durable write lives in the extension's own `recordOutcome`, which records to
+  // the spool it was REGISTERED with. A direct `flushSpool` call therefore clears
+  // nothing and the assertion would pass for the wrong reason.
+  // ⛔ AND THE SPOOL IS EMPTY, DELIBERATELY: this is the shape the finding names. A
+  // pass that FILES clears the field through the `ok` write's fresh record, so a
+  // test with an entry in the spool cannot discriminate the no-op clearing at all
+  // (measured: disabling it left such a test green). The pass here HOLDS the claim
+  // and attempts NOTHING, which is precisely the pass that used to write nothing.
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "stale obstruction",
+    updated_at: new Date().toISOString(),
+  });
+  const accepted = statusFetch(200);
+  const first = await sessionStartLines(spool, accepted.fetchImpl);
+  assert.equal(
+    first.calls.filter((u) => u.endsWith("/v1/sessions")).length, 0,
+    "this test is about the pass that attempts NOTHING",
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.claim_unavailable, undefined,
+    "a pass that HELD the claim must clear the stale fact: " + JSON.stringify(recorded));
+  const line = captureHealthLine(spool, { apiKey: "present" }).line;
+  assert.doesNotMatch(line, /NO drain exclusion/, line);
+});
+
+test("#14350: a TARGETED pass cannot erase the durable claim fact (F1)", () => {
+  // ⛔ ONLY A PASS THAT HELD THE CLAIM MAY CLEAR IT (#14480 review, F1).
+  //
+  // The targeted (live) pass takes NO claim by design, so it reports neither
+  // `claimUnavailable` nor `claimHeld`. Its fresh `ok` record — a record with no claim
+  // field — therefore DELETED the durable fact, and the record is the SHARED
+  // `<spool>/status.json`, so this leg erased the warning the Python leg renders.
+  //
+  // MUTATION THAT REDS THIS: drop the final `next && hadFact` carry-forward arm from
+  // `applyClaimPolicy` (the pre-fix behaviour: the earned record replaces the file
+  // wholesale).
+  const previous = {
+    version: 1 as const, state: "ok" as const,
+    claim_unavailable: true,
+    claim_unavailable_reason: "the spool root cannot hold a claim",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const earned = { version: 1 as const, state: "ok" as const,
+                   updated_at: "2026-01-02T00:00:00.000Z" };
+  const out = applyClaimPolicy(earned, previous, {});
+  assert.ok(out, "the pass earned a record, so one is written");
+  assert.equal(out.claim_unavailable, true,
+    "a pass that never asked for the claim cannot clear the fact");
+  assert.equal(out.claim_unavailable_reason,
+    "the spool root cannot hold a claim");
+  assert.equal(out.updated_at, "2026-01-02T00:00:00.000Z",
+    "the state half of the record IS this pass's observation");
+});
+
+test("#14350: the TARGETED pass carries the fact END-TO-END (F1)", async () => {
+  // ⛔ THE POLICY IS NOT THE WIRING (review, cycle 15 P2). Every other F1 row on
+  // this leg calls `applyClaimPolicy` directly, so re-introducing the PRE-FIX call
+  // site — `if (summary.claimHeld || next === null) next = applyClaimPolicy(…)`, i.e.
+  // a claim-less pass with an earned record BYPASSES the policy — left the suite
+  // green while the durable fact was erasable again on this leg. The Python twin
+  // drives a real `flush_spool(only_session_id=…)`; this drives the extension.
+  //
+  // The ONLY writer here is the targeted/live pass: a real peer holds the drain
+  // claim, so the general pass is CONTENTION — it takes no claim, attempts nothing
+  // and writes nothing. That is what makes the assertion about the live pass.
+  //
+  // MUTATION THAT REDS THIS: restore the conditional call site above.
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "stale obstruction",
+    updated_at: new Date().toISOString(),
+  });
+  // Install a REAL claim through the module's own API (a hand-built directory is
+  // not a claim record and would be broken as stale instead of honoured).
+  const peer = acquireDrainClaim(spool, { leg: "peer" });
+  assert.ok(peer, "the fixture must hold a real claim, or the general pass writes");
+  writeSpoolEntry(spool, snapshot("live-carried"));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+  await pi.handlers.session_shutdown(
+    { reason: "quit" },
+    mockCtx({ entries: PI_ENTRIES, sessionId: "live-carried" }),
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.claim_unavailable, true,
+    "a claim-less pass has no standing to clear the fact, and the call site must "
+      + "apply the policy to see that: " + JSON.stringify(recorded));
+  assert.equal(recorded?.claim_unavailable_reason, "stale obstruction",
+    JSON.stringify(recorded));
+});
+
+test("#14350: a TARGETED pass that earned NO record writes nothing at all (F1)", () => {
+  // The other half of the same rule: an empty or backoff-only targeted pass observed
+  // nothing, so it must neither clear the fact nor invent a record.
+  //
+  // MUTATION THAT REDS THIS: return `next ?? previous` from the carry-forward arm
+  // unconditionally, which rewrites the unchanged record (a write nothing observed).
+  const previous = {
+    version: 1 as const, state: "blocked" as const, reason: "quota_exceeded",
+    claim_unavailable: true,
+    claim_unavailable_reason: "the spool root cannot hold a claim",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  assert.equal(applyClaimPolicy(null, previous, {}), null);
+});
+
+test("#14350: the claim policy agrees between both legs on every summary shape", () => {
+  // ⛔ THE TWO LEGS ARE ONE PROTOCOL on a SHARED file, so their policy is compared
+  // rather than each leg's own opinion of it. This matrix is the SAME one the Python
+  // twin drives (`test_the_claim_policy_agrees_on_every_summary_shape`), so a leg that
+  // drifts reds on its own row.
+  //
+  // MUTATION THAT REDS THIS: make any one row below disagree with the Python twin —
+  // e.g. clear the fact on a pass that did not hold the claim, or write a record from
+  // a targeted pass that observed nothing.
+  const fact = {
+    version: 1 as const, state: "ok" as const,
+    claim_unavailable: true, claim_unavailable_reason: "obstructed",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const earned = { version: 1 as const, state: "ok" as const,
+                   updated_at: "2026-01-02T00:00:00.000Z" };
+  // [label, earned, summary, writes?, claim_unavailable on the result, prior?]
+  // ⛔ `prior: false` MEANS THERE IS NO FACT TO CARRY (review, cycle 15 P2). Every
+  // other row starts from an existing fact, so widening "carry it forward" to
+  // "always stamp it" (`if (next)`) was green here — and a healthy box would then
+  // report `NO drain exclusion` forever. It is the false-positive direction, and it
+  // is the only row that can see it.
+  const matrix: Array<[string, object | null, object, boolean, boolean | null,
+    boolean?]> = [
+    ["targeted, earned nothing", null, {}, false, null],
+    ["targeted, earned ok", earned, {}, true, true],
+    ["targeted, earned ok, NO prior fact", earned, {}, true, false, false],
+    ["holder, earned nothing", null, { claimHeld: true }, true, false],
+    ["holder, earned ok", earned, { claimHeld: true }, true, false],
+    ["unclaimed, earned nothing", null, { claimUnavailable: true }, true, true],
+    ["unclaimed AND holder", null, { claimUnavailable: true, claimHeld: true },
+      true, true],
+    // ⛔ THE EMPTY-REASON ROW (review, cycle 14, P3). An empty reason is NO reason:
+    // both legs must fall back to the SAME default, because they write the same
+    // `<spool>/status.json`. This leg used `??` (so `""` was written verbatim) while
+    // the Python leg used `or` (so `""` defaulted) — the predicate class
+    // `client_captured_at_source` was fixed for, missed here because no row carried
+    // `""`.
+    ["unclaimed, reason is EMPTY", null,
+      { claimUnavailable: true, claimUnavailableReason: "" }, true, true],
+  ];
+  for (const [label, earnedRec, summary, writes, expected, prior] of matrix) {
+    // ⛔ A FRESH COPY OF BOTH INPUTS PER ROW (review, cycle 15 P3). One mutable
+    // `earned` object was reused across rows and `applyClaimPolicy` MUTATES its
+    // `next`, so "holder, earned ok" only detected a missing `delete` because the
+    // earlier "targeted, earned ok" row had already stamped the fact onto that shared
+    // object — moved first, it passed with the clearing deleted. Order-dependence
+    // in a matrix is a guard that grades whichever row happened to run earlier.
+    const out = applyClaimPolicy(
+      earnedRec ? { ...earnedRec } : null,
+      prior === false ? undefined : { ...fact },
+      summary as never);
+    assert.equal(out !== null, writes, label + " → writes? " + JSON.stringify(out));
+    if (writes) {
+      assert.equal(Boolean(out?.claim_unavailable), expected,
+        label + " → " + JSON.stringify(out));
+    }
+    if (writes && (summary as { claimUnavailableReason?: string })
+        .claimUnavailableReason === "") {
+      assert.equal(out?.claim_unavailable_reason,
+        "the spool root cannot hold a claim",
+        "an EMPTY reason is no reason on BOTH legs, not empty on one: "
+          + JSON.stringify(out));
+    }
+  }
+});
+
+test("#14350: a FAILED restore does not delete the only copy of a peer claim", () => {
+  // ⛔ `link(2)` FAILS WITH MORE THAN EEXIST (review, cycle 16, P1): the rename
+  // already vacated the claim path, so once the object is in the quarantine it is the
+  // ONLY copy of a live holder's claim. This branch used to warn and then
+  // `unlinkSync` unconditionally, emptying the path for the next `linkSync` — two
+  // holders for up to `ttl/3`, silently, evidence gone. `link(2)` lists
+  // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and ENOSPC on a
+  // spool directory is the ordinary case.
+  //
+  // The failure is produced deterministically at the PRIMITIVE: a restore target
+  // inside a directory that does not exist makes `linkSync` fail with ENOENT — an
+  // errno that is not EEXIST, exactly the class above — so no seam is needed.
+  //
+  // MUTATION THAT REDS THIS: restore the unconditional `unlinkSync(quarantine)` on
+  // the failure branch (then the quarantine is gone and the return value is `true`).
+  const spool = tmpSpool();
+  const quarantine = join(spool, "drain.claim.tmp-clear-1-peer");
+  writeFileSync(quarantine, "peer-claim-bytes");
+  const blockedTarget = join(spool, "no-such-dir", "drain.claim");
+
+  assert.equal(restoreQuarantine(quarantine, blockedTarget), false,
+    "a restore that could not happen must SAY so");
+  assert.equal(existsSync(quarantine), true,
+    "the only copy of the peer's claim was DELETED when the restore failed");
+
+  // …and the displacement path must obey the same rule.
+  const quarantine2 = join(spool, "drain.claim.tmp-clear-2-peer");
+  writeFileSync(quarantine2, "peer-claim-bytes-2");
+  assert.equal(
+    disposeQuarantine(quarantine2, "peer-claim-bytes-2", blockedTarget, "<not ours>"),
+    false,
+  );
+  assert.equal(existsSync(quarantine2), true,
+    "displaceQuarantine deleted the only copy when the restore failed");
+});
+
+test("#14350: the displacement path RENAMES the displaced claim back while the path is free", () => {
+  // Sparing the copy is the floor, not the remedy: a claim left under
+  // `*.tmp-clear-*` is swept by mtime, so the holder it belongs to is doomed
+  // minutes later. `renameSync` needs no hard link — which is the reachable
+  // failure (`tox-dev/filelock#843`) — so while the claim path is FREE the object
+  // goes BACK and the holder keeps holding.
+  //
+  // MUTATION THAT REDS THIS: return `false` without the rename-back (leaving it in
+  // the quarantine), or answer `true` from the rename-back arm (the caller then
+  // believes it may keep the claim).
+  const spool = tmpSpool();
+  const claimPath = join(spool, "drain.claim");
+  const quarantine = join(spool, "drain.claim.tmp-take-9-peer");
+  writeFileSync(quarantine, "peer-claim-bytes");
+  assert.equal(existsSync(claimPath), false, "this row is about the FREE-path arm");
+  const linkFails = (): void => {
+    throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+  };
+  assert.equal(
+    disposeQuarantine(quarantine, "peer-claim-bytes", claimPath, "<not ours>", linkFails),
+    false,
+    "a displaced claim is not ours to keep: the caller must give up this tick",
+  );
+  assert.equal(readFileSync(claimPath, "utf8"), "peer-claim-bytes",
+    "the displaced claim must be BACK at the path — rename needs no hard link");
+  assert.equal(existsSync(quarantine), false,
+    "a successful rename-back leaves no quarantine");
+});
+
+test("#14350: an OCCUPIED path plus a refused link PRESERVES the displaced claim", () => {
+  // ⛔ THE WARNING MUST BE TRUE (review, cycle 16, P1). `disposeQuarantine`'s occupied
+  // arm warned "PRESERVED at <quarantine>" and then FELL THROUGH to the `unlinkSync`
+  // below, destroying the only copy of the displaced holder's claim — the code
+  // contradicting its own sentence, and a divergence from the Python twin, which
+  // returns inside the same arm. Narrow reachability (it needs a `link` refusal that
+  // is not EEXIST arriving before the existence check — an LSM/FUSE/odd FS), but the
+  // invariant is certified as absolute in the record and in both twins.
+  //
+  // MUTATION THAT REDS THIS: delete the `return false;` after the occupied warn (the
+  // quarantine disappears and the preservation assertion fails — measured: 271 pass
+  // before this row existed, i.e. nothing redded).
+  const spool = tmpSpool();
+  const path = join(spool, "drain.claim");
+  const occupied = `${JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "newer-holder", leg: "python",
+    pid: process.pid, host: "box-a", boot_id: "boot-1",
+    started_at: Date.now(), expires_at: Date.now() + 120_000,
+  })}\n`;
+  writeFileSync(path, occupied);          // the path is OCCUPIED by a newer claim
+  const quarantine = join(spool, "drain.claim.tmp-clear-9-occupied");
+  const displaced = "displaced-holder-bytes\n";
+  writeFileSync(quarantine, displaced);
+
+  const refused = () => {
+    const err = new Error("EPERM: link refused") as NodeJS.ErrnoException;
+    err.code = "EPERM";                    // NOT EEXIST, and the path IS occupied
+    throw err;
+  };
+  const disposed = disposeQuarantine(quarantine, displaced, path, "<not ours>", refused);
+  assert.equal(disposed, false, "we did not judge this claim, so it is not ours to drop");
+  assert.equal(existsSync(quarantine), true,
+    "the copy the warning calls PRESERVED was DELETED");
+  assert.equal(readFileSync(quarantine, "utf8"), displaced);
+  assert.equal(readFileSync(path, "utf8"), occupied,
+    "the newer holder's claim is undisturbed");
 });
