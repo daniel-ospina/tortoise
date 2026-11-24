@@ -779,7 +779,13 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
+<<<<<<< HEAD
 # sdk.py:22085 (`_capture_session` reaches it at `sdk.py:19951`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+||||||| parent of 46bc47b2dcd0 (fix(14428): re-derive the 7949 bundle cites #14220 rotted, where the target is unambiguous)
+# sdk.py:22032 (`_capture_session` reaches it at `sdk.py:19898`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+=======
+# sdk.py:22032 (`_capture_session` reaches it at `sdk.py:19951`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+>>>>>>> 46bc47b2dcd0 (fix(14428): re-derive the 7949 bundle cites #14220 rotted, where the target is unambiguous)
 # `extractor_v2.py:12497`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12497` was
