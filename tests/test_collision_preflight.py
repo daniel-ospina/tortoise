@@ -898,6 +898,13 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     _drain_lane_stderr(proc.pid)
 
 
+#: Does `_peek_child_status` leave the zombie in place? ONE definition, because the two
+#: arms below GATE on it — a copy that drifted from the mechanism would silently skip the
+#: pin on the platform where the non-reaping read is what prevents the leak (#14506 review,
+#: cycle 8). False on macOS with Python < 3.13, where `os.waitid` is absent.
+_PEEK_LEAVES_ZOMBIE = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+
+
 def _peek_child_status(proc: subprocess.Popen) -> int | None:
     """The child's exit status, read WITHOUT reaping it — or `None` if still running.
 
@@ -908,9 +915,10 @@ def _peek_child_status(proc: subprocess.Popen) -> int | None:
 
     Falls back to `poll()` where `os.waitid`/`os.WNOWAIT` does not exist; that platform
     keeps the pre-existing behaviour (the status is reported, and the teardown's guard then
-    declines to signal a group it no longer owns).
+    declines to signal a group it no longer owns). Gate on `_PEEK_LEAVES_ZOMBIE`, never on
+    a fresh `hasattr` — a copy of the predicate can drift from the mechanism.
     """
-    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+    if _PEEK_LEAVES_ZOMBIE:
         try:
             info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:  # a caller already reaped it — report what IT kept
@@ -10634,7 +10642,8 @@ class CollisionPreflightTest(unittest.TestCase):
 
         Deterministic shape only, so the RC half of this pin runs on every platform: a normal
         exit (`sleep 0` runs out). The signalled death takes the other `si_code` branch and
-        needs `/proc` to construct, so it is its own skipped arm below.
+        builds its state with the same fork-marker handshake its sibling arm below uses — so
+        that arm is NOT skipped either, and this one's `/proc`-based predecessor is gone.
 
         ⛔ THE "NOT REAPED" HALF IS PLATFORM-CONDITIONAL, AND THE ARM MUST SAY SO (#14506
         review, cycle 7). `_peek_child_status` falls back to `poll()`, which REAPS — so
@@ -10650,7 +10659,7 @@ class CollisionPreflightTest(unittest.TestCase):
                 rc = _peek_child_status(proc)
                 time.sleep(0.01)
             self.assertEqual(rc, 0, "a lane that ran out its `sleep 0` exits 0")
-            if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+            if _PEEK_LEAVES_ZOMBIE:
                 self.assertIsNone(
                     proc.returncode,
                     "the status was read by REAPING it — `poll()` frees the pid and the "
@@ -10684,7 +10693,7 @@ class CollisionPreflightTest(unittest.TestCase):
                              "`poll()` would")
             # ⛔ PLATFORM-CONDITIONAL, like its sibling (#14506 review, cycle 7): the
             # `poll()` fallback reaps by construction, so `returncode` is set there.
-            if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+            if _PEEK_LEAVES_ZOMBIE:
                 self.assertIsNone(
                     proc.returncode,
                     "the status was read by REAPING it — `poll()` frees the pid and the "
@@ -10692,6 +10701,14 @@ class CollisionPreflightTest(unittest.TestCase):
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
+            # ⛔ AND CLEAN UP WHAT THE FALLBACK REAPED (#14506 review, cycle 8). Where
+            # `_peek_child_status` took `poll()`, the peek REAPED — so `_stop_fake_lane`
+            # takes its early return and the lane's `sleep` is left orphaned, holding a cwd
+            # inside the temp dir `tearDown` deletes. MEASURED 3/3 on the simulated
+            # platform before this line existed: one orphan per run, `ppid 1`. The sleeper
+            # still holds the pgid, so it cannot have been recycled.
+            with suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
 
     @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
     def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
