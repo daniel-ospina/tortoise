@@ -71,7 +71,8 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `da4b76a5851c`, whose three landings since `e6b3cf2908ba` register no fast file of their own, so
+# `f379299c64d`, whose four landings since `e6b3cf2908ba` register no fast file of their own — the
+# last of them, `f379299c64d`, does not touch this file at all — so
 # `main`'s own emission is unmoved — plus this PR's `core` registration
 # `tests/test_4625_schema_reads_off_write_path.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, the ONLY
 # `fast_pool()` addition on this tree) the verb packs five shards at 837.7 s
