@@ -832,7 +832,7 @@ def test_a_partial_tree_pays_one_parse_per_plan_not_one_per_parameter(
     `_jsonb_or_scalar`, and on an absent/partial tree the SQL is deliberately not
     memoised — so without a SQL-keyed memo for its answer the parse ran once per
     PARAMETER, per record, inside `replay_plan`. Measured on a tree missing one
-    migration: 0.854 s for 20 records against 0.025 s on the complete tree (35x),
+    migration: 0.854 s for 20 records against 0.025 s on the complete tree (~34x),
     with 40 parses for 20 records — the very stack shape #4625 exists to remove,
     reintroduced on the self-healing branch. Pre-#4625 the 5 s TTL masked it.
 

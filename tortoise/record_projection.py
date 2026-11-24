@@ -3049,7 +3049,7 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     # (`_jsonb_or_scalar`), and on an ABSENT/PARTIAL tree the SQL is deliberately
     # NOT memoised — so without this the parse ran once per parameter, per record,
     # inside `replay_plan`. Measured on a tree missing one migration: 0.854 s for
-    # 20 records against 0.025 s on the complete tree (35x), 40 parses for 20
+    # 20 records against 0.025 s on the complete tree (~34x), 40 parses for 20
     # records — the stack shape #4625 exists to remove, reintroduced on the branch
     # that self-heals. Keying on the SQL STRING keeps the self-heal: a new read
     # yields a new string, so the cache misses and the answer is recomputed.
