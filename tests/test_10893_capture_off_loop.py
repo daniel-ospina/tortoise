@@ -516,9 +516,12 @@ def _install_blocking_stamp_write(monkeypatch, state: dict) -> None:
     emits; blocking every emit would also block legs this test does not touch
     and would let it pass for the wrong reason. Blocks ONCE — the window under
     measurement is the first write's, and every further id would only add
-    another ``_STAMP_STALL_S`` to the run — while the WHERE-IT-RAN flag is
-    folded over every ``PointRevised``, so a later on-loop id cannot hide behind
-    an off-loop first one.
+    another ``_STAMP_STALL_S`` to the run — while the WHERE-IT-RAN reading is
+    folded over every ``PointRevised`` (``state["observations"]``, and
+    ``state["threads"]`` for the pool row), so a later on-loop id cannot hide
+    behind an off-loop first one. The aggregation is pinned by
+    ``test_the_blocking_hook_records_every_stamped_write_not_only_the_first``:
+    this fixture stamps exactly ONE id, so the live test can never show it.
     """
     real = TortoiseSDK._emit_event
 
@@ -532,9 +535,16 @@ def _install_blocking_stamp_write(monkeypatch, state: dict) -> None:
             # BLOCKED — the window under measurement is its own, and every
             # further id would add another `_STAMP_STALL_S` to the run — so the
             # aggregation and the block are deliberately separate.
-            state["ran_on_loop"] = state.get("ran_on_loop", False) or _on_loop()
-            state["thread"] = threading.current_thread().name
+            observations = state.setdefault("observations", [])
+            observations.append((_on_loop(), threading.current_thread().name))
+            state["ran_on_loop"] = any(on_loop for on_loop, _ in observations)
+            # ⛔ THE THREADS ARE AGGREGATED TOO, and the window's OWN thread is
+            # kept separately: a last-write `state["thread"]` would let a later
+            # write on `capture-extract_1` overwrite the blocked write's
+            # `MainThread` and pass the pool row, so the pool row reads the SET.
+            state["threads"] = [name for _, name in observations]
             if "entered" not in state:
+                state["thread"] = threading.current_thread().name
                 state["entered"] = time.perf_counter()
                 try:
                     time.sleep(_STAMP_STALL_S)  # stand-in for the blocking write
@@ -611,6 +621,19 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
         "and `_submit_off_loop` exists to avoid. It confines contextvars "
         "either way, so the POOL is the whole difference: "
         "`_run_off_loop(_CAPTURE_EXECUTOR, ...)` is the seam (#13722/#14112)")
+    # ⛔ EVERY stamped write, not only the blocked one: `state["thread"]` is the
+    # WINDOW's thread, and the window is the first write's, so a later write
+    # submitted on another pool (or on the loop) would be invisible here — which
+    # `ran_on_loop` alone does not rule out, since that flag says WHERE a write
+    # ran, not WHICH POOL.
+    off_pool = [name for name in state.get("threads", ())
+                if not str(name).startswith("capture-extract")]
+    assert not off_pool, (
+        f"{len(off_pool)} of {len(state.get('threads', ()))} stamped writes ran "
+        f"off the dedicated capture pool (threads {off_pool!r}) — the stamp half "
+        "is ONE closure, so every id it journals must run on "
+        "`_CAPTURE_EXECUTOR` (#13722/#14112); the row above reads only the "
+        "first write's thread")
 
     entered, exited = state["entered"], state["exited"]
     in_stall = [t for t in ticks if entered < t < exited]
@@ -653,3 +676,68 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
     assert response.status_code == 200, (
         f"the capture did not complete after the off-loaded stamp write "
         f"({response.status_code}: {response.text[:200]})")
+
+
+def test_the_blocking_hook_records_every_stamped_write_not_only_the_first(
+        monkeypatch):
+    """The aggregation above is otherwise unreachable, so it is pinned here.
+
+    `_stamp_capture_provenance` journals one `PointRevised` per id and this
+    fixture stamps exactly ONE, so the live test's fold is only ever exercised
+    with a single element — a hook that recorded the first write alone would be
+    indistinguishable there while making a later on-loop id invisible, which is
+    the exact regression that row exists to catch (#14520 review, P3). This
+    drives the hook itself: one off-loop write, then one ON the loop, and
+    requires the on-loop one to be both recorded and reflected in
+    `ran_on_loop`.
+
+    Falsified against the pre-fix guard (`type_ == "PointRevised" and "entered"
+    not in state`): measured red, `the hook recorded (), not the two
+    PointRevised writes it was driven with`.
+    """
+    # The real door is replaced with a no-op so the hook can be driven with a
+    # placeholder `self` — the seam under test is the HOOK, not the journal.
+    monkeypatch.setattr(TortoiseSDK, "_emit_event",
+                        lambda self, type_, payload=None, **kw: None)
+    # Pre-seeding `entered` skips the stand-in sleep: this test measures WHICH
+    # writes are recorded, never a window.
+    state: dict = {"entered": time.perf_counter()}
+    _install_blocking_stamp_write(monkeypatch, state)
+
+    def _off_loop_write() -> None:
+        TortoiseSDK._emit_event(object(), "PointRevised")
+
+    worker = threading.Thread(target=_off_loop_write)
+    worker.start()
+    worker.join()
+
+    async def _on_loop_write() -> None:
+        TortoiseSDK._emit_event(object(), "PointRevised")
+
+    asyncio.run(_on_loop_write())
+    # A different event type is not the stamp's write and must not be recorded.
+    TortoiseSDK._emit_event(object(), "SessionCreated")
+
+    observations = state.get("observations", ())
+    threads = state.get("threads", ())
+    assert len(observations) == 2, (
+        f"the hook recorded {observations!r}, not the two `PointRevised` writes "
+        "it was driven with (a non-`PointRevised` type must not be recorded "
+        "either)")
+    assert threads[1] == "MainThread", (
+        f"the second write ran on {threads[1]!r}, so this run did not put a "
+        "later write on the loop and the aggregate assertion below is vacuous")
+    assert state["ran_on_loop"] is True, (
+        "a LATER `PointRevised` ran on the event loop and `ran_on_loop` is "
+        f"still False (observations {observations!r}) — the hook records the "
+        "first write only, so the live test above cannot see a later on-loop "
+        "write (#14520 review, P3)")
+    assert state["ran_on_loop"] is not observations[0][0], (
+        "the aggregate is not an aggregate: `ran_on_loop` equals the FIRST "
+        f"observation only ({observations!r})")
+    # The pool row's input is the SET, and the window's own thread is kept
+    # separately — a last-write `thread` would hide the blocked write's pool.
+    assert threads[0] != "MainThread", (
+        f"the off-loop write ran on {threads[0]!r}, so the pair this test "
+        "drives is not (off-loop, on-loop) and the fold is untested")
+    assert "entered" in state
