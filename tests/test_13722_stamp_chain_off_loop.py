@@ -50,7 +50,35 @@ run-time guard in #14528:
 4. the containing function is referenced **only as that submission's callable**
    — any other reference (an inline `_stamp_chain()`, a
    `_CAPTURE_EXECUTOR.submit(_stamp_chain)`) is a second way to run the chain
-   and reds, however many submissions also exist elsewhere in the module.
+   and reds, however many submissions also exist elsewhere in the module; and
+5. every submission of that function is REACHABLE — when ALL of them sit under a
+   guard whose value is STATICALLY FALSE, no submission is ever reached and the
+   chain runs nowhere. A dead-guarded duplicate beside a live submission is inert
+   (it runs nothing) and stays green.
+
+   ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it", and the
+   difference is deliberate: a fixer disables a leg by making the guard false, so
+   `[]` / `{}` / `{*()}` are as dead as `False` even though CPython evaluates them
+   at run time (`dis` folds only a literal constant such as `False` / `0` / `()`).
+   Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
+   (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
+   signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
+   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2`).
+   For `is`/`is not` identity, graded only where the PROGRAM decides it: a
+   singleton operand (`None`/`True`/`False`), or two operands that cannot be the
+   same object (`1 is 2`, `(1, 2) is (1, 3)`, `0.0 is 0`) — never two EQUAL
+   non-singleton literals (`'ab' is 'ab'`, `() is ()`), whose identity is an
+   interning detail that CPython happens to answer True and another
+   implementation need not,
+   `not X`, `and`/`or` over them, a conditional expression whose test — or whose
+   two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
+   and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
+   and a `match` case's `if` guard (`case _ if False:`). Ungraded: anything
+   `_literal_truth` answers `None` for — a run-time constant (`if _FEATURE:`), an
+   unpack of a run-time value, an arbitrary call, two equal non-singleton
+   literals compared by `is`, and an expression-position short circuit
+   (`False and await …`), where the submission sits inside the `BoolOp` rather
+   than under an `if`/`while`/`if`-expression/match guard.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -75,49 +103,29 @@ twice, once on the loop), and `_CAPTURE_EXECUTOR.submit(_stamp_chain)` beside th
 intended submission. Arm 4 closes that: it grades every REFERENCE to the chain,
 not the existence of some submission.
 
-⛔ ARMS 1 AND 2 COME BEFORE ARM 3, and THAT order is load-bearing (arms 4, 5, 6
-and the door-spelling arm follow arm 3; "in that order" would be false). Property 3
-is checked AFTER them on purpose: the PRE-#13722 chain lives in `_report_capture`,
-a nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
-an arm-3-first check reds THERE — reporting "the chain silently does NOT run"
+⛔ THE ARMS ARE ASSERTED IN THAT ORDER, and the order is load-bearing. Property 3
+is checked AFTER the submission and await arms — not first, and deliberately not
+last (the mention count, the stray-reference and the dead-guard arms follow it) —
+because the PRE-#13722 chain lives in `_report_capture`, a
+nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
+a 3-check written first reds THERE — reporting "the chain silently does NOT run"
 about a shape where it runs, inline on the loop, which is the 53 s wedge. The
 submission arm must speak first for a revert; the `async def` arm must only speak
 once submission and await hold (an `async def` that IS submitted and awaited still
 reaches it, so nothing is lost by the reorder).
-
-WHAT IS PINNED DIRECTLY, WITHOUT USING `hosted_api.py` AS THE FIXTURE. The three
-predicates the main test rests on — `_string_value`'s constant fold, the shape set
-`_refers_to`/`_submitted_names` agree on, and `_statically_false`/`_dead_guards`
-(the dead-guard arm) — are ALSO graded on synthetic sources below. The shipped
-module uses only the bare-name spelling, carries no split spelling, no attribute
-submission for this owner, and no statically-false guard, so those arms were
-otherwise reachable only through it: reverting any of the three predicates left
-the WHOLE SUITE GREEN (measured twice for the first two, review P2 at `4fd3fc8c`
-and again at `1d59c806` on `/tmp` copies; re-measured for the third at
-`74e6a0f0`, where neutering `_statically_false` — or `_dead_guards` itself — still
-left `16 passed`). A gate whose only encoding of its own arm is prose is a habit,
-not a gate. `test_dead_guards_reports_only_the_guards_the_interpreter_skips`
-closes the third.
 
 WHAT IT DELIBERATELY DOES NOT PIN. The number of round trips per record. That
 number is a property of `record_projection.replay`'s plan and is measured (not
 asserted) by `tests/test_9558_record_write_cost.py`'s prologue assertion and by
 #13722's own before/after figures in the PR; #13722 item 2 (batching the plan's
 per-record statements) would move it, and this file must not red when it does.
-
-Nor does it pin the submission's RUNTIME reachability: a guard that is false only
-at run time (`if _FEATURE: …`) is not statically decidable, so a chain submitted
-only under such a flag reads as reachable here. What it DOES reject is a guard the
-interpreter itself folds away — a literal-false test (`if False:`, `if True and
-False:`, `if _flag and False:`) around the only submission — because that is a
-shape a fixer writes on purpose to "disable" the offload, and the result is the
-same silent loss as the `async def` arm: no record, no `PointRevised`, no warning,
-and a green suite.
 """
 
 from __future__ import annotations
 
 import ast
+import operator
+import re
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -129,9 +137,26 @@ HOSTED_API = Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.p
 #: The stamp door the chain calls (imported at module scope by `hosted_api`).
 _STAMP_DOOR = "_stamp_capture_provenance"
 
-#: The off-loop submission helper and the pool it must be given.
-_OFF_LOOP = "_run_off_loop"
-_OFF_LOOP_POOL = "_CAPTURE_EXECUTOR"
+#: The binary comparison operators a literal `Compare` can carry, as Python
+#: functions — so `1 < 0` is decided by EVALUATION rather than by shape.
+_COMPARE_OP = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
+
+#: Zero-argument builtin constructors whose result is always EMPTY (falsy).
+_EMPTY_CONSTRUCTORS = frozenset({
+    "set", "frozenset", "dict", "list", "tuple", "str", "bytes", "int",
+    "float", "complex", "bool",
+})
 
 #: `ast.FormattedValue.conversion` → the function the interpreter applies for it
 #: (`-1` is "no conversion", and is absent from this map on purpose).
@@ -140,6 +165,10 @@ _FSTRING_CONVERSIONS: dict[int, Callable[[str], str]] = {
     ord("r"): repr,
     ord("a"): ascii,
 }
+
+#: The off-loop submission helper and the pool it must be given.
+_OFF_LOOP = "_run_off_loop"
+_OFF_LOOP_POOL = "_CAPTURE_EXECUTOR"
 
 
 def _module() -> ast.Module:
@@ -385,28 +414,184 @@ def _string_value(node: ast.AST) -> str | None:
     return None
 
 
-def _statically_false(test: ast.expr) -> bool:
-    """True when the interpreter itself would fold ``test`` to a false value.
+def _identical_literals(left: object, right: object) -> bool | None:
+    """Is `left is right` decided by the PROGRAM — and if so, which way?
 
-    Only the constant foldings are graded — a literal `False`, `not` of a literal
-    truth, an `and` with any false operand, an `or` whose operands are all false.
-    A run-time-constant guard (`if _FEATURE:`) is deliberately NOT modelled: it is
-    not statically decidable, and this pin says so in its header instead of
-    pretending to grade it.
+    ⛔ `ast.literal_eval` hands back the AST's own `Constant` objects, so asking
+    `left is right` of THEM measures the AST's object graph, not the program:
+    `'ab' is 'ab'` is False of those objects while CPython shares one
+    `LOAD_CONST` slot and RUNS the body — the false RED this arm was fixed for
+    (review P2, measured).
+
+    Decided, because no interning accident can change the answer:
+      * either operand is a singleton (`None`/`True`/`False`) — their identity is
+        the program's, so `None is None` is True and `None is not None` is False;
+      * the operands CANNOT be the same object — their types differ (`0.0 is 0`)
+        or their values differ (`1 is 2`, `(1, 2) is (1, 3)`). Identity implies
+        equality, so `is` there is ALWAYS False and `is not` ALWAYS True, which
+        is the "always false" criterion this file grades by. ⛔ Grading these
+        `None` is a FAIL-OPEN, not caution: the pre-fix code reddened them
+        correctly and a bare singleton test un-graded them (measured: `if 1 is
+        2:` around the only submission → GREEN).
+
+    Undecided (`None`): two EQUAL non-singleton literals — `'ab' is 'ab'`,
+    `(1, 2) is (1, 2)`, `() is ()`. CPython merges equal constants into one code
+    object so those bodies usually RUN, but the language does not require it (3.8
+    emits a `SyntaxWarning` for `is` on literals for exactly this reason).
+    ⛔ NOT CLOSED, and declared here so the arm is not over-read: `'ab' is not
+    'ab'` is DEAD in CPython and stays GREEN, because grading it False would red a
+    body that runs wherever the constants are not merged.
     """
-    if isinstance(test, ast.Constant):
-        return not test.value
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        operand = test.operand
-        return isinstance(operand, ast.Constant) and bool(operand.value)
-    if isinstance(test, ast.BoolOp):
-        folded = [_statically_false(v) for v in test.values]
-        return any(folded) if isinstance(test.op, ast.And) else all(folded)
-    return False
+    if left is None or left is True or left is False:
+        return right is left
+    if right is None or right is True or right is False:
+        return False
+    if type(left) is not type(right):
+        return False
+    # `==` is reflexive for every literal `ast.literal_eval` can build (it cannot
+    # produce a NaN — `float("nan")` is a Call, not a literal), so "unequal ⇒ not
+    # one object" is sound here; the reflexivity guard keeps that honest rather
+    # than assumed.
+    if left != left or right != right:  # pragma: no cover - unreachable for literals
+        return None
+    return None if left == right else False
+
+
+def _literal_truth(node: ast.expr) -> bool | None:
+    """The statically decidable truth of a literal-ish expression, or None.
+
+    ⛔ `None` means "not statically decidable" and the caller must NOT read it as a
+    polarity. ⛔ AN UNPACK IS NOT "NO ITEM": `{*()}` is empty because the OPERAND is
+    empty, `{*{1}}` is NOT empty, and `{*PAYLOAD}` is undecidable — so a starred
+    element (and a dict's `**`, whose key is `None`) is decided by recursing on its
+    value. Deciding it from the node's shape alone got both directions wrong in
+    earlier cuts: `{*()}` read as truthy (so `not {*()}` redded although its body
+    runs) and `{*{1}}` read as empty (so `if not {*{1}}:` greened although nothing
+    runs there).
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        # ⛔ AN UNPACK CAN MAKE A COLLECTION NON-EMPTY, so `any(not Starred)` is
+        # wrong in BOTH directions: `{*{1}}` is non-empty (the operand is), and
+        # `{*PAYLOAD}` is not decidable at all. Decide from the operand: any
+        # plain element makes it non-empty; otherwise every unpack must be
+        # statically EMPTY for the whole collection to be.
+        members = [(_literal_truth(e.value) if isinstance(e, ast.Starred) else True)
+                   for e in node.elts]
+        if any(m is True for m in members):
+            return True
+        return False if all(m is False for m in members) else None
+    if isinstance(node, ast.Dict):
+        spreads = [_literal_truth(value)
+                   for key, value in zip(node.keys, node.values, strict=True)
+                   if key is None]
+        if any(key is not None for key in node.keys):
+            return True
+        if any(s is True for s in spreads):
+            return True
+        return False if all(s is False for s in spreads) else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        operand = _literal_truth(node.operand)
+        return None if operand is None else not operand
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        try:
+            return bool(ast.literal_eval(node))
+        except (ValueError, TypeError, SyntaxError):
+            return None
+    if isinstance(node, ast.JoinedStr):
+        # `f''` has no values and is always the empty string; `f'{x}'` is not
+        # decidable without evaluating `x`.
+        return False if not node.values else None
+    if isinstance(node, ast.Call):
+        # ⛔ A ZERO-ARG BUILTIN CONSTRUCTOR IS A LITERAL IN DISGUISE: `if set():`
+        # and `if dict():` are always falsy, and they are just as plausible a
+        # "disable" as `if {}:` — measured GREEN before this arm existed. Any
+        # argument, or any other callee, is undecidable.
+        if (
+            not node.args and not node.keywords
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _EMPTY_CONSTRUCTORS
+        ):
+            return False
+        return None
+    if isinstance(node, ast.Compare):
+        # A comparison of LITERALS is decided at all heads (`1 < 0` is never true),
+        # even though CPython does not fold it — the criterion is "always false",
+        # not "folded". `ast.literal_eval` alone does NOT accept a `Compare`, so the
+        # operands are evaluated here and the chain applied explicitly; a chained
+        # comparison (`0 < x < 1`) is evaluated pairwise, as Python does.
+        try:
+            left = ast.literal_eval(node.left)
+            rights = [ast.literal_eval(c) for c in node.comparators]
+        except (ValueError, TypeError, SyntaxError):
+            return None
+        operators = [type(op) for op in node.ops]
+        comparators = [_COMPARE_OP.get(kind) for kind in operators]
+        if any(fn is None for fn in comparators):
+            return None
+        # ⛔ `is` IS NOT DECIDED BY VALUE — see `_identical_literals` for the
+        # criterion and for the two directions it has been wrong in: grading
+        # equal literals from `literal_eval`'s objects false-REDded a body that
+        # runs, and grading only singletons un-graded `1 is 2`, which is always
+        # dead (review P2, measured both ways).
+        answer = True
+        for fn, kind, right in zip(comparators, operators, rights, strict=True):
+            if kind is ast.Is or kind is ast.IsNot:
+                identical = _identical_literals(left, right)
+                if identical is None:
+                    return None
+                holds = identical if kind is ast.Is else not identical
+            else:
+                try:
+                    holds = bool(fn(left, right))  # type: ignore[misc]
+                except TypeError:
+                    return None
+            if not holds:
+                answer = False
+                break
+            left = right
+        return answer
+    if isinstance(node, ast.IfExp):
+        behaviour = _literal_truth(node.test)
+        if behaviour is not None:
+            return _literal_truth(node.body if behaviour else node.orelse)
+        # Both branches deciding the SAME polarity decide the expression, whatever
+        # the test is: `X if PAYLOAD else Y` with X and Y both false is always false.
+        body, orelse = _literal_truth(node.body), _literal_truth(node.orelse)
+        return body if body is not None and body == orelse else None
+    if isinstance(node, ast.BoolOp):
+        values = [_literal_truth(v) for v in node.values]
+        if isinstance(node.op, ast.And):
+            if any(v is False for v in values):
+                return False
+            return True if all(v is True for v in values) else None
+        if any(v is True for v in values):
+            return True
+        return False if all(v is False for v in values) else None
+    return None
+
+
+def _statically_false(test: ast.expr) -> bool:
+    """True when ``test`` is ALWAYS false — the body can never run.
+
+    ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it". A fixer
+    disables a leg by making the guard false, and `[]`/`{}`/`{*()}` are just as
+    dead as `False` even though CPython evaluates them at run time (`dis` folds only
+    a literal constant such as `False`/`0`/`()`); grading them is what makes the arm
+    catch the disable a fixer actually writes. `_literal_truth` is the one place
+    that decides, so `not X` and `X` cannot disagree.
+    """
+    return _literal_truth(test) is False
 
 
 def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
-    """`(line, source)` of every enclosing `if`/`while` that folds to false.
+    """`(line, source)` of every enclosing guard that is ALWAYS FALSE.
+
+    ⛔ THE CRITERION IS "always false", NOT "CPython folds it away" (the header
+    states why), and the guards graded are every shape a submission can hide
+    under: an `if`/`while` test, an `if`-expression's test, and a `match` case's
+    `if` guard. The polarity comes from `_literal_truth` and nowhere else.
 
     ⛔ `orelse` is NOT descended with the guard pushed: the else-branch of a
     statically-false `if` is exactly the branch that RUNS, so a submission there is
@@ -415,11 +600,30 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     dead: list[tuple[int, str]] = []
 
     def walk(node: ast.AST, guards: list[tuple[int, ast.expr]]) -> None:
-        if isinstance(node, (ast.If, ast.While)):
+        if isinstance(node, ast.Match):
+            # ⛔ A `case _ if False:` GUARD IS A DISABLE TOO (Python 3.12 shape, and
+            # measured: the body's submission is never reached while the pin stayed
+            # green). Each case's guard applies to that case's body only.
+            walk(node.subject, guards)
+            for case in node.cases:
+                case_guards = guards
+                if case.guard is not None:
+                    walk(case.guard, guards)
+                    case_guards = [*guards, (case.guard.lineno, case.guard)]
+                for child in case.body:
+                    walk(child, case_guards)
+            return
+        if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+            # ⛔ `IfExp` is graded too: CPython folds `X if False else Y` to `Y` and
+            # drops the `X` branch, so a submission in `X` is as gone as one under a
+            # dead `if`. Its `orelse` is the branch that runs, so it is walked
+            # unguarded — same rule as `If`.
             walk(node.test, guards)
-            for child in node.body:
-                walk(child, [*guards, (node.lineno, node.test)])
-            for child in node.orelse:
+            body = node.body if isinstance(node.body, list) else [node.body]
+            orelse = node.orelse if isinstance(node.orelse, list) else [node.orelse]
+            for child in body:
+                walk(child, [*guards, (node.test.lineno, node.test)])
+            for child in orelse:
                 walk(child, guards)
             return
         if node is target:
@@ -434,6 +638,37 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
 
     walk(tree, [])
     return dead
+
+
+def _unaccounted_mentions(
+    tree: ast.Module, owners: set[str], source: str,
+) -> dict[str, tuple[int, int]]:
+    """`owner -> (textual mentions, graded AST nodes)` for every mismatch.
+
+    ⛔ WHOLE-WORD, NOT SUBSTRING (review P2-2, measured): a substring count made
+    `_stamp_chain_retry = None` — an identifier that merely EXTENDS the chain's
+    name, the plausible refactor — add one occurrence with no node to grade, so a
+    CORRECT tree redded with "builds the callable some way this pin cannot follow".
+    `\b` counts the name where it is the name (`"_stamp_chain"` in a string, the
+    `def` line, a reference) and not where it is a prefix of a longer identifier.
+
+    Fail-closed where it is declared to be: a mention this walk cannot see as a
+    node (a comment, a docstring, a string-built `locals().get("…")`) still
+    counts. ⛔ NOT closed, and stated so the arm is not over-read: CONCATENATION
+    (`"_stamp" + "_chain"`) has no contiguous occurrence to count.
+    """
+    unaccounted: dict[str, tuple[int, int]] = {}
+    for owner in sorted(owners):
+        graded = (
+            [line for line, _submitted in _off_loop_references(tree, owner)]
+            + [node.lineno for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == owner]
+        )
+        occurrences = len(re.findall(rf"\b{re.escape(owner)}\b", source))
+        if occurrences != len(graded):
+            unaccounted[owner] = (occurrences, len(graded))
+    return unaccounted
 
 
 def test_every_stamp_call_runs_off_the_loop() -> None:
@@ -520,8 +755,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
             "keeps a stamp failure non-fatal (#8501/#1529), and a detached task "
             "moves that failure where nothing reports it (#13722)")
 
-    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED AFTER 1 AND 2, NOT LAST
-    # (cycle-10 finding 1, falsified against `origin/main`): `_run_off_loop` hands
+    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED AFTER SUBMISSION+AWAIT,
+    # NOT FIRST, AND NOT LAST (the mention-count, stray-reference and dead-guard
+    # arms follow it; review P3 at `807a1014` measured that this comment said
+    # "LAST" about an arm three arms from the end). `_run_off_loop` hands
     # `fn` to `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
     # (`monitoring.confine_context`'s `ctx.run(fn, ...)`). Given a coroutine
     # function it returns an unawaited coroutine OBJECT — the future resolves to
@@ -561,10 +798,39 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     #
     # This arm needs no dataflow: the only legal reference to an owner in this
     # module is the callable argument of `_run_off_loop(_CAPTURE_EXECUTOR, owner)`
-    # (a bare name or an attribute resolving to it — `_refers_to`),
-    # so every other reference it finds is a second way to run the chain and reds.
+    # — a bare `ast.Name` OR an attribute, since `_refers_to` accepts both and the
+    # two arms must not disagree about what a submission is — so every other
+    # reference it finds is a second way to run the chain and reds.
     # All three mutants above red here; the shipped tree has exactly one reference
     # per owner, at the submission.
+    # ⛔ INDIRECTION THE AST CANNOT SEE (same review finding, second measured
+    # mutant): `_again = locals().get("_stamp_chain"); _again()` and
+    # `getattr(self, "_stamp_chain")` build the callable from a STRING, so no
+    # `ast.Name`/`ast.Attribute` node refers to it and the arm below reported zero
+    # references — measured GREEN with the chain run a second time, inline, on the
+    # loop. The defence is counting: every textual occurrence of an owner's name in
+    # this module must be an AST node we graded (its definition, or a reference
+    # above), so a string occurrence is an UNACCOUNTED one and reds. A COMMENT or
+    # docstring mentioning the name in this module reds too — fail-closed on
+    # purpose: a name worth mentioning is a name worth grading, and the message
+    # says so.
+    # ⛔ WHOLE-WORD ON PURPOSE (review P2-2, measured): the count is `\b…\b`, not
+    # a substring count, so `_stamp_chain_retry = None` beside an untouched
+    # submission stays GREEN. The first cut counted substrings and redded that
+    # correct tree with "the extra mention builds the callable some way this pin
+    # cannot follow" — a false report on the plausible refactor, i.e. the defect
+    # class this PR exists to remove. What remain covered are the shapes the
+    # message names: a string-built callable and a comment.
+    unaccounted = _unaccounted_mentions(
+        tree, owners, HOSTED_API.read_text(encoding="utf-8"))
+    assert not unaccounted, (
+        f"{_STAMP_DOOR}'s chain is named {unaccounted} time(s) in "
+        f"{HOSTED_API.name} (textual, graded AST node) — the extra mention builds "
+        "the callable some way this pin cannot follow as a reference (a string in "
+        "`locals().get(…)`/`getattr(…)`, or a comment), so a second, on-loop run of "
+        "the chain would be invisible here. Call it by name at its single "
+        "submission, or re-derive this pin to follow that indirection (#13722)")
+
     stray = {
         owner: [line for line, submitted_here in _off_loop_references(tree, owner)
                 if not submitted_here]
@@ -632,6 +898,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # too, and a name worth spelling in a string is a name worth grading
     # explicitly. Measured cost today: zero (`grep` finds the name at its `def`
     # and at its submission, and nowhere else).
+    # ⛔ THE FOLD AND THE WHOLE-WORD COUNT ARE COMPLEMENTARY, NOT RIVALS: the
+    # count above catches a mention the walk cannot grade (including a comment),
+    # and this arm catches the composed string a count of the WHOLE name cannot see
+    # (`"_stamp_" + "chain"` has no contiguous occurrence). Both are kept.
     string_built = {
         owner: [node.lineno for node in ast.walk(tree)
                 if _string_value(node) == owner]
@@ -663,25 +933,243 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # warning, and every arm above stays green. That is the same silent-loss state
     # arm 3 rejects for `async def`, reached by "disabling" the offload instead of
     # mis-typing it. Run-time-constant guards stay ungraded (see the header).
-    # ⛔ `_refers_to`'s NAME, not `node.id`: the submitted node may be an ATTRIBUTE
-    # (`holder._stamp_chain`), which carries `.attr` and no `.id` — reading `.id`
-    # here raised `AttributeError` on a shape the arms above deliberately accept.
+    #
+    # ⛔ EVERY SUBMISSION OF THE OWNER, NOT ANY ONE OF THEM (review finding, P2):
+    # a first cut redded as soon as ONE submission sat under a folded-false guard,
+    # so a functionally CORRECT tree — a live awaited submission plus a leftover
+    # `if False:` duplicate beside it — was reported as "the chain silently does
+    # NOT run", which is false there, and it sends a fixer hunting an unreachable
+    # submission that does not exist. The silent-loss state is exactly "NO
+    # submission of this owner is reachable", so the arm fires only when every one
+    # of them is dead-guarded. A dead duplicate beside a live submission runs
+    # nothing and is therefore inert — it is not a second way to run the chain,
+    # which is what the reference arm grades.
+    by_owner: dict[str, list[ast.AST]] = {}
+    for node in _submitted_names(tree):
+        for owner in sorted(owners):
+            if _refers_to(node, owner):
+                by_owner.setdefault(owner, []).append(node)
     dead_guards = {
-        name: guards
-        for name, guards in (
-            (getattr(node, "id", None) or getattr(node, "attr", None),
-             _dead_guards(tree, node))
-            for node in _submitted_names(tree)
-            if (getattr(node, "id", None) or getattr(node, "attr", None)) in owners
+        name: [guard for guards in per for guard in guards]
+        for name, per in (
+            (name, [_dead_guards(tree, node) for node in nodes])
+            for name, nodes in by_owner.items()
         )
-        if guards
+        if per and all(per)
     }
     assert not dead_guards, (
-        f"{_STAMP_DOOR}'s chain is submitted only under a STATICALLY-FALSE guard "
-        f"at {dead_guards} (owner: [(line, test)]) — the interpreter folds that "
-        "test away, so the submission is never reached and the chain silently "
-        "does NOT run: no record, no `PointRevised`, no warning (#13722). Remove "
-        "the dead guard rather than leaving the offload unreachable")
+        f"EVERY submission of {_STAMP_DOOR}'s chain sits under a STATICALLY-FALSE "
+        f"guard at {dead_guards} (owner: [(line, test)]) — each of those guards is "
+        "ALWAYS FALSE (`_literal_truth` decided it), so no submission is ever "
+        "reached and the chain silently does NOT run: no record, no "
+        "`PointRevised`, no warning "
+        "(#13722). Remove the dead guard rather than leaving the offload "
+        "unreachable")
+
+
+#: A minimal module carrying one dead-guarded and one undecidable-guarded stamp
+#: call behind a `match` — the shape an `if`-only walk cannot see.
+_MATCH_SOURCE = '''
+def dead(value):
+    match value:
+        case _ if False:
+            _stamp_capture_provenance(1)
+
+def live(value):
+    match value:
+        case _ if _flag:
+            _stamp_capture_provenance(2)
+'''
+
+
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        # A collection is decided by its OPERAND, not by its shape (P2-1).
+        ("{*()}", False),
+        ("{*{1}}", True),
+        ("[*[1]]", True),
+        ("{**{}}", False),
+        ("{**{1: 2}}", True),
+        ("{*_x}", None),
+        ("{**_x}", None),
+        # Literal shapes that are falsy without being folded by CPython.
+        ("f''", False),
+        ("f'{_x}'", None),
+        ("set()", False),
+        ("dict()", False),
+        ("set(_x)", None),
+        ("1 < 0", False),
+        ("1 == 1", True),
+        ("'a' in 'abc'", True),
+        ("1 < _x", None),
+        # `is`/`is not`: graded where the PROGRAM decides identity — a singleton
+        # operand, or operands that cannot be one object — and nowhere else.
+        # ⛔ NON-VACUOUS BOTH WAYS, measured: grading equal literals from
+        # `ast.literal_eval`'s own Constant objects answered False for
+        # `'ab' is 'ab'`, whose body CPython RUNS (a false RED, the defect class
+        # this PR removes); a bare singleton test then answered `None` for
+        # `1 is 2`, which is ALWAYS dead (a fail-open — `if 1 is 2:` around the
+        # only submission went GREEN).
+        ("None is None", True),
+        ("None is not None", False),
+        ("True is False", False),
+        ("True is 1", False),
+        ("1 is 2", False),
+        ("(1, 2) is (1, 3)", False),
+        ("0.0 is 0", False),
+        ("'a' is 1", False),
+        ("1 is 2 is 3", False),
+        # Equal NON-singleton literals: CPython merges the constants so the body
+        # runs, but the language does not require it — undecided, never False.
+        ("'ab' is 'ab'", None),
+        ("(1, 2) is (1, 2)", None),
+        ("1000 is 1000", None),
+        ("'ab' is not 'ab'", None),
+        ("-0.0", False),
+        ("(0 if True else 1)", False),
+        ("None if False else None", False),
+        # An `if`-expression decided by its TWO BRANCHES agreeing rather than by
+        # its test (review P1 at `807a1014`: these two lines were the one arm with
+        # no assertion, so deleting them left the suite green).
+        ("0 if _x else 0", False),
+        ("1 if _x else 1", True),
+        ("0 if _x else 1", None),
+        ("not {*()}", True),
+        # Undecidable — the caller must NOT read these as a polarity.
+        ("_x", None),
+    ],
+)
+def test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on(
+    expr: str, expected: bool | None,
+) -> None:
+    """The dead-guard arm is only as good as `_literal_truth`'s answers.
+
+    ⛔ NON-VACUOUS, measured: on the pre-fix cuts every f-string, zero-arg
+    constructor and literal comparison below answered `None`, so a submission
+    under `if set():` / `if f'':` / `if 1 < 0:` stayed GREEN although its body can
+    never run — the silent-loss state the arm exists to refuse. The `{*…}`/
+    `{**…}` rows are the P2-1 fix, which read a spread from its operand instead of
+    treating it as empty. The `0 if _x else 0` / `1 if _x else 1` rows pin the
+    branch-agreement arm (deleting its two lines reds them and nothing else), and
+    `0 if _x else 1` is its control: disagreeing branches stay undecidable. The
+    `None` rows pin the other direction: nothing may grade a run-time value, or a
+    correct tree reds with a false diagnosis.
+    """
+    assert _literal_truth(ast.parse(expr, mode="eval").body) is expected
+
+
+#: An `if`-expression guard around a submission whose test is a SAME-POLARITY
+#: conditional — the shape `_dead_guards`' `IfExp` branch exists to grade.
+_IFEXP_SOURCE = '''
+def dead():
+    _run_off_loop(_CAPTURE_EXECUTOR, chain) if (0 if _x else 0) else None
+
+def live():
+    _run_off_loop(_CAPTURE_EXECUTOR, chain) if (0 if _x else 1) else None
+'''
+
+
+def test_an_if_expression_guard_is_graded_as_a_guard() -> None:
+    """An `if`-expression test is a guard, and a same-polarity one is ALWAYS false.
+
+    ⛔ NON-VACUOUS, measured: dropping the `ast.IfExp` arm from `_dead_guards`
+    (review P3 at `807a1014`: its docstring still said "every enclosing
+    `if`/`while`") leaves the `dead` submission unguarded, so this reds. The
+    `live` control pins the other direction — branches that DISAGREE are
+    undecidable and must not be read as a polarity.
+    """
+    tree = ast.parse(_IFEXP_SOURCE)
+    targets = {
+        _enclosing_functions(tree, node)[-2]: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _OFF_LOOP
+    }
+    assert sorted(targets) == ["dead", "live"], targets
+    assert [source for _line, source in _dead_guards(tree, targets["dead"])] == [
+        "0 if _x else 0"]
+    assert _dead_guards(tree, targets["live"]) == []
+
+
+#: An identity guard around a submission: `1 is 2` cannot be one object, so that
+#: body is ALWAYS dead and the arm must grade it; `'ab' is 'ab'` is the shape whose
+#: body RUNS (one shared `LOAD_CONST`), so grading it would be a false RED.
+_IDENTITY_SOURCE = '''
+async def dead():
+    if 1 is 2:
+        await _run_off_loop(_CAPTURE_EXECUTOR, chain)
+
+async def live():
+    if 'ab' is 'ab':
+        await _run_off_loop(_CAPTURE_EXECUTOR, chain)
+'''
+
+
+def test_a_literal_identity_guard_is_graded_end_to_end() -> None:
+    """`if 1 is 2:` reaches the dead-guard arm; `if 'ab' is 'ab':` must not.
+
+    ⛔ NON-VACUOUS, measured: dropping the identity decision from
+    `_literal_truth`'s compare arm (grading `is` with `operator.is_` over
+    `literal_eval`'s objects) leaves `dead`'s guard ungraded — so this reds — and
+    a singleton-only test reds it too, because `1 is 2` is then undecidable. The
+    `live` control pins the other direction: `'ab' is 'ab'` RUNS, so a pin that
+    reds it is the false-RED defect this PR exists to remove.
+    """
+    tree = ast.parse(_IDENTITY_SOURCE)
+    targets = {
+        _enclosing_functions(tree, node)[-2]: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _OFF_LOOP
+    }
+    assert sorted(targets) == ["dead", "live"], targets
+    assert [source for _line, source in _dead_guards(tree, targets["dead"])] == [
+        "1 is 2"]
+    assert _dead_guards(tree, targets["live"]) == []
+
+
+def test_a_match_case_guard_is_graded_as_a_guard() -> None:
+    """`case _ if False:` is a disable, and an `if`-only walk cannot see it.
+
+    ⛔ NON-VACUOUS, measured: on the pre-fix `_dead_guards` the dead case returned
+    NO guards (the walk entered the `match` through `iter_child_nodes` and never
+    pushed the case guard), so a submission moved into an unreachable case stayed
+    GREEN. The `live` control pins that an undecidable guard is not graded.
+    """
+    tree = ast.parse(_MATCH_SOURCE)
+    targets = {
+        node.args[0].value: node
+        for node in _stamp_calls(tree)
+    }
+    assert [source for _line, source in _dead_guards(tree, targets[1])] == ["False"]
+    assert _dead_guards(tree, targets[2]) == []
+
+
+def test_the_mention_count_is_whole_word_and_still_fails_closed() -> None:
+    """P2-2: a sibling identifier must not red a CORRECT tree; a string must.
+
+    ⛔ NON-VACUOUS, measured: the pre-fix arm counted SUBSTRINGS, so appending
+    `_stamp_chain_retry = None` beside an untouched submission made it RED with
+    "the extra mention builds the callable some way this pin cannot follow" —
+    false for that input, and the plausible refactor. The string row is the
+    declared fail-closed arm that must survive the whole-word change.
+    """
+    source = HOSTED_API.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    owner = _enclosing_functions(tree, _stamp_calls(tree)[0])[-2]
+
+    assert _unaccounted_mentions(tree, {owner}, source) == {}
+    # A name that EXTENDS the chain's adds no graded node and must add no count.
+    assert _unaccounted_mentions(
+        tree, {owner}, source + f"\n{owner}_retry = None\n") == {}
+    # A callable built from a STRING is invisible to the AST and stays fail-closed.
+    unaccounted = _unaccounted_mentions(
+        tree, {owner}, source + f'\n_again = locals().get("{owner}")\n')
+    assert list(unaccounted) == [owner]
+    assert unaccounted[owner][0] - unaccounted[owner][1] == 1
 
 
 def _expr(source: str) -> ast.expr:
@@ -838,7 +1326,7 @@ def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
 @pytest.mark.parametrize(
     ("source", "folded"),
     [
-        # ─── the interpreter folds these to a FALSE value: the body never runs ───
+        # ─── ALWAYS FALSE: the body can never run ───
         ("False", True),
         ("0", True),
         ('""', True),
@@ -846,22 +1334,24 @@ def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
         ("True and False", True),
         ("_flag and False", True),
         ("False or False", True),
+        # ⛔ `1 == 2` IS GRADED HERE, and that is the deliberate criterion change
+        # this file's arm 5 states (merged from the `_literal_truth` work): the
+        # property is "always false", not "CPython folds it away", because a fixer
+        # disables a leg by making the guard false. `1 < 0` is likewise graded — see
+        # `test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on`.
+        ("1 == 2", True),
         # ─── NOT statically false: the dead-guard arm must not claim them ───
         ("True", False),
         ("not _flag", False),
         ("_flag", False),
         ("True and _flag", False),
         ("True or _flag", False),
-        # `1 == 2` is constant-false to a human and NOT folded here on purpose:
-        # `_statically_false` models only what the INTERPRETER folds, and its
-        # docstring says a `Compare` is out of scope.
-        ("1 == 2", False),
     ],
 )
 def test_statically_false_folds_exactly_what_the_interpreter_folds(
     source: str, folded: bool
 ) -> None:
-    """`_statically_false` answers only what the INTERPRETER would fold away.
+    """`_statically_false` answers "always false" — not "the interpreter folds it".
 
     ⛔ THE THIRD PIN ON THE P2 AXIS (measured). The `dead_guards` arm reads this
     predicate, and on the shipped module it passes VACUOUSLY — there is no
@@ -876,8 +1366,8 @@ def test_statically_false_folds_exactly_what_the_interpreter_folds(
     assert _statically_false(_expr(source)) == folded
 
 
-def test_dead_guards_reports_only_the_guards_the_interpreter_skips() -> None:
-    """`_dead_guards` returns the enclosing folds-to-false guards — and not live ones.
+def test_dead_guards_reports_only_the_guards_that_are_always_false() -> None:
+    """`_dead_guards` returns the enclosing always-false guards — and not live ones.
 
     The negative controls are the half that matters. A live guard (`if _flag:`) and
     the `else` branch of a false one both RUN, so reporting either would be an
