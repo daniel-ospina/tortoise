@@ -21975,9 +21975,13 @@ _CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b")
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
-#: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX
-#: `slow_wall_projection` docstring, the verbatim defect this PR corrects was the ONE claim
-#: of six the scan missed, i.e. the false-PASS class this pin exists to forbid, one level up.
+#: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX blobs it hid TWO
+#: wrapped claims, and BOTH contradict the tree — the `slow_wall_projection` sentence this
+#: PR corrects (`test_slow_shards_are_duration_packed_and_meet_the_wall_target`, live at that
+#: head) and the fold-runner seam's beside it (`test_the_fold_runner_seam_is_inert_by_default`,
+#: also live). That is the false-PASS class this pin exists to forbid, one level up — and the
+#: count is measured, not quoted: a first cut of this comment said "the ONE claim of six",
+#: which is the same carried-figure defect in the note that documents the scan.
 #: The two halves are JOINED before comparison, and the pattern requires an identifier chunk
 #: immediately on each side of the break so it cannot swallow unrelated text between two
 #: distant backticks (measured: a `(?:\s*\n\s*#?\s*\w+)*` form matched whole sentences,
