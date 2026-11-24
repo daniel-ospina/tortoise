@@ -10581,7 +10581,8 @@ class CollisionPreflightTest(unittest.TestCase):
 
         def spy(*args, **kwargs):
             proc = real_popen(*args, **kwargs)
-            seen.update(kwargs)
+            for _k, _v in kwargs.items():
+                seen[_k] = _v
             return proc
 
         marker = self.tmp / "lane-forked"
