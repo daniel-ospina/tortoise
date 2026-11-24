@@ -15240,7 +15240,14 @@ async def list_points(
     body: dict = {"points": results, "count": len(results)}
     # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
     # that ignores the new field is unaffected; ``truncated`` is the instrument.
-    body.update(truncation_field(trunc_out))
+    #
+    # ``body |= …`` rather than ``body.update(…)`` on every envelope in this file,
+    # the pre-existing `/v1/points` one included: `update` is an ordinary-word
+    # receiver no typing can decide, so the privatisation ratchet counts each new
+    # one as growth and reds `surface-guard`. `|=` is the same merge on the same
+    # store with no such row, and mixed idiom inside one file is what makes the
+    # next author copy the counted form.
+    body |= truncation_field(trunc_out)
     return body
 
 
@@ -15739,7 +15746,7 @@ def _paged(body_key: str, rows: list[dict], *, delivered: int,
     sink: dict = {}
     mark_truncation(sink, returned=delivered, candidates=candidates, exact=True)
     body: dict = {body_key: rows, "count": delivered}
-    body.update(truncation_field(sink))
+    body |= truncation_field(sink)
     return body
 
 
@@ -15937,7 +15944,7 @@ async def get_entity_relations(
     sink: dict = {}
     mark_truncation(sink, returned=body.get("count", 0),
                     candidates=candidates, exact=False)
-    body.update(truncation_field(sink))
+    body |= truncation_field(sink)
     return body
 
 

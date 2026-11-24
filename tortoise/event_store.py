@@ -1052,7 +1052,12 @@ def latest_for_node(proj, type_: str, node_id: str, *,
     """
     if not isinstance(scan, int) or isinstance(scan, bool) or scan < 1:
         raise ValueError(f"scan must be a positive whole number, got {scan!r}")
-    rows = proj.g.query(
+    # `ro_query` (GRAPH.RO_QUERY): this is a READ, and `query` is GRAPH.QUERY —
+    # the verb that CREATES the named graph when it does not exist (the rule
+    # `cache_eviction.py` states at its own read boundary, and the one the
+    # privatisation ratchet holds on an untyped receiver). A reader must not
+    # mint the store it was asked to read.
+    rows = proj.g.ro_query(
         "MATCH (e:GraphEvent) WHERE e.type = $type "
         "RETURN properties(e) ORDER BY e.seq DESC LIMIT $scan",
         params={"type": type_, "scan": scan},

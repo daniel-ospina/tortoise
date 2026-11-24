@@ -281,6 +281,12 @@ surfaces:
   # MEASURED, same selector, pre-fix. The `core` row is what covers the
   # `sentry.py`-only diff, and that is the only gap it closes.
   - test_13665_sentry_init_off_loop.py
+  # #14592 Phase A: the OTHER half of that suite's dual registration — it pins the
+  # five REST read routes whose handlers live in `tortoise/hosted_api.py`, and a
+  # hosted_api-only diff resolves `['api', 'onboarding']` (the EXACT `api` match
+  # REPLACES the `core` fallback), so the `core` row alone leaves these pins asleep
+  # on the one diff that can revert a route. Measured with the shipped selector.
+  - test_14592_read_parity.py
   # #13722: the capture provenance stamp chain's per-id record writes must run
   # OFF the event loop. Dual-registered for the reason the off-loop guards above
   # are: the handler that owns the chain is `tortoise/hosted_api.py`, an EXACT
@@ -2960,6 +2966,20 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
+  # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
+  # DUAL-REGISTERED, and the two rows cover DIFFERENT diffs — measured with this
+  # selector, not assumed:
+  #   * `tortoise/entity_reads.py`  -> `['core']`
+  #   * `tortoise/event_store.py`   -> `['core']`
+  #   * `tortoise/pack_registry.py` -> `['core']`      (all three: THIS row)
+  #   * `tortoise/hosted_api.py`    -> `['api', 'onboarding']` — an EXACT `api`
+  #     SOURCE_PATTERNS match that REPLACES the `core` fallback, so the `api` row
+  #     below is the one that keeps these pins awake on a hosted_api-only diff,
+  #     which is the exact change class (a route's shape) this suite guards.
+  # Without BOTH rows the pin is asleep on one of the two diffs that can revert
+  # it. Same reasoning as `test_13665_sentry_init_off_loop.py` above.
+  - test_14592_read_parity.py
   # #14429 review P2: the spool-drain rehearsal's two load-bearing invariants (the
   # source spool is never written, and a non-loopback / production target is
   # refused) are enforced only inside `tools/spool_drain_rehearsal.py`'s own control

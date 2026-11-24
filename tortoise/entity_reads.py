@@ -139,11 +139,18 @@ def list_layer(
         params = {"kind": kind}
     where = " AND ".join(conditions)
 
-    total_rows = proj.g.query(
+    # ⛔ `ro_query` (GRAPH.RO_QUERY), never `query`, on every read in this module.
+    # The verb is part of the contract, not a style choice (`cache_eviction.py`
+    # states the same rule at its own boundary): `query` is GRAPH.QUERY, which
+    # MINTS the named graph when it does not exist, and it is also the verb this
+    # repo's privatisation ratchet counts as residue on an untyped receiver. A
+    # GET that creates the store it was asked to read is a write, and this module
+    # holds only reads.
+    total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
     total = int(total_rows[0][0]) if total_rows else 0
-    rows = proj.g.query(
+    rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN properties(n) "
         f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit",
         params={**params, "skip": offset, "limit": limit},
@@ -267,7 +274,7 @@ def entity_relations(
     # `limit + 1`: the INTERNAL probe, never a caller-visible cap — the caller's
     # bound still governs what is delivered (`rows[:limit]` below), so the
     # route's `le=1000` stays the ceiling and no cap VALUE changes here.
-    rows = proj.g.query(
+    rows = proj.g.ro_query(
         query, params={"eid": entity_id, "skip": offset, "limit": limit + 1},
     ).result_set
     candidates = len(rows)

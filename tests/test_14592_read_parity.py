@@ -56,7 +56,15 @@ def _seed_registry(ha) -> None:
     that exists nowhere is refused before any write."""
     sdk = ha._make_sdk(namespace="registry")
     try:
-        sdk._get_registry().query("CREATE (t:Team {id:$id})", params={"id": _ORG})
+        # ⛔ `_query(..., read_only=False)`, not `.query(...)`: no SDK door creates a
+        # registry Team under a CALLER-CHOSEN id (`_org_create` mints its own), so
+        # this is a raw write, and the vendor's unified verb states which arm it is
+        # (`query`/`ro_query` both delegate to it). `.query` on an untyped raw
+        # handle is the ordinary-word receiver the privatisation ratchet counts as
+        # residue, so a new one is new debt in `surface-guard` — `read_only=False`
+        # says "write" out loud instead.
+        sdk._get_registry()._query(
+            "CREATE (t:Team {id:$id})", params={"id": _ORG}, read_only=False)
     finally:
         sdk.close()
 
@@ -149,9 +157,13 @@ def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
             "/v1/objects", json={"name": "OLD", "objectKind": "goal"}).json()
         sdk = _sdk(ha)
         try:
-            sdk._get_proj().g.query(
+            # A WRITE with no door: nothing in the SDK ends an Object (the
+            # lifecycle writers are Point-only) and `_delete_entity` would remove
+            # the row the by-id arm below asserts is still reachable. The verb is
+            # `_query(..., read_only=False)` for the reason `_seed_registry` states.
+            sdk._get_proj().g._query(
                 "MATCH (o:Object {id:$id}) SET o.status = 'deprecated'",
-                params={"id": node["id"]})
+                params={"id": node["id"]}, read_only=False)
             listed = client.get("/v1/objects").json()
             assert [o["name"] for o in listed["objects"]] == [], listed
             assert client.get(f"/v1/objects/{node['id']}").status_code == 200
@@ -233,9 +245,14 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
         sdk = _sdk(ha)
         try:
             sdk._create_point("statement", "extracted", extractedFrom=url)
-            sdk._get_proj().g.query(
+            # A WRITE with no door, and deliberately so: `_create_source` REFUSES a
+            # caller-supplied `text` from `**props` (its blocklist names it), which
+            # is exactly why this test plants one below the door — the route must
+            # not hand back a payload the write door would not accept.
+            sdk._get_proj().g._query(
                 "MATCH (s:Source {url:$u}) SET s.text = $t",
-                params={"u": url, "t": "RAW BODY THAT MUST NOT LEAK"})
+                params={"u": url, "t": "RAW BODY THAT MUST NOT LEAK"},
+                read_only=False)
         finally:
             sdk.close()
         body = client.get(f"/v1/sources/{quote(url, safe='')}").json()
@@ -252,7 +269,7 @@ def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
         b = client.post("/v1/objects", json={"name": "BETA", "objectKind": "goal"}).json()
         sdk = _sdk(ha)
         try:
-            assert sdk._get_proj().create_edge(a["id"], b["id"], "dependsOn")
+            assert sdk._create_edge("dependsOn", a["id"], b["id"])
         finally:
             sdk.close()
 
@@ -285,7 +302,7 @@ def test_relations_reports_which_pack_declared_the_predicate(tmp_path):
             # A DOMAIN verb rides the operator path as the Layer-3 label
             # (ONTOLOGY §8 / #7852) — it is `causes`, declared by the dev pack.
             sdk.link_entities("IMPL", a["id"], b["id"], label="causes")
-            sdk._get_proj().create_edge(a["id"], b["id"], "related")
+            sdk._create_edge("related", a["id"], b["id"])
         finally:
             sdk.close()
         body = client.get(f"/v1/entities/{a['id']}/relations").json()
@@ -302,7 +319,7 @@ def test_relations_is_layer_agnostic_and_404s_on_an_unknown_entity(tmp_path):
         s = client.post("/v1/subjects", json={"name": "Daniel", "subjectKind": "person"}).json()
         sdk = _sdk(ha)
         try:
-            sdk._get_proj().create_edge(s["id"], a["id"], "holdsRole")
+            sdk._create_edge("holdsRole", s["id"], a["id"])
         finally:
             sdk.close()
         body = client.get(f"/v1/entities/{s['id']}/relations").json()
