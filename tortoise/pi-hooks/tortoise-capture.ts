@@ -6174,6 +6174,16 @@ export function countPendingEntries(dir: string): number | undefined {
  *  path, so the health line hung instead of reporting the box. It is the object
  *  class `readDrainClaim` already gates on the CLAIM file (cycle-5 P1), applied
  *  to the status file this PR is what put on the drain path (#14480 review, P1).
+ *
+ *  ⚠️ STATED RESIDUAL: `lstatSync` → `readFileSync` is a REPLACE WINDOW, and CERT C
+ *  `FIO32` ("Prevent Blocking on Special Files") names it — the check and the open
+ *  are two syscalls, so an object swapped for a FIFO between them still blocks. The
+ *  race-free form is `open(O_RDONLY|O_NONBLOCK)` then `fstat` the FD (what `xz`'s
+ *  `file_io.c` does). Not adopted HERE deliberately: `readDrainClaim` gates the CLAIM
+ *  file the same way and the two legs of this feature must be one mechanism. The
+ *  exposure is a local writer replacing the box's own `status.json` with a FIFO,
+ *  which is already a box-takeover primitive. `fifo(7)` and CERT `FIO32` are the
+ *  sources.
  */
 export function readCaptureStatus(dir: string): CaptureStatus | undefined {
   const path = statusPathFor(dir);
