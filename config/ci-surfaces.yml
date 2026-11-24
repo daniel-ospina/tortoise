@@ -59,11 +59,6 @@ version: 1
 # #12926's own 10.0 s row moved that emission to 24 m (arm-2 SUM 55.64 m, x 1.5 = 83.5 m,
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a02515d14ad` — the last fold; the registrations from earlier folds are in `main` too, which is
-# why this clause is `main`'s reading as well — plus `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (g) and ten at
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
 # `main` at `6a02515d14ad`, and the pool it emits is the union of BOTH parents' registrations —
@@ -100,7 +95,7 @@ version: 1
 # `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 835.5 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
@@ -141,7 +136,7 @@ version: 1
 # guard as `<est … stated twice>` / `<ceil stated 2 times>`, i.e. a block claiming two partitions
 # while looking like one — measured on THIS fold, where `main`'s re-emission and this branch's
 # arrived side by side and the guard red `1 failed` at the merged head (837.9/837.8 beside
-# 838.1/838.0). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
+# 838.1/838.2). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
 # be read as a second claim.
 #
 # The direction, so a reader can see how fast this moves and why the SET is the graded operand: the
@@ -153,7 +148,7 @@ version: 1
 # `tests/test_13722_stamp_chain_off_loop.py` row — which also moved `d` and `e` out of the worst bin
 # — and then `main`'s next two landings to the one/ten at 838.1/838.2 above; and the 2026-11-23 sweep
 # to the 28 m it prints (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom). The MINUTE has stood
-# at 28 m across every one of those readings while the seconds moved under it (835.5 s to 838.1 s),
+# at 28 m across every one of those readings while the seconds moved under it (835.5 s to 838.2 s),
 # so NO arithmetic on the minute can catch a carried figure: only the `est_seconds` partition can,
 # which is why the sentence is GRADED below instead of trusted.
 # The registrations this reading counts are the ones `main` has landed at the flat 2.0 s
@@ -195,7 +190,7 @@ version: 1
 # #14407's `tests/test_14407_alert_delivery.py` and #14504's
 # `tests/test_13722_stamp_chain_off_loop.py`. EVERY one of them re-partitions every bin, which is
 # why the split is quoted and not only the worst figure — and why the minute, which has NOT moved
-# (28 m at every reading from 835.5 s to 838.1 s), could never be the operand that catches a
+# (28 m at every reading from 835.5 s to 838.2 s), could never be the operand that catches a
 # carried one.
 # The figures above are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head — re-derive them
