@@ -556,6 +556,15 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
     stale_item.state = BatchItemState.EXTRACTING
     stale_item.updated_at = "2020-01-01T00:00:00+00:00"
     store.put_item(ORG, stale_item)
+    # ⛔ AND THE OTHER ITEM MUST BE STALE TOO (#14415 review round 22). The
+    # adoption now refuses an orphan carrying any NON-TERMINAL item younger than
+    # the reclaim window (that is an acceptance in flight, not a crash residue —
+    # the root cause of the takeover this file pins elsewhere). A genuine crash
+    # orphan is stale by construction, so a fixture that means "the process died"
+    # backdates every row it left behind.
+    still_queued = store.get_item(ORG, batch.batch_id, items[1].item_id)
+    still_queued.updated_at = "2020-01-01T00:00:00+00:00"
+    store.put_item(ORG, still_queued)
 
     real_items = store.items
     real_get = store.get_batch
@@ -3434,3 +3443,123 @@ def test_a_pre_claim_read_fault_is_counted_and_reaches_the_retry_ceiling():
         "a condition that never clears must settle `failed` visibly, not stay "
         "`queued` for the life of the process")
     assert "retry ceiling" in settled.reason
+
+
+# ── round 22: the adoption's liveness rule, the takeover's compare, and the ──
+# ── ceiling's liveness rule                                                 ──
+def test_a_young_orphan_is_an_acceptance_in_flight_and_is_not_adopted():
+    """#14415 round 22 (HIGH): the adoption applied no liveness window at all.
+
+    Acceptance writes ITEM rows before the batch row on purpose, and
+    `pending_batches()` UNIONs the ITEM arm — so a recovery scan running while an
+    acceptance is inside `_submit_rows` sees the orphan shape by construction and
+    adopted it, taking the create out from under the acceptance (whose own
+    `put_batch_if_absent` then failed and answered "nothing was accepted" over rows
+    already queued for a drain). Every other caller here refuses a row inside the
+    reclaim window; this one now does too.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    del store._batches[(ORG, batch.batch_id)]        # the crash shape: items, no row
+
+    assert coord.recover(ORG) == [] or store.get_batch(
+        ORG, batch.batch_id) is None, (
+        "a FRESH orphan was adopted — that is the acceptance's own row being "
+        "taken before it can write it")
+
+    # …and the same rows ARE adopted once the window has passed, so a genuine
+    # crash orphan is deferred, never stranded.
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = "2020-01-01T00:00:00+00:00"
+    store.put_item(ORG, stale)
+    coord.recover(ORG)
+    adopted = store.get_batch(ORG, batch.batch_id)
+    assert adopted is not None, (
+        "a stale orphan was never adopted — the deferral stranded it")
+    assert adopted.state is BatchState.RESUMING
+
+
+class _AdoptThenCancelStore(_AdoptingStore):
+    """Adoption wins the create, and a cancel lands before the takeover writes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.coord: BatchCoordinator | None = None
+        self.fired = False
+
+    def put_batch_if_state(self, batch, expected, *, write_identity=False):
+        if not self.fired and self.coord is not None:
+            self.fired = True
+            self.coord.cancel(batch.org_id, batch.batch_id,
+                              reason="customer said stop")
+        return super().put_batch_if_state(
+            batch, expected, write_identity=write_identity)
+
+
+# The acceptance's clock, frozen far enough back that its own item rows are
+# STALE — which is the only way an adoption may take them now — while still
+# being the stamp the acceptance owns (so ownership is provable, as in the real
+# interleaving: the adoption copies the acceptance's own item stamp).
+_OLD = lambda: "2020-01-01T00:00:00+00:00"  # noqa: E731
+
+
+def test_the_takeover_never_overwrites_a_cancel_and_never_writes_blind():
+    """#14415 round 22 (HIGH): `put_batch` has no compare, so it erased a cancel.
+
+    Measured on the previous cut: a `cancel()` landing in the takeover's
+    read->write gap came back `accepted` with `cancelled_at=''` over items
+    `['cancelled','cancelled']` — the customer's own audit half of a
+    billing-visible act, erased. The identity is now written UNDER the same
+    compare as the state, so a cancel wins and nothing is overwritten.
+    """
+    store = _AdoptThenCancelStore()
+    coord = BatchCoordinator(store, now=_OLD)
+    store.coord = coord
+
+    batch, _items = coord.submit(ORG, ["/d/a.md"], estimate={"items": 1})
+    recorded = store.get_batch(ORG, batch.batch_id)
+    assert recorded is not None
+    assert recorded.state is BatchState.CANCELLED, (
+        f"the takeover overwrote the cancel: {recorded.state}")
+    assert recorded.cancel_reason == "customer said stop", (
+        f"the cancel's reason was erased: {recorded.cancel_reason!r}")
+    assert recorded.cancelled_at, "the cancel's stamp was erased"
+
+
+def test_a_takeover_writes_the_estimate_when_no_one_else_moved_the_row():
+    """The other half: the takeover must still restore the ACK's arithmetic."""
+    store = _AdoptingStore()
+    coord = BatchCoordinator(store, now=_OLD)
+    estimate = {"items": 1, "estimated_tokens": 64_799}
+    batch, _items = coord.submit(ORG, ["/d/a.md"], estimate=estimate)
+    assert batch.state is BatchState.ACCEPTED
+    assert store.get_batch(ORG, batch.batch_id).estimate == estimate, (
+        "the takeover reported success but did not write the ACK's arithmetic")
+
+
+def test_a_live_peers_claim_is_never_settled_by_the_retry_ceiling():
+    """#14415 round 22 (MEDIUM): the new counting path skipped the liveness window.
+
+    Measured before the guard: a peer claim `extracting, attempts 2, age 0 s`
+    (window 900 s) became `failed` after three local read faults — and
+    `ITEM_TRANSITIONS[FAILED]` is empty, so the peer's real outcome has nowhere to
+    land and `run_item`'s illegal-edge arm bills the spend and DROPS the document.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS):
+        coord.advance(ORG, store.get_item(
+            ORG, items[0].batch_id, items[0].item_id),
+            BatchItemState.EXTRACTING, attempt=True)
+
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS + 3):
+        coord._note_failed_pass(ORG, items[0], RuntimeError("graph probe timeout"))
+
+    row = store.get_item(ORG, items[0].batch_id, items[0].item_id)
+    assert row.state is BatchItemState.EXTRACTING, (
+        "the retry ceiling settled a LIVE peer claim, which makes its outcome "
+        f"unlandable (billed-and-dropped): {row.state}")
+    assert row.attempts == bi_module.BATCH_MAX_ATTEMPTS, (
+        f"a live claim's attempt counter was moved: {row.attempts}")

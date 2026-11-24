@@ -2335,3 +2335,32 @@ def test_a_mixed_cancel_says_a_document_is_still_running_and_being_charged(
     after = client.get(f"/v1/batches/{batch_id}").json()
     assert after["complete"] is True
     assert after["counts"]["pending"] == 0
+
+
+def test_the_list_route_complete_agrees_with_the_counts_it_reports(client, store):
+    """#14415 round 22 (MEDIUM): `as_dict()` derived `counts` AND `complete`.
+
+    This route passes no `items`, so `complete` collapsed to "the label is
+    terminal" while the real per-batch counts were pasted in afterwards. Measured
+    on the real routes, same batch (one item cancelled, one in flight):
+
+        cancel route: status=cancelled complete=False counts.pending=1
+        LIST route  : status=cancelled complete=True  counts.pending=1
+
+    — two fields of one payload derived from DIFFERENT inputs, on the entry point
+    a list consumer polls.
+    """
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "/d/todo.md"}, {"ref": "/d/live.md"}]})
+    batch_id = r.json()["batch_id"]
+    coord = bi.BatchCoordinator(store)
+    by_ref = {i.ref: i for i in store.items(ORG_ID, batch_id)}
+    coord.advance(ORG_ID, by_ref["/d/live.md"], bi.BatchItemState.EXTRACTING,
+                  attempt=True)
+    client.post(f"/v1/batches/{batch_id}/cancel")
+
+    listed = client.get("/v1/batches").json()["batches"]
+    row = next(b for b in listed if b["batch_id"] == batch_id)
+    assert row["counts"]["pending"] == 1
+    assert row["complete"] is False, (
+        "the LIST surface said the batch was complete beside counts.pending=1")
