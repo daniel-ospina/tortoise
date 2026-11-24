@@ -140,65 +140,32 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # said "4 on-loop calls, 81.5 ms" for the same commits (#14086 cycle-4
     # review, F2). State a magnitude once, or not at all.
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
-    # The two provenance stamps in `_capture_session_impl`
-    # (`_stamp_capture_provenance` and the `_capture_stamp_targets` call beside
-    # it — cited by NAME, not line: this PR's own tail rewrite moves every
-    # `hosted_api.py` line below it) go through this ONE retry wrapper —
-    # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
-    # the loop and the census observes BOTH: this wrapper, and the journal
-    # `_emit_event` that precedes it (`sdk.py:11590` — re-derived after the
-    # `origin/main` `e0accb8fe6` merge moved it +31 from `11559`). Measured on FOUR
-    # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
-    # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
-    # this comment said "the census sees a single leg and not two": the second
-    # leg was there and sat under the bar, i.e. the figure was stated wider than
-    # the measurement (#14086 review, P2). Neither leg is listed separately —
-    # this entry is the declaration for the stamp, and both legs are the same
-    # owned work.
-    # ⛔ THE PREMISE THIS PARAGRAPH USED TO STATE IS WITHDRAWN, SO IT IS GONE.
-    # It read: "`_stamp_capture_provenance` is JOURNAL-FIRST (#9350) … so moving
-    # it to another thread changes which thread OWNS that lane, which is a
-    # behaviour change, not a move of WHERE the same callable runs. It needs its
-    # own measurement (#14104)." That reasoning is false and #14104's closing
-    # comment withdraws it in full: the lane identity is a `ContextVar`
-    # (`_CACHE_WRITE_AUTHORIZED`), opened inside the stamp's OWN body, and
-    # `_run_off_loop` confines contextvars by design (`_submit_off_loop` →
-    # `confine_context`, deliberately not a bare `run_in_executor`) — so
-    # relocating these changes WHERE they run and nothing else. Keeping both
-    # paragraphs in one comment block asserted P and ¬P about the same move, which
-    # is why the refuted one is replaced rather than annotated (#14086 round-2
-    # review, R2-2).
-    # ⚠️ This entry is keyed on a GENERIC retry wrapper — measured 36 call sites
-    # in `tortoise/sdk.py` (34 besides the two provenance stamps; the only other
-    # references in `tortoise/` are prose, in `exceptions.py` and `retry.py`), so
-    # it exempts any FUTURE on-loop use of it at any cost, and the size of that
-    # exemption is the number that sizes the residual. An earlier cut of this
-    # comment said "~9 other call sites", understating it ~4× (#14086 review,
-    # P2).
-    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites as ONE
-    # closure and then DELETES this entry — deleting it is what
-    # closes the generic-wrapper hole above. ⛔ An earlier cut pointed at #14104,
-    # which is CLOSED (NOT_PLANNED); an entry whose owner cannot act is a
-    # permanent unowned exemption, the one thing this table exists to prevent, and
-    # this file's contract says every entry NAMES the issue that owns removing it
-    # (#14086 round-2 review, R2-1).
-    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, still "
-    "inline — the issue lists them; no line number here, because this table's "
-    "figures are the ones that rot)",
+    # ⛔ THE `_graph_write_with_retry` ENTRY IS DELETED, AND THIS NOTE IS WHAT
+    # STANDS IN ITS PLACE. It read: "#14112 (the capture's four provenance stamp
+    # sites, still inline — the issue lists them)". #13722 IS that off-load: the
+    # four sites are now `_stamp_chain`'s body, handed to
+    # `_run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)` and awaited, so the stamp's
+    # journal `_emit_event` and this retry wrapper both run on the capture worker
+    # and write no census row at all. #14112's removal trigger has therefore
+    # fired, and the entry is DELETED rather than re-stated (which is the action
+    # #14112 itself named): it was keyed on a GENERIC retry wrapper — 36 call
+    # sites in `tortoise/sdk.py` — so it exempted ANY future on-loop use of it at
+    # any cost, and deleting it is what closes that hole (#14086 round-2 review,
+    # R2-1). A leg that comes BACK to the loop through the wrapper now reds the
+    # census instead of joining an unowned exemption, which is the fail-closed
+    # direction this table wants; if that red ever appears, the entry comes back
+    # with the issue that owns removing it, not with a figure.
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
     # declaration about ownership, not a claim that the leg runs today.
-    # ⚠️ AND, LIKE THE `_graph_write_with_retry` ROW ABOVE, ITS SIZE IS THE
-    # PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
-    # exempts EVERY on-loop `sdk._get_proj()` on the capture path, at any cost,
-    # whatever its caller — and `_get_proj` is not a capture-specific leg
-    # (measured on this tree with `git grep -c '_get_proj('`: 395 lines under
-    # `tortoise/`, 394 besides the one `def`; 207 in `tortoise/sdk.py`, where it
-    # is defined, i.e. 206 besides that `def` — and the sibling row's 36 for
-    # `_graph_write_with_retry(` is likewise its `sdk.py` lines minus its `def`
-    # (37 with it), so compare 206 with 36 and not with the def-included 207),
-    # it is the cold
+    # ⚠️ ITS SIZE IS THE PROBLEM: the verdict is keyed on the METHOD NAME alone,
+    # so this line exempts EVERY on-loop `sdk._get_proj()` on the capture path,
+    # at any cost, whatever its caller — and `_get_proj` is not a
+    # capture-specific leg (measured on this tree with `git grep -c '_get_proj('`:
+    # 395 lines under `tortoise/`, 394 besides the one `def`; 207 in
+    # `tortoise/sdk.py`, where it is defined, i.e. 206 besides that `def`, which
+    # is the population the name exempts), it is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
     # exemption silently and is then reported as `#4451`'s. Declared rather
@@ -292,7 +259,8 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     no UNDECLARED leg may appear at all. ⛔ An earlier cut of this paragraph
     said "ONE on-loop leg, `_get_registry`", and the table two screens up
     contradicted it in the same file ("measured 2.50 ms + 4.11 ms on the loop"
-    for `_graph_write_with_retry`) — a figure stated wider than the measurement
+    for `_graph_write_with_retry`, a row #13722 has since deleted — see the
+    deleted-entry note in `_ON_LOOP_RESIDUAL`) — a figure stated wider than the measurement
     is the same defect this cycle's reviews kept correcting, so the number is
     gone rather than re-copied (#14086 review F3).
 
@@ -492,3 +460,10 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     # …and a DECLARED leg is never reported, whatever it costs: the table is an
     # ownership declaration, not a budget.
     assert _undeclared_blocking({"_get_registry": 16.29}) == {}
+    # ⛔ AND THE DELETED ENTRY IS REALLY GONE (#13722): the retry wrapper the four
+    # provenance stamps were exempted through is now an UNDECLARED leg, so a stamp
+    # that returns to the loop reds the census above instead of joining an
+    # unowned exemption. Restoring the `_graph_write_with_retry` row is the edit
+    # that reverts this, and it reds HERE.
+    assert set(_undeclared_blocking({"_graph_write_with_retry": 40.0})) == {
+        "_graph_write_with_retry"}
