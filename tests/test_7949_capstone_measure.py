@@ -5997,14 +5997,20 @@ class _ManifestShapeError(RuntimeError):
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
 #: `_BUNDLE_TOOL_SOURCES` — the first is still LIVE (the second argument of
 #: `_bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)` in
-#: `test_the_bundles_cites_resolve_where_the_bundle_says_they_do`), the second was
-#: CUT in the B4 test-volume cut (2026-11-23). The CALL is named instead of a
-#: direction on purpose (#14493 review, P2): that call sits ABOVE this block, so the
-#: earlier "the sweep below" sent a reader looking the wrong way — and a reader who
-#: found no sweep below would conclude `_BUNDLE_SOURCES` is unconsumed, which is the
-#: "both were CUT" error this sentence exists to remove. No linter reads prose (ruff's
-#: F841 is function-scope only, and no rule resolves comment line references), so
-#: nothing but this note's own accuracy keeps it true.
+#: `test_the_bundles_cites_resolve_where_the_bundle_says_they_do`); the second was
+#: ORPHANED by the B4 test-volume cut (2026-11-23, #14439 — that diff deleted its
+#: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED a day later by
+#: #14482's orphan sweep (2026-11-24, "delete the 81 names the volume cut
+#: orphaned"). ⚠️ Two events, two dates: dating the CUT alone points a reader at
+#: `8c373f59a1`, where the table is still DEFINED, which is the same
+#: not-verifiable-at-the-point-of-reading failure the CALL reference below removes
+#: (#14493 review, P2). The CALL is named instead of a direction for that same
+#: reason: it sits ABOVE this block, so the earlier "the sweep below" sent a reader
+#: looking the wrong way — and a reader who found no sweep below would conclude
+#: `_BUNDLE_SOURCES` is unconsumed, which is the "both were CUT" error this sentence
+#: exists to remove. No linter reads prose (ruff's F841 is function-scope only, and
+#: no rule resolves comment line references), so nothing but this note's own
+#: accuracy keeps it true.
 #: Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
