@@ -71,10 +71,10 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `59a08fdb8b4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
-# 838.0 s (b, c, d, e, f, g, h, i, j, k), so
-# `ceil(838.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# `2cccf90f4dd4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
+# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (g) and ten at
+# 838.2 s (a, b, c, d, e, f, h, i, j, k), so
+# `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
@@ -92,13 +92,14 @@ version: 1
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
-# 838.0 s (b, c, d, e, f, g, h, i, j, k) — ⛔ MEASURED ON THIS PR'S REBASED HEAD, which sits on
-# `main` at `59a08fdb8b40` and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so
-# `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
+# `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
+# paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `2cccf90f4dd4`
+# and adds this PR's own registration only
+# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`). A restatement
+# here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
+# reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
+# `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
 # 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
