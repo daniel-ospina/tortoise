@@ -3723,6 +3723,16 @@ def _css_last_declaring_body(css: str, selector: str, prop: str) -> str | None:
     and this helper picks the last body that declares the property at all. An
     appended `.pricing-card { display: block }` is therefore still the owner and
     still reds (measured: RED before and after this reader).
+
+    ⛔ `at_desktop=True` (the default) reads through `_css_desktop_rules`, so a
+    rule inside a `min-width` media block is the owner when it is the last one
+    that declares `prop` (#14406 review round 15). Skipping media made the
+    compensation's TWO OPERANDS come from DIFFERENT TREES: the graded winner is
+    read by `_css_block_end_cascade`, which DOES reach `min-width` media, while
+    `@media (min-width: 1024px) { .pricing-card { padding-bottom: 2rem } }` was
+    invisible to the `expected` side — so the popular CTA was measured 4px low at
+    1440x900 with all 205 tests in the module GREEN. A `max-` block that cannot
+    apply at desktop size is still skipped, so the mobile hatches stay invisible.
     """
     # ⛔ "NON-MEDIA" IS THE WRONG AXIS; the CONDITION is (#14406 review round 16).
     # This reader used to keep only rules at TOP LEVEL, so a `@media` block that
@@ -4567,6 +4577,50 @@ def _css_block_end(prop: str, value: str) -> str:
     if prop in ("padding-block", "margin-block"):
         return tokens[-1] if len(tokens) > 1 else tokens[0]
     return tokens[2] if len(tokens) >= 3 else tokens[0]
+
+
+#: A CSS length this file can convert to px: a number and `px` or `rem`.
+_CSS_LENGTH = re.compile(r"([0-9]*\.?[0-9]+)(px|rem)$")
+
+
+def _css_root_px(css: str) -> float | None:
+    """The page's `rem` base in px — 16 unless `html`/`:root` overrides it.
+
+    Returning `None` on an override is deliberately fail-closed: this reader
+    assumes the CSS default root size, and a page that moved it would make every
+    `rem` below silently wrong (#14406 review round 15).
+    """
+    for prelude, body, _inside_media in _css_all_rules(css):
+        parts = [p.strip().lower() for p in prelude.split(",")]
+        if ("html" in parts or ":root" in parts) and (
+                _effective_decl(body, "font-size") is not None):
+            return None
+    return 16.0
+
+
+def _css_length_px(value: str, root: float | None) -> float | None:
+    """`value` as a px number, or `None` when it is not a length this reads.
+
+    A BARE `0` is a valid length in CSS and is read as zero (#14406 review round
+    15: the page's `* { margin: 0 }` reset was otherwise unparseable and red the
+    two block-end rows on a correct page). Any other unitless number is NOT a
+    length, so it stays `None` and the caller fails.
+
+    `None` is the caller's signal to FAIL rather than skip — a geometry claim
+    derived from a length the reader cannot convert is not a claim (#14406
+    review round 15).
+    """
+    text = _without_important(value).strip().lower()
+    if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", text) \
+            and float(text) == 0.0:
+        return 0.0
+    match = _CSS_LENGTH.match(text)
+    if not match:
+        return None
+    number, unit = float(match.group(1)), match.group(2)
+    if unit == "px":
+        return number
+    return None if root is None else number * root
 
 
 def _css_align_keyword(prop: str, value: str) -> str:
@@ -12203,16 +12257,36 @@ class TestProductTeamsPricingCardCtaBaseline:
             "`.pricing-card` is a flex ROW, so its children sit side by side "
             "instead of stacking — the card renders as one line of text "
             "(#13645 item 6)")
-        cta_slack = _css_last_declaring_body(
-            css, ".pricing-card .btn", "margin-top")
-        assert cta_slack is not None, (
-            "no rule naming `.pricing-card .btn` declares `margin-top`, so the "
-            "CTA does not take the leftover height (#13645 item 6)")
+        # ⛔ THE BLOCK-START SIDE, read as the FAMILY it is (#14406 review round
+        # 15). Reading only `margin-top` reded a page that spells the same thing
+        # `margin-block-start: auto` — which renders IDENTICALLY (measured: all
+        # four CTAs at 6415.78 at 1440x900) — with "does not take the leftover
+        # height". The same file already resolves `padding-block-end` first for
+        # this reason; the logical alias is the property `margin-top` delegates
+        # to, and the shorthands reset it.
+        cta_start = None
+        for prop in ("margin-block-start", "margin-top"):
+            owner = _css_last_declaring_body(css, ".pricing-card .btn", prop)
+            if owner is not None:
+                cta_start = _without_important(
+                    _effective_decl(owner, prop) or "")
+                break
+        if cta_start is None:
+            for prop in ("margin-block", "margin"):
+                owner = _css_last_declaring_body(css, ".pricing-card .btn", prop)
+                if owner is not None:
+                    tokens = _css_tokens(_without_important(
+                        _effective_decl(owner, prop) or ""))
+                    cta_start = tokens[0] if tokens else None
+                    break
+        assert cta_start is not None, (
+            "no rule naming `.pricing-card .btn` declares a block-start margin "
+            "(`margin-top`, `margin-block-start`, `margin` or `margin-block`), "
+            "so the CTA does not take the leftover height (#13645 item 6)")
         # ⛔ `!important` is a PRIORITY, not part of the value: `margin-top: auto
         # !important` is this pin's own intent, only stronger, and comparing the
         # raw declaration reded a correct page (#14406 review round 12).
-        assert _without_important(
-            _effective_decl(cta_slack, "margin-top") or "") == "auto", (
+        assert cta_start == "auto", (
             "the card's CTA does not take the leftover height, so it sits "
             "wherever its tier's copy ends and the four buttons do not share a "
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
@@ -12358,6 +12432,57 @@ class TestProductTeamsPricingCardCtaBaseline:
             "stop sharing one height and `margin-top: auto` aligns each CTA to "
             "its own card's bottom (#13645 item 6), with every other row in "
             "this class still GREEN")
+        # ⛔ ONE FLEX LINE, not four (#14406 review round 15). `align-items:
+        # stretch` applies PER LINE, so the four cards share a height only while
+        # they are on the SAME line — and the grid carries `flex-wrap: wrap`.
+        # Measured: each of these wrapped the grid onto two lines and left every
+        # row of this class GREEN, with the popular CTA 515-575px below its
+        # siblings at 1440x900:
+        #
+        #     .pricing-card { min-width: 280px }        1192 > 1100
+        #     .pricing-grid { gap: 4rem }                1112 > 1100
+        #     .pricing-grid { max-width: 900px }          992 >  900
+        #
+        # The fit is DERIVED from the page's own numbers rather than restated:
+        # `flex: 1` gives each card a base size of 0, so a line holds all four
+        # while `4 x min-width + 3 x column-gap <= the grid's max-width`. A
+        # length this reader cannot convert FAILS rather than skips.
+        root = _css_root_px(css)
+
+        def _length(prop: str, compound: str, what: str) -> float:
+            found = [value for _prelude, value
+                     in _css_reaching_decls(css, prop, compound)]
+            assert found, (f"`{compound}` declares no `{prop}`, so the one-line "
+                           f"fit cannot be derived ({what})")
+            px = _css_length_px(found[-1], root)
+            assert px is not None, (
+                f"`{compound}` declares `{prop}: {found[-1]}`, which this "
+                "reader cannot convert to px (only `px` and `rem` are read, and "
+                "`rem` needs an unset root font-size) — the one-line fit is a "
+                "FAIL, not a skip")
+            return px
+
+        grid_max = _length("max-width", ".pricing-grid", "the line's budget")
+        card_min = _length("min-width", ".pricing-card", "a card's floor")
+        column_gaps = [value for _prelude, value
+                       in _css_reaching_decls(css, "column-gap", ".pricing-grid")]
+        if column_gaps:
+            gap_px = _css_length_px(column_gaps[-1], root)
+            assert gap_px is not None, (
+                f"`.pricing-grid` declares `column-gap: {column_gaps[-1]}`, "
+                "which this reader cannot convert to px — the one-line fit is a "
+                "FAIL, not a skip")
+        else:
+            gap_px = _length("gap", ".pricing-grid", "the gap between cards")
+        needed = 4 * card_min + 3 * gap_px
+        assert needed <= grid_max, (
+            f"the four pricing cards no longer fit on ONE line at desktop: "
+            f"4 x {card_min:g}px + 3 x {gap_px:g}px = {needed:g}px against the "
+            f"grid's {grid_max:g}px budget, so `flex-wrap: wrap` puts them on "
+            "two lines — `align-items: stretch` stretches PER LINE, so the "
+            "boxes on different lines stop sharing a height and "
+            "`margin-top: auto` aligns each CTA to its own card's bottom "
+            "(#13645 item 6), with every other row in this class still GREEN")
         for prop, allowed in (("display", {"flex", "inline-flex"}),
                               ("flex-direction", {"row", "row-reverse"}),
                               ("flex-flow", {"row", "row-reverse"})):
@@ -12399,21 +12524,58 @@ class TestProductTeamsPricingCardCtaBaseline:
             .pricing-card .btn { margin-top: auto; margin-block-end: auto }
 
         This is the INVERSE of `SLACK_PROPS` on purpose: there `auto` is the
-        pinned value and any other reds; here `auto` is the only refused one.
-        Sharing the loop would have made the same word mean both things.
+        pinned value and any other reds; here a NON-ZERO block-end margin is the
+        refused one. Sharing the loop would have made the same word mean both
+        things.
+
+        ⛔ IT REFUSES EVERY NON-ZERO VALUE, not only `auto` (#14406 review round
+        15). The docstring above claimed the block-end margin "must stay 0" while
+        the assertion only refused `auto`, so `.pricing-card.popular .btn {
+        margin-bottom: 0.5rem }` — a plain 8px shove — left this row and all 205
+        tests in the module GREEN with the popular CTA measured 8px high. `auto`
+        is the dramatic case; any length is the same defect at a smaller scale.
         """
         css = _product_teams_html()
         bad = [(prop, value, prelude)
                for prelude, prop, value in _css_block_end_cascade(
                    css, ".btn", BLOCK_END_MARGIN_PROPS)
-               if value.strip().lower() == "auto"]
+               if _css_length_px(_css_block_end(prop, value), 16.0) != 0.0]
         assert bad == [], (
-            "a rule that can select `.pricing-card .btn` gives the CTA an "
-            f"`auto` block-END margin (`{bad[0][0]}: {bad[0][1]}`, "
-            f"{bad[0][2]!r}), and the two `auto` margins SPLIT the card's free "
-            "space rather than stacking — so the button centres in each card's "
-            "own leftover and the four baselines split (#13645 item 6), with "
-            "every other row in this class still GREEN")
+            "a rule that can select `.pricing-card .btn` gives the CTA a "
+            f"NON-ZERO block-END margin (`{bad[0][0]}: {bad[0][1]}`, "
+            f"{bad[0][2]!r}); any such margin moves the button up off the shared "
+            "baseline, and two `auto` margins SPLIT the card's free space "
+            "instead of stacking — so the button centres in each card's own "
+            "leftover (#13645 item 6), with every other row in this class still "
+            "GREEN")
+
+    def test_no_rule_gives_a_card_a_block_end_margin(self):
+        """A CARD's block-end margin moves the edge `margin-top: auto` aligns to.
+
+        The rows above pin the card's cross SIZE (`height`/`max-height`), its
+        `align-self`, and the CTA's own margins — but a bottom margin on the CARD
+        shrinks the stretched border box inside its flex line, so the edge the
+        CTA is pushed against moves up by that margin while the boxes keep their
+        one height. Measured (#14406 review round 15): `.pricing-card.popular {
+        margin-bottom: 1rem }` put the popular CTA at 6399.78 against
+        6415.78 for the other three — a 16px split — with all 205 tests in the
+        module GREEN.
+
+        The page declares no margin on `.pricing-card`, so refusing every
+        non-zero block-end value costs no false RED.
+        """
+        css = _product_teams_html()
+        bad = [(prop, value, prelude)
+               for prelude, prop, value in _css_block_end_cascade(
+                   css, ".pricing-card", BLOCK_END_MARGIN_PROPS)
+               if _css_length_px(_css_block_end(prop, value), 16.0) != 0.0]
+        assert bad == [], (
+            "a rule that can select `.pricing-card` gives the card a NON-ZERO "
+            f"block-END margin (`{bad[0][0]}: {bad[0][1]}`, {bad[0][2]!r}), "
+            "which shrinks the stretched box inside its flex line — so the edge "
+            "`margin-top: auto` aligns the CTA to moves up by that much and the "
+            "four baselines split (#13645 item 6), with every other row in this "
+            "class still GREEN")
 
     def test_no_other_rule_takes_the_ctas_slack(self):
         """The card CTA's ONLY vertical slack is the pinned `margin-top: auto`.
