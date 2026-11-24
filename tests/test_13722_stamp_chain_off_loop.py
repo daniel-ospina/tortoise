@@ -912,10 +912,19 @@ def _unaccounted_mentions(
     return unaccounted
 
 
-def test_every_stamp_call_runs_off_the_loop() -> None:
+def _check_stamp_chain_off_loop(
+    tree: ast.Module, source: str, label: str,
+) -> None:
     """`_stamp_capture_provenance` must be called from a leg submitted off-loop.
 
-    ⛔ NESTING IS NOT THE PROPERTY — this test started as "the chain must not be
+    ⛔ THIS IS THE GATE ITSELF, LIFTED OUT OF THE TEST so a fixture can supply
+    the failure populations the shipped module does not contain (the same reason
+    `_every_submission_dead_guarded` and
+    `_door_references_outside_call_position` were lifted). `tree`/`source` are the
+    module under test (`source` is the text the mention count reads) and `label`
+    names it in the messages.
+
+    ⛔ NESTING IS NOT THE PROPERTY — this gate started as "the chain must not be
     in the handler's own body", and that assertion was FALSIFIED before it was
     committed: the stamp chain already lives in `_report_capture`, a nested
     `async def` inside `_capture_session_impl`, and nesting a coroutine changes
@@ -931,7 +940,6 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     which would lose the #8501 non-fatal warning arm and the ordering the
     handler relies on.
     """
-    tree = _module()
     # ⛔ MODULE-WIDE ON PURPOSE (review cycle 4, P2): the walk used to start at
     # `_capture_session_impl` while the header claimed every stamp call in
     # `hosted_api`, so a stamp appended to any OTHER function of this module was
@@ -940,7 +948,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # four calls live in the handler today; the scan does not assume it.
     calls = _stamp_calls(tree)
     assert calls, (
-        f"{HOSTED_API.name} no longer calls {_STAMP_DOOR} — if the stamp chain "
+        f"{label} no longer calls {_STAMP_DOOR} — if the stamp chain "
         "moved, this pin must move with it rather than be deleted (#13722)")
 
     owners = set()
@@ -951,7 +959,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         # so `chain[-2]` would raise before any assertion could name the reason.
         # Still RED either way; this only makes the message the useful one.
         assert len(chain) >= 2, (
-            f"{_STAMP_DOOR} is called outside any function of {HOSTED_API.name}, so "
+            f"{_STAMP_DOOR} is called outside any function of {label}, so "
             f"there is no enclosing function to submit to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
             "the chain would run on the event loop, which is the #13722 wedge. Move "
             "it into a sync `def` and submit that.")
@@ -976,7 +984,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     assert not ambiguous, (
         f"{_STAMP_DOOR} is called from {ambiguous}, whose name(s) resolve to "
         f"{ {name: def_counts[name] for name in ambiguous} } definitions in "
-        f"{HOSTED_API.name} — a submission matches by NAME, so the other "
+        f"{label} — a submission matches by NAME, so the other "
         "definition's submission would be accepted for this one and a second copy "
         "of the chain could run on the event loop unseen. Rename it, or re-derive "
         "this pin to key on the definition node (#13722)")
@@ -984,7 +992,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     for owner in sorted(owners):
         assert (_OFF_LOOP_POOL, owner) in submitted, (
             f"{_STAMP_DOOR} is called from {owner!r}, which no function of "
-            f"{HOSTED_API.name} ever submits to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
+            f"{label} ever submits to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
             "so its per-id record writes (two prologue statements, the "
             "cursor-presence read, two plan statements and one commit = SIX "
             "blocking Postgres round trips for a `PointRevised`) run on the "
@@ -1063,10 +1071,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # class this PR exists to remove. What remain covered are the shapes the
     # message names: a string-built callable and a comment.
     unaccounted = _unaccounted_mentions(
-        tree, owners, HOSTED_API.read_text(encoding="utf-8"))
+        tree, owners, source)
     assert not unaccounted, (
         f"{_STAMP_DOOR}'s chain is named {unaccounted} time(s) in "
-        f"{HOSTED_API.name} (textual, graded AST node) — the extra mention builds "
+        f"{label} (textual, graded AST node) — the extra mention builds "
         "the callable some way this pin cannot follow as a reference (a string in "
         "`locals().get(…)`/`getattr(…)`, or a comment), so a second, on-loop run of "
         "the chain would be invisible here. Call it by name at its single "
@@ -1201,6 +1209,236 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         "`PointRevised`, no warning "
         "(#13722). Remove the dead guard rather than leaving the offload "
         "unreachable")
+
+
+def test_every_stamp_call_runs_off_the_loop() -> None:
+    """The shipped module satisfies EVERY property `_check_stamp_chain_off_loop` grades.
+
+    ⛔ THE ARMS ARE PINNED SEPARATELY, because this module supplies none of the
+    failure shapes: it has one live, awaited, unguarded submission, one reference
+    and no alias, string or stray spelling. Deleting any ONE arm's `assert` from
+    the checker therefore left this suite GREEN — measured, ELEVEN of eleven arms
+    survived deletion (`stray`, `dead_guards`, `aliased_imports`, `ambiguous`,
+    `string_built`, `door_spellings`, `submitted`, `awaited`, `async_owners`,
+    `unaccounted`, and the `calls` arm that decides a stamp call exists at all),
+    which is the same "the arm is pinned by
+    nothing" class the review filed against `all(per)`. The checker is a FUNCTION
+    so that population can be supplied by a fixture — the shipped module can only
+    ever prove the arms do not false-RED — and
+    `test_every_arm_reds_its_own_mutant` is where each one is proven to fire.
+    """
+    _check_stamp_chain_off_loop(
+        _module(), HOSTED_API.read_text(encoding="utf-8"), HOSTED_API.name,
+    )
+
+
+#: The smallest source `_check_stamp_chain_off_loop` PASSES: one sync `def` chain
+#: carrying one stamp call, one awaited submission of it on the capture pool, and
+#: no other reference to the name. Every mutant below is this source with exactly
+#: ONE violation spliced in, so the row that fires is the arm that owns it.
+_VALID_OFF_LOOP_SOURCE = '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+'''
+
+#: `(id, source, the substring of the message the arm that must fire produces)`.
+#: ⛔ ONE ROW PER ARM OF THE CHECKER, and the substring is the arm's own words —
+#: so a row pins WHICH arm fired, not merely that something did.
+_OFF_LOOP_ARM_MUTANTS: list[tuple[str, str, str]] = [
+    (
+        # arm 1 — there is a stamp call at all (a deleted chain is not a pass).
+        "no-stamp-call-left",
+        '''
+def _stamp_chain(point):
+    point.touch()
+
+async def handler():
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+''',
+        "no longer calls",
+    ),
+    (
+        # arm 2 — the call has an enclosing function to submit (`chain[-2]`).
+        "stamp-call-outside-any-function",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+
+_stamp_capture_provenance(0)
+''',
+        "is called outside any function",
+    ),
+    (
+        # arm 3 — the owner name resolves to ONE definition, or a submission
+        # matches the wrong one (the `all(per)` bug in name form).
+        "second-definition-of-the-chain-name",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+def _stamp_chain(point):  # noqa: F811 — the fixture's whole point
+    point.touch()
+
+async def handler():
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+''',
+        "definitions in",
+    ),
+    (
+        # arm 4 — the chain is submitted to the capture pool at all.
+        "chain-never-submitted",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    pass
+''',
+        "ever submits to",
+    ),
+    (
+        # arm 5 — the submission is awaited, so a raise still reaches the caller.
+        "submission-not-awaited",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+''',
+        "never awaited",
+    ),
+    (
+        # arm 6 — the chain is a SYNC def (`_run_off_loop` runs it synchronously).
+        "chain-turned-into-a-coroutine-function",
+        '''
+async def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+''',
+        "an `async def`",
+    ),
+    (
+        # arm 7 — the door appears only as the `func` of a call, in either
+        # spelling; binding it to a variable is an inline run the arms cannot see.
+        "door-bound-to-another-name",
+        _VALID_OFF_LOOP_SOURCE
+        + '''
+_prov = _stamp_capture_provenance
+''',
+        "referenced OUTSIDE",
+    ),
+    (
+        # arm 8 — nor may the import rename it (`_refers_to` cannot see an alias).
+        "door-imported-under-another-name",
+        _VALID_OFF_LOOP_SOURCE
+        + '''
+from tortoise.hosted_api import _stamp_capture_provenance as _prov
+''',
+        "IMPORTED UNDER ANOTHER NAME",
+    ),
+    (
+        # arm 9 — the chain's name assembled as a foldable string. ⛔ It must be
+        # the FRAGMENTED form: the whole literal is already caught by the
+        # whole-word count, which is asserted earlier, so only `+`-folding
+        # reaches this arm.
+        "chain-name-assembled-from-fragments",
+        _VALID_OFF_LOOP_SOURCE
+        + '''
+def _again(obj):
+    getattr(obj, "_stamp_" + "chain")()
+''',
+        "appears as a STRING LITERAL",
+    ),
+    (
+        # arm 10 — no SECOND reference to the chain (an inline call runs it on
+        # the loop, however many submissions also exist).
+        "additional-inline-reference",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler(point):
+    await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+    _stamp_chain(point)
+''',
+        "referenced OUTSIDE its off-loop submission",
+    ),
+    (
+        # arm 11 — the submission is REACHABLE (every one of them, not any one).
+        "only-submission-under-a-dead-guard",
+        '''
+def _stamp_chain(point):
+    _stamp_capture_provenance(point)
+
+async def handler():
+    if False:
+        await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
+''',
+        "STATICALLY-FALSE",
+    ),
+    (
+        # arm 12 — the name is not mentioned where the walk cannot grade it (a
+        # comment here; the count is the fail-closed backstop for indirection).
+        "chain-named-where-the-walk-cannot-grade-it",
+        _VALID_OFF_LOOP_SOURCE
+        + '''
+# _stamp_chain is also reached some other way, allegedly
+''',
+        "time(s) in",
+    ),
+]
+
+
+def test_the_checker_passes_the_minimal_valid_fixture() -> None:
+    """The control: `_VALID_OFF_LOOP_SOURCE` violates nothing.
+
+    ⛔ WITHOUT THIS ROW `test_every_arm_reds_its_own_mutant` COULD BE SATISFIED
+    BY A CHECKER THAT RAISES ALWAYS — the mutants would all still red, and the
+    "expected substring" assertion would be met by an arm that fires for the
+    wrong reason only if the message matched. This row is the other side: the
+    same checker, on a source with no violation, must return silently.
+    """
+    tree = ast.parse(_VALID_OFF_LOOP_SOURCE)
+    _check_stamp_chain_off_loop(tree, _VALID_OFF_LOOP_SOURCE, "<fixture>")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [(source, expected) for _id, source, expected in _OFF_LOOP_ARM_MUTANTS],
+    ids=[_id for _id, _source, _expected in _OFF_LOOP_ARM_MUTANTS],
+)
+def test_every_arm_reds_its_own_mutant(source: str, expected: str) -> None:
+    """Every arm of the checker FIRES on its own violation — one row per arm.
+
+    ⛔ THE PIN THE SHIPPED MODULE CANNOT SUPPLY (measured): `hosted_api.py` has
+    one live, awaited, unguarded submission, so the arms that reject a stray
+    reference, an aliased door, a string-built callable, a duplicate definition,
+    a dead-guarded submission, an un-awaited submission, a coroutine-function
+    chain and a mention the walk cannot grade all passed —
+    and deleting each of ELEVEN assertions in turn left this suite GREEN,
+    99 passed, at `9fd0ac474b`.
+    A gate whose arms can be deleted one by one with nothing going red protects
+    only the arms that happen to fire on today's tree.
+
+    Each row carries the arm's OWN message fragment, so a row also pins which
+    arm fired: two arms sharing one message would satisfy a row for the wrong
+    reason.
+    """
+    tree = ast.parse(source)
+    with pytest.raises(AssertionError) as raised:
+        _check_stamp_chain_off_loop(tree, source, "<fixture>")
+    assert expected in str(raised.value), (
+        f"the arm named by {expected!r} did not fire; the checker said: "
+        f"{str(raised.value)[:400]}")
 
 
 #: A minimal module carrying one dead-guarded and one undecidable-guarded stamp
