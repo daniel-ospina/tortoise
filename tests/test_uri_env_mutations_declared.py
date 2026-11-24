@@ -1794,6 +1794,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$'],
+    # #14232 (#14429): the spool-drain REHEARSAL — a `--mode` harness that replays a
+    # recorded spool against a graph. Every site is DELIBERATE_URI, and none of them
+    # reaches a store:
+    #   :389  a PRODUCTION target (`bolt://api.premiselabs.co:6379/live-v5`) is set
+    #         precisely so the rehearsal's own gate must REFUSE it — the URI is the
+    #         input the refusal assertion quotes, and `_run` exits before any client.
+    #   :395  the loopback twin is the NON-VACUITY half: the same call must get far
+    #         enough to trip the next guard, so "refusing a production target" is
+    #         not satisfied by a gate that refuses everything.
+    #   :568, :590, :614, :649, :676  the run/refusal rehearsals drive a LOCAL
+    #         `docker://:pw@127.0.0.1:6379/tortoise_test` graph with `_stub_one_mode`,
+    #         i.e. the drain sequence is exercised against a throwaway graph this
+    #         box serves, never the shared lane.
+    # every site uses `monkeypatch.setenv`, so the parent env is reverted at teardown.
+    "test_spool_drain_rehearsal.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:pw@127\.0\.0\.1:6379/tortoise_test"\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
