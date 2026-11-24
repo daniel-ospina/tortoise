@@ -722,11 +722,16 @@ def test_string_value_folds_exactly_what_the_interpreter_folds(
     """`_string_value` returns the string the module would HOLD, or ``None``.
 
     ⛔ THE PIN THE REVIEW ASKED FOR (P2, measured). Everything `_string_value` can
-    fold reds the string arm in the main test; every row above expecting a value
-    returns ``None`` under the pre-#14522 arm (`isinstance(node, ast.Constant) and
+    fold reds the string arm in the main test; a row that expects a VALUE returns
+    ``None`` under the pre-#14522 arm (`isinstance(node, ast.Constant) and
     node.value == owner`), so reverting the fold reds HERE instead of leaving the
     suite green. Verified by mutation, not by reading: with `_string_value`
-    restored to the constant compare, the five FOLDED rows fail and the rest pass.
+    restored to the constant compare this test drops to FIVE failures — the `+` row,
+    the two-literal f-string row, and the `!s`/`!r`/`!a` rows (the whole-literal and
+    the implicitly-concatenated rows are folded by the PARSER into one
+    `ast.Constant`, so they pass under both arms; they are here to pin the fold's
+    output, not to red on its removal) — and
+    `test_a_string_built_callable_is_the_string_arm_that_sees_it` fails with it.
 
     The ``None`` rows matter in both directions. They pin the boundary the
     docstring declares — so a later "improvement" that starts guessing at run-time
