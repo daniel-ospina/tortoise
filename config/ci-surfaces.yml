@@ -57,6 +57,13 @@ version: 1
 # `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
 # and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
 # the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
+# `b2d1e9086a`, plus the `core`-registered fast rows this tree carries — `#14423`'s
+# `tests/test_14350_drain_convergence.py` (the D1 suite, `api` + `core`), `#14434`'s
+# `tests/test_14371_offline_embed_json.py` and `tests/test_14186_embedder_seam_batching.py` — all
+# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
+# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k): the greedy packer
+# re-packs EVERY bin when a fast file is registered, so the previous two-bin 837.0 / 836.9 split no
+# longer exists, and a block that keeps quoting it is quoting an emission this tree cannot produce.
 # `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
