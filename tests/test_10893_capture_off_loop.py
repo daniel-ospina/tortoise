@@ -167,11 +167,18 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # ⚠️ ITS SIZE IS THE PROBLEM: the verdict is keyed on the METHOD NAME alone,
     # so this line exempts EVERY on-loop `sdk._get_proj()` on the capture path,
     # at any cost, whatever its caller — and `_get_proj` is not a
-    # capture-specific leg (measured on this head with `git grep -c '_get_proj('`:
-    # 396 lines under `tortoise/`, 395 besides the one `def`; 208 in
-    # `tortoise/sdk.py`, where it is defined, i.e. 207 besides that `def`, which
-    # is the population the name exempts — re-derived at this head after
-    # `024387f533` added a call; was 395/394 and 207/206), it is the cold
+    # capture-specific leg. ⛔ TWO DIFFERENT COUNTS, EACH LABELLED (review cycle 6,
+    # P2): the `git grep -c '_get_proj('` figures below are LINES, which include
+    # prose mentions and the `def`; the population the name EXEMPTS is CALL SITES,
+    # measured with an `ast` walk — 199 in `tortoise/sdk.py` and 322 across
+    # `tortoise/` at this head. An earlier cut glossed the LINE count as "the
+    # population the name exempts", and a line count OVERSTATES both figures the
+    # sentence sizes: 208 lines − the `def` = 207 lines, of which eight are prose
+    # mentions, leaving 199 call sites; and 395 lines against 322 calls tree-wide.
+    # The lines, labelled as lines: 396 under `tortoise/`, 395 besides the one
+    # `def`; 208 in `tortoise/sdk.py`, where it is defined, i.e. 207 besides that
+    # `def` (re-derived at this head after `024387f533` added a call; was
+    # 395/394 and 207/206). `_get_proj` is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
     # exemption silently and is then reported as `#4451`'s. Declared rather
