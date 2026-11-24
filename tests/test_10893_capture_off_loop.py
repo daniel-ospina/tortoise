@@ -111,9 +111,14 @@ def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
 #: one capture request. ⛔ Deliberately a MAGNITUDE and not the noise floor: the
 #: legs that matter here are tens to hundreds of milliseconds (the mint 552 ms
 #: before the fix; `_get_registry` 16-36 ms on this tree), while the largest
-#: UNDECLARED leg on the path (`_emit_event`, inside the provenance stamp) reads
-#: 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar put that leg 0.1 ms
-#: from reding a gate whose own docstring argues against timing sensitivity.
+#: UNDECLARED leg on the path WHEN THE BAR WAS SET (`_emit_event`, inside the
+#: provenance stamp) read 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar
+#: put that leg 0.1 ms from reding a gate whose own docstring argues against
+#: timing sensitivity. ⛔ THAT LEG IS NO LONGER ON THE PATH AND IS NOT THE BAR'S
+#: JUSTIFICATION ANY MORE: #13722 moved the stamp chain onto the capture worker,
+#: so `_emit_event` writes no census row at all (the note in `_ON_LOOP_RESIDUAL`
+#: records the move). The band is quoted because it is the reading the 5 ms
+#: margin was sized against, not because a leg of that size is on the loop today.
 #: 5 ms leaves ~4x margin over the measured overhead band and is still ~110x
 #: below the 552 ms the mint cost, i.e. every leg worth declaring is caught
 #: (#14086 review, P2).
@@ -162,10 +167,11 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # ⚠️ ITS SIZE IS THE PROBLEM: the verdict is keyed on the METHOD NAME alone,
     # so this line exempts EVERY on-loop `sdk._get_proj()` on the capture path,
     # at any cost, whatever its caller — and `_get_proj` is not a
-    # capture-specific leg (measured on this tree with `git grep -c '_get_proj('`:
-    # 395 lines under `tortoise/`, 394 besides the one `def`; 207 in
-    # `tortoise/sdk.py`, where it is defined, i.e. 206 besides that `def`, which
-    # is the population the name exempts), it is the cold
+    # capture-specific leg (measured on this head with `git grep -c '_get_proj('`:
+    # 396 lines under `tortoise/`, 395 besides the one `def`; 208 in
+    # `tortoise/sdk.py`, where it is defined, i.e. 207 besides that `def`, which
+    # is the population the name exempts — re-derived at this head after
+    # `024387f533` added a call; was 395/394 and 207/206), it is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
     # exemption silently and is then reported as `#4451`'s. Declared rather
@@ -243,13 +249,14 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     bar is `_ON_LOOP_BAR_MS` of TOTAL on-loop time for the request — two orders
     of magnitude below the 552 ms the mint cost, and set with margin over the
     probe's OWN overhead rather than at the noise floor. ⛔ It used to be 1 ms,
-    and the largest UNDECLARED leg on this path (`_emit_event`, 0.51-0.92 ms
-    measured here) sat 0.1-0.5 ms inside that: under coverage the same leg
-    measured 1.20 ms and flipped this test to FAILED on a leg the table
-    deliberately does not require — a false block in a gate whose own docstring
-    argues against timing sensitivity (#14086 review, P2). The bar is about
-    MAGNITUDE: a leg that matters is tens to hundreds of ms (the mint 552 ms,
-    `_get_registry` 16-36 ms here), so 5 ms still catches every leg worth
+    and the largest UNDECLARED leg on this path THEN (`_emit_event`, inside the
+    provenance stamp as it was before #13722 moved that chain to the capture
+    worker — 0.51-0.92 ms measured here) sat 0.1-0.5 ms inside that: under
+    coverage the same leg measured 1.20 ms and flipped this test to FAILED on a
+    leg the table deliberately does not require — a false block in a gate whose
+    own docstring argues against timing sensitivity (#14086 review, P2). The bar
+    is about MAGNITUDE: a leg that matters is tens to hundreds of ms (the mint
+    552 ms, `_get_registry` 16-36 ms here), so 5 ms still catches every leg worth
     declaring while no longer reding on the probe's own cost.
 
     Which entries the census Actually OBSERVES on the path this test drives is
