@@ -623,17 +623,19 @@ def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     # is for a PEER's claim, which a status poll cannot prove dead — see
     # `abandon_dead_claims`.)
     assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == []
-    # ⛔ The claim is aged FIRST: the reclaim window applies to every caller
-    # (#14415 review round 10), so a 0 s claim is deliberately left alone and a
-    # later scan settles it. This test is about the row not stranding, which is
-    # what the stale claim proves.
-    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
-    stale.updated_at = _ancient_stamp()
-    store.put_item(ORG, stale)
-    assert BatchCoordinator(store).recover(ORG) == []
-    after = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
-    assert after["/a.md"].state is BatchItemState.CANCELLED
-    assert after["/a.md"].tokens_in == 0
+    # ⛔ ASSERT THE SETTLEMENT THIS CALL IS SUPPOSED TO MAKE (#14415 review
+    # round 11, P3). This used to assert only `== []` and then age a row the call
+    # had already settled — so it held whether or not that call did anything, and
+    # its own comment ("a 0 s claim is deliberately left alone") described the
+    # opposite of its own statement order. `stale_after_s=0` is the explicit
+    # "the holder is gone" case (this process died), so the row must ALREADY be
+    # settled here; a mutation making `recover()` ignore the argument left the old
+    # version green.
+    after_zero = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
+    assert after_zero["/a.md"].state is BatchItemState.CANCELLED, (
+        "the zero window is the boot case — nothing is running, so the claim is "
+        f"void and must settle now: {after_zero['/a.md'].state}")
+    assert after_zero["/a.md"].tokens_in == 0
     assert store.pending_batches(ORG) == []
 
 
@@ -1890,6 +1892,15 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
                             token_delta=(1, 1))
     store.cancel_queued_items(ORG, batch.batch_id, reason="stopped",
                               updated_at="t")
+    # ⛔ AND THE CREATE-IF-ABSENT (#14415 review round 12, P2). The orphan
+    # adoption's write — the one this PR hardened over three rounds — was graded by
+    # NEITHER emission guard and by no live test: doubling a brace in it, or naming
+    # a `$param` it does not supply, left the whole suite green while FalkorDB
+    # refused the statement on `_resume_batch`.
+    store.put_batch_if_absent(
+        Batch(batch_id="batch_absent", org_id=ORG, state=BatchState.RESUMING,
+              created_at="2026-01-01T00:00:00+00:00",
+              updated_at="2026-01-01T00:00:00+00:00"))
     return pairs
 
 
@@ -2659,3 +2670,173 @@ def test_a_cancel_that_stopped_nothing_returns_the_rows_it_read():
     assert sum(i.tokens_in for i in returned) > 0, (
         "the summary the route renders must carry the spend it reports beside "
         "`complete: true`")
+
+
+def test_a_cancel_over_finished_work_reports_the_rows_it_re_read():
+    """⛔ ROUND-11 REVIEW P2: the two early arms returned their SNAPSHOT too.
+
+    `_bill` writes tokens with `add_item_tokens`, which changes NO compared field,
+    so a peer's accumulation can land on a row this call already read as terminal.
+    The arms that return without writing returned the snapshot, and `status_body()`
+    then summed it: `tokens_spent: 0` beside a ledger that was charged.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=100)
+
+    real_items = store.items
+    fired = {"done": False}
+
+    def items_then_bill(org_id, batch_id):
+        rows = real_items(org_id, batch_id)
+        if not fired["done"]:
+            fired["done"] = True
+            # A peer's `_bill` lands after this call read its snapshot.
+            store.add_item_tokens(org_id, batch_id, items[0].item_id,
+                                  tokens_in=59_900, updated_at="t")
+        return rows
+
+    store.items = items_then_bill  # type: ignore[method-assign]
+    try:
+        _b, returned = coord.cancel(ORG, batch.batch_id, reason="customer")
+    finally:
+        store.items = real_items  # type: ignore[method-assign]
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    assert sum(i.tokens_in for i in returned) == 60_000, (
+        "the cancel's payload is its PRE-write snapshot: the sum reports "
+        f"{sum(i.tokens_in for i in returned)} over a ledger charged 60 000")
+
+
+def test_an_orphan_adoption_cannot_blank_an_acceptance_that_landed_first(monkeypatch):
+    """⛔ ROUND-11 REVIEW P2: the adoption wrote the batch row unconditionally.
+
+    `_resume_batch` adopts orphan ITEM rows and wrote the batch row with a plain
+    `put_batch` — a `MERGE … SET` of state, created_at, updated_at, estimate_json,
+    cancelled_at, cancel_reason and corpus_name. An acceptance landing in that
+    window had its estimate and corpus BLANKED (owner §4's arithmetic gone from the
+    record) and the row relabelled `resuming` over work that never stopped. The
+    create is now `MERGE … ON CREATE SET`, which cannot touch an existing row.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    estimate = {"items": 1, "estimated_tokens": 64_799}
+
+    # An ORPHAN item row: an acceptance that wrote items and died before its row.
+    store.put_item(ORG, BatchItem(batch_id="batch_orphan",
+                                  item_id="batch_orphan-00000", ref="/d/a.md",
+                                  state=BatchItemState.QUEUED,
+                                  updated_at=_ancient_stamp()))
+
+    real_absent = store.put_batch_if_absent
+    fired = {"done": False}
+
+    def acceptance_lands_first(batch):
+        if not fired["done"]:
+            fired["done"] = True
+            store.put_batch(Batch(batch_id=batch.batch_id, org_id=ORG,
+                                  state=BatchState.ACCEPTED,
+                                  created_at="2026-01-01T00:00:01+00:00",
+                                  updated_at="2026-01-01T00:00:01+00:00",
+                                  estimate=dict(estimate),
+                                  corpus_name="handbook"))
+            return False   # the row now exists; the create lost
+        return real_absent(batch)
+
+    store.put_batch_if_absent = acceptance_lands_first  # type: ignore[method-assign]
+    try:
+        coord.recover(ORG)
+    finally:
+        store.put_batch_if_absent = real_absent  # type: ignore[method-assign]
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    row = store.get_batch(ORG, "batch_orphan")
+    assert row is not None
+    assert row.estimate == estimate, (
+        f"the adoption blanked the ACK's estimate: {row.estimate!r}")
+    assert row.corpus_name == "handbook", (
+        f"the adoption blanked the corpus name: {row.corpus_name!r}")
+
+
+def test_duplicate_of_round_trips_through_the_production_store():
+    """⛔ ROUND-12 REVIEW P2: `duplicate_of` was the ONE field never persisted.
+
+    `submit()` sets it, `as_dict()` puts it on the wire and `run_item` branches on
+    it, but `GraphBatchStore.put_item`'s SET listed no column and neither read
+    projection returned one — so on the real store the wire always said
+    `duplicate_of: ""` and the twin branch (the one that stops a repeat being
+    SKIPPED when its twin FAILED) was unreachable there, while the test that pins it
+    ran against the in-memory store, which does preserve it.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    class _Rec:
+        def __init__(self):
+            self.cyphers: list[str] = []
+            self.params: list[dict] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            self.params.append(dict(params or {}))
+
+            class _Res:
+                result_set: list = []
+
+            return _Res()
+
+    rec = _Rec()
+    store = GraphBatchStore(rec)
+    item = BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
+                     duplicate_of="b-00000", updated_at="t")
+    store.put_item(ORG, item)
+    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
+        "the production store never writes duplicate_of: "
+        f"{rec.cyphers[-1][:200]}")
+    assert rec.params[-1]["duplicate"] == "b-00000"
+
+    store.items(ORG, "b")
+    assert "i.duplicate_of" in rec.cyphers[-1], (
+        "the production read projection omits duplicate_of, so the wire always "
+        "reports an empty twin")
+    store.get_item(ORG, "b", "b-00001")
+    assert "i.duplicate_of" in rec.cyphers[-1]
+
+
+def test_the_create_if_absent_reports_creation_not_state_equality():
+    """⛔ ROUND-12 REVIEW P3: the verdict compared STATE, not existence.
+
+    It returned `b.state` and compared that, which is TRUE for a pre-existing row
+    whose stored state equals the caller's — the exact concurrent shape it is used
+    in, where two adoptions of one orphan row both pass `RESUMING`. The caller then
+    trusted its own object (created_at from the orphan item) instead of re-reading.
+    `created_at` is written only by `ON CREATE SET`, so the created timestamp is a
+    creation test.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    batch = Batch(batch_id="b", org_id=ORG, state=BatchState.RESUMING,
+                  created_at="2026-01-01T00:00:00+00:00",
+                  updated_at="2026-01-01T00:00:00+00:00")
+
+    class _Rec:
+        def __init__(self, rows):
+            self.rows = rows
+            self.cyphers: list[str] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            rows = self.rows
+
+            class _Res:
+                result_set = rows
+
+            return _Res()
+
+    created = _Rec([["2026-01-01T00:00:00+00:00"]])
+    assert GraphBatchStore(created).put_batch_if_absent(batch) is True
+    reused = _Rec([["2025-12-31T00:00:00+00:00"]])
+    assert GraphBatchStore(reused).put_batch_if_absent(batch) is False, (
+        "a pre-existing row whose state string matches the caller's was reported "
+        "as CREATED — the caller then trusts its own object")

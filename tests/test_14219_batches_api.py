@@ -2115,3 +2115,24 @@ def test_a_path_item_that_names_a_url_is_still_refused(client):
         {"ref": "https://acme.example/contract.pdf"}]})
     assert r.status_code == 422
     assert r.json()["detail"]["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
+
+
+def test_inline_text_with_no_storage_is_refused_before_the_ack_gate(client,
+                                                                   monkeypatch):
+    """⛔ ROUND-11 REVIEW P2: the staging check ran AFTER the acknowledgement gate.
+
+    A body of ≥47 inline-text items is large enough to need an acknowledgement, so
+    on a server with `TORTOISE_INGEST_BASE_DIR` unset it was answered 402 "re-send
+    with acknowledge_overage=true" — and the re-send then 503'd, because there is no
+    org root to stage the bytes under. An acknowledgement collected for work that
+    can never run is the same defect the URL check was moved in front of that gate
+    to close. The existing 503 test uses a ONE-item body, so the gate never ran and
+    the ordering was unpinned.
+    """
+    monkeypatch.setattr(ha, "_batch_org_root", lambda org_id, create=False: None)
+    items = [{"ref": f"/d/{i}.md", "text": "hello"} for i in range(60)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert r.status_code == 503, (
+        "a body that cannot be staged was answered "
+        f"{r.status_code} instead of being refused for its own reason: "
+        f"{r.text[:200]}")
