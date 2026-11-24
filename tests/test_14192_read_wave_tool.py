@@ -12841,17 +12841,22 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     # FOUR-of-EIGHT while the dict carried 10 of the 18, and the round-4 correction then said
     # TWO-of-SIXTEEN while the dict carried 18 of the 18. So the grid is DERIVED from the two
     # dimensions the paragraph enumerates and diffed against the rows' own bindings. MEASURED
-    # non-vacuous: on the pre-fix tree (`9cd89e62800`) this assertion reds naming exactly the
-    # eight spellings that commit added; deleting ANY ONE row now reds it naming that spelling.
-    # Without it, "a future partial closure of ANY of them reds one" is unfalsifiable for a
-    # spelling no row carries — the defect class this table exists to delete.
+    # non-vacuous: on the pre-fix tree (`9cd89e62800`) this assertion reds naming FOURTEEN
+    # spellings — the eight `9968dec753de` added PLUS the six `__getitem__` ones this head rows
+    # (the "exactly the eight" figure reproduced only while the member dimension was the typed
+    # three-tuple; it is re-derived here, not carried); deleting ANY ONE row now reds it naming
+    # that spelling. The MEMBER dimension is read from `_BUILTINS_MAPPING_READS` rather than
+    # typed, because a hand-typed tuple is what hid the fourth member and six live spellings
+    # from this very assertion. Without it, "a future partial closure of ANY of them reds one"
+    # is unfalsifiable for a spelling no row carries — the defect class this table exists to
+    # delete.
     _copy_receivers = (
         "copy.__dict__", "vars(copy)", 'getattr(copy, "__dict__")',
         "_z.__dict__", "vars(_z)", 'getattr(_z, "__dict__")')
     _copy_grid = {
-        f"_g = {receiver}{member}"
+        f"_g = {receiver}.{member}"
         for receiver in _copy_receivers
-        for member in (".get", ".pop", ".setdefault", ".__getitem__")}
+        for member in _BUILTINS_MAPPING_READS}
     _rowed_bindings = {line for lines in declared_residual.values() for line in lines}
     _unrowed = sorted(_copy_grid - _rowed_bindings)
     assert not _unrowed, (
