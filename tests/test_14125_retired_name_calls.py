@@ -61,6 +61,26 @@ ROOT = Path(__file__).resolve().parent.parent
 
 RETIRED_NAMES = frozenset(RETIRED_SDK_METHODS) | frozenset(REMOVED_SDK_METHODS)
 
+#: The per-item budget the two `_sweep()` rows below declare for themselves.
+#:
+#: `pyproject.toml`'s `[tool.pytest.ini_options] timeout = 300` is what an unmarked
+#: item inherits, and pytest-timeout gives an item's own `@pytest.mark.timeout(N)`
+#: marker priority over it — the repo's documented lever for a row that legitimately
+#: needs more ("A leg that needs a longer single item must SAY so", and the three
+#: long-regrade rows in `tests/test_surface_manifest.py` carry exactly this marker).
+#:
+#: MEASURED at this head on an idle box: `test_no_sdk_typed_reference_calls_a_
+#: retired_name` **114.9 s** and `test_a_file_the_census_cannot_grade_is_a_red_not_a_
+#: silent_drop` **55.6 s** — both walk the tree's AST (`_sweep()` parses the 2231
+#: files whose text mentions a retired name, out of 2461 tracked `.py`). On a loaded
+#: self-hosted runner that is not 300 s of slack: run 45387019681's shard `test (h)`
+#: red them as `Failed: Timeout (>300.0s) from pytest-timeout` with **0 failed of
+#: 1661 passed** before the shard's own 28-minute watchdog killed it — a red that
+#: says nothing about the SDK contract this gate asserts, on a leg whose remaining
+#: rows were green. The budget is 3x the slowest measured walk so box load alone
+#: cannot red it, and it stays a BOUND (the shard watchdog is still the outer one).
+_SWEEP_ITEM_BUDGET_S = 900
+
 #: A reference to a retired name that is CORRECT as written, keyed by
 #: `(repo-relative path, the expression the sweep renders)`. Each must still be
 #: found: `test_the_intentional_allowances_still_exist` reds when one is repaired
@@ -259,6 +279,7 @@ def _sweep() -> tuple[tuple[str, int, str], ...]:
 # ── class 1: no retired name is called through the SDK ────────────────────
 
 
+@pytest.mark.timeout(_SWEEP_ITEM_BUDGET_S)
 def test_no_sdk_typed_reference_calls_a_retired_name():
     """Every reference to a retired name is either gone, or a declared allowance.
 
@@ -287,6 +308,7 @@ def test_no_sdk_typed_reference_calls_a_retired_name():
         )
 
 
+@pytest.mark.timeout(_SWEEP_ITEM_BUDGET_S)
 def test_the_intentional_allowances_still_exist():
     """Non-vacuity: a stale allowance is a red, so the list cannot rot.
 
