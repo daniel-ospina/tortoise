@@ -9490,6 +9490,33 @@ def test_the_fast_shards_header_block_states_no_span_twice():
         f"catch this shape and the arm proves nothing about the re-wrapped one: {duplicate_lines!r}. "
         "Re-wrap one copy — the real splice's copies differ line for line (measured at the spliced "
         "base `14b8322eb2`: 0 duplicate lines, 10 repeated spans).")
+    # ⛔ EVERY copy is reported, not only the first — the property the failure message's instruction
+    # ("keep ONE copy" … "delete the reported span") actually depends on, and the one `finditer`
+    # introduced. Two copies of a 12-word passage re-wrapped onto different lines must come back as
+    # TWO spans of 12 words each; a first-occurrence-only reader (the pre-`finditer` `flat.find`)
+    # returns ONE, and the message would then tell a maintainer to delete a span that stops short of
+    # its own end. Contiguously, three copies merge into ONE 36-word span, where first-occurrence-only
+    # yields a severed 21-word fragment (copy 1 whole, then `window - 1` = 9 words of copy 2) — the
+    # exact artefact this arm exists to catch. Padding tokens are UNIQUE so the pad cannot manufacture
+    # a repeat of its own.
+    _copy12 = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+    _pad_a = " ".join(f"pa{i}" for i in range(40))
+    _pad_b = " ".join(f"pb{i}" for i in range(40))
+
+    def _spans_for(body: str) -> list[str]:
+        return _repeated_header_spans(_emission_block_header(f"# {body}\n\nfast_shards: 11\n"))
+
+    two_copies = _spans_for(f"{_pad_a} {_copy12}\n# s1 s2 s3\n# {_copy12} {_pad_b}")
+    assert [len(s.split()) for s in two_copies] == [12, 12], (
+        "a passage stated twice must be reported TWICE, one span per copy, each its full 12 words — "
+        f"got {[len(s.split()) for s in two_copies]} word(s) per span: {two_copies!r}. Reporting "
+        "only the first occurrence makes the arm's own 'delete the reported span' instruction "
+        "truncate the survivor")
+    three_copies = _spans_for(f"{_pad_a} {_copy12} {_copy12} {_copy12} {_pad_b}")
+    assert [len(s.split()) for s in three_copies] == [36], (
+        "three CONTIGUOUS copies must merge into ONE 36-word span — a first-occurrence-only reader "
+        f"returns a severed fragment instead: {[len(s.split()) for s in three_copies]} word(s) "
+        f"across {len(three_copies)} span(s)")
     # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
     # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
     # is what keeps the guard from redding on the block's own honesty.
