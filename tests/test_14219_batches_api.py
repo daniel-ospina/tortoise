@@ -157,8 +157,15 @@ def test_a_read_only_key_can_read_batches_but_not_create_or_cancel_them(
         ha.app.dependency_overrides.pop(ha.get_current_org_gated, None)
 
 
-def test_a_write_key_still_cannot_exceed_its_scope_on_cancel(store, monkeypatch):
-    """The other half: `graphs:write` satisfies read, and cancel is a write."""
+def test_a_write_key_can_create_cancel_and_list(store, monkeypatch):
+    """The other half of the matrix: `graphs:write` satisfies read AND cancel.
+
+    ⛔ AND THE CANCEL CALL IS THE POINT (#14415 recut review, LOW — measured).
+    This test used to assert only POST + list while its name and docstring claimed
+    the CANCEL cell, so "`graphs:write` permits cancel" was untested: raising
+    `cancel_batch`'s gate to a scope a write key lacks left BOTH scope tests green
+    (the read-only one still 403s, and this one never reached cancel at all).
+    """
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
@@ -179,6 +186,15 @@ def test_a_write_key_still_cannot_exceed_its_scope_on_cancel(store, monkeypatch)
             post = c.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
             assert post.status_code == 201, (
                 f"a graphs:write key was refused acceptance: {post.text[:300]}")
+            bid = post.json()["batch_id"]
+
+            cancel = c.post(f"/v1/batches/{bid}/cancel")
+            assert cancel.status_code == 200, (
+                "a graphs:write key could not CANCEL — the cancel route's gate "
+                "requires a scope that write does not imply: "
+                f"{cancel.status_code} {cancel.text[:200]}")
+            assert cancel.json()["status"] == "cancelled", cancel.json()
+
             listed = c.get("/v1/batches")
             assert listed.status_code == 200, (
                 "write must imply read for the list route: " + listed.text[:200])
