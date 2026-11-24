@@ -239,8 +239,9 @@ false claims in this record, which is the half that matters as much as the code.
 | **P2** the takedown test named a mutant that cannot red it (a revert of `acquire`'s takeover leaves the primitives it drives unchanged) | **corrected in the record, not in the code**: the stated mutant is now the one that does red it (dropping `_dispose_quarantine`'s byte compare), and the line says plainly which test covers the acquire path instead. |
 | **P2** the convergence measurement counted winners over a population it never proved overlapped: the winner held a FIXED 1.0 s, so on a loaded box a slow starter legitimately took the released claim and was counted as a second winner | **fixed**: the processes now rendezvous on a barrier before attempting and the winner holds until every peer has FINISHED its attempt, so the count is over a population that provably overlapped. ⚠️ Measured both ways: with the barrier removed the run reports **9 winners of 10** — the exact false "two drainers" verdict a correct protocol would have been blamed for; with it, **1 of 10**. The receipt carries `bounded`, which now GATES the verdict — `main` exits non-zero and says "NO VERDICT" when the winner released before every straggler attempted. ⚠️ `overlapped` was removed at cycle 10: it could not vary (see that row). |
 
-⚠️ The Pi-leg byte changes are another re-cut of generation 33's digest — see the
-note beside `_PINNED_PI_SEAM_INSTALL_CONTRACT`.
+⚠️ The Pi-leg byte changes moved the seam digest again, and generation 33 has shipped, so
+they ship as generation **34** rather than as another re-cut of 33 — see the note beside
+`_PINNED_PI_SEAM_INSTALL_CONTRACT` and the Residuals bullet below.
 
 **A further fold** of the peer lane brought two more of its fixes: a lease that lapsed
 DURING our own scan is re-armed rather than reported as a takeover (the pass was
@@ -295,7 +296,7 @@ matter, which is why each is fixed at the source and not restated:
 
 | finding | disposition |
 |---|---|
-| **P2** the committed record quoted a generation-33 seam digest this PR does not ship (`3eef418b…`, the blob at the branch's FIRST commit), while the pinned and shipped value is `932d74a2…` | **fixed**: the record then stated `932d74a2…` **at that head**, re-derived rather than copied — `sha256sum tortoise/pi-hooks/tortoise-capture.ts` was `932d74a2…` there, byte-identical to the pins as they stood at that head. ⚠️ The seam digest moves with every byte change, so *at the head this record ships* it is `f36b8c84…` (re-derived here, equal to `_PINNED_PI_SEAM_INSTALL_CONTRACT` and `_GENERATION_DIGESTS[33]`, and stated in Residuals below); only a digest quoted **at a head** is a claim a reader can check (#14480 review, F5). ⚠️ The GitHub *description* still quotes `4cbd1f02…`; left alone deliberately — it is not the committed record the merge path reads, and it is the artifact that will carry the harness's review attestation at the final head. |
+| **P2** the committed record quoted a generation-33 seam digest this PR does not ship (`3eef418b…`, the blob at the branch's FIRST commit), while the pinned and shipped value is `932d74a2…` | **fixed**: the record then stated `932d74a2…` **at that head**, re-derived rather than copied — `sha256sum tortoise/pi-hooks/tortoise-capture.ts` was `932d74a2…` there, byte-identical to the pins as they stood at that head. ⚠️ The seam digest moves with every byte change, so *at the head this record ships* it is `18b1256d…` (re-derived here, equal to `_PINNED_PI_SEAM_INSTALL_CONTRACT` and `_GENERATION_DIGESTS[34]`, and stated in Residuals below). ⚠️ This row itself quoted `f36b8c84…` for three cycles after it stopped being true: `f36b8c84…` was the value at `71c89986ef6f`, when the marker was still 33. It is kept in Residuals only with the head that owned it; only a digest quoted **at a head** is a claim a reader can check (#14480 review, F5 and cycle 19 P3). ⚠️ The GitHub *description* still quotes `4cbd1f02…`; left alone deliberately — it is not the committed record the merge path reads, and it is the artifact that will carry the harness's review attestation at the final head. |
 | **P2** the recorded test counts were short by two — `59`/`748` were regenerated at cycle 9 and cycle 10's two new cases were never folded in | **fixed by re-running, not arithmetic**: `61 passed` for `tests/test_14350_drain_convergence.py` (54 `def test_` + the 8-way parametrize = the reviewer's own collection model), and `760 passed` for the family run measured on the MERGE tree with `origin/main` (`6a72cfd661`) integrated — `main` grows that family itself, so the number is re-measured here, not carried. `node --test …` stays `314 pass / 0 fail` (no Pi test is added). |
 | **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test still named the mutation it cannot reach (`keep previous?.claim_unavailable` on the `attempted > 0` `ok` write — the spool is EMPTY, so `attempted === 0` and that arm never executes) | **fixed and PROVEN**: the comment now names the mutant that does red it — deleting the `summary.claimHeld && !summary.claimUnavailable` clearing block in `recordOutcome`. Applied that mutant and ran the row: RED (`actual: true, expected: undefined`); restored, green. Same unattributable-catch class cycle 9 corrected on this very test. |
 | **P2** the two new Pi-leg tests called `mkfifo` unguarded, so a win32 box (or one without the binary) THROWS instead of grading — one-leg regression against the pre-existing FIFO test beside them and against both Python twins | **fixed**: both now use the file's own guard (`if (process.platform === "win32") return;` then `try { execFileSync("mkfifo", …, { stdio: "ignore" }) } catch { return; }`), matching the pre-existing test verbatim. Behaviour unchanged on Linux — the 31 `#14350`-tagged Pi cases pass. |
@@ -320,7 +321,7 @@ three rounds gave, and found one of them (the measurement's own verdict) could n
 | **P2 — F2** the Pi leg's `held` → CONTENTION wiring had no assertion at all: the sibling test called `clearUnusableClaimPath` DIRECTLY and asserted its return value, so putting `state.obstruction = path` inside the `held` arm — which runs the whole pass UNCLAIMED beside a live claim — redded nothing. The Python twin is covered end to end. | **fixed with a seam plus the missing row**: `acquireDrainClaim` takes a `clearClaimPath` test seam (the same reason `takedown` exists above it), so a test can stand inside the clear's window; the new row drives `acquireDrainClaim` into `held` with a peer's claim landing in the window and asserts `undefined` (no claim), `state.obstruction === undefined` and the peer's bytes still at the path. Verified RED under that exact mutant. |
 | **P3 — F3** the "judged object" was not judged when it could not be read: `_read_raw` answers `None` for *not a regular file* AND for *a regular file I could not read*, and the second — a peer's claim that arrived in the window — was `unlink`ed as junk, after which this process won the next `link` and two holders coexisted for up to `ttl/3`, silently. It inverts `acquire`'s own stated doctrine forty lines above ("a regular file we could not read is honoured and NEVER unlinked"), and both legs agreed, so the cross-leg parity pin could not see it. | **fixed on both legs**: the landed object's TYPE is now checked separately from its bytes (`_lstat_is_regular` / a `landedRegular` flag), and an unreadable regular file is put BACK with `link` (create-if-absent, so a NEWER claim still wins) and answered `HELD`/`held` — contention, never a delete. New `_restore_quarantine` / `restoreQuarantine` helpers name why the restore uses `link` rather than `rename`. One new row per leg; both verified RED (Python: `done` + claim gone; Pi: `actual: 'done'`). |
 | **P3 — F4** the Pi leg's `gone`/`done` retry was the ONE lost-race arm that did not `markRaced()`, so two exhausted attempts left `state` empty, the path empty and no record — and `flushSpool` then ran the whole pass UNCLAIMED and stamped `claimUnavailable` with the default reason *"the spool root cannot hold a claim"*, which is FALSE (the root is fine; the object moved). The Python leg fails closed in the same state. | **fixed**: `markRaced(); continue;` — one line, as the review predicted. A new row drives two `gone` retries through `acquireDrainClaim` and asserts `state.raced === true`; the consumer (`raced` → `heldByClaim`, not unclaimed) is already pinned by *"an unmakeable root is UNAVAILABLE, not a lost RACE"*. Verified RED (`actual: false, expected: true`). |
-| **P3 — F5** two record figures were not re-derived after cycle 12 moved the bytes: `pr-body.md:247` named `SWEEP_RESIDUE` as `(11901, "953c70c0…")` (the pin ships `(11911, "3e92044bab08cc3d")`), and the cycle-11 row's present-tense claim about the seam digest was contradicted by this body's own Residuals section. | **fixed by re-deriving, and by dating the figures**: the fold paragraph now states that `(11901, "953c70c0…")` is THAT FOLD's pair, not the pin to verify, and names `(11911, "3e92044bab08cc3d")` at the head this record ships; the cycle-11 row is now past tense ("then stated `932d74a2…` at that head") with this head's re-derived `f36b8c84…` given beside it. A digest that is not quoted AT A HEAD is not a claim a reader can check. |
+| **P3 — F5** two record figures were not re-derived after cycle 12 moved the bytes: `pr-body.md:247` named `SWEEP_RESIDUE` as `(11901, "953c70c0…")` (the pin ships `(11911, "3e92044bab08cc3d")`), and the cycle-11 row's present-tense claim about the seam digest was contradicted by this body's own Residuals section. | **fixed by re-deriving, and by dating the figures**: the fold paragraph now states that `(11901, "953c70c0…")` is THAT FOLD's pair, not the pin to verify, and names `(11911, "3e92044bab08cc3d")` at the head this record ships; the cycle-11 row is now past tense ("then stated `932d74a2…` at that head") with the digest re-derived at the head this record ships (`18b1256d…`, generation 34) given beside it. A digest that is not quoted AT A HEAD is not a claim a reader can check. |
 
 **Cycle 14** (a fresh-context reviewer at `c7c4d013` — the head after the cycle-13 fixes) — 5 P3,
 no mechanism defect: the round re-verified the durable-fact rule, the clear's `HELD`/`GONE`
@@ -415,27 +416,34 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
 ## Residuals, stated
 
 * **Generation 34 is this PR's; generation 33 SHIPPED on `main` in #14423** (`da82ece4226`,
-  marker 33, capture digest `746075470aab…`). ⛔ Every earlier head of this PR re-cut
-  generation 33 IN PLACE on the premise that it had never shipped — that premise was
-  FALSE, and re-cutting it would have kept the marker at 33 while the bytes moved, so
-  `detect_artifact_install` would have graded every Pi install made from `main` as a
-  BLOCKING `modified-artifact` ("local edit"). 33's entry is now frozen at `main`'s
-  digest and this PR ships **34** on both halves (a marker change on one half alone
-  makes `contract_version_for("pi")` answer `None`). The historical record of what 33's
-  bytes became before it shipped, re-cut at each head
-  (capture half `f36b8c84…` at this head, re-cut at every byte change: for the export-only
-  test seam, for the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
-  changes, for cycle 12's claim-policy extraction, for cycle 13's three fixes (the
-  unreadable-landed-object rule on both legs, the `raced` marker on the Pi leg's
-  `gone`/`done` retry, and the obstruction-clear test seam), for cycle 16's restore
-  rule (a failed restore `rename`s the object back or PRESERVES it, never deletes
-  it), for cycle 19's two behaviour changes on shipped bytes (the `status.json`
-  regular-file gate and the second claim-axis operator term), and for the MERGE of them — a merge is a byte set neither side
-  hashed, so the digest is always derived from the merged tree; the read half moved
-  `708b6a…`→`904d2742…` because its generation MARKER moved 32→33 with the pair)
-  instead of
-  spending a generation 34 on a refinement of the same unreleased seam. From the
-  moment 33 reaches `main` the entries are frozen and a byte change needs 34.
+  marker 33, capture digest `746075470aab…`, read half `904d2742…`). ⛔ Every earlier head of
+  this PR re-cut generation 33 IN PLACE on the premise that it had never shipped — that
+  premise was FALSE, and re-cutting it would have kept the marker at 33 while the bytes
+  moved, so `detect_artifact_install` would have graded every Pi install made from `main`
+  as a BLOCKING `modified-artifact` ("local edit"). Both 33 entries are now FROZEN at
+  `main`'s digests and this PR ships **34** on both halves (a marker change on one half
+  alone makes `contract_version_for("pi")` answer `None`), so no byte change in this branch
+  can move a shipped generation again.
+* **The seam digests this record quotes, each re-derived with `sha256sum` and never copied.**
+  At the head this record ships, the capture half is `18b1256d…` = `_PINNED_PI_SEAM_INSTALL_CONTRACT`
+  = `_GENERATION_DIGESTS[34]`, and the read half is `469eb352…` =
+  `_PINNED_PI_READ_SEAM_INSTALL_CONTRACT` = `_READ_SEAM_GENERATION_DIGESTS[34]`. The values the
+  branch derived at EARLIER heads are kept only WITH the head that owned them, because a
+  figure that is not quoted at a head is not a claim a reader can check — and this bullet is
+  the third place the same rot was found (cycle 11 F5, cycle 19 P3): `3eef418b…` at the
+  branch's first commit, `932d74a2…` at the cycle-11 head, `f36b8c84…` at `71c89986ef6f`.
+  Every one of those was an in-place re-cut of generation **33**, legal only while 33 was
+  unreleased, and none of them is 33's shipped value (33's is `746075470aab…`, above).
+  The re-cuts happened, in order, for the export-only test seam; the peer lane's
+  `release`/`raced` behaviour fixes; this leg's behaviour changes; cycle 12's claim-policy
+  extraction; cycle 13's three fixes (the unreadable-landed-object rule on both legs, the
+  `raced` marker on the Pi leg's `gone`/`done` retry, the obstruction-clear test seam);
+  cycle 16's restore rule (a failed restore `rename`s the object back or PRESERVES it, never
+  deletes it); cycle 19's two behaviour changes on shipped bytes (the `status.json`
+  regular-file gate and the second claim-axis operator term); and the MERGE of them — a merge
+  is a byte set neither side hashed, so the digest is always derived from the merged tree
+  (the read half moved `708b6a…`→`904d2742…` at 33 because its generation MARKER moved with
+  the pair, and moved again to `469eb352…` when this PR's marker reached 34).
 * ~~**A `renew` that lands inside the read → replace window can overwrite a peer's
   fresh claim**~~ — **CLOSED at cycle 6, on both legs.** Cycle 5 recorded this as a
   residual on the argument that a compare-and-swap would "add a rename + read to
