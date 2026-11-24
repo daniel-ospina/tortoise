@@ -22086,7 +22086,7 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
 
 #: Block openers. A blank line; a markdown bullet in any of its list spellings (`- `, `* `,
 #: `+ `, `1. `, `1) `), at ANY indent; a quoted bullet (`> - `); a table row (`| … |`); and
-#: the `#`-comment spelling of a bullet at any indent — 5 of the 6 files this pin scans are
+#: the `#`-comment spelling of a bullet at any indent — MOST of the files this pin scans are
 #: comment prose. A set that knew only column-0 `- `/`* ` split nothing in a numbered list, a
 #: table or an indented comment, so one block's verdict charged the next block's arm (a
 #: FALSE RED). ⛔ No census of spellings is stated: the patterns are the statement.
