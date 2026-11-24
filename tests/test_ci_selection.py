@@ -14234,13 +14234,16 @@ def test_the_emission_block_guard_is_not_vacuous():
     # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
     # stating two different emissions.
     #
-    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which is in no ref
-    # (`git cat-file -t b766b779af` -> fatal), and was then rewritten to say the splice is at
-    # "no reachable commit" — which is also false, so the correction repeated the very defect it
-    # was removing. Both halves are reachable today, measured with this module's own helpers:
-    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
-    # four parsed groups but FIVE unreadable shard-figure sentences, the fail-open this arm
-    # exists for — and `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor
+    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which NO REF ON `origin`
+    # resolves — `git ls-remote origin | grep b766b779` -> 0 matches, so every fresh clone gets
+    # `git cat-file -t b766b779af` -> fatal. (Stated against `origin` on purpose: a box whose
+    # LOCAL-ONLY `refs/preserved/*` happens to hold the object can still resolve it, so a bare
+    # `cat-file` here measures the box, not the citation.) It was then rewritten to say the splice
+    # is at "no reachable commit" — which is also false, so the correction repeated the very
+    # defect it was removing. Both halves are reachable today, measured with this module's own
+    # helpers: `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon
+    # spelling — four parsed groups but FIVE unreadable shard-figure sentences, the fail-open this
+    # arm exists for — and `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor
     # of this head), states four groups from two parents' readable clauses with no conflict
     # markers. The `spliced` fixture below is a HAND-BUILT string, not a checkout of either;
     # the commits are named so the arm is motivated by a shape a reader can go and check.
