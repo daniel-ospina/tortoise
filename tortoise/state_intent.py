@@ -249,7 +249,7 @@ _ENDING_BASE = (
 #:   constraint (`what is the archived pricing document`) cannot reach it, and it
 #:   refuses a WINDOW too (`what has ended in Q3`). ⛔ The vague adverbs
 #:   (`recently`/`lately`) are NOT admitted — they were withdrawn in the same
-#:   change that noticed the served `tortoise_search` description names
+#:   change that noticed the `tortoise_search` HANDLER DOCSTRING names
 #:   `what has ended recently` a RELEVANCE read (§ the adverb bullet below).
 #:   ⛔ IT IS THE HANDLER DOCSTRING, NOT THE SERVED DESCRIPTION (#14491 review).
 #:   The served tool description is `ToolDefinition.description`
@@ -363,16 +363,18 @@ _ENDING_BASE = (
 #:
 #: * "what has ended recently" / "what ended recently" — a trailing vague
 #:   adverb. #14033 names it as a measured miss and it still does NOT route, on
-#:   purpose: the SERVED `tortoise_search` description (`tortoise/mcp_server.py`)
+#:   purpose: the `tortoise_search` HANDLER DOCSTRING
+#:   (`tortoise/mcp_server.py`, not the served `ToolDefinition.description`)
 #:   states that this exact string is a RELEVANCE read, so admitting it here
-#:   would make the shipped contract WRONG about a phrasing it names — which is
-#:   #14033's own acceptance item #3, not a way to satisfy it. Honouring it needs
-#:   the description re-cut in the SAME change, and that description is a frozen
-#:   baseline cell (an owner-gated surface edit, #4282). The adverb would in fact
-#:   be harmless for the POPULATION — the ended read is ordered by the row's own
-#:   ``endedAt`` newest-first, so nothing a caller said is narrowed away — which
-#:   is why this is deferred rather than
-#:   refused: it is the DESCRIPTION that binds, not the population.
+#:   would leave that documented handler contract WRONG about a phrasing it
+#:   names — which is #14033's own acceptance item #3, not a way to satisfy it.
+#:   Honouring it needs the docstring re-cut in the SAME change, and the docstring
+#:   is a frozen baseline cell — it is part of the handler's ``co_consts``, so
+#:   editing it moves ``served_from`` and the re-cut is owner-gated (#4282).
+#:   The adverb would in fact be harmless for the POPULATION — the ended read is
+#:   ordered by the row's own ``endedAt`` newest-first, so nothing a caller said
+#:   is narrowed away — which is why this is deferred rather than refused: it is
+#:   the DOCSTRING that binds, not the population.
 #:   `what ended` and `what has been withdrawn` are the route until the re-cut
 #:   lands.
 #: * "what commitments do we have" / "what are the commitments" — a commitment
@@ -403,9 +405,9 @@ _ENDING_BASE = (
 #:   VAGUE ADVERB INCLUDED (`what has ended recently`, `list what we retired last
 #:   quarter`). The adverb is deferred on the CONTRACT, not on precision:
 #:   "recently" names no boundary, so it would narrow nothing away — but the
-#:   served `tortoise_search` description names that
-#:   exact string a RELEVANCE read, so admitting it here needs the description
-#:   re-cut in the SAME change (owner-gated, #4282). See the adverb bullet above.
+#:   `tortoise_search` handler docstring names that exact string a RELEVANCE
+#:   read, so admitting it here needs the docstring re-cut in the SAME change
+#:   (owner-gated, #4282). See the adverb bullet above.
 #: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
 #:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
