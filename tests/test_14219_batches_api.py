@@ -2471,6 +2471,28 @@ def test_a_configured_but_unwritable_root_is_refused_before_the_ack_gate(
     assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
 
 
+def test_a_maybe_accepted_fault_is_told_to_check_not_to_resend(client, monkeypatch):
+    """⛔ THE COPY THAT CARRIES THE P1 FIX WAS UNPINNED (round 26, P2 — measured).
+
+    `_BatchMaybeAccepted` subclasses `_BatchStoreFault`, so removing (or REORDERING)
+    its route arm silently regresses the wire copy to "nothing was accepted; retry
+    shortly" — the exact lie the type exists to avoid, over item rows the recovery
+    scan will adopt and bill. Measured: deleting the whole arm left this suite green.
+    """
+    def _fault(*a, **kw):
+        raise ha._batch_ingest._BatchMaybeAccepted("graph probe timeout")
+
+    monkeypatch.setattr(ha._batch_ingest.BatchCoordinator, "submit", _fault)
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    assert r.status_code == 503, r.text[:200]
+    detail = r.json()["detail"]
+    assert "GET /v1/batches" in detail, (
+        "a maybe-accepted fault invited a resend instead of a check: "
+        f"{detail}")
+    assert "nothing was accepted" not in detail, detail
+
+
 def test_a_store_fault_at_acceptance_answers_retry_not_a_misconfiguration(
         client, monkeypatch):
     """⛔ A STORE FAULT IS NOT A MISCONFIGURATION (round 23, P2 — measured).

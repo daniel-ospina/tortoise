@@ -2419,6 +2419,12 @@ class BatchCoordinator:
         # that positively proves there is no row lets the rollback clear the item
         # rows this call wrote.
         created = None
+        # ⛔ `present` TRAVELS (round 26, P2 — measured): once the guard has OBSERVED a
+        # row, a later ownership-read fault must not fall back to "nothing was
+        # accepted; retry", because that row is in `pending_batches()` and the retry
+        # duplicates the ingest. Unknown stays False = the honest failure (nothing of
+        # ours is known to have landed).
+        present = False
         for _attempt in (1, 2):
             try:
                 created = self._store.put_batch_if_absent(batch)
@@ -2530,7 +2536,7 @@ class BatchCoordinator:
                     "may not own", bid, exc_info=True)
                 # ⛔ a SERVER fault, so the route answers "retry" — not the
                 # storage-misconfiguration copy a `_BatchIdConflict` renders as.
-                raise _BatchStoreFault(
+                raise (_BatchMaybeAccepted if present else _BatchStoreFault)(
                     f"batch {bid!r}: the ownership read failed") from exc
             adopted = False
             if current is not None and current.created_at == stamp:

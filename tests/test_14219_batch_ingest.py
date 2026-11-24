@@ -3829,6 +3829,51 @@ def test_a_lost_create_refusal_unlinks_the_bytes_it_staged(tmp_path):
         f"{[str(p) for p in written]}")
 
 
+def test_a_fault_after_observing_the_row_still_says_check_not_resend():
+    """⛔ `present` MUST TRAVEL PAST THE GUARD (round 26, P2 — measured).
+
+    The guard observes the row, then the TAKEOVER's ownership read faults. Raising the
+    plain `_BatchStoreFault` there puts back the identical lie the previous commit
+    removed one read earlier: "nothing was accepted; retry shortly" over a row
+    `pending_batches()` already returns, so the retry ingests and charges twice.
+    Measured before the fix: `_BatchStoreFault` with the row `ACCEPTED` and
+    `pending_batches` holding the id.
+    """
+    class _FaultAfterPresentStore(InMemoryBatchStore):
+        """Create lands then faults; the re-read sees the row; the takeover read faults."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def put_batch_if_absent(self, batch) -> bool:
+            super().put_batch(Batch(batch_id=batch.batch_id, org_id=batch.org_id,
+                                    state=BatchState.ACCEPTED,
+                                    created_at=batch.created_at,
+                                    updated_at=batch.updated_at))
+            raise RuntimeError("graph statement timeout (write)")
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads <= 1:
+                return None            # the pre-write check
+            if self.reads == 2:
+                return super().get_batch(org_id, batch_id)   # the guard's re-read
+            raise RuntimeError("graph probe timeout")        # the takeover's read
+
+    store = _FaultAfterPresentStore()
+    coord = BatchCoordinator(store)
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md"])
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert isinstance(raised, bi_module._BatchMaybeAccepted), (
+        "a fault AFTER the row was observed told the customer nothing was accepted "
+        f"— the retry duplicates the ingest: {raised!r}")
+
+
 def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
     """⛔ `customer_copy(0.0)` PROMISED "1 hour" FOR ANY SIZE BATCH (round 23, P1).
 
