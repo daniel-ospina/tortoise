@@ -206,13 +206,42 @@ def test_cancel_is_404_for_an_unknown_batch(client):
     assert client.post("/v1/batches/batch_nope/cancel").status_code == 404
 
 
+def _stamped_init(real_init, clock):
+    """Give every coordinator the next stamp, so two submissions differ."""
+    def __init__(self, *a, **kw):
+        kw["now"] = lambda: next(clock)
+        real_init(self, *a, **kw)
+    return __init__
+
+
 def test_list_batches_is_newest_first_and_scoped(client, store, monkeypatch):
+    """⛔ BOTH halves of the name, each pinned (#14415 review round 6, P3).
+
+    The earlier cut asserted only `set(ids) == {…}` over ONE tenant, so it held
+    with the ordering reversed (`reverse=True` → ascending) and with the org
+    filter deleted — a set does not see either. The dashboard's whole reason for
+    this route is order, and the whole reason for the filter is tenancy.
+    """
+    # Two DISTINCT created_at stamps: a real clock can put both submissions in
+    # the same instant, and then the ordering test cannot see a reversal at all
+    # (equal keys are stable under either direction — measured: the ascending
+    # mutation stayed green until the stamps were separated).
+    clock = iter(["2026-01-01T00:00:01+00:00", "2026-01-01T00:00:02+00:00",
+                  "2026-01-01T00:00:03+00:00"])
+    # `_now` is an INSTANCE seam (`now` is a constructor argument), so the route's
+    # own coordinator is what has to be patched.
+    monkeypatch.setattr(bi.BatchCoordinator, "__init__",
+                        _stamped_init(bi.BatchCoordinator.__init__, clock))
     first = client.post("/v1/batches", json={"items": [{"ref": "/a.md"}]}).json()
     second = client.post("/v1/batches", json={"items": [{"ref": "/b.md"}]}).json()
+    # A batch belonging to ANOTHER tenant, in the same store.
+    bi.BatchCoordinator(store).submit("org-someone-else", ["/theirs.md"])
+
     listed = client.get("/v1/batches")
     assert listed.status_code == 200
     ids = [b["batch_id"] for b in listed.json()["batches"]]
-    assert set(ids) == {first["batch_id"], second["batch_id"]}
+    assert ids == [second["batch_id"], first["batch_id"]], (
+        f"newest first, and only this tenant's: {ids}")
 
 
 def test_the_route_family_is_batches_never_packs(client):
@@ -1905,3 +1934,70 @@ def test_two_stale_passes_both_accumulate_their_spend(store):
     assert row.tokens_in == 1400, (
         "a lost accumulation: 1 400 tokens were spent and the row records "
         f"{row.tokens_in} — the receipt under-reports the bill")
+
+
+def test_a_failed_hand_off_still_answers_accepted(client, monkeypatch):
+    """⛔ ROUND-6 REVIEW P2: the hand-off is not part of "nothing was accepted".
+
+    The rows are durable and `submit()` has returned by the time work is
+    dispatched, so a raise from there (starting the retry thread under thread
+    pressure) answered 500 for a batch that WAS accepted — and the customer's
+    retry ingested every item twice, the duplicate-ingestion class `submit()`'s
+    rollback exists to prevent and cannot help with. The ACK must stand: the
+    items are `queued` and both the recovery scan and the retry tick select them.
+    """
+    def boom(org, batch_id):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(ha, "_submit_or_defer", boom)
+    r = client.post("/v1/batches", json={"items": [{"ref": "/a.md"}]})
+    assert r.status_code == 201, (
+        f"an accepted batch was reported as failed: {r.status_code} {r.text}")
+    body = r.json()
+    assert body["batch_id"]
+    row = client.get(body["status_url"]).json()
+    assert row["items"][0]["status"] == "queued", (
+        "the item must still be queued for the recovery scan to find")
+
+
+def test_a_body_of_urls_is_refused_before_the_acknowledgement_gate(client):
+    """⛔ ROUND-6 REVIEW P3: validation order decides which refusal the customer sees.
+
+    The URL refusal ran AFTER the 402 acknowledgement gate, so a 47-item body of
+    URLs — large enough to require an acknowledgement — was refused with "re-send
+    with acknowledge_overage=true to confirm the expected spend", beside an
+    estimate for a batch that cannot be accepted. The re-send then 422s. A
+    request that cannot be accepted is refused for THAT reason first, and no
+    acknowledgement is collected for work that will never run.
+    """
+    items = [{"ref": f"https://example.test/{i}.md"} for i in range(60)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert r.status_code == 422, (
+        f"a URL body must be refused for being a URL body: {r.status_code} "
+        f"{r.text[:200]}")
+    assert r.json()["detail"]["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
+
+
+def test_a_vanished_item_row_is_not_resurrected_by_a_settlement(store):
+    """⛔ ROUND-6 REVIEW P2: a MERGE recreates the row it failed to match.
+
+    `_advance_landed`'s "no row" arm fell back to `put_item` — a `MERGE` — and
+    reported `landed=True`. The premise was false: `submit()` writes the item rows
+    BEFORE the batch row, so a mid-loop acceptance failure leaves orphan rows, a
+    concurrent recovery scan adopts and drains them, and the acceptance rollback
+    deletes them under the drain. The MERGE then recreated an item belonging to a
+    batch the customer was told was NOT accepted, the drain reported a settlement,
+    and the spend was metered against it. A vanished row is a lost compare.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    row = items[0]
+    # The rollback's `discard()`: the row is gone, the drain still holds a copy.
+    store.discard(ORG_ID, batch.batch_id)
+
+    settled, landed = coord._advance_landed(
+        ORG_ID, row, bi.BatchItemState.EXTRACTING, attempt=True)
+
+    assert landed is False, "a write that landed on no row must not report landed"
+    assert store.get_item(ORG_ID, batch.batch_id, row.item_id) is None, (
+        "the settlement MERGE-recreated a row whose batch was discarded")

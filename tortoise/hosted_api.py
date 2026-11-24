@@ -17480,6 +17480,36 @@ async def create_batch(body: BatchRequest,
                                "seconds.",
                 }) from None
 
+    # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
+    # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
+    # promised a refusal — and neither existed: `ref` was copied verbatim into
+    # `submit`, so `https://…` became a relative path under the org root, was
+    # ACCEPTED with 201, and died inside the indexer with a storage message. A
+    # refusal the customer can act on has to be an HTTP answer at acceptance.
+    # (This API never fetches a caller-named URL: that is an SSRF surface, and an
+    # egress allow-list is not a substitute for not fetching.)
+    #
+    # ⛔ AND IT RUNS BEFORE THE ESTIMATE AND THE ACKNOWLEDGEMENT GATE (#14415
+    # review round 6, P3). Behind the gate, a body whose items are ALL URLs was
+    # refused 402 and told to "re-send with acknowledge_overage=true to confirm
+    # the expected spend" — collecting an acknowledgement for work that cannot
+    # run, with an estimate for a batch that is structurally invalid; the
+    # re-send then 422s. A request that cannot be accepted is refused for THAT
+    # reason first.
+    bad_refs = [it.ref for it in body.items
+                if _URL_SHAPED.match(str(it.ref or ""))]
+    if bad_refs:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "BATCH_REF_URL_NOT_SUPPORTED",
+                "message": "a batch item must name a document under this team's "
+                           "storage (a path), or carry its text. This API does "
+                           "not fetch URLs — nothing was accepted and nothing "
+                           "was charged.",
+                "refs": bad_refs[:10],
+            })
+
     est = _batch_ingest.estimate_batch(len(body.items),
                                        included_tokens=included_tokens,
                                        tokens_already_used=used_tokens)
@@ -17541,28 +17571,6 @@ async def create_batch(body: BatchRequest,
                 "estimate": est_dict,
             })
 
-    # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
-    # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
-    # promised a refusal — and neither existed: `ref` was copied verbatim into
-    # `submit`, so `https://…` became a relative path under the org root, was
-    # ACCEPTED with 201, and died inside the indexer with a storage message. A
-    # refusal the customer can act on has to be an HTTP answer at acceptance.
-    # (This API never fetches a caller-named URL: that is an SSRF surface, and an
-    # egress allow-list is not a substitute for not fetching.)
-    bad_refs = [it.ref for it in body.items
-                if _URL_SHAPED.match(str(it.ref or ""))]
-    if bad_refs:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error_code": "BATCH_REF_URL_NOT_SUPPORTED",
-                "message": "a batch item must name a document under this team's "
-                           "storage (a path), or carry its text. This API does "
-                           "not fetch URLs — nothing was accepted and nothing "
-                           "was charged.",
-                "refs": bad_refs[:10],
-            })
-
     refs = [it.ref for it in body.items]
     contents = [it.text for it in body.items]
     names = [it.name or "" for it in body.items]
@@ -17602,7 +17610,21 @@ async def create_batch(body: BatchRequest,
     # Work starts AFTER the rows exist, on the batch's own pool. A deferral
     # (ceiling or off-peak window) leaves the items `queued`: durable, visible,
     # and picked up by the next tick — never lost.
-    _submit_or_defer(org, batch.batch_id)
+    # ⛔ THE HAND-OFF IS NOT PART OF "NOTHING WAS ACCEPTED" (#14415 review round
+    # 6, P2). The rows above are durable and `submit()` has returned, so a raise
+    # from here (starting the retry thread under thread pressure, say) would
+    # answer 500 for a batch that WAS accepted — and the customer's retry ingests
+    # every item twice, which is exactly what `submit()`'s rollback exists to
+    # prevent and cannot help with here. A refused or missing hand-off is already
+    # recoverable: the items stay `queued` and the recovery scan and the retry
+    # tick both select them.
+    try:
+        _submit_or_defer(org, batch.batch_id)
+    except Exception:
+        _logger.exception(
+            "batch %s was accepted but its drain could not be handed off (team "
+            "%s); the items are queued and the recovery scan will pick them up",
+            batch.batch_id, org_id)
 
     return _batch_ingest.acceptance_receipt(
         batch, items, status_url=f"/v1/batches/{batch.batch_id}")

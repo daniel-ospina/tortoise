@@ -1780,11 +1780,20 @@ class BatchCoordinator:
         caller_item = item
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
         if stored is None:
-            # No row to race with: the expectation is not a claim about a
-            # competitor, so fall back to a plain write rather than wedging an
-            # item whose row vanished.
-            expect = None
-        elif stored.state is not expect:
+            # ⛔ A VANISHED ROW IS A LOST COMPARE, NOT A LICENCE TO RECREATE IT
+            # (#14415 review round 6, P2). This arm used to fall back to
+            # `put_item` — a `MERGE`, which CREATES the row it failed to match —
+            # and report `landed=True`. The premise ("no row to race with") is
+            # false: `submit()` writes the item rows BEFORE the batch row, so a
+            # mid-loop acceptance failure leaves orphan item rows, a concurrent
+            # `_recover_org_batches` (any `GET /v1/batches` from that tenant)
+            # adopts and drains them, and the acceptance rollback's `discard()`
+            # then deletes the rows under the drain. The MERGE recreated an item
+            # belonging to a batch the customer was told was NOT accepted, the
+            # drain reported a settlement, and the spend was metered for it.
+            # Nothing is written, and the caller sees the truth: not landed.
+            return _sync_item(caller_item, caller_item), False
+        if stored.state is not expect:
             # Someone moved it between the caller's read and here. THEIR write
             # wins; report the row, write nothing.
             return _sync_item(caller_item, stored), False
