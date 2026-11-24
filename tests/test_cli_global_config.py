@@ -391,6 +391,85 @@ class TestCreatePointRetrySafety:
         assert "Cannot reach API" in captured.err
         assert "AttributeError" not in captured.err
 
+    def test_the_unreachable_arm_never_prints_a_url_credential(
+            self, tmp_path, capsys):
+        """The `URLError` arm prints the base too, so it must MASK it as well.
+
+        The success hint is covered by
+        `test_the_success_hint_never_prints_a_url_credential`, but the FAILURE
+        arms print the same base and had no witness: reverting this arm to
+        `{api_url}` left the whole file green (measured). A store-supplied
+        `api_url` may carry basic-auth credentials, and a connect failure is
+        exactly when a user pastes stderr into an issue.
+
+        Mutation: print `api_url` instead of
+        `_printable(_mask_display_target(api_url))` and this REDs.
+        """
+        from urllib.error import URLError
+
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:sup3rsecretpw@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=URLError("Connection refused")):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "sup3rsecretpw" not in err, (
+            "the store's URL password reached stderr")
+        assert "***" in err, "the masked base must still be shown"
+
+    @pytest.mark.parametrize("body,kind", [
+        (b"[]", "list"),
+        (b"null", "NoneType"),
+        (b"<html>502 proxy</html>", "JSON"),
+        (b"\xff\xfe\x00binary", "JSON"),
+    ])
+    def test_a_2xx_body_the_verb_cannot_read_is_a_clean_error(
+            self, tmp_path, capsys, body, kind):
+        """An unreadable 2xx was a bare TRACEBACK out of the first-run verb.
+
+        `main()` has no backstop (`raise SystemExit(main())`), so `[].get` and a
+        `None` body crashed it, and a non-UTF-8 body (`UnicodeDecodeError` — a
+        `ValueError` but NOT a `JSONDecodeError`) escaped even the decode arm.
+
+        Every one of these is a 2xx, so the write MAY have landed: the message
+        must say so and name `--dedup`, or the user re-runs and manufactures the
+        duplicate Point this PR documents.
+
+        Mutation: delete the `isinstance(result, dict)` guard and the `[]`/`null`
+        cases RED; drop `UnicodeDecodeError` from the decode arm and the binary
+        case REDs with the traceback escaping.
+        """
+        class _Resp:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_Resp(body)):
+            rc = main(["create-point", "hello world"])  # must not raise
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert kind in err, f"the message must name what arrived: {err!r}"
+        assert "MAY have landed" in err, (
+            "a 2xx means it probably committed; say so")
+        assert "--dedup" in err, (
+            "the retry override must be named, or the user re-runs blindly")
+        assert "Traceback" not in err
+
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):
         _seed_global(tmp_path)

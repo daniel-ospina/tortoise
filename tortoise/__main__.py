@@ -6147,11 +6147,17 @@ def _cmd_create_point(args) -> int:
               "re-sending, or re-run with `--dedup` to make the retry safe.",
               file=_sys.stderr)
         return 1
-    except _json.JSONDecodeError as e:
+    except (UnicodeDecodeError, _json.JSONDecodeError) as e:
         # #14424 review P3: the server ANSWERED, so this is not the arm above —
         # the connection did not fail, the body was unreadable (an HTML proxy
         # page behind a 502, a truncated body). The write still MAY have landed,
         # so the next action is the same, and the CAUSE is stated apart from it.
+        # ⛔ `UnicodeDecodeError` is named here because it is a `ValueError` but
+        # NOT a `JSONDecodeError`: a binary/undecodable 2xx body (a truncated
+        # gzip, an upstream answering in raw bytes) escaped every arm and
+        # tracebacked out of `main()`, which has no backstop. Widening to bare
+        # `ValueError` was REJECTED — that would also swallow a programming
+        # error in the request construction inside this same `try`.
         print(f"Cannot read the API's response as JSON ({e}).", file=_sys.stderr)
         print("The server answered, so the write MAY have landed. Reconcile "
               "with `GET /v1/points` before re-sending, or re-run with "
@@ -6160,14 +6166,21 @@ def _cmd_create_point(args) -> int:
 
     # #14424 review P3: a 2xx this verb cannot READ is not a success, and until
     # here it was a bare traceback on the first-run verb — `result.get` on a
-    # `[]`/`null` body raises AttributeError and an HTML proxy page raises
-    # JSONDecodeError out of `main()`, which has no backstop (`raise
-    # SystemExit(main())`). `_cmd_org_keys_list` one command up guards the same
-    # shape the same way ("2xx with a non-object body ([]/null) — clean error,
-    # not AttributeError").
+    # `[]`/`null` body raises AttributeError, out of `main()`, which has no
+    # backstop (`raise SystemExit(main())`). `_cmd_org_keys_list` one command up
+    # guards the same shape the same way ("2xx with a non-object body ([]/null)
+    # — clean error, not AttributeError").
     if not isinstance(result, dict):
+        # ⛔ A 2xx means the POST most likely COMMITTED, so this arm must say the
+        # same thing as its three siblings in this function (URLError,
+        # Timeout/OSError, decode). It used to print only "Invalid response",
+        # which tells a user to re-run and manufactures exactly the duplicate
+        # Point this PR exists to prevent (measured: 4 attempts, 4 Points).
         print(f"Invalid response from API: expected a JSON object, got "
               f"{type(result).__name__}.", file=_sys.stderr)
+        print("The server answered with 2xx, so the write MAY have landed. "
+              "Reconcile with `GET /v1/points` before re-sending, or re-run "
+              "with `--dedup` to make the retry safe.", file=_sys.stderr)
         return 1
     point_id = result.get("id", result.get("point_id", "unknown"))
     print(f"Created point: {point_id}")
