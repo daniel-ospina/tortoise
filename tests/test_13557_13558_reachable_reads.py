@@ -799,6 +799,14 @@ NOT_SELECTED = [
     "what ended, and what replaced it",
     # ── STATEMENTS, third-party actions, and boundaries stated in the module ─
     "did the customer cancel their order",
+    # …and the do-support THIRD-PARTY frame, which no shape can reach (review at
+    # `633cbcdff6`, P3): `did <subject> <ending base>` with a subject that is not
+    # `we`/`i` used to answer `population=None, signal=None`, which a caller cannot
+    # tell apart from "nothing has ended". It does NOT route — `we`/`i` is what makes
+    # the question about OUR records — so both spellings are here AND in
+    # `NOTICE_ONLY`, and they report `do_support_other_subject`.
+    "what did legal retire",
+    "what did legal retire in Q3",
     # …`what has ended recently` USED TO SIT HERE as a stated recall loss and is
     # now a SELECTED row (#14033): a recency adverb names no window, and the rows
     # carry `endedAt`. The CONSTRAINT rows below still do not route — they report
@@ -1228,6 +1236,13 @@ NOTICE_ONLY = [
     "which claims were retracted by legal",
     "which reports were superseded by the new one",
     "which units are cancelled in the export",
+    # …and the do-support THIRD-PARTY frame (review at `633cbcdff6`, P3, measured):
+    # `what did legal retire` / `… retire in Q3` were silent — no shape reaches a
+    # `did <subject> <base verb>` frame whose subject is not first person — so the
+    # relevance reply was indistinguishable from "nothing has ended". They report
+    # `do_support_other_subject` now; the ROUTE stays with `did we …` on purpose.
+    "what did legal retire",
+    "what did legal retire in Q3",
     "what has ended last quarter",
     # a COMPOUND question: only the first clause is an ending
     "what ended, and what replaced it",
@@ -2844,7 +2859,12 @@ def test_every_signal_is_its_shape_without_the_end_anchor():
         "which_names_an_ending", "which_modified_noun", "is_copula_long_subject",
         # the UNGUARDED `existence` expression: the same cue, matched without the
         # clause guard, so a question the guard refused is reported, not silenced.
-        "existence_unguarded"}
+        "existence_unguarded",
+        # …and the do-support frame NO shape can reach: `did <subject> <base verb>`
+        # whose subject is not first person (review at `633cbcdff6`, P3). It is a
+        # NOTICE row by construction — a signal can only ADD a report, so it moves
+        # no route — which is why `do_support` itself keeps its routed asymmetry.
+        "do_support_other_subject"}
 
     # The BEHAVIOUR the identity buys, driven through the detector: each shape's own
     # routed example, given a qualifier, declines and REPORTS — including the
@@ -2868,6 +2888,12 @@ def test_every_signal_is_its_shape_without_the_end_anchor():
     # PRE-EXISTING, deliberately pinned trade (`what did we archive last quarter`
     # is a SELECTED row, and every returned row carries `endedAt`), recorded here
     # so the asymmetry is a decision rather than a gap the next reader "fixes".
+    # ⛔ AND IT IS NAMED WHERE THE CALLER READS IT (review at `633cbcdff6`, P2):
+    # the module prose used to claim the constraint was "refused by every shape's
+    # tail anchor", which is false on exactly this frame, and the SERVED
+    # `ROUTING_NOTE` said the boundary was readable off the wording while listing
+    # nothing about `what did we retire in Q3`. See
+    # `test_the_do_support_exception_is_named_where_the_caller_reads_it`.
     assert detect_state_question("what did we archive last quarter").shape == (
         "do_support")
     assert "do_support" not in signals
@@ -2879,23 +2905,27 @@ def test_the_shape_with_no_tail_anchor_states_BOTH_of_its_boundaries():
     `do_support` is the one shape with no tail anchor, so on that frame the module
     can neither refuse an appended window (P2) nor report one (P3 — a shape with no
     end anchor yields no derived signal row). Both behaviours predate this PR and
-    anchoring the shape would overturn a pinned SELECTED row, so the remedy the
-    review names is that the boundary is STATED where a caller reads it. This test
-    pins the measurement on both sides, so the prose cannot drift off the code:
+    anchoring the shape would overturn a pinned SELECTED row, so the window half is
+    fixed by STATING the boundary where a caller reads it, which is the remedy the
+    review names. This test pins the measurement on both sides, so the prose cannot
+    drift off the code:
 
       * the frame still ROUTES with the window unapplied — the pinned trade, so a
         ``_TAIL_END`` slipped onto the shape reds here and has to go through that
         decision instead of arriving as an unremarked "fix";
-      * a non-`we|i` subject is still SILENT — the residual, named rather than
-        claimed away;
+      * a non-`we|i` subject is NOT routed — the route belongs to the first-person
+        frame, "our records" — and it IS reported, through the hand-written
+        ``do_support_other_subject`` notice row. ⛔ THE REVIEW'S P3 IS THE SILENCE,
+        so documenting it is not the fix: ``signal=None`` is indistinguishable from
+        "nothing has ended", which is the one outcome this module forbids;
       * and the SERVED `tortoise_search` description names BOTH frames, each under
-        the heading the recogniser agrees with.
+        the heading the recogniser agrees with, with the consequence stated.
     """
+    from tortoise import state_intent as si
     from tortoise.state_intent import ROUTING_NOTE, detect_state_question
     from tortoise.tool_registry import TOOL_REGISTRY
 
-    # P2 — routed, window dropped, no report. (The silence is by construction: a
-    # shape with no end anchor has no prefix to derive a signal from.)
+    # P2 — routed (the pinned trade), and the window is dropped rather than reported.
     for query in ("what did we retire in Q3",
                   "what did we retire last quarter",
                   "what did we archive last quarter"):
@@ -2906,14 +2936,35 @@ def test_the_shape_with_no_tail_anchor_states_BOTH_of_its_boundaries():
             "pinned SELECTED trade (and `ROUTING_NOTE`'s WINDOW row) is stale")
         assert sq.signal is None, query
 
-    # P3 — neither routed nor reported: the reply is indistinguishable from
-    # "nothing has ended", which is why it is named in the served description.
+    # P3 — NOT routed (a third-party subject must not answer with OUR ended set),
+    # but REPORTED, with the cue it saw and the `shape` reason a caller branches on.
     for query in ("what did legal retire", "what did legal retire in Q3"):
         sq = detect_state_question(query)
-        assert sq.shape is None and sq.signal is None and sq.population is None, (
-            f"{query!r} now answers shape={sq.shape!r} signal={sq.signal!r} — the "
-            "named silent residual changed, so the prose that calls it silent is "
-            "now false and must move with it")
+        assert sq.population is None and sq.shape is None, (
+            f"{query!r} now serves {sq.population!r} — `we`/`i` is what makes the "
+            "do-support question about OUR records")
+        assert sq.signal == "do_support_other_subject", (
+            f"{query!r} answers signal={sq.signal!r}: a state question that is "
+            "neither routed nor reported is indistinguishable from an honest empty "
+            "answer (#14500 review, P3)")
+        payload = si.missed_route_payload(sq)
+        assert payload and payload["reason"] == "shape", (
+            f"{query!r} carries no `shape` payload — the notice the read path puts "
+            "on its sink is what makes the distinction visible to a caller")
+        assert payload["cue"] and payload["cue"] in query.lower(), (
+            f"{query!r} reports cue {payload['cue']!r}, which is not the words it saw")
+
+    # …and the guards that keep the new notice row off the pinned content rows: the
+    # present-tense frame, and an OBJECT after the verb (the tail guard is what keeps
+    # `did the customer cancel their order` silent — measured: dropping the guard
+    # annotates exactly that one pinned `NOT_SELECTED` row and nothing else).
+    for query in ("does legal archive the register",
+                  "did the customer cancel their order",
+                  "what did the customer say when we cancelled their order",
+                  "what did we learn from the cancelled launch"):
+        assert si.detect_state_question(query).signal is None, (
+            f"{query!r} now carries a notice — it is a pinned CONTENT query, so the "
+            "notice is noise on an ordinary search")
 
     doc = next(t for t in TOOL_REGISTRY if t.name == "tortoise_search").description
     assert ROUTING_NOTE in doc
@@ -2931,15 +2982,32 @@ def test_the_shape_with_no_tail_anchor_states_BOTH_of_its_boundaries():
     assert "WINDOW is NOT applied" in routes, (
         "the served description names that frame but not the consequence — it "
         "must say the window is NOT applied and that each row carries `endedAt`")
-    # …and the silent-subject frame is filed under DOES NOT ROUTE, with its
-    # silence stated (the existing per-phrasing loop in the description test
-    # already checks that every phrasing filed there really does not route).
+    # …and the non-`we|i` subject is filed under DOES NOT ROUTE (the existing
+    # per-phrasing loop in the description test already checks that every phrasing
+    # filed there really does not route), with its NOTICE stated — the half a caller
+    # cannot recover from is being told nothing was seen.
     assert "what did legal retire" in declines, (
         "the served description does not name the do-support frame whose subject "
-        "is not `we|i`, so that silence stays undocumented (#14500 review, P3)")
-    assert "neither routed NOR" in declines, (
-        "the served description names the silent frame without saying it is "
-        "unreported as well, which is the half a caller cannot recover from")
+        "is not `we|i`, so a caller cannot predict it (#14500 review, P3)")
+    assert "it IS reported" in declines, (
+        "the served description names that frame without saying its cue is "
+        "REPORTED — the notice is what separates it from an honest empty answer, "
+        "and the served text must not leave a caller to guess")
+    assert "neither routed NOR reported" not in declines, (
+        "the served description calls the non-`we|i` frame unreported — it carries "
+        "`do_support_other_subject` now, so that sentence is false")
+
+    # …and the module prose's false universal is gone, not merely reworded nearby.
+    source = (
+        Path(__file__).resolve().parent.parent / "tortoise" / "state_intent.py"
+    ).read_text(encoding="utf-8")
+    assert "refused by every shape's tail anchor" not in source, (
+        "the module claims an appended constraint is refused by EVERY shape's tail "
+        "anchor — `do_support` has no tail anchor and drops the window instead "
+        "(review at `633cbcdff6`, P2)")
+    assert "_DO_SUPPORT_OTHER_SUBJECT" in source, (
+        "the notice row that reports the third-party do-support frame is gone, so "
+        "`what did legal retire` is silent again while the prose says it is reported")
 
 
 def test_the_mcp_description_predicts_which_of_the_six_route():

@@ -168,6 +168,13 @@ _ENDING_BASE = (
 #: (`previously`, `earlier`, `before` — unrouted and reported); one whose first word
 #: is not (`most recently`, `just recently`) is unrouted AND SILENT, which
 #: `_BLOCKED_TAIL`'s own note states as the limit of the closed list.
+#: ⛔ AND THE WINDOWS THIS CLASS REFUSES ARE REFUSED ONLY BY A TAIL-ANCHORED SHAPE
+#: (review at `633cbcdff6`, P2, measured): `what did we archive last quarter` still
+#: ROUTES through ``do_support``, whose pattern carries no end anchor — so on THAT
+#: frame `last quarter` is dropped rather than refused, while the same window on
+#: `what has ended last quarter` is refused and reported. Naming it here so the
+#: class's own claim is not read as covering a frame it does not reach; the caller-
+#: facing statement of the exception is :data:`ROUTING_NOTE`'s `did we …` row.
 _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 
 #: ENDING-question shapes. ⛔ EVERY SHAPE IS ANCHORED, and that is the lesson of
@@ -314,13 +321,14 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:   row (`what did we archive last quarter`, with its identity assertion, in
 #:   `tests/test_13557_13558_reachable_reads.py`). The served `ROUTING_NOTE` names
 #:   the same frame, so a caller reading only the tool description can predict it.
-#:   ⛔ AND THE SAME SHAPE IS SILENT FOR A SUBJECT THAT IS NOT `we|i` (#14500 review,
-#:   P3, measured): `what did legal retire` and `what did legal retire in Q3` answer
-#:   ``shape=None, signal=None`` — neither a route nor a notice — so that reply is
-#:   indistinguishable from the claim "nothing has ended". Routing it is a RECALL
-#:   decision (a wider subject class on the shape), not a documentation one, so it is
-#:   a residual NAMED here and in `ROUTING_NOTE` rather than one taken inside a
-#:   reconciliation.
+#:   ⛔ AND THE SAME SHAPE'S SUBJECT CLASS IS REPORTED, NOT SILENT (#14500 review,
+#:   P3, measured). A `did <subject> <ending base>` question whose subject is not
+#:   `we|i` (`what did legal retire`) matches no shape, so it used to answer
+#:   ``shape=None, signal=None`` — indistinguishable from the claim "nothing has
+#:   ended", which is the one outcome this module forbids. Routing it would be a
+#:   RECALL decision (a wider subject class on the shape) and that is NOT taken here:
+#:   the notice row ``do_support_other_subject`` REPORTS it instead, which can only
+#:   add a report and cannot move a route.
 #:
 #: ⛔ AND A STRONG CUE THAT DOES NOT FIRE IS NOT SILENT (#14033). The precision
 #: rules above are what keep a content question out of the population, and the
@@ -331,7 +339,12 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #: while matching no shape is reported as ``StateQuestion.signal``. ⛔ NOT EVERY SHAPE
 #: HAS ONE: `do_support`'s pattern carries no end anchor to swap, so it is excluded
 #: by construction and has no signal row (see `_ENDING_SIGNALS`; the identity test
-#: pins the same asymmetry). That is the whole
+#: pins the same asymmetry). ⛔ ONE HAND-WRITTEN ROW DOES NAME ITS FRAME, and only for
+#: the class the shape cannot reach AT ALL: ``do_support_other_subject`` reports a
+#: `did <subject> <base verb>` question whose subject is not first person — no shape
+#: matches it, so `what did legal retire` used to be silent (review at `633cbcdff6`,
+#: P3). A NOTICE row can only ever ADD a report, so it moves no route and leaves the
+#: routed asymmetry above exactly as it was. That is the whole
 #: definition of "strong": a cue the recogniser WOULD have applied but for a
 #: guard the population cannot honour, never "an ending word somewhere in the
 #: sentence". The read path answers those queries with the relevance read it
@@ -340,13 +353,17 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:
 #: ⛔ WHAT THE NOTICE COVERS, STATED SO IT IS NOT OVERREAD. It is the expression-level
 #: complement of the shapes — a cue whose shape matched but whose GUARD refused it
-#: (an appended qualifier from :data:`_BLOCKED_TAIL`) — plus FOUR named rows for the
+#: (an appended qualifier from :data:`_BLOCKED_TAIL`) — plus FIVE named rows for the
 #: recall the shapes give up on purpose: an attributive `which` phrase
 #: (``which_names_an_ending``), the unguarded `existence` expression whose clause guard
 #: refused it (``existence_unguarded``), a MODIFIED `which` head noun
-#: (``which_modified_noun``) and an over-long copula subject
-#: (``is_copula_long_subject``). It is NOT "every question that mentions an ending":
-#: an over-long `has … been <participle>` subject and a qualifier outside the closed
+#: (``which_modified_noun``), an over-long copula subject
+#: (``is_copula_long_subject``) and a `did <subject> <ending base>` question whose
+#: subject is NOT first person (``do_support_other_subject`` — the do-support frame
+#: :data:`_ENDING_SHAPES` cannot reach at all, review at `633cbcdff6`, P3). It is NOT
+#: "every question that mentions an ending":
+#: an over-long `has … been <participle>` subject, a present-tense third-party
+#: do-support frame (`does legal archive …`), and a qualifier outside the closed
 #: tail list are still silent, and widening the notice to cover them means widening
 #: this paragraph's claim first.
 
@@ -1728,6 +1745,49 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"{_BLOCKED_TAIL}"
 )
 
+#: `did <subject> <base verb>` WHERE THE SUBJECT IS NOT FIRST PERSON — the do-support
+#: frame `do_support` cannot reach, reported instead of silenced (review at
+#: `633cbcdff6`, P3, measured). `what did legal retire` and `what did legal retire in
+#: Q3` answered `population=None, signal=None`, which a caller cannot tell apart from
+#: "nothing has ended"; the frame IS a state question, so it gets a notice.
+#:
+#: ⛔ IT IS A NOTICE ROW AND NOT A SHAPE, which is what makes it safe: the population
+#: was never served here and this row cannot serve one, so it can only ADD a report —
+#: measured, 0 population/shape moves over the pinned corpus. The route stays with the
+#: FIRST-PERSON frame on purpose: `we`/`i` is what makes the question about OUR
+#: records, so `did legal retire …` (a third party's action) must not answer with our
+#: ended population; it is reported and the caller decides.
+#:
+#: ⛔ THE SUBJECT SLOT IS BOUNDED (at most three words, one optional determiner) for
+#: the same reason `_WHICH_MODIFIED_NOUN`'s is: a window that reaches across a clause
+#: turns a content question into a notice. Measured on the pinned `NOT_SELECTED`
+#: corpus: `what did the customer say when we cancelled their order`, `what did we
+#: learn from the cancelled launch` and `what did the vendor advise about our
+#: commitments` match neither this row nor a shape — their verb slot is not an ending
+#: word — while `what did the vendor archive` does report.
+#: ⛔ THE TAIL GUARD IS WHAT KEEPS THE ROW OFF THE PINNED CONTENT QUERY, and the trade
+#: it charges is stated rather than discovered: with :data:`_BLOCKED_TAIL` the row fires
+#: only where the verb ENDS the question (`what did legal retire`, `… retire in Q3`), so
+#: an OBJECT after it stays silent (`did the team archive the old plans`). Dropping the
+#: guard was measured against the same corpus and annotates exactly ONE row — the pinned
+#: `did the customer cancel their order`, a content lookup that must stay silent — which
+#: is why the guard is kept: there is no structural discriminator between a third-party
+#: subject whose ending verb carries an object and that row, so admitting objects means
+#: admitting it too.
+#: ⛔ ITS LIMIT IS STATED, NOT DISCOVERED: the auxiliary class is the PAST `did` only,
+#: so a present-tense third-party frame (`does legal archive …`) stays SILENT. Widening
+#: it means teaching this row the present-habitual discriminator `do_support` already
+#: carries (`do`/`does` + a base verb is a policy question), not simply adding an
+#: alternative to the auxiliary slot.
+_DO_SUPPORT_OTHER_SUBJECT = re.compile(
+    rf"^(?:what\s+)?did\s+(?!we\b|i\b)"
+    rf"(?:(?:the|our|your|their|his|her|its|a|an|any|all|some|every)\s+)?"
+    rf"[a-z0-9][a-z0-9'’._/-]*"
+    rf"(?:\s+[a-z0-9][a-z0-9'’._/-]*){{0,2}}"
+    rf"\s+(?:{_ENDING_BASE})\b"
+    rf"{_BLOCKED_TAIL}"
+)
+
 _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     *(
         (name, re.compile(shape.pattern.replace(_TAIL_END, _BLOCKED_TAIL)))
@@ -1935,6 +1995,9 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
+    # the do-support frame no shape can reach: a `did <subject> <ending base>`
+    # question whose subject is NOT first person (review at `633cbcdff6`, P3).
+    ("do_support_other_subject", _DO_SUPPORT_OTHER_SUBJECT),
 )
 
 #: What a caller is told when a state cue was seen and no shape applied. ONE
@@ -1979,7 +2042,8 @@ ROUTING_NOTE = """\
 ⛔ WHICH PHRASINGS ROUTE, SO YOU CAN PREDICT IT (#14033). The cue is the
 question's own PREDICATE, anchored to its grammatical role — never an ending
 word that happens to sit near a wh-word — so the boundary is readable off the
-wording. Of the phrasings this read is asked about:
+wording, with ONE named exception (the `did we …` row below). Of the phrasings
+this read is asked about:
 
   ROUTES — answered from the ended population, each row with how it ended:
     `has anything we relied on been withdrawn`   (has/have + quantifier + been)
@@ -2007,9 +2071,12 @@ wording. Of the phrasings this read is asked about:
                                                   population cannot answer)
     `what did legal retire`                      (this frame needs a `we`/`i`
                                                   subject; with any other subject
-                                                  it is neither routed NOR
-                                                  reported, so an answer here is
-                                                  NOT evidence that nothing has
+                                                  it is NOT routed — the window
+                                                  frame above is the only `did …`
+                                                  form that routes — but it IS reported
+                                                  as a missed-cue notice instead of
+                                                  served silently, so an answer here
+                                                  is NOT evidence that nothing has
                                                   ended)
 
 ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL
@@ -2239,10 +2306,10 @@ _APOSTROPHES = (
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus AT MOST 18 compiled
+    Deterministic and bounded — one normalisation plus AT MOST 19 compiled
     patterns in three passes that stop at the first shape that fires: the 6
-    ending shapes, then (only if none fired) the 9 missed-cue signals (5 derived
-    from those shapes + 4 hand-written recall rows, :data:`_ENDING_SIGNALS`),
+    ending shapes, then (only if none fired) the 10 missed-cue signals (5 derived
+    from those shapes + 5 hand-written recall rows, :data:`_ENDING_SIGNALS`),
     then the 3 commitment shapes
     (:data:`_COMMITMENT_SHAPES`). No model call and no IO, so the hot read path
     pays microseconds and the mapping is unit-testable offline.
