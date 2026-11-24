@@ -2055,11 +2055,11 @@ SWEEP_NAMES = 66
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE, because
 #: the fold's own tree is a THIRD tree: this merge brings main's durable `claim_unavailable` self-heal,
 #: whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one new untyped `.update(`
-#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -3
-#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
+#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -2
+#: between that and `main`'s OWN TREE **11912** is attributed ROW BY ROW, not waved through:
 #:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
 #:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
-#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
+#:     with `#14506` (`7d9e7b99c4734`) and which #14480's re-pin did not count. So `--check` exits 1 on
 #:     ITSELF **at `2cccf90f4dd4`** (the `#14062` recurrence the blocks above record a sixth time);
 #:     this branch inherits main's row set, not main's number. ⛔ AND `main` HAS SINCE MOVED PAST IT:
 #:     #4625's fold re-derived the pin on ITS OWN tree and `--check` exits 0 at `6a02515d14ad5`,
