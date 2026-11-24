@@ -2099,7 +2099,24 @@ SWEEP_NAMES = 66
 #: method — the ordinary-word receiver class this pin DECLARES rather than rewrites. `typed
 #: references still pointing at a public name: 0` on this tree, so no typed call site is legitimised
 #: by the re-cut.
-SWEEP_RESIDUE = (11921, "6c91d77bf0791ca6")
+#: references still pointing at a public name: 0` on this tree, so no typed call site is legitimised
+#: by the re-cut.
+#: ⛔ BOTH SIDES' BLOCKS FROM THE `origin/main` FOLD ARE KEPT above and below this line, this file's
+#: standing ground rule (one assignment, both records). The fold recorded ABOVE is this branch's;
+#: the NEXT fold — `origin/main` `59a08fdb8b40` — read **(11910, "adc8229295339239")** on ITS tree,
+#: which is not this one, and that record is preserved rather than overwritten.
+#: ⛔ THAT MERGE'S TREE IS THAT LANE'S, NOT THIS ONE'S — the pair below is `--repin`'s output HERE.
+#: ⛔ THIS PIN WAS RE-DERIVED ON THE **MERGE TREE**,
+#: not carried from either side of the `origin/main` integration: `--repin` HERE prints
+#: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
+#: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
+#: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
+#: ⛔ THIS FOLD — `origin/main` `2cccf90f4dd4` (the two commits above `59a08fdb8b40`) — is RE-CUT ON
+#: THE RESOLVED TREE, never inherited from either parent and never arithmetic across them:
+#: `--repin` on THIS tree prints **(11922, "97af31f6c4fda3c5")**, which is this branch's own pre-fold
+#: 11921 plus exactly the ONE row `main`'s block above names, and NO other row moves — the count a
+#: reader can check, not a delta taken on trust. `--check` exits 0 on it.
+SWEEP_RESIDUE = (11922, "97af31f6c4fda3c5")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

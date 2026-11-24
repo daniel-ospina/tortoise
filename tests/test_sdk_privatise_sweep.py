@@ -252,8 +252,14 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1989 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2006 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
+    kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
+    RE-MEASURED by this walk on the RESOLVED file at 2006 rather than inherited from either side —
+    the pre-merge branch walked 1989 and `main`'s own blob walked 1930, each measured by THIS
+    function on its own file, and the resolved run is their UNION plus this lane's fold note, never
+    a sum of them. ⛔ Earlier readings, kept because every fold's record stays (1921 at
+    `59a08fdb8b40`, 1930 on `main`): ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — ⛔ AND
     RE-WALKED AGAIN on the LATER fold of `origin/main` `59a08fdb8b40`, which re-ran this sentence's
@@ -318,6 +324,11 @@ def _residue_block() -> str:
     branch's `abf5fefe` copy had no such arm at all), and it was TRUE at `main`: its blob walks
     the 1921 it published. It is not true of the MERGE tree, which is the whole reason the figure
     is graded rather than trusted.
+    — and `main`'s NEXT two commits (`2cccf90f4dd4`, whose own note records that its
+    `recorded.update(keep)` receiver moved its pin by one) add that note to the same run, so THIS
+    fold's figure is again this function's own walk of the RESOLVED file rather than either side's
+    reading; the row it names is the one row this fold adds, and the pin below is `--repin`'s output
+    on that same tree.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
