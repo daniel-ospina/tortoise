@@ -10508,6 +10508,55 @@ ROWED_BY_THIS_FOLD = (
 )
 
 
+def test_every_fast_file_this_fold_rows_carries_a_durations_row():
+    """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own.
+
+    ⛔ RESTORED with B7's durations-map arithmetic cut. The cut deleted this arm as
+    arithmetic, but it is the ONLY whole-set assertion behind the header above
+    (`:10200`): "dropping a row it names still reds required CI". The per-file pins
+    (`test_the_eviction_suite_is_in_the_entry_rule_set_13123`, `…_14357_…_14362`,
+    `…_record_chain_suite_…_7879`, the `_13110` pair) each cover ONE row, so the
+    remaining members were uncovered: dropping one of their rows left `--integrity`
+    green (its coverage check is a 0.90 RATIO with ~70 files of headroom) and nothing
+    reded. The header states an enforcement, so the enforcement must exist.
+
+    Red on a dropped row: delete any `durations:` entry this tuple names.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    missing = [f for f in ROWED_BY_THIS_FOLD if f not in durations]
+    assert missing == [], (
+        "a test file this PR ADDS is registered in a fast surface but carries no "
+        f"`durations:` row, so it packs at the flat default: {missing}. The map's "
+        "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
+        "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
+        "from a push-to-main junit sweep later.")
+
+
+def test_the_whole_set_row_pin_sees_every_member_it_guards():
+    """Non-vacuity for the whole-set pin above: its population must be non-empty.
+
+    `missing == []` is vacuously TRUE over an empty iteration set — the exact shape
+    this file refuses elsewhere (a `git`-derived set goes silently empty on a shallow
+    CI checkout, #10356). So the pin's own comprehension is driven over the LIVE map
+    one member at a time: removing a member's row must leave a non-empty `missing`
+    that names it (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`).
+
+    Red on the pre-fix state: empty the population (the whole-set pin stays GREEN
+    while guarding nothing) or break the predicate — either way `blind` is non-empty.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    blind = []
+    for name in ROWED_BY_THIS_FOLD:
+        holed = {k: v for k, v in durations.items() if k != name}
+        if [f for f in ROWED_BY_THIS_FOLD if f not in holed] != [name]:
+            blind.append(name)
+    assert ROWED_BY_THIS_FOLD and blind == [], (
+        "the whole-set row pin is vacuous for these members — an empty population or "
+        f"a predicate that cannot name a dropped row: {blind}")
+
+
 def test_ROWED_BY_THIS_FOLD_carries_no_duplicate_entries():
     """The set is a SET — a repeated entry is the shape that breaks the pins.
 
@@ -14885,8 +14934,9 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
 # `test` (90m) is NOT a pip writer in the merged tree: it restores pip and saves
 # `~/.cache/uv` through an explicit, BOUNDED `actions/cache/save@` step. Its
 # 3.88 GB implicit post save inside a 90 m cap is what reddened run 42000057137
-# (#11063); the companion pin that read that job's shape was an arithmetic arm
-# and went with the cache-cap cut, so this constant now states the class alone.
+# (#11063), and that shape is pinned by
+# `test_the_test_job_carries_no_unbounded_cache_post_step` BELOW — the two pins
+# are complementary: that one fixes the job, this one states the class.
 _PIP_CACHE_SAVE_MIN_CAP_MINUTES = 40
 #: The jobs that WRITE the shared `pip-<os>-<hash uv.lock>` key. Pinned so a
 #: future edit cannot leave the key with no writer at all (every reader then
