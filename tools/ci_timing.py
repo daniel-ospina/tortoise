@@ -2353,7 +2353,8 @@ def _balance_cut_parens(text: str) -> str:
 # `_balance_cut_parens` — seeing an unclosed `(` and no `)` — deleted the OPENER,
 # leaving `never ran cannot appear in an artifact), so this is the LOCAL wall …`.
 # That reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623), which is a P3 note-damage defect and not a wrong weight.
+# legs (run 41395489623) while that pin existed — it went with the durations-map
+# arithmetic cut — which is a P3 note-damage defect and not a wrong weight.
 #
 # So the renderer joins the span before it touches it (`_joined_note_tail`) and
 # re-emits it per the shape of the change (see `render_refreshed_manifest`):
@@ -2434,18 +2435,19 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        it was written for is left with no note at all. Measured on the REAL map
        (this head, every row re-based once, which is what a weekly refresh does):
        **36 rows lost their block, 349 lines were folded into row lines**. The text
-       survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
-       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
-       `_durations_rows_stating_a_stale_watchdog_floor`) — a swallowed block carrying
-       one of those claim shapes is judged against the wrong row's value, i.e. a
-       false red or a false green in a required leg.
+       survives but the ATTRIBUTION does not, and the guard that reads prose
+       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`)
+       — a swallowed block carrying that claim shape is judged against the wrong
+       row's value, i.e. a false red or a false green in a required leg. (The
+       watchdog-floor sibling of that guard went with the durations-map
+       arithmetic cut; this note names only the arm that still runs.)
 
        So: a block that opens a note is NOT this row's note. It is not joined, not
        appended into, and not dropped — the row line is rewritten and the block is
        left byte-identical. `test_a_note_block_that_opens_of_its_own_is_never_this_rows`
-       pins the behaviour on a synthetic map;
-       `tests/test_ci_selection.py::test_the_cap_block_is_not_read_as_the_row_aboves_note`
-       pins it on the real one.
+       pins the behaviour on a synthetic map (its companion arm, which read the real
+       map and asserted the same rule there, went with the durations-map
+       arithmetic cut).
     """
     out: list[int] = []
     for j in range(index + 1, len(lines)):
@@ -2488,11 +2490,13 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 
 # ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
 #
-# Two guards in the suite read ONE rule off this map, and the writer did not
+# A guard in the suite reads ONE rule off this map, and the writer did not
 # implement it: a row that carries a MEASUREMENT may not also carry the note of a
-# row no sweep has collected.
+# row no sweep has collected. TWO arms read that rule, and both are live: the one
+# below, and `test_ci_selection.py`'s
+# `test_no_durations_row_claims_the_flat_default_at_a_measured_value` (restored
+# with the `durations:` rows it guards, whose notes cite it).
 #
-#   tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
 #
 # The map's own rule for it is stated above `durations:` — "a row's comment is kept
