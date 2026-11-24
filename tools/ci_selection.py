@@ -1801,8 +1801,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
              # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded is the
              # pin's SHAPE (rows > 0, and a digest that separates SHAPES and COUNTS, not only
-             # counts), the vacuous-map REFUSAL (an empty map must exit 2 — a `--check` that
-             # stopped refusing would make surface-guard pass VACUOUSLY), the
+             # counts), the vacuous-map REFUSAL (an empty map must exit 2 with its own
+             # diagnosis — without it a map that silently derived nothing still exits 1, but
+             # reported as `the residue SET moved off its pin`, which sends the reader to the
+             # pin instead of to the map), the
              # `SWEEP_NAMES == 66` non-vacuity FLOOR, the scope-local typing arms and the
              # refspec arms.
              # ⛔ SCOPED TO WHAT SURVIVES: `#14439` (B8, `8c373f59a15b`) cut this suite from

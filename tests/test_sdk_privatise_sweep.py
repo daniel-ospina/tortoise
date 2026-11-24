@@ -1040,12 +1040,15 @@ def test_a_tool_only_diff_selects_this_suite():
     edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
     before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
     `full: false`, 106 test files, THIS FILE ABSENT. `--check` (the required `surface-guard`
-    step) is not a substitute: it compares the `(rows, digest)` pair and nothing else.
+    step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
+    count of typed references that survive, never this suite's arms.
 
     ⛔ WHAT THAT LEAVES UNGRADED, named exactly — the loose version of this paragraph is
     false: the pin's SHAPE (rows > 0, and a digest separating SHAPES and COUNTS), the
-    vacuous-map REFUSAL (an empty map must exit 2 — a `--check` that stopped refusing would
-    make `surface-guard` pass VACUOUSLY), the `SWEEP_NAMES == 66` non-vacuity floor, the
+    vacuous-map REFUSAL (an empty map must exit 2 with its own diagnosis — without it a map
+    that silently derived nothing still exits 1, but reported as `the residue SET moved off
+    its pin`, which sends the reader to the pin instead of to the map), the
+    `SWEEP_NAMES == 66` non-vacuity floor, the
     scope-local typing arms and the refspec arms. ⛔ AND NOT "the next `core`-selecting PR
     reds on the prose": `#14439` (B8, `8c373f59a15b`) cut this suite from 36 arms to 11 and
     deleted `_residue_block()` together with the published-extent and prose grading, so no
@@ -1056,10 +1059,13 @@ def test_a_tool_only_diff_selects_this_suite():
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
     to `tier1`. ⛔ THE MECHANISM IS A UNION, NOT A SKIP: `tier1` is unioned into EVERY PR
     selection (`files = set(tier1)` in `select()`), so a tier-1 membership selects this suite
-    unconditionally — the `core` row stops being what selects it, and the asserts below would
-    then pass even with the row deleted, i.e. over a lost row. Measured: with this file injected
-    into `tier1` the selection is unchanged (`surfaces ['core']`, suite selected) and it is STILL
-    selected after the `CORE_ALSO` row is also removed.
+    unconditionally. ⛔ AND WHAT THAT COSTS IS THE SUITE-SELECTION ASSERT ONLY: with the row
+    deleted the `core`-surface assert still reds, so the row's removal is still caught; what a
+    tier-1 join takes away is this arm's discrimination on the selection side — the suite assert
+    would pass over a row that no longer selects anything. Measured: with this file injected
+    into `tier1` the selection is unchanged (`surfaces ['core']`, suite selected) and the suite
+    is STILL selected after the `CORE_ALSO` row is also removed, while `surfaces` collapses to
+    `[]`.
 
     Runs the selector's own CLI rather than re-deriving its rules, so it grades the wiring the
     CI job actually uses, and it is object-free (no `fetch-depth` dependence).
@@ -1086,8 +1092,9 @@ def test_a_tool_only_diff_selects_this_suite():
         f"{len(files)} test files, this one absent — the selection gap #14062 describes")
 
     # ⛔ NON-VACUITY, FROM THE OTHER SIDE: `tier1` is unioned into EVERY PR selection, so if
-    # this file joined `tier1` it would be selected unconditionally and the asserts above would
-    # pass even with the `CORE_ALSO` row deleted — they would no longer be testing the row.
+    # this file joined `tier1` it would be selected unconditionally and the SUITE-SELECTION
+    # assert above would pass with the `CORE_ALSO` row deleted. The `core`-surface assert would
+    # still red, so this is not a lost removal check — it is a lost selection check.
     _assert_not_tier1(_load_manifest_for_test())
 
 
@@ -1116,6 +1123,6 @@ def _assert_not_tier1(manifest):
     # would test nothing at all.
     assert "test_sdk_privatise_sweep.py" not in tier1, (
         "this file joined 'tier1' — `tier1` is UNIONED into every PR selection, so this suite "
-        "is now selected unconditionally and the asserts above would pass even with the "
-        "`CORE_ALSO` row deleted: the row is no longer what selects it, so this pin must be "
-        "RE-DERIVED rather than assumed still load-bearing")
+        "is now selected unconditionally and the suite-selection assert above no longer tests "
+        "the `CORE_ALSO` row: it would pass with the row deleted. The row is no longer what "
+        "selects it, so this pin must be RE-DERIVED rather than assumed still load-bearing")
