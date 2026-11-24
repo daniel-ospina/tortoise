@@ -1654,7 +1654,9 @@ SWEEP_NAMES = 66
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
 #: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
-#: the tool on that tree, never by arithmetic on the delta.
+#: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
+#: THIS ONE: after `#14445`'s re-cut and this fold of `origin/main` `2cccf90f4dd4`, `--repin` here
+#: prints (11912, "73827c80583e139f") — see the pin's own note below, which owns this tree's value.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
@@ -2035,12 +2037,20 @@ SWEEP_NAMES = 66
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by the re-cut. ⛔ THIS PIN WAS RE-DERIVED ON THE **MERGE TREE**,
-#: not carried from either side of the `origin/main` integration: `--repin` HERE prints
-#: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
-#: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
-#: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
-SWEEP_RESIDUE = (11911, "3e92044bab08cc3d")
+#: so no typed call site is legitimised by the re-cut. ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
+#: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. `main` pins (11911, "3e92044bab08cc3d")
+#: while its OWN tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a PRISTINE detached
+#: worktree at `2cccf90f4dd4` (`git status --porcelain` empty, `git ls-files --others` 0), so the
+#: required `surface-guard` leg was red ON `main` and every open PR inherited that red — the #14062
+#: class, again, and repaired here for that reason rather than absorbed.
+#: ⛔ THIS PR ADDS NO ROW, AND THAT IS THE MEASUREMENT, NOT A CLAIM: `--repin` on THIS merge tree
+#: prints the SAME pair, (11912, "73827c80583e139f") — identical COUNT and identical DIGEST, so no
+#: row is attributable to this diff and the pin moves only because a red on `main` blocks every PR.
+#: ⛔ `main`'s own 11911 → 11912 movement is NOT attributed row-by-row here: the earlier re-cut note
+#: on `main`'s behalf (`seen.update` 101 → 102, arrived with `#14506`) is THAT commit's record of
+#: `main`'s 11910 → 11911 movement, not a claim about this diff, and it was not re-measured here.
+#: `typed references still pointing at a public name: 0` and `--check` exits 0 on the pair below.
+SWEEP_RESIDUE = (11912, "73827c80583e139f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

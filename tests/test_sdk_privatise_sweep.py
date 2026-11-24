@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1930 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1940 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -311,6 +311,12 @@ def _residue_block() -> str:
     on this tree at 1930 rather than adjusted by arithmetic from the unmodified tree's 1921 — the
     merge itself and the peer's reflow of the first note add nothing to the count, which is why
     the delta is nine and not more,
+    — and the LATER fold of `origin/main` `2cccf90f4dd4` kept both sides' blocks once more (this
+    lane's copy read 1930, the peer re-cut's copy 1931) and brought that peer's own `#14445`
+    `SWEEP_RESIDUE` re-cut — the `#:` lines that attribute it are prose in the same run — so the
+    figure above is RE-MEASURED by this walk ON THE RESOLVED FILE at 1940 rather than inherited
+    from either side, and that fold's pair was re-derived by RUNNING `--repin` on BOTH trees
+    (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
