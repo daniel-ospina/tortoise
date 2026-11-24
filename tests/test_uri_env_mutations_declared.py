@@ -195,31 +195,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "rediss://:pw@falkordb\.example:6379/g"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "postgres://host/db"\)$',
     ],
-    # #14429's spool-drain rehearsal mutates the URI at SEVEN sites, with three
-    # values and no others. Every one is a value it means to pin, and every one is
-    # scoped: the file's own `_run` gates the target BEFORE any connection, so the
-    # mutation decides which GATE arm answers, never which store is reached.
-    #   (1) `:389` sets a PRODUCTION host. The assertion is that `_serve` REFUSES it
-    #       (`SystemExit`, "refusing a production target") — and `_mode_knobs` is
-    #       replaced with a sentinel that raises if the run gets that far, so the
-    #       pre-fix path reds the pin instead of dialling premiselabs.co.
-    #   (2) `:395` sets the LEGACY loopback lane (`:16379`), the non-vacuity control:
-    #       without it the pin cannot tell "refuses production" from "refuses all".
-    #   (3) the five `run --mode …` sites set the docker TEST lane. `_stub_one_mode`
-    #       replaces the mode runner, so the arms grade `_run`'s artefact/cost
-    #       bookkeeping, not a graph; the URI is what keeps the same target gate
-    #       from refusing the run before that bookkeeping is exercised.
-    # ⛔ THE ARMS ARE VALUE-SCOPED, NOT `setenv`-SHAPED — deliberately, and the two
-    # gate sites are why (#14318 warned that a `docker://`-only row would leave them
-    # unauthorised while turning the gate green). A row matching any setenv in this
-    # file would authorise the next site nobody triaged, which is the #942 vacuity
-    # vector this census exists to catch; `test_the_spool_rehearsal_row_covers_only_
-    # its_triaged_values` pins both directions.
-    "test_spool_drain_rehearsal.py": [
-        r'monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)',
-        r'monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)',
-        r'monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:pw@127\.0\.0\.1:6379/tortoise_test"\)',
-    ],
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
     # #2944: the two embedded allow-path tests force the embedded lane so the
@@ -1819,6 +1794,40 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$'],
+    # #14232 (#14429): the spool-drain REHEARSAL — a `--mode` harness that replays a
+    # recorded spool against a graph. Every site is DELIBERATE_URI, and none of them
+    # reaches a store:
+    #   :389  a PRODUCTION target (`bolt://api.premiselabs.co:6379/live-v5`) is set
+    #         precisely so the rehearsal's own gate must REFUSE it — the URI is the
+    #         input the refusal assertion quotes, and `_run` exits before any client.
+    #   :395  the loopback twin is the NON-VACUITY half: the same call must get far
+    #         enough to trip the next guard, so "refusing a production target" is
+    #         not satisfied by a gate that refuses everything.
+    #   :568, :590, :614, :649, :676  the run/refusal rehearsals drive a LOCAL
+    #         `docker://:pw@127.0.0.1:6379/tortoise_test` graph with `_stub_one_mode`,
+    #         i.e. the drain sequence is exercised against a throwaway graph this
+    #         box serves, never the shared lane.
+    # every site uses `monkeypatch.setenv`, so the parent env is reverted at teardown.
+    #
+    # ⛔ ONE ROW, NOT TWO — `main`'s #14491 (`07a483ab38c7`) swept this same file
+    # independently while this branch was open (this branch's `28a56f3d9254`), and the
+    # fold AUTO-merged the two declarations into a DUPLICATE MAPPING KEY at two
+    # different lines. Python silently resolves a duplicate key to the LAST one, and
+    # `--integrity` cannot see it (it reds duplicate ENTRIES within a surface, not
+    # duplicate mapping keys) — so the branch's row would have been shadowed with
+    # nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
+    # (strictly stronger scoping than this branch's unanchored ones) and this site map
+    # is the fuller record.
+    # ⛔ THE ARMS MUST STAY VALUE-SCOPED, NOT `setenv`-SHAPED (#14318): a
+    # `docker://`-only row would leave the two gate sites unauthorised while turning
+    # the gate green, and a row matching any `setenv` in this file would authorise the
+    # next site nobody triaged — the #942 vacuity vector this census exists to catch.
+    # `test_the_spool_rehearsal_row_covers_only_its_triaged_values` pins both
+    # directions, so widening this row to a shape reds.
+    "test_spool_drain_rehearsal.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:pw@127\.0\.0\.1:6379/tortoise_test"\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

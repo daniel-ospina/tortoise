@@ -15,11 +15,11 @@ Two independent mechanisms, both measured:
 
 | | |
 |---|---|
-| **One drainer** | `tortoise/drain_claim.py` (new): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately (`held_by_claim`, zero POSTs) — nothing is lost, the holder is working the same oldest-first list. |
+| **One drainer** | `tortoise/drain_claim.py` (new in #14423; this PR adds the durable-exclusion fact, the `status.json` gate and the restore rule on top): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately (`held_by_claim`, zero POSTs) — nothing is lost, the holder is working the same oldest-first list. |
 | **A stated ceiling** | `DRAIN_MAX_IN_FLIGHT = 1` POST in flight, *per box*. It is a cap on how much of the shared 8-slot budget the drain may hold (7 stay available to live captures), not a throughput knob, and no configuration raises it. |
 | **Capacity charges nobody** | `capacity_refusal()` + `_flush_one`'s early return: no `attempts` increment, no backoff armed, and the **pass stops**. It then yields, honouring the server's own `retry_after`, bounded at `DRAIN_CAPACITY_YIELDS = 3`, and retries **the same** entry — so a busy box starves nothing and a head never rises. |
 | **Named, durably** | The refusal is recorded as `blocked` + 429 + the code, so the health line reads `capture: BLOCKED (n queued, 429 capture capacity)` instead of a box that cannot file looking healthy. Self-healing on both ends. |
-| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33. A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
+| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33 in #14423, and **34** here (a byte change at an already-shipped generation must move the number — see the P1 in cycle 20). A lock one leg cannot take is a lock the other leg does not have, and five cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
 
 ### Why a lease and not a lockfile or a config promise
 
@@ -90,32 +90,46 @@ The last rows matter as much as the first: on today's main the free server is **
 * **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; on the Python leg the pass retries the *same* entry after a bounded yield, and on the Pi leg it ends and lets the next opportunity continue (its pass is `await`ed on `session_shutdown`, so it must not sleep). Both legs charge nothing — that is the rule; the yield is the Python leg's implementation of it.
 * **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
 * **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
-* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect; everything else — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime.
+* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect. Everything else **in this contract's enumerated surface** — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering, and (as of cycle 19) the `claim_unavailable_reason` suffix including its type guard — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime. ⛔ **One known gap, outside this PR's diff and FILED, not claimed clean:** the contention/holder SENTENCE still differs (Python prints the lease deadline and the claim path, the Pi leg neither, and the leg-field predicate differs on `""`) — #14508.
 
 ## Tests
 
 ```text
-# 53 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
-TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-53 passed
+# 85 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
+uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
+85 passed
 
-# capture family + install-contract pins (generation 33) + store_sync + doctor
-TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
+# capture family + install-contract pins (generation 34) + store_sync + doctor
+uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_14350_drain_convergence.py tests/test_12483_12487_spool_integrity.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-742 passed
+785 passed
 
-# the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
+# the five cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-310 pass / 0 fail
+328 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
 
-Two existing cases needed a stated reason, and neither is weakened:
+All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
+(`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
+family count moves with `main` and is re-run rather than arithmetic'd from the last head. `85` is the
+collection count for `tests/test_14350_drain_convergence.py` (78 `def test_` with one 8-way
+`parametrize`: 78 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
+incremented: `69`/`768`/`317` were the figures at `ef4c1405`, and every later round's cases moved them
+by re-running. The number is re-derived whenever a round changes it; a carried count has been the
+wrong figure in this record four times, which is why the sentence states the collection MODEL beside
+the total.
+
+Two existing cases carry a stated reason, and neither is weakened. ⛔ BOTH landed
+with #14423, which is already on `origin/main` (`da82ece4226b`) — they are named
+here because this PR's contract relies on them, NOT as adaptations this diff makes:
+`git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains
+neither case, and its only deleted line is the now-unused `lstatSync` import.
 
 * **#12603's confirm-read race** now races a **targeted** filing, because a whole-spool peer is excluded by the claim — and a targeted filing (`session capture`, the shutdown flush) is the only racer left, and a real one.
 * **#2100's quota case** let a never-answering POST hang across a later process, which now correctly reads `heldByClaim`; it releases the wedged pass first and additionally asserts the claim is released — a new invariant.
@@ -227,31 +241,283 @@ false claims in this record, which is the half that matters as much as the code.
 | **P2** the Pi leg's `renew` CAS had **no test that could fail**: the only test called `linkSync`/`renameSync` directly on its own files, so reverting the install to `renameSync` left the suite green | **fixed for real**: `renew` now honours the same `takedown` seam `release` uses, and a new test stands INSIDE the window (take the claim, install a peer's record, assert `renew` returns false and the peer's token is on disk). Measured red on `linkSync` → `renameSync`. The primitive test keeps its own honest claim and says it is the primitive. |
 | **P2** `test_the_claim_is_written_COMPLETE_never_visible_empty` could not see its own mutant: both assertions were post-hoc, and a create-then-write claim satisfies them | **fixed**: the assertion is now the ORDER — a wrapper around `os.link` reads the SOURCE bytes at the instant the name becomes visible, so the test asserts that what a racing reader could see is a complete record (and that a `link` happened at all). Measured red on the create-in-place mutant. |
 | **P2** the takedown test named a mutant that cannot red it (a revert of `acquire`'s takeover leaves the primitives it drives unchanged) | **corrected in the record, not in the code**: the stated mutant is now the one that does red it (dropping `_dispose_quarantine`'s byte compare), and the line says plainly which test covers the acquire path instead. |
-| **P2** the convergence measurement counted winners over a population it never proved overlapped: the winner held a FIXED 1.0 s, so on a loaded box a slow starter legitimately took the released claim and was counted as a second winner | **fixed**: the processes now rendezvous on a barrier before attempting and the winner holds until every peer has FINISHED its attempt, so the count is over a population that provably overlapped. ⚠️ Measured both ways: with the barrier removed the run reports **9 winners of 10** — the exact false "two drainers" verdict a correct protocol would have been blamed for; with it, **1 of 10**. The receipt now also publishes `overlapped` so a run that did not overlap says so. |
+| **P2** the convergence measurement counted winners over a population it never proved overlapped: the winner held a FIXED 1.0 s, so on a loaded box a slow starter legitimately took the released claim and was counted as a second winner | **fixed**: the processes now rendezvous on a barrier before attempting and the winner holds until every peer has FINISHED its attempt, so the count is over a population that provably overlapped. ⚠️ Measured both ways: with the barrier removed the run reports **9 winners of 10** — the exact false "two drainers" verdict a correct protocol would have been blamed for; with it, **1 of 10**. The receipt carries `bounded`, which now GATES the verdict — `main` exits non-zero and says "NO VERDICT" when the winner released before every straggler attempted. ⚠️ `overlapped` was removed at cycle 10: it could not vary (see that row). |
 
-⚠️ The Pi-leg byte changes are another re-cut of generation 33's digest — see the
-note beside `_PINNED_PI_SEAM_INSTALL_CONTRACT`.
+⚠️ The Pi-leg byte changes moved the seam digest again, and generation 33 has shipped, so
+they ship as generation **34** rather than as another re-cut of 33 — see the note beside
+`_PINNED_PI_SEAM_INSTALL_CONTRACT` and the Residuals bullet below.
 
 **A further fold** of the peer lane brought two more of its fixes: a lease that lapsed
 DURING our own scan is re-armed rather than reported as a takeover (the pass was
 stopping itself over its own clock), and the required aggregate's `needs:` citations were
 re-cut after `main` moved them. Both kept as-is; the census pins and Appendix A are
 re-cut on this merged tree (1 327 rows, **0 rows drifted**, because the fold changed no
-statement site), and `SWEEP_RESIDUE` stays `(11901, "953c70c0…")` — measured on a
-detached `origin/main` worktree too, so it is `main`'s drift and not this branch's.
+statement site), and `SWEEP_RESIDUE` was `(11901, "953c70c0…")` **at that fold** —
+measured on a detached `origin/main` worktree too, so it is `main`'s drift and not this
+branch's. ⚠️ `SWEEP_RESIDUE` is a whole-tree census and moves with every byte, so that
+pair is the row's own history and is NOT the pin to verify: at the head this record
+ships it is `(11911, "3e92044bab08cc3d")` (`tools/sdk_privatise.py:2043`, `--check`
+exit 0 — see the cycle-12 row below). A census figure quoted without its head sends a
+reader to a pair nothing on this tree produces (#14480 review, F5).
+
+**Cycle 8** (a fresh-context reviewer at `5e9e89d0` — the merged head) — 1 **P1**, 4 P2.
+The P1 is the one that mattered most, because it was a hole in THIS PR's own fix:
+the exclusion being off was reported only on a stderr that nobody reads.
+
+| finding | disposition |
+|---|---|
+| **P1** the "run unclaimed and say so" answer said so ONLY on stderr, and the primary firing path discards it (`session-start.sh`: `nohup … session drain … >/dev/null 2>&1 &`). A pass that ran without the one-drainer exclusion could file NOTHING, so no other rule wrote a record either — and the box reported `capture: OK`/`DRAINING` while N drainers POSTed into the same 8-slot ceiling. | **fixed on both legs, durably**: the status record gains `claim_unavailable` + `claim_unavailable_reason`, DECORATED onto whatever state the pass earned (a quota-blocked box with a broken claim path keeps both facts), and the health line carries `, NO drain exclusion (<reason>)` in byte-identical words on both legs. Self-healing in the other direction — a pass that HELD the claim clears it — because a one-way latch teaches an operator to ignore the line. Two tests per leg; both mutants red (dropping the record arm; keeping the stale field on every write). |
+| **P2** `_dispose_quarantine`'s failed restore deleted a live claim with no trace, and the sentence justifying it ("the displaced holder … stops at its next refresh, which is the safe direction") was FALSE — it keeps draining until that refresh, up to TTL/3 | **fixed**: the failure now WARNS with the cause on both legs, and the sentence states what actually happens (a bounded double-drain, `ttl/3`, not "the safe direction"). The bound is quoted by a function (`_ttl_third_hint`) so the prose and `DEFAULT_TTL_S / RENEW_FRACTION` cannot drift — the earlier comment named a constant that does not exist under that name. |
+| **P2** the measurement's `overlapped` field could never report what its comment claimed (`min(arrivals, done + winners)` is always `processes`), and a winner that timed out released EARLY — after which a straggler legitimately took the claim and was counted as a second winner | **fixed**: the winner prints the bound it observed (`RELEASED <bounded>`), an early release makes the run **no verdict** (`bounded: false`) instead of a false "two drainers". ⚠️ the `overlapped` half of this disposition was itself wrong and is corrected at cycle 10. |
+| **P2 / P2** two stale citations in the test docstrings — one named a capacity test that never existed under that name, the other named an `acquire`-path test that does not exist at all | **corrected**: both now cite tests that exist, and the second says plainly that the nearest cover asserts the GIVE-UP rather than the restore. That is the same overclaim class this PR has now corrected four times; a citation to a nonexistent test is how it survives a review. |
+
+**Cycle 9** (a fresh-context reviewer at `5b9ee557` — the head after the pin re-cut) — 1 **P1**, 4 P2.
+This one is the sharpest yet, because every finding is a hole in THIS PR's own
+safety valve:
+
+| finding | disposition |
+|---|---|
+| **P1** the obstruction clear answered a BOOLEAN, so *"the object vanished under me"* and *"I may not delete it"* were the same answer. Two legs meet at a FIFO, the peer's own `unlink` lands first, this one's `unlink` gets `ENOENT` → "cannot be cleared" → **the whole pass ran UNCLAIMED beside a live peer claim**. That is the two-drainer defect this PR exists to remove, reproduced from the path that was meant to be the safety valve — and unlike the documented bound it is for a whole pass, since an unclaimed pass never holds or re-checks a lease (reviewer reproduced it). | **fixed on both legs**: the answer is tri-state (`GONE` / `REFUSED` / `DONE`), `GONE` makes `acquire` RETRY the loop (install the claim, or judge whatever the peer put there), and only `REFUSED` raises `DrainClaimUnavailable`. A test drives the exact interleave on each leg; both mutants red (answering `REFUSED` for `ENOENT`). |
+| **P2** that same clear was the protocol's **only uncompared delete**: `lstat` → `unlink` could remove a claim a peer installed *under it*, then win the next `link` — two holders for up to `ttl/3`, silently | **fixed on both legs**: the `(dev, ino)` judged is re-read immediately before the removal and the object is left alone if it changed — the same rule `_dispose_quarantine` already applied to every other removal. Test drives the substitution; dropping the check reds it. |
+| **P2** the durable `claim_unavailable` fact was **stranded**: the `ok` write is gated on `attempted > 0`, so a pass that HELD the claim over an empty/backoff-only spool wrote nothing and the operator kept reading `NO drain exclusion (<path>)` for an obstruction already removed | **fixed on both legs**: a pass that held the claim clears the two fields even when it attempts nothing (one write, only when there is something to clear; `state`/`reason`/`status` untouched, so the quota-survives-an-empty-pass rule still holds). Test drives the no-op pass; gating the clearing on `attempted` reds it. |
+| **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test was **vacuous** — it wrote the "healthy" record itself and never called the pass, so the mutation it named could not reach it (measured `pass 1 / fail 0` while the Python twin redded) | **fixed**: the test drives a REAL pass through the extension over an EMPTY spool (the shape that discriminates the no-op clearing — a filing pass clears the field through the `ok` write's fresh record, so an entry in the spool would hide the bug). Verified green, and red with the clearing disabled. |
+| **P2** two docstrings claimed the health-line wording was "pinned by the cross-leg parity test" — **no such pin existed**; both legs had one substring assertion each, so changing either leg's punctuation left both suites green | **fixed by writing the pin rather than dropping the claim**: a new test runs the REAL TypeScript leg over a three-row status matrix and compares the FULL rendered line with the Python leg's, byte for byte. Changing one leg's spacing reds it. |
+
+**Cycle 10** (a fresh-context reviewer at `8c109a96` — the head after the cycle-9 fixes) — 1 **P1**, 3 P2.
+Each finding is a hole in the *answers this PR gives*, not in its mechanism:
+
+| finding | disposition |
+|---|---|
+| **P1** the durable `claim_unavailable` fact reached the operator line only on the final `DRAINING`/`OK` verdict — the four EARLY returns (BLOCKED, SATURATED, INACTIVE, UNREADABLE) dropped it, and the shape this PR exists for (a capacity 429 **with a backlog**) is one of them, so the fact was invisible for the whole duration of the block | **fixed on both legs**: the term is applied by ONE wrapper (`_with_claim_term` / `withClaimTerm`) to every verdict the function can return, and the record is read before the scan so `UNREADABLE` carries it too. It is an ADDED FACT, not a sixth precedence state, so the documented `UNREADABLE > BLOCKED > SATURATED > INACTIVE > DRAINING > OK` order is untouched. The parity matrix now reaches all six verdicts with real spools (the old `blocked` row had `queued == 0`, self-healed to `ok`, and never reached the branch), plus a direct per-verdict assertion. |
+| **P2** the identity-change branch answered `REFUSED`, whose comment promised a retry that never happens, and whose message ("the spool root is not writable by this process") was a FALSE diagnosis — while `flush_spool` read it as "run the pass unclaimed" | **fixed**: a claim that appears in the removal window is now `HELD` — the object is put back and `acquire` answers CONTENTION, so the pass never runs beside a live claim and no writability is claimed. The message for a genuinely unclearable path now states what was measured (`is not a claim record and could not be removed`). |
+| **P2** the identity check narrowed the check-then-unlink window but the docstring said it closed it: between the re-read and the `unlink` (which is by NAME) a peer can still install its claim — and an inode compare is not evidence at all, since ext4/xfs reuse a freed inode (the `filelock` advisory GHSA-fq56-3cx3-fjxp admits two holders exactly that way) | **fixed by replacing the removal, not narrowing it**: the object at the claim path is MOVED ASIDE with `rename` (the arbiter `_takedown` already uses for every other removal in this module) and the object that LANDED is what gets judged. A peer claim found there is restored via `link` and reported as `HELD`; everything else is dropped. Tests drive the real interleave on both legs (a peer installs its claim in the window); both mutants red. |
+| **P2** `claimHeld` was declared on `CaptureStatus` (the on-disk record) instead of `FlushSummary` (the pass), so `summary.claimHeld` was a type error no gate can see (no `tsc` project covers `pi-hooks/`) and the `claim_unavailable` doc block had come loose onto the wrong field | **fixed**: the field and its own doc block live on `FlushSummary`, next to `claimUnavailable`; `CaptureStatus` carries only what is written to disk. |
+| **P2-minor** `tools/measure_drain_convergence.py` stacked three contradictory definitions of `overlapped`, and `bounded` was consumed by nothing — so "an early release makes the run no verdict" was prose, not behaviour | **fixed**: `overlapped` is REMOVED (each process writes exactly one `done` marker, so it was always `processes` — the barrier that makes it true is the very thing it was supposed to verify), and `bounded: false` now GATES: `main()` prints "NO VERDICT" and exits non-zero instead of returning 0 with a `winners` count that no longer measures the protocol. |
+
+**Cycle 11** (a fresh-context reviewer at `01064dc1` — the head after the cycle-10 fixes) — 4 **P2**,
+all record- and attribution-accuracy rather than mechanism. That is this PR's own declared subject
+matter, which is why each is fixed at the source and not restated:
+
+| finding | disposition |
+|---|---|
+| **P2** the committed record quoted a generation-33 seam digest this PR does not ship (`3eef418b…`, the blob at the branch's FIRST commit), while the pinned and shipped value is `932d74a2…` | **fixed**: the record then stated `932d74a2…` **at that head**, re-derived rather than copied — `sha256sum tortoise/pi-hooks/tortoise-capture.ts` was `932d74a2…` there, byte-identical to the pins as they stood at that head. ⚠️ The seam digest moves with every byte change, so the head that followed it (`1a0c29c3`) stated `18b1256d…` — true there, equal to the pins as they stood THEN — and *at the head this record ships* it is `90af077e…` (re-derived here, equal to `_PINNED_PI_SEAM_INSTALL_CONTRACT` and `_GENERATION_DIGESTS[34]`, and stated in Residuals below). ⚠️ This row itself quoted `f36b8c84…` for three cycles after it stopped being true: `f36b8c84…` was the value at `71c89986ef6f`, when the marker was still 33. It is kept in Residuals only with the head that owned it; only a digest quoted **at a head** is a claim a reader can check (#14480 review, F5 and cycle 19 P3). ⚠️ The GitHub *description* still quotes `4cbd1f02…`; left alone deliberately — it is not the committed record the merge path reads, and it is the artifact that will carry the harness's review attestation at the final head. |
+| **P2** the recorded test counts were short by two — `59`/`748` were regenerated at cycle 9 and cycle 10's two new cases were never folded in | **fixed by re-running, not arithmetic**: `61 passed` for `tests/test_14350_drain_convergence.py` (54 `def test_` + the 8-way parametrize = the reviewer's own collection model), and `760 passed` for the family run measured on the MERGE tree with `origin/main` (`6a72cfd661`) integrated — `main` grows that family itself, so the number is re-measured here, not carried. `node --test …` stays `314 pass / 0 fail` (no Pi test is added). |
+| **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test still named the mutation it cannot reach (`keep previous?.claim_unavailable` on the `attempted > 0` `ok` write — the spool is EMPTY, so `attempted === 0` and that arm never executes) | **fixed and PROVEN**: the comment now names the mutant that does red it — deleting the `summary.claimHeld && !summary.claimUnavailable` clearing block in `recordOutcome`. Applied that mutant and ran the row: RED (`actual: true, expected: undefined`); restored, green. Same unattributable-catch class cycle 9 corrected on this very test. |
+| **P2** the two new Pi-leg tests called `mkfifo` unguarded, so a win32 box (or one without the binary) THROWS instead of grading — one-leg regression against the pre-existing FIFO test beside them and against both Python twins | **fixed**: both now use the file's own guard (`if (process.platform === "win32") return;` then `try { execFileSync("mkfifo", …, { stdio: "ignore" }) } catch { return; }`), matching the pre-existing test verbatim. Behaviour unchanged on Linux — the 31 `#14350`-tagged Pi cases pass. |
+
+**Cycle 12** (a fresh-context reviewer at `e2d43ad3` — the head that integrated `origin/main`) —
+1 **P1**, 2 P2. Unlike cycles 9-11 this one found a real hole in the mechanism, and it is the
+PR's OWN headline invariant that it broke:
+
+| finding | disposition |
+|---|---|
+| **P1** the "durable" fact is erased by the TARGETED pass, which never takes the claim. `recordOutcome`/`_record_capture_status` cleared it on any `attempted > 0` write, and the most frequent such pass — `only_session_id`, the SessionEnd path and the store-sync replay — takes no claim by design, so it reported neither `claim_unavailable` nor `held_claim` and wrote a fresh `ok` record with NO claim field. One `tortoise session capture` on an obstructed box wiped the warning, on the SHARED `status.json`, so this leg silenced the Python leg's reader too | **fixed on both legs, as one rule**: only a pass that HELD the claim may clear it; every other write CARRIES IT FORWARD. The record is built and written ONCE at the tail (it used to be written at four call sites, which is what made the invariant a property of whichever arm ran), and the Pi leg's policy is exported as `applyClaimPolicy` so both legs drive the SAME matrix — row for row, in `test_the_claim_policy_agrees_on_every_summary_shape` (Python) and `the claim policy agrees between both legs on every summary shape` (Pi). Three new Python cases + three Pi cases; each verified RED under the arm it names, and the carry-forward arm's removal reds the targeted-pass case on both legs. |
+| **P2** `tools/measure_drain_convergence.py` failed OPEN: a run whose processes never reached their attempt reported `winners: 0`, `bounded: true`, `supported: true` — exit 0. The `BARREN` marker that says exactly this was parsed by nobody, and the tool had **no test at all** (`git grep measure_drain_convergence -- tests/` → 0 hits), so deleting the cycle-10 verdict gate redded nothing | **fixed**: `supported` is `bounded and barren == 0 and winners == 1`; `barren` is counted from each process's own stdout; `_no_verdict` covers all three ways of measuring nothing (unbounded, barren, no winner); and `winners == 2` stays a FINDING (exit 0) — folding it into "no verdict" would silence the harness in exactly the case it exists for. Five new cases, including the end-to-end `main()` exit code; deleting the gate reds two of them. |
+| **P2-minor** `tools/sdk_privatise.py` (line 1654 **at that head** — the note was rewritten by the fix, so the anchor does not hold at this head) stated `--repin`'s output as `(11903, 0a80b031…)` while the pin below it said `(11911, 3e92044b…)` — the note had been inserted MID-SENTENCE during the integration, splitting "`--check` prints an" from its own "observed digest ONLY on its failure path", and quoting a pre-merge pair in the block whose subject is that an unreproducible pair sends a reader to the wrong command | **fixed**: the sentence is restored, the note follows it, and it now names the pair `--repin` actually prints on this tree. Re-derived after the cycle-12 code change too: `(11911, "3e92044bab08cc3d")`, with `--check` exiting 0 and the row sets of `origin/main` and this tree diffed — EXACTLY ONE row differs, `recorded.update` 0 → 1. |
+
+**Cycle 13** (a fresh-context reviewer at `ef4c1405` — the merge of cycle 12's fixes) — 2 **P2**,
+3 **P3**, no P1. This round did not re-litigate the mechanism: it audited the ANSWERS the previous
+three rounds gave, and found one of them (the measurement's own verdict) could not be reported at all.
+
+| finding | disposition |
+|---|---|
+| **P2 — F1** the measurement could not report the finding it exists for, and TWO TESTS CERTIFIED THAT IT COULD. The hold waited for `processes - 1` `done` markers while a winner wrote its own only AFTER releasing, so with `k` winners the marker population topped out at `processes - k`: every winner blocked to the 60 s deadline, `bounded` flipped False, and a two-drainer race was reported as *"NO VERDICT — re-run on a quieter box"* (exit 2). The two witnesses assert `bounded: true, winners: 2`, a receipt `_claim_race` could not emit. | **fixed at the producer**: each process marks its ATTEMPT as finished (won or lost) BEFORE the hold, and the hold waits for all `processes` attempts — the fact it actually needs, instead of a count of losers. A BARREN process marks its own non-attempt too, so a straggler no longer costs a 60 s stall to discover. `bounded: true, winners: 2+` is now REACHABLE, and a new row drives the real `_claim_race` — real subprocesses, real barrier — with the claim protocol stubbed to admit every contender: `winners == 3`, `bounded is True`, `_no_verdict is False`. Verified RED under the revert (62.9 s: the 60 s stall the finding describes). The two hand-built witnesses now say the shape is reachable and name the row that proves it. |
+| **P2 — F2** the Pi leg's `held` → CONTENTION wiring had no assertion at all: the sibling test called `clearUnusableClaimPath` DIRECTLY and asserted its return value, so putting `state.obstruction = path` inside the `held` arm — which runs the whole pass UNCLAIMED beside a live claim — redded nothing. The Python twin is covered end to end. | **fixed with a seam plus the missing row**: `acquireDrainClaim` takes a `clearClaimPath` test seam (the same reason `takedown` exists above it), so a test can stand inside the clear's window; the new row drives `acquireDrainClaim` into `held` with a peer's claim landing in the window and asserts `undefined` (no claim), `state.obstruction === undefined` and the peer's bytes still at the path. Verified RED under that exact mutant. |
+| **P3 — F3** the "judged object" was not judged when it could not be read: `_read_raw` answers `None` for *not a regular file* AND for *a regular file I could not read*, and the second — a peer's claim that arrived in the window — was `unlink`ed as junk, after which this process won the next `link` and two holders coexisted for up to `ttl/3`, silently. It inverts `acquire`'s own stated doctrine forty lines above ("a regular file we could not read is honoured and NEVER unlinked"), and both legs agreed, so the cross-leg parity pin could not see it. | **fixed on both legs**: the landed object's TYPE is now checked separately from its bytes (`_lstat_is_regular` / a `landedRegular` flag), and an unreadable regular file is put BACK with `link` (create-if-absent, so a NEWER claim still wins) and answered `HELD`/`held` — contention, never a delete. New `_restore_quarantine` / `restoreQuarantine` helpers name why the restore uses `link` rather than `rename`. One new row per leg; both verified RED (Python: `done` + claim gone; Pi: `actual: 'done'`). |
+| **P3 — F4** the Pi leg's `gone`/`done` retry was the ONE lost-race arm that did not `markRaced()`, so two exhausted attempts left `state` empty, the path empty and no record — and `flushSpool` then ran the whole pass UNCLAIMED and stamped `claimUnavailable` with the default reason *"the spool root cannot hold a claim"*, which is FALSE (the root is fine; the object moved). The Python leg fails closed in the same state. | **fixed**: `markRaced(); continue;` — one line, as the review predicted. A new row drives two `gone` retries through `acquireDrainClaim` and asserts `state.raced === true`; the consumer (`raced` → `heldByClaim`, not unclaimed) is already pinned by *"an unmakeable root is UNAVAILABLE, not a lost RACE"*. Verified RED (`actual: false, expected: true`). |
+| **P3 — F5** two record figures were not re-derived after cycle 12 moved the bytes: `pr-body.md:247` named `SWEEP_RESIDUE` as `(11901, "953c70c0…")` (the pin ships `(11911, "3e92044bab08cc3d")`), and the cycle-11 row's present-tense claim about the seam digest was contradicted by this body's own Residuals section. | **fixed by re-deriving, and by dating the figures**: the fold paragraph now states that `(11901, "953c70c0…")` is THAT FOLD's pair, not the pin to verify, and names `(11911, "3e92044bab08cc3d")` at the head this record ships; the cycle-11 row is now past tense ("then stated `932d74a2…` at that head") with the digest re-derived at the head THAT ROW shipped (`18b1256d…` at `1a0c29c3`, generation 34) given beside it — not quoted as the shipped head's, because cycle 22's re-cut moved it to `90af077e…`. A digest that is not quoted AT A HEAD is not a claim a reader can check. |
+
+**Cycle 14** (a fresh-context reviewer at `c7c4d013` — the head after the cycle-13 fixes) — 5 P3,
+no mechanism defect: the round re-verified the durable-fact rule, the clear's `HELD`/`GONE`
+judgement, the measurement gate, the residue pin and the generation-33 digest by reading the code
+AND by running the named mutants, and found nothing to change there. Each item below is fixed at
+the source and each fix was verified RED under the mutation it prevents:
+
+| finding | disposition |
+|---|---|
+| **P3** `withClaimTerm`'s doc block was stacked above `applyClaimPolicy`, so the operator-line function — this PR's headline claim — carried no doc comment and a hover on the policy showed two blocks describing different functions. ⛔ The finding had been RAISED BY MORE THAN ONE EARLIER ROUND and left unfixed, and **no row in this log recorded it** (verified: `grep -n withClaimTerm pr-body.md` matched only the cycle-10 P1 row, which is about the parity pin, not this) — so the log's silence is corrected here rather than being attributed to a round whose table cannot carry it. | **fixed**: the block sits above `withClaimTerm` again; `applyClaimPolicy` keeps only its own. |
+| **P3** the two legs wrote DIFFERENT `claim_unavailable_reason` values for the same pass when the reason was `""` — Python tested truthiness (`""` defaulted), the Pi leg tested nullish (`""` written verbatim) — a divergence in a SHARED on-disk record, in the predicate class `client_captured_at_source` was fixed for in this same file | **fixed**: both use truthiness, and a `("", unavailable)` row is added to BOTH cross-leg matrices. Verified: flipping either leg back to nullish reds the parity row on that leg. |
+| **P3** `test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact` (Python) named a mutant that cannot red it (the clearing arm pops the fields again afterwards), while its Pi twin documented exactly that defect — an R6-class disagreement IN WRITING about the same row | **fixed**: the docstring names the mutant that does red it — deleting the `elif held_claim:` clearing arm — with the reason the merge-the-prior-record mutant is green, mirroring the Pi twin. Verified RED. |
+| **P3** the record's cycle-13 Python-case count said "four" while the same sentence's own arithmetic said `+2` | **fixed**: "two", re-counted from `git show … \| grep -c '^+def test_'`. |
+| **P3** the record's `tools/sdk_privatise.py:1654` anchor no longer holds the sentence it describes (the fix rewrote that block) | **fixed**: the row now says the line number is "at that head", so a reader is not sent to a different sentence. |
+
+**Cycle 15** (the round that reconciled the LATE-POSTED review at `ef4c1405`, which arrived after
+`c7c4d013` had already been reviewed clean: 3 **P2**, 5 **P3**). ⛔ ITS OWN HEADER USED TO MISCOUNT
+THE SPLIT and the round numbered itself 16 across a gap where 15 should be; both are corrected here,
+by counting its eight rows rather than describing them: **five** were real gaps in what PINS the two
+mechanisms (fixed here), **two** were record fixes made here, and **one** was already closed at
+`c7c4d013`. Each fix below was verified RED under the exact mutation it prevents, by patching the
+file, running the named row and restoring it (`sha256`-checked):
+
+| finding | disposition |
+|---|---|
+| **P2** the Pi leg's F1 was pinned only as a PURE FUNCTION — re-introducing the pre-fix call site (`if (summary.claimHeld \|\| next === null) next = applyClaimPolicy(…)`, so a claim-less pass with an earned record bypasses the policy) left the suite green | **fixed with an end-to-end row**: a REAL peer claim is installed through `acquireDrainClaim` (so the general pass is genuine CONTENTION — the log reads *"another drainer holds this spool (peer leg) … nothing attempted"*), the live session is filed by the targeted pass, and the durable fact must survive. Verified RED under that exact call site (`actual: undefined, expected: true`). |
+| **P2** both legs could INVENT the durable fact, and no matrix row covered that direction — widening "carry it forward" to "always stamp it" made a healthy box report `NO drain exclusion` forever | **fixed**: a `("targeted, earned ok, NO prior fact")` row on BOTH legs, the only row with no prior record. Verified RED on Python under `elif record is not None:` (the widened arm). |
+| **P2** the third no-verdict way (`bounded is False`), the `barren` COUNTER, and `supported`'s new conjuncts had no discriminating row | **fixed**: a `bounded:false, winners:1, barren:0` row, and a row that drives the real `_claim_race` with the arrival barrier expiring for every process so `barren` is the producer's own count. Verified RED by deleting the `bounded is False` arm and by deleting `barren += out.count("BARREN")`. (`supported`'s `winners == 1` conjunct is guarded by the two-winner FINDING row; `_no_verdict`, not `supported`, is what gates the exit code.) |
+| **P3** the nested-race scan was unguarded: `--scenario all` nests `claim_race` under `baseline`/`saturated`, so deleting the loop left `_no_verdict` permanently `False` in the tool's only multi-race mode | **fixed**: a bidirectional row (a clean nested race is a measurement, a measuring-nothing nested race is a no-verdict). Verified RED by deleting the loop. |
+| **P3** the module docstring named `claim_winners`, a field the receipt never carries, said `MUST be 1` without noting 0 exits 2, and omitted `barren` | **fixed**: the bullet is `winners`, with `barren` / `bounded` / `supported` documented and the exit-code contract stated. |
+| **P3** the shared matrix's TS rows were ORDER-DEPENDENT — one mutable `earned` object was reused and `applyClaimPolicy` mutates `next`, so a missing `delete` was only detected because an earlier row had already stamped the fact onto that shared object | **fixed**: both inputs are copied per row. The related half (the TS matrix feeds a literal `next` while the Python rows go through the real build) is closed by the new END-TO-END row above, which drives the extension rather than the policy. |
+| **P3** the record's per-row attribution was off by one in each direction (`Four new Python cases` / `Four new cases`) | **fixed by COUNTING, not arithmetic**: `git show 7cf106b6be -- tests/test_14350_drain_convergence.py` yields **8** new `def test_`, split 3 claim-policy + 5 measurement. Rows corrected to "Three" and "Five"; the Pi count (3) was already right. |
+| **P3** `pr-body.md:247` quoted `SWEEP_RESIDUE` as `(11901, "953c70c0…")` | **already closed at `c7c4d013`** (the fold pair is dated as THAT fold's, with `(11911, "3e92044bab08cc3d")` named at this head). Re-verified, no change owed. |
+
+**Cycle 16** (a fresh-context reviewer at `b17a8828` — the head after the cycle-15 pinning round) —
+1 **P1** and 2 P3. The finding was first graded P3 by that round and re-graded **P1** once cycle 17
+measured that the fix had not landed on one of the four functions; the code comments cite the P1.
+
+| finding | disposition |
+|---|---|
+| **P1 — the one that mattered, and my own fix had MISSED IT** a FAILED restore DELETED the live claim it promised to honour. `restoreQuarantine` / `_restore_quarantine` and `disposeQuarantine` / `_dispose_quarantine` warned on any `link` failure that was not `EEXIST` and then ran an UNCONDITIONAL `unlink` — and because the rename had already vacated the claim path, the quarantined file was the ONLY copy of that holder's claim. The next `link` then won the emptied path: two holders for up to `ttl/3`, silently, with the moved-aside evidence gone. `link(2)` lists `EACCES`/`EDQUOT`/`EIO`/`EMLINK`/`ENOSPC`/`EPERM`/`EROFS`/`EXDEV` beside `EEXIST`, and `ENOSPC`/`EDQUOT` on a spool directory is the ordinary case. It also contradicted the module's own doctrine ("an unprovable read is ALIVE") and four statements in this record | **fixed on BOTH legs**: a non-`EEXIST` failure no longer deletes the quarantined object, and the answer stays HELD — the fail-CLOSED one. ⛔ AND SPARING IT IS THE FLOOR, NOT THE REMEDY (cycle 17, second review): a copy left under `*.tmp-*` is swept by mtime, so the holder it belongs to is destroyed minutes later anyway. While the claim path is still FREE the object is RENAMED BACK (`rename` needs no hard link, which is the reachable failure; it runs only after `lexists` says the path is empty, because `rename` replaces where `link` never does — the fallback `filelock`'s stale break takes for exactly this reason, `tox-dev/filelock#843` `_util._linked_back`); only when that ALSO fails is the copy left in place, named in the warning, and the `*.tmp-*` sweep bounds it. ⛔ NOT `REFUSED`, which the reviewer proposed and which is WORSE here: `REFUSED` raises `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and runs the pass **UNCLAIMED** with the false reason "the spool root cannot hold a claim". On the Pi leg the same HELD answer over an empty path additionally records the lost race, because `flushSpool`'s first arm looks for a record and would otherwise fall through to its unclaimed arm. One row per leg, each RED under the unconditional `unlink` (verified). ⛔ **AND THE FIRST ATTEMPT AT THIS FIX SHIPPED WITHOUT LANDING ON ONE OF THE FOUR FUNCTIONS**: the next cycle measured `_restore_quarantine`'s body still byte-identical to the pre-fix version (signature changed, body not), with the delete still live and the call site printing a false diagnosis on the healthy path — and no row reached it, so nothing redded. Fixed for real, with a row that drives THAT branch (unreadable mandatory quarantine + `ENOSPC` from `link`) and is RED under the unconditional `unlink`. A disposition is not done until the artifact is verified, and this row is the evidence for why the rule exists. |
+| **P3** the cycle log had no **Cycle 15** (headings ran 13, 14, 16) and seven new comments cited "cycle 13" for findings that live in the 16-round's table | **fixed**: the reconciliation round is **Cycle 15** (it is one round after 14, which is what its own position says), its header now COUNTS its rows instead of describing them (5 pinning gaps + 2 record fixes + 1 already closed — the old sentence said "four … and four", which matches no reading of its own eight rows), and its citations point at the round that owns those rows. |
+| **P3** the record's `withClaimTerm`-block and other residual prose drifted from the code | re-verified against the tree at this head rather than restated. ⛔ An earlier wording of this row said the unverifiable rows "were deleted rather than reworded" — no row was deleted (`git diff b17a8828..HEAD -- pr-body.md \| grep '^-\|'` shows only the two digest rows, each re-added), and a disposition naming an action with no artifact behind it is the class this record polices. The claim is removed rather than reworded. |
+
+**Cycle 17** (a fresh-context reviewer at `a3a80e68` — the head after cycle 16's fixes) — 1 **P1**,
+2 P3. The P1 is cycle 16's OWN fix, measured as not landed. ⚠️ That head drew TWO independent
+reviews; this table is the first, and the second (a pinning gap, no code finding) is the same
+number's second table below — the numbering repeats because the head does.
+
+| finding | disposition |
+|---|---|
+| **P1** `_restore_quarantine`'s body was byte-identical to the pre-fix version — the signature had changed to `-> bool` and the body had not, so the only-copy deletion was STILL live on the Python leg, `if not _restore_quarantine(…)` printed a FALSE diagnosis on the healthy path (`None` is falsy), and `grep -rn _restore_quarantine tests/` was still zero hits, so nothing redded | **fixed for real, and pinned at the branch**: `return False` in the `except OSError` arm (object left in the quarantine) and `return True` after a successful sweep; the docstring states the contract. A new row drives THAT branch — the mandatory quarantine is made UNREADABLE so `landed is None` and the lstat says regular, `link` raises `ENOSPC` — and asserts HELD plus the peer's bytes still on disk. Verified RED under the unconditional `unlink`. ⛔ Why it survived a round: the round's row exercised `_dispose_quarantine` (its peer claim was READABLE, so `landed is not None`), which was fixed — the two functions are adjacent and only one was covered. A disposition is not done until the artifact is verified, and this is the measured cost of skipping that check. |
+| **P3** one of the seven re-pointed citations still said "cycle 13" for a finding owned by cycle 15's table | **fixed**: it names cycle 15 and says which two P2s cycle 13 actually owns. |
+| **P3** the cycle-16 table asserted rows "were deleted rather than reworded" and NO row had been deleted | **fixed**: the claim is removed rather than reworded — the diff shows only the two digest rows, each re-added. |
+
+**Cycle 17** (a second lane on the same head, `a3a80e68`) — one **P3-pinning gap**, no code change:
+the cycle-16 fix touched TWO helpers per leg, and only one of the two was pinned on the Python leg.
+
+| finding | disposition |
+|---|---|
+| **P3** the Pi leg's row asserts both primitives (`restoreQuarantine` AND `disposeQuarantine`), but the Python leg's row drives only `_clear_unusable_claim_path` — so `_dispose_quarantine`'s new `return False` (keep the displaced claim in the quarantine on a non-`EEXIST` restore failure) had NO discriminating assertion, and reverting it left the suite green. The failure mode is the exact one cycle 16 fixed: on `ENOSPC`/`EDQUOT`/`EPERM` the quarantined file is the ONLY copy of that holder's claim. | **fixed with the missing row**: `test_a_DISPLACED_claim_is_PRESERVED_when_its_restore_FAILS` drives the real `_takedown`, refuses only the `link` back (`ENOSPC`, not `EEXIST`) and asserts the displaced bytes SURVIVE — the return value alone cannot distinguish the fix, since the pre-fix code also returned `False`, so the survival assertion IS the pin. ⚠️ Its arm is the RECOVERY one (the takedown leaves the path free, so the object is renamed back), which is why the assertion is written over `(path, quarantine)` rather than over the quarantine alone; `test_the_DISPLACEMENT_path_PRESERVES_a_copy_it_cannot_restore` covers the both-restores-refused arm where the quarantine is all that is left. Verified RED under the pre-fix unconditional `unlink` and restored `sha256`-verified. |
+| **P3 — the RECOVERY arm, on both legs and both restores** the fix above stops the deletion and stops there: the displaced claim is left under `*.tmp-clear-*` / `*.tmp-take-*`, which the scratch sweeper deletes by mtime, so the holder is doomed minutes later and the evidence goes with it. The remedy the primary source actually prescribes — `filelock`'s stale break (`tox-dev/filelock#843`, verified against the upstream diff) — is create-if-absent `link`, then `rename` BACK while the path is free | **fixed**: `_restore_quarantine` and `_dispose_quarantine` (and their Pi twins) now recover the object before falling back to preserving it, and the preserve arm says so in the warning. `restoreQuarantine` / `disposeQuarantine` take injectable `link`/`move` seams so a test can stand inside the failed restore. Rows: three Python on the clear path (rename-back; both restores refused → preserved; end-to-end `acquire` answers CONTENTION with the claim readable at the path), the end-to-end displacement row re-pointed at the survival invariant, one both-refused displacement row, and three Pi rows. Verified RED at this head: the three clear rows `3 failed` under the pre-fix delete, `fail 2` for the Pi restore rows, the Pi displacement row red when its arm is skipped, and the Python displacement row red with it. |
+
+**Cycle 18** — TWO rounds, one head each, and ⚠️ they are recorded separately because an earlier
+version of this row merged them and attributed the WRONG finding to the WRONG head (verified against
+`git show <sha>:<path> | grep -c`): the citation-class P3 was CREATED by `92bbfb76`, so no review OF
+`08fd0891` could have found it.
+
+| head reviewed | finding | disposition |
+|---|---|---|
+| `08fd0891` | **P3** a comment this PR itself added over-claimed: *"Falling through here means `linkSync` SUCCEEDED … Every FAILURE path above returns"* — false for the `EEXIST` arm, which is a `linkSync` FAILURE that warns and falls through to `unlinkSync` (correct behaviour: a newer claim holds the path, so the copy is a superseded one; the Python twin's `except FileExistsError` arm does the same) | **fixed in `92bbfb76`** — the comment names both fall-through routes and says the two PRESERVED arms are the ones that return. The `EEXIST` arm had no other description in the code, so the correction is also its only pin. |
+| `92bbfb76` | **P3** that fix's own comment cited `(review, cycle 16, P3)` for a finding no cycle-16 row can hold — cycle 16 reviewed an ANCESTOR of the commit that wrote it | **fixed in `dd60e41a`** by DATING the citation instead of round-citing it (`(the confirmation review at 08fd0891 …)`), the one form that cannot dangle ⚠️ and `dd60e41`'s own commit message carries the merged-round provenance this table corrects — corrected here rather than by rewriting history. |
+| `dd60e41a` | **P3** `tests/test_14350_drain_convergence.py`'s docstring cited `cycle 12 F3` for a finding cycle 12 records as `F3` = the `sdk_privatise.py` pin-prose item; the finding it describes is **cycle 11 F3** (the Pi twin's unreachable mutant, `pr-body.md:300`) | **fixed**: one word — the citation now reads `cycle 11 F3`, and it resolves to the row whose text matches the docstring verbatim. |
+
+**Cycle 19** (a fresh-context reviewer whose export was at `23ac4a97d1fd` — relabelled from "18" here so the log stays monotone: the confirmation pair is Cycle 18, recorded ABOVE this row) — 1 **P1**,
+1 **P2**, 2 **P3**. ⚠️ THAT HEAD WAS STALE, and the figures are dated rather than present tense:
+15 commits behind the head the round was written against (`git rev-list --count
+23ac4a97d1fd..ffad4ae6`) and 31 behind `bcb52e1d`, where this row was authored (`…23ac4a97d1fd..bcb52e1d`).
+⛔ NO `..HEAD` FIGURE, deliberately: a count to the live head rots on the very next commit —
+this sentence already shipped as "32 behind THIS shipping head" and was 33 by the time it landed.
+A number is quoted here only with the head it belongs to. The reviewer's worktree was stale and its own footer
+records a live fixer lane in the same tree, so each finding is re-verified against THIS tree below,
+and the P3 it reported as already closed is confirmed closed at the commit it names.
+
+| finding | disposition |
+|---|---|
+| **P1** `read_capture_status` read `status.json` with no `lstat`/`S_ISREG` gate, so a FIFO or socket there blocks `open(2)` FOREVER — and this diff is what put that read on the DRAIN path (`_record_capture_status`, right after the pass, while the one-drainer claim is still HELD; `claim.release()` runs in `flush_spool`'s `finally`). `contextlib.suppress(Exception)` at the call site does not help: a block is not an exception. `capture_health_line` blocked on the same path, so `session health` hung instead of reporting the box. The Pi twin `readCaptureStatus` was unguarded identically | **fixed on BOTH legs**: `read_capture_status` / `readCaptureStatus` `lstat` first and read only a REGULAR file — the module's own doctrine applied one path short (`drain_claim._read_raw` gates the CLAIM file for exactly this reason, cycle-5 P1). Rows: the Python one drives the READER, the HEALTH LINE and a **real claimed pass** under bounded joins, then asserts the pass returned, that `_atomic_write` replaced the obstructing object with a record, and that the claim is **acquirable afterwards** (i.e. it was released, not stranded); the Pi row asserts the reader and the health line over a real FIFO. Both verified RED by dropping the gate — the Python row asserts at the join bound, the Pi row hangs the case out. |
+| **P2** an unreadable **regular** `drain.claim` blocks every pass forever, and the durable surface this PR adds for the OTHER arm stops one step short of the only arm that blocks permanently: the line said `capture: DRAINING (1 queued)` over a spool that can never move, so R2's "reclaimed when its lease expires" is unreachable there and the residual's justification ("blocks the drain until a human looks") had **no surface to be looked at** | **fixed as a LIVE PROBE, not a recorded fact** — and that choice is the disposition, not a shortcut. `drain_claim.claim_path_unreadable(root)` (Pi twin `claimPathUnreadable`) asks the question at READ time, because this fact is about the PRESENT state of the spool root: a recorded copy would need a clearing arm, a carry-forward arm and a staleness story, and a long-dead lock (pid recycled, lease expired) could then keep the warning alive — the probe cannot, and it costs one `lstat` + one `open` on a healthy box. The operator line now renders `, drain claim UNREADABLE (a regular file exists but could not be read)` beside the durable term, in a fixed order. Rows: a Python test that asserts the term, that the pass really does stop (`held_by_claim=True, filed=0`) and that the term **self-clears** when the mode is fixed; plus a cross-leg row in the parity matrix, so the SENTENCE is the contract rather than one leg's opinion. Verified RED by making the probe answer `False` unconditionally. |
+| **P3** the two legs disagree in words on the shared operator line for a NON-STRING `claim_unavailable_reason` (Python gated on `isinstance(reason, str)`, the Pi leg on truthiness, so one shared `status.json` rendered `…, NO drain exclusion` and `…, NO drain exclusion (5)`), and at the carry-forward arm a JSON `null` reason was dropped by one leg and carried by the other | **fixed on both legs, and in the third place the same class lived**: the suffix is string-gated on both, the carry-forward treats `null` as absent on both, and the SELF-HEAL now keeps every claim-axis key the record HOLDS instead of only the truthy ones (a `claim_unavailable: false` and a `null` reason vanished on the Pi leg and survived on the Python leg). Pinned three ways: two parity rows (non-string reason, null reason), a cross-leg carry-forward test that executes the real `applyClaimPolicy`, and a parity row whose self-heal fires (`queued == 0`) whose REPAIRED record is compared key-for-key across legs. Each verified RED by reverting the corresponding pre-fix predicate. |
+| **P3** record counts stale at the head they claimed (`71`/`320` vs `74`/`321`) | **already fixed, confirmed** — `21a2c5e9b0` (`74`/`773`/`321`), and re-derived again here because this round adds cases: `84`/`783`/`327` (the merged tree: the peer lane's own cases moved the Pi count from the `326` this lane measured alone). |
+
+**Cycle 20** (a fresh-context reviewer posted against `bcb52e1d` — 1 **P1** + 5 **P3**, and the
+round that moved shipped BYTES). ⚠️ It had no row until now, and an earlier version of this table
+named that head while listing the NEXT round's findings — which made both rounds unverifiable
+(the class this record polices). The two rounds are now separate, and every citation names the
+head it belongs to.
+
+| finding | disposition |
+|---|---|
+| **P1** generation 33 had ALREADY SHIPPED on `main`, so this PR's in-place re-cut of 33 would have graded every Pi install made from `main` as a BLOCKING `modified-artifact` ("local edit") — for a change the user never made | **fixed by shipping generation 34** on both halves, with 33's entries frozen at `main`'s digests. |
+| **P3** the `state.raced` Residual row's third report | folded into the Residual row it names; no code change owed (already closed at the round it cites). |
+| **P3** an orphaned third copy of `withClaimTerm`'s doc block after the merge | **fixed**: the stranded block is deleted; the function keeps the expanded one, the constant its own. |
+| **P3** `tools/sdk_privatise.py:1655` citing `capture_spool.py:4037` | **fixed**: the citation is the line the sweep actually counts. |
+| **P3** two Summary rows naming work `origin/main` already holds | **fixed**: the rows are removed rather than reworded. |
+| **P3** R6's "everything else … is the same on both sides" | **fixed**: the sentence now names the shared-format writer the cross-leg matrix grades, instead of asserting sameness. |
+
+**Cycle 21** (a fresh-context reviewer at `2b36e643` — 5 **P3**, and one measurement that was not on
+its list; the table below holds those six, plus a seventh row recording a correction made to this record AFTER that round): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
+`306 passed` and `327 pass / 0 fail`, because every other row asserts only that the LIVE number and
+the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
+them all. That is the shape that reads green everywhere and blocks installs everywhere.
+
+| finding | disposition |
+|---|---|
+| **P3 (measured, not listed)** the generation-34 bump had NO discriminating row | **fixed**: `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why` pins both markers at 34 AND pins `_GENERATION_DIGESTS[33]` / `_READ_SEAM_GENERATION_DIGESTS[33]` as something other than this branch's pair. Verified RED under each of those four edits, and it is the ONLY row that reds under a full revert of `f69c2113` (which also reverts `_EXPECTED_INSTALL_CONTRACT["pi"]` and the `== 34` marker assertion — a revert built from the shorter enumeration beside this row reds those two as well, which is why the enumeration now names all five steps (eight literal `34`s)). |
+| **P3** "cycle 19" was cited for findings owned by the `bcb52e1d` round | **fixed**: the citations name cycle 20 (or the head). |
+| **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
+| **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
+| **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts five plus the measured one. |
+| **P3 (correction to this record's own history)** the commit `4a49c877` claimed `grep -rn 'cycle-19' tests/ tortoise/ pr-body.md` "returns nothing in this PR's files". It overstates, and is corrected here rather than by rewriting history: that grep returns many hits on those paths (unrelated, pre-existing files), and WITHIN this PR's files it returns exactly **THREE LINES** — one in code, `tests/test_14350_drain_convergence.py:2540`, a CORRECT cycle-19 P3 citation (the `null`-carry-forward arm, whose row is cycle 19's third), and TWO in `pr-body.md`: this row's own quotations of the pattern, and the cycle-23 row that certifies this citation. | **recorded**: no code change. The only hyphenated `cycle-19` CITATION left in this PR's files is the legitimate one (this row's own quotations of the pattern aside), and the two `test_capture_install.py` citations that WERE wrong now read cycle 20. |
+| **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
+
+**Cycle 22** (a fresh-context reviewer at `1a0c29c3`) — 1 **P2**, and unlike cycles 11-21 it is a
+hole in the MECHANISM, in the arm the PR's own headline claim rests on. Reproduced here before it
+was fixed (a finding is a claim, not a fact): the clear's final `unlink` re-raised the lie.
+
+| finding | disposition |
+|---|---|
+| **P2** `_clear_unusable_claim_path` answered `REFUSED` — "the path cannot be cleared" — when the obstruction had ALREADY been moved aside and only the disposal of that ASIDE copy failed. The claim path was FREE at that moment, so `acquire` raised `DrainClaimUnavailable`, whose handler stat'ed the empty path and ran the WHOLE PASS UNCLAIMED with the false durable reason "the spool root cannot hold a claim" — the two-drainer window this PR exists to close, plus a `status.json` fact that is not true and an operator line (`NO drain exclusion (…)`) on a perfectly writable root. Present on BOTH legs (`drain_claim.py`, the `except OSError` after the quarantine `unlink`; `tortoise-capture.ts`, `catch { return "refused" }`), and the function's own contract for `REFUSED` ("it is still not a claim and we could not remove it") was measurably false in this arm: the object WAS removed. | **fixed on both legs**: a failed disposal of the aside copy now WARNS with the cause and answers `DONE`/`done` — the measured answer, because the `rename` vacated the path and the leftover `*.tmp-clear-*` is collected by the same mtime sweep the comment above the rename already names (bounded, not permanent). `_CLEAR_REFUSED`'s contract is tightened to say it means THE CLAIM PATH could not be cleared. The Pi leg gains an `unlink` seam so the failure is reachable in a test (the same reason `rename`/`link` are seams there). One new row per leg; **both verified RED** under the exact mutant (`return _CLEAR_REFUSED` / `return "refused"` in the disposal arm — Python `1 failed`, Pi `fail 1`), and the trees restored `sha256`-identical. The new rows move the counts: `85`/`785`/`328`. |
+| **P3 ×3** the figures the previous head shipped did not survive re-measurement: `783 passed` (the row `1474ec7b` added was never folded in), `7 CROSS-LEG` beside two "four"s (the file spawns `node` from FIVE tests), and a citation to `capture_spool.py:4366-4375` for a handler that lives at `4412-4473` | **fixed by MEASURING, not by arithmetic**: the family was re-run (`785 passed`, recorded in `WORKTREE-REPORT.md` by the tool that parses it), the cross-leg count was counted from the spawn sites (`grep -nE "subprocess\.run\(" …`), and the handler's range was read from `grep -n "except DrainClaimUnavailable"`. |
+
+**Cycle 23** (a fresh-context reviewer at `9864698e` — the head after cycle 22's P2 fix) — 3 **P3**,
+and the split matters: TWO were citations the cycle-22 commit itself invalidated (line-number drift
+from its own `+17` and `+52` lines) and the THIRD was an older misattribution the round merely
+SURFACED — "Two existing cases needed a stated reason" was already in the record at `1a0c29c3`,
+before the commit this paragraph is about (`git show 1a0c29c3:pr-body.md` holds it verbatim), so it
+is an ancestor defect and not part of that commit's self-inflicted class. Both halves are recorded
+rather than merged into one count, because the difference decides whether this commit's citation
+drift is a two-occurrence pattern or a three-occurrence one.
+
+The reviewer also re-verified the substantive half in the same pass — the `DONE`/`done` answer on
+both legs, the digests, all three counts, the census pin, the durability policy, and that each new
+row reds under its named mutant — and found the mechanism clean.
+
+| finding | disposition |
+|---|---|
+| **P3** the Residuals bullet's six `markRaced()` line numbers were the PARENT head's — the fix's `+17` lines in `clearUnusableClaimPath` moved all six, so a reader following the pointer found `parsed = undefined;` and two closing braces | **fixed by re-reading them off the tree**: `grep -n "markRaced()" tortoise/pi-hooks/tortoise-capture.ts` → `5870, 5889, 5903, 5908, 5913, 5922`. |
+| **P3** the cycle-21 row's `tests/test_14350_drain_convergence.py:2488` (the ONE legitimate `cycle-19` citation that row exists to certify) moved to `:2540` when the fix inserted **52** lines above it (`git diff --numstat 1a0c29c3 9864698e -- tests/test_14350_drain_convergence.py` → `52 0`: the `import errno` line plus the 51-line test), and `2488 + 52 = 2540` reproduces the move exactly | **fixed**: the citation now reads `:2540`, verified with `grep -n "cycle-19"` on that file. ⚠️ An earlier wording of this row said `51` — the test is 51 lines but the commit also added the `import errno` line, so the arithmetic did not reproduce; corrected here by counting rather than by describing. |
+| **P3** the Tests block said "Two existing cases needed a stated reason", presenting #12603's and #2100's adaptations as this PR's work — BOTH landed with #14423, which is already on `origin/main` (`da82ece4226b`) | **fixed by dating the attribution**: the sentence says both landed with #14423 and names them because this contract RELIES on them, not as adaptations this diff makes — checkable, because `git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains neither case and its only deleted line is the now-unused `lstatSync` import. ⚠️ This defect predates the cycle-22 commit (see the header), so it is recorded as surfaced-here, not created-here. |
 
 ## Residuals, stated
 
-* **Generation 33 is introduced by this PR and has never shipped**, so its recorded
-  seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `74607547…`, re-cut at every byte change: for the export-only test seam, for
-  the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
-  changes, and for the MERGE of the two — a merge is a byte set neither side
-  hashed, so the digest is always derived from the merged tree; the read half moved
-  `708b6a…`→`904d2742…` because its generation MARKER moved 32→33 with the pair)
-  instead of
-  spending a generation 34 on a refinement of the same unreleased seam. From the
-  moment 33 reaches `main` the entries are frozen and a byte change needs 34.
+* **Generation 34 is this PR's; generation 33 SHIPPED on `main` in #14423** (`da82ece4226`,
+  marker 33, capture digest `746075470aab…`, read half `904d2742…`). ⛔ Every earlier head of
+  this PR re-cut generation 33 IN PLACE on the premise that it had never shipped — that
+  premise was FALSE, and re-cutting it would have kept the marker at 33 while the bytes
+  moved, so `detect_artifact_install` would have graded every Pi install made from `main`
+  as a BLOCKING `modified-artifact` ("local edit"). Both 33 entries are now FROZEN at
+  `main`'s digests and this PR ships **34** on both halves (a marker change on one half
+  alone makes `contract_version_for("pi")` answer `None`).
+  ⛔ AND THE FREEZE IS A CONVENTION PLUS ONE NEW ROW, NOT AN EXISTING GATE — stated because it
+  was measured, not assumed (review at `bcb52e1d`, P1 — it MEASURED that the test which should have
+  caught the re-cut concedes it cannot). Before the new row: reverting the whole fix at `f69c2113`
+  left `306 passed` and `327 pass / 0 fail`, because every other row asserted only that the LIVE
+  number and the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped
+  number satisfies all of them. Since the new row: that same revert — five steps, listed in the
+  row's docstring — leaves `306 passed, 1 failed`, and the failure is that row. The node pair is
+  unchanged at `328 pass / 0 fail` either way (the Pi suites never ran the ship-frozen assertion). That is why this PR adds
+  `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`: it pins the artifacts at 34 AND
+  pins `_GENERATION_DIGESTS[33]`/`_READ_SEAM_GENERATION_DIGESTS[33]` as something other than
+  this branch's pair, so re-cutting the shipped 33 reds. Verified RED under that re-cut.
+* **The seam digests this record quotes, each re-derived with `sha256sum` and never copied.**
+  At the head this record ships, the capture half is `90af077e…` = `_PINNED_PI_SEAM_INSTALL_CONTRACT`
+  = `_GENERATION_DIGESTS[34]` (re-cut in place by cycle 22's disposal fix — 34 is this PR's own,
+  still unreleased, so the entry moves with the bytes), and the read half is `469eb352…` =
+  `_PINNED_PI_READ_SEAM_INSTALL_CONTRACT` = `_READ_SEAM_GENERATION_DIGESTS[34]`. The values the
+  branch derived at EARLIER heads are kept only WITH the head that owned them, because a
+  figure that is not quoted at a head is not a claim a reader can check — and this bullet is
+  the third place the same rot was found (cycle 11 F1, cycle 19 P3): `3eef418b…` at the
+  branch's first commit, `932d74a2…` at the cycle-11 head, `f36b8c84…` at `71c89986ef6f`.
+  Every one of those was an in-place re-cut of generation **33**, legal only while 33 was
+  unreleased, and none of them is 33's shipped value (33's is `746075470aab…`, above).
+  The re-cuts happened, in order, for the export-only test seam; the peer lane's
+  `release`/`raced` behaviour fixes; this leg's behaviour changes; cycle 12's claim-policy
+  extraction; cycle 13's three fixes (the unreadable-landed-object rule on both legs, the
+  `raced` marker on the Pi leg's `gone`/`done` retry, the obstruction-clear test seam);
+  cycle 16's restore rule (a failed restore `rename`s the object back or PRESERVES it, never
+  deletes it); cycle 19's two behaviour changes on shipped bytes (the `status.json`
+  regular-file gate and the second claim-axis operator term); and the MERGE of them — a merge
+  is a byte set neither side hashed, so the digest is always derived from the merged tree
+  (the read half moved `708b6a…`→`904d2742…` at 33 because its generation MARKER moved with
+  the pair, and moved again to `469eb352…` when this PR's marker reached 34).
 * ~~**A `renew` that lands inside the read → replace window can overwrite a peer's
   fresh claim**~~ — **CLOSED at cycle 6, on both legs.** Cycle 5 recorded this as a
   residual on the argument that a compare-and-swap would "add a rename + read to
@@ -267,11 +533,18 @@ detached `origin/main` worktree too, so it is `main`'s drift and not this branch
   live session's own shutdown filing, which takes no claim by design) overlaps the
   claim holder. `DRAIN_MAX_IN_FLIGHT` is a stated ceiling read by no code; the claim
   is what serialises UNTARGETED passes.
-* **`acquireDrainClaim`'s `state.raced` flag has no forcing test.** The flag is set
-  at the three sites where a takeover is lost and consumed by one `if` in
-  `flushSpool`; the arm that IS tested is the neighbouring one (an unmakeable root
-  is not a race). Forcing the interleaving needs a peer process inside the two
-  acquisition attempts, which this suite does not stage.
+* **`acquireDrainClaim`'s `state.raced` flag: the `gone`/`done` arm HAS a forcing row;
+  the rest are staged at the seam only.** The flag is set at **six** sites
+  (`markRaced()` at `tortoise-capture.ts:5870, 5889, 5903, 5908, 5913, 5922`) and
+  consumed by one `if` in `flushSpool`. The `gone`/`done` retry — the arm that used to
+  leave no record and run the whole pass UNCLAIMED — is forced end-to-end by
+  *"the gone/done retry IS a lost race, and marks it"* (it drives `acquireDrainClaim`
+  with the `clearClaimPath` seam and asserts `state.raced === true`). ⚠️ A predecessor
+  of this line said the flag had NO forcing test and was set at "three sites"; both
+  halves were false and contradicted this record's own cycle-13 F4 row (#14480
+  the review at `bcb52e1d`, P3 — the third time this row was reported and the second time the
+  merge re-introduced it). What remains true: the takedown/disposal lost-race arms are
+  staged only at the seam, not by a peer process inside the two acquisition attempts.
 * **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
 * **A claim we cannot READ is HONOURED, not taken over** (both legs): a transient
   local error on a regular claim file is not evidence about its holder, and the
@@ -280,6 +553,15 @@ detached `origin/main` worktree too, so it is `main`'s drift and not this branch
   cost is that a permanently unreadable claim file blocks the drain until a human
   looks, which is the fail-closed direction the issue's "never two drainers" rule
   prefers over the alternative.
+* **The `status.json` gate is `lstat` → read, so it carries a REPLACE WINDOW** (cycle 19,
+  stated from the primary sources rather than discovered later): CERT C `FIO32`
+  ("Prevent Blocking on Special Files") points out that the type check and the open are
+  two syscalls, so an object swapped for a FIFO between them still blocks; the
+  race-free form is `open(O_RDONLY|O_NONBLOCK)` + `fstat` on the FD, which is what
+  `xz`'s `file_io.c` does and what `fifo(7)` prescribes. Not adopted here *deliberately*:
+  `drain_claim._read_raw` gates the CLAIM file the same way and the two halves of this
+  feature must stay one mechanism, and the exposure is a local writer replacing the
+  box's own `status.json` with a FIFO — already a box-takeover primitive.
 * **A targeted filing is exempt from the claim.** It is one POST, so the ceiling (1 slot) is respected; the exemption buys the live session's own shutdown filing never being queued behind a backlog.
 * **The Pi leg does not yield on a capacity stop** — it ends the pass and lets the next opportunity continue, because its pass is `await`ed on `session_shutdown` and must not sleep. Both legs charge nothing. This asymmetry is deliberate and is stated in the code.
 * **A non-`capture_capacity_saturated` 429 is also treated as box-level** (status triggers, code names). Narrowing to the typed category would leave the defect alive on any server that does not send one.
