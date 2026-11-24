@@ -681,7 +681,7 @@ STOP_WORDS_KEEP_THIS_RECALL = (
 #: The first cut of the guard refused a dash on the stop word ALONE, so it also refused
 #: every hyphenated head noun whose segment merely HAPPENS to be one: `state-of-the-art`,
 #: `all-or-nothing`, `do-it-yourself`, `once-in-a-lifetime`, `take-it-or-leave-it`,
-#: `everything-or-nothing`. That was disclosed as residual #11 and pinned as a REFUSAL,
+#: `everything-or-nothing`. That was disclosed as residual #14 and pinned as a REFUSAL,
 #: on the argument that the only refinement found also re-opened
 #: `is the plan—not—really cancelled` to the polarity-INVERTED population.
 #:
@@ -703,7 +703,7 @@ DASH_JOINED_COMPOUND_ROUTES = (
     "is the self-service plan archived",
 )
 
-#: ⛔ AND THE HALF THAT USED TO BE REFUSED — residual #11's six rows, plus the
+#: ⛔ AND THE HALF THAT USED TO BE REFUSED — residual #14's six rows, plus the
 #: `not-for-profit` spelling that shows why an UNCONDITIONAL negator boundary is not the
 #: fix (`-for` is not an auxiliary, so the dash joins). All of these keep the relevance
 #: read now; under the first cut of the guard every one of them was `None`.
@@ -717,14 +717,14 @@ DASH_JOINED_COMPOUND_FORMERLY_REFUSED = (
     "is the not-for-profit plan archived",
     # ⛔ THESE THREE WERE THE r9 PIN, and they moved HERE when the guard changed
     # (PR #14491 review cycle 7, P2) instead of being left asserting the old
-    # behaviour: r9 recorded them as residual #11's cost, which is now closed.
+    # behaviour: r9 recorded them as residual #14's cost, which is now closed.
     "is the state-of-the-art plan archived",
     "is the love-of-my-life plan archived",
     "is the once-a-year report archived",
 )
 
 #: ⛔ AND THE HALF THAT STILL REFUSES — the honest residue of the same guard, and the
-#: class residual #11 narrows to. Each of these is a hyphenated head noun whose marker
+#: class residual #14 narrows to. Each of these is a hyphenated head noun whose marker
 #: segment is followed by something that IS a predicate in that slot: `-of retired` is
 #: `is the list of retired services archived` one dash away, and `-to be archived` is the
 #: infinitive frame the futurity arm exists to stop. They keep the relevance read (a SAFE
@@ -744,6 +744,165 @@ DASH_JOINED_NEGATION_REFUSED = (
     "is the plan\u2014never really archived",
     "is the plan\u2014which\u2014was archived",
 )
+
+#: ⛔ THE WELD CLASS, pinned after the grammatical guard was measured leaking it TWICE
+#: MORE (PR #14491: 810/810 dash-joined NEGATOR + one non-AUX word, 1701/1701 dash-joined
+#: CLAUSE SUBJECT, each reaching the polarity-INVERTED or wrong population while the
+#: SPACED twin refused). Every row here is a dash that WELDS an ordinary word onto the
+#: head noun so no token-start stop can see it. The `_NP_DASH_AUX` frame cannot close
+#: this — `officially` and `anyone` are ordinary words, so the hole moves one word out
+#: each time the list is widened — which is why `is_predicate` now admits a dash-joined
+#: TOKEN only from `_DASH_COMPOUND_TOKENS`, a closed vocabulary. The consequence is that
+#: these refuse STRUCTURALLY: nothing has to recognise `officially`.
+DASH_WELD_REFUSED = (
+    # one non-AUX word between a negator and the ending (the r12 P1)
+    "is the plan\u2014not officially cancelled",
+    "is the plan\u2014not soon cancelled",
+    "is the plan\u2014not remotely cancelled",
+    "is the plan\u2014never officially archived",
+    "is the plan\u2014nor soon retired",
+    # the disjunction and relative spellings, same shape
+    "is the plan\u2014or soon cancelled",
+    "is the plan\u2014which officially archived",
+    # a CLAUSE SUBJECT welded onto the head noun (the r12 P1)
+    "is the plan\u2014anyone abandoned",
+    "is the ticket\u2014both teams cancelled",
+    "is the data\u2014we retired",
+    "is the claim\u2014finance retracted",
+    "is the plan\u2014the team abandoned",
+    # a registered compound with a negator glued on is a DIFFERENT token, so the
+    # WHITELIST cannot be re-opened by prefixing a compound it admits
+    "is the all-hands\u2014not cancelled",
+    "is the all-hands meeting\u2014not cancelled",
+)
+
+
+@pytest.mark.parametrize("query", DASH_WELD_REFUSED)
+def test_a_dash_may_not_weld_an_ordinary_word_onto_the_head_noun(query):
+    """The weld class, pinned by rows rather than by a guard's shape.
+
+    The preceding rounds pinned only the spellings the frame already handled
+    (`not\u2014really`, `not actually` — every gap word inside `_NP_DASH_AUX`), so the
+    table covered exactly the cases the implementation had. These rows are the ones
+    OUTSIDE that list, which is where the hole kept reappearing.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is None, (
+        f"{query!r} routes to {got.population!r} (shape {got.shape!r}) — a dash-joined "
+        f"ordinary word is being served the CANCELLED/ENDED population. The spaced "
+        f"twin of this sentence refuses, so this is the polarity-INVERTED / wrong-"
+        f"population answer, not a rounding difference")
+
+
+def test_the_dash_weld_class_leaks_nothing_across_the_sweep():
+    """The class, not just its examples — this is the falsifier for the NAME SET.
+
+    Measured on the head before the whitelist: 810/810 across this sweep reached the
+    population. A fix that closes the named rows but leaves the class open reds here,
+    which is exactly the failure mode four earlier rounds shipped (each round pinned
+    the rows it fixed and the hole moved one word out).
+    """
+    from tortoise.state_intent import detect_state_question
+
+    endings = ("cancelled", "archived", "retired", "withdrawn", "deprecated")
+    separators = ("\u2014", "\u2013", "\u2015", "\uff0d", "-")
+    weld_words = (
+        "officially", "soon", "remotely", "surely", "quickly",
+        "anyone", "someone", "both", "each", "we", "they",
+    )
+    leaks = []
+    for weld in weld_words:
+        for ending in endings:
+            for sep in separators:
+                query = f"is the plan{sep}{weld} {ending}"
+                got = detect_state_question(query)
+                if got.population is not None:
+                    leaks.append((query, got.population))
+    assert not leaks, (
+        f"{len(leaks)} dash-welded spelling(s) still route, e.g. {leaks[:4]} — the "
+        f"dash is joining an ordinary word onto the head noun, which is the "
+        f"polarity-INVERTED answer class. Close the CLASS (a dash-joined token must be "
+        f"registered vocabulary), not the rows")
+
+
+def test_the_dash_compound_whitelist_is_what_admits_the_routing_rows():
+    """The whitelist must be load-bearing, not decorative.
+
+    Two directions, because a whitelist that admits everything and one that admits
+    nothing both look 'closed'. Every routing-table compound must be IN the set, and a
+    token that is NOT in the set must refuse — so deleting an entry reds the routing
+    table and adding one cannot silently widen past a weld.
+    """
+    from tortoise.state_intent import _DASH_COMPOUND_TOKENS, detect_state_question
+
+    for query in DASH_JOINED_COMPOUND_ROUTES + DASH_JOINED_COMPOUND_FORMERLY_REFUSED:
+        for token in query.split():
+            if "-" in token:
+                assert token in _DASH_COMPOUND_TOKENS, (
+                    f"{token!r} (from {query!r}) routes but is not registered — the "
+                    f"routing table and the whitelist disagree")
+    assert "plan-not" not in _DASH_COMPOUND_TOKENS
+    assert detect_state_question("is the plan\u2014not cancelled").population is None
+
+
+#: ⛔ AN ATTRIBUTIVE ENDING WORD IN THE **HEAD** SLOT, pinned because the guard that
+#: refuses it was UNFALSIFIED for a while: the module credited it with closing a real
+#: regression against `main`, and deleting the lookahead left all 166 tests GREEN
+#: (measured, PR #14491 review round 12, P2). These two rows are the rows that
+#: actually flip — measured by removing the lookahead and diffing the answers, not by
+#: guessing which spellings it covers. (The dash row the module also cites,
+#: `is the superseded-policy document archived`, no longer flips on that mutation
+#: alone because `superseded-policy` is not registered vocabulary, so it is pinned
+#: here for its BEHAVIOUR rather than credited to this guard.)
+HEAD_SLOT_ENDING_REFUSED = (
+    "is the deprecated api migration guide archived",
+    "is the retired employees list archived",
+    "is the superseded-policy document archived",
+)
+
+
+@pytest.mark.parametrize("query", HEAD_SLOT_ENDING_REFUSED)
+def test_an_attributive_ending_word_in_the_head_slot_refuses(query):
+    """`deprecated` MODIFIES `api migration guide`; it is not the predicate.
+
+    The shape is a yes/no question whose PREDICATE is the ending word. When the ending
+    word sits in the HEAD slot it is an adjective, and routing on it answers a content
+    lookup with the whole ended population.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is None, (
+        f"{query!r} routes to {got.population!r} (shape {got.shape!r}) — the ending "
+        f"word there MODIFIES the following noun, so the question's predicate is "
+        f"`archived`/absent, not the participle. Deleting the head-slot lookahead is "
+        f"what re-opens this")
+
+
+#: The DETERMINER set is closed and load-bearing for recall: narrowing it to
+#: `the|our|your|their|its|my` drops `these`/`those` and silently answers `0 rows`
+#: (measured, PR #14491 review round 12, P3 — suite stayed green).
+DETERMINER_SUBJECT_ROUTES = (
+    "is these endpoints archived",
+    "is those claims retired",
+    "is this policy archived",
+    "is that report cancelled",
+)
+
+
+@pytest.mark.parametrize("query", DETERMINER_SUBJECT_ROUTES)
+def test_a_demonstrative_determiner_subject_routes(query):
+    """`these`/`those`/`this`/`that` are ordinary determiners, not an edge case."""
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is not None, (
+        f"{query!r} keeps the relevance read — a demonstrative subject is the same "
+        f"shape as `is the plan archived`, so this is a silent `0 rows` miss caused "
+        f"by narrowing the determiner set")
+
 
 
 @pytest.mark.parametrize("query", STOP_WORDS_KEEP_THIS_RECALL)
@@ -780,7 +939,7 @@ def test_a_dash_joined_compound_still_routes_when_no_segment_is_a_stop(query):
 
 @pytest.mark.parametrize("query", DASH_JOINED_COMPOUND_FORMERLY_REFUSED)
 def test_the_dash_guard_recall_cost_is_closed_not_disclosed(query):
-    """Residual #11 is CLOSED — the rows that used to be the disclosure now route.
+    """Residual #14 is CLOSED — the rows that used to be the disclosure now route.
 
     Every row here was `None` under the first cut of the guard (which refused a dash on
     the stop word alone) and is `ended/is_predicate` now. If this reds, the guard has
@@ -791,7 +950,7 @@ def test_the_dash_guard_recall_cost_is_closed_not_disclosed(query):
 
     got = detect_state_question(query)
     assert got.population == "ended", (
-        f"{query!r} routed to {got.population!r} (shape {got.shape!r}) — residual #11 is "
+        f"{query!r} routed to {got.population!r} (shape {got.shape!r}) — residual #14 is "
         f"closed: the dash guard is predicate-anchored, so a compound whose segment is "
         f"a stop word still routes. If this reds, the guard was narrowed back to "
         f"refusing on the stop word alone — re-measure the disclosure rather than "
@@ -1023,7 +1182,7 @@ def test_the_dash_guard_splits_only_a_predicate_shaped_tail():
     ⛔ THIS PIN USED TO ASSERT THE OPPOSITE, and moving it is the point. The first cut
     of the guard split the token at EVERY `-<stop>`, so `is the state-of-the-art plan
     archived`, `is the love-of-my-life plan archived` and `is the once-a-year report
-    archived` kept the relevance read — disclosed as residual #11. The
+    archived` kept the relevance read — disclosed as residual #14. The
     predicate-anchored guard (cycle-7, P2) closed that cost, and those three now ROUTE
     (:data:`DASH_JOINED_COMPOUND_FORMERLY_REFUSED`), so renewing them here would pin a
     behaviour the module no longer has — measured red at `1f9dfd0452`, which is why
@@ -1042,7 +1201,7 @@ def test_the_dash_guard_splits_only_a_predicate_shaped_tail():
         got = detect_state_question(refused)
         assert got.population is None, (
             f"{refused!r} now routes to {got.population!r} (shape {got.shape!r}) — "
-            f"that CLOSES the residue of residual #11, which is fine, but it is not a "
+            f"that CLOSES the residue of residual #14, which is fine, but it is not a "
             f"silent change: re-measure that the refinement does not re-open "
             f"`is the plan—not—really cancelled` / `is the plan—which was archived` "
             f"to the CANCELLED/ENDED population, then update "

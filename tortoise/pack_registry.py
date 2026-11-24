@@ -2213,22 +2213,26 @@ class PackRegistry:
             # whose `-> list[str]` contract forbids it (#8661, the "validator
             # not total" class). ⛔ Do NOT re-wrap this sentence onto a line
             # that BEGINS with `# type:` — mypy reads such a line as a TYPE
-            # COMMENT, and `'list'` is not a type. ⛔ THE TWO SHAPES ARE NOT THE
-            # SAME TRAP, measured on a bare repro (#14491) — and the version
-            # bound differs between them:
-            #   • STANDALONE, a comment LINE beginning `# type: 'list' …` (what
-            #     this file hit) — mypy 2.3.1: `error: Invalid syntax  [syntax]`,
-            #     RED; mypy 2.4.1: no error at all, GREEN.
-            #   • INLINE, `x = 1  # type: 'list' …` on the assignment line —
-            #     `error: Syntax error in type comment "…"  [syntax]` on BOTH
-            #     2.3.1 and 2.4.1, so THAT message names the INLINE shape and
-            #     never the standalone one this file hit.
-            # So the standing hygiene — never BEGIN a comment line with `# type:`
-            # — costs nothing and is the fix that holds on both shapes. Do NOT
-            # drop this note because a 2.4.1 box is green today: `mypy` is
-            # installed UNPINNED by CI while [tool.mypy]'s baseline was measured
-            # on 2.3.1, so the resolved version moving backwards resumes the red
-            # and the next lane would be told the pin is not the cause when it is.
+            # COMMENT, and `'list'` is not a type. ⛔ THE POSITION DECIDES WHICH TRAP
+            # IT IS, measured on a bare repro (#14491) — and only one arm is
+            # version-bounded:
+            #   • STANDALONE, mid-body or module level (what this file hit) — mypy
+            #     2.3.1: `error: Invalid syntax  [syntax]`, RED; mypy 2.4.1: no error,
+            #     GREEN.
+            #   • STANDALONE as the FIRST statement of a function body — mypy reads it
+            #     as the FUNCTION's type comment, so BOTH 2.3.1 and 2.4.1 say
+            #     `error: Syntax error in type comment "…"  [syntax]`.
+            #   • INLINE, `x = 1  # type: 'list' …` on the assignment line — also
+            #     `error: Syntax error in type comment "…"` on BOTH.
+            # So `Syntax error in type comment` names the INLINE and the
+            # first-in-block arms, NOT the mid-body one this file hit — position, not
+            # inline-vs-standalone, is the discriminator.
+            # The standing hygiene — never BEGIN a comment line with `# type:` — costs
+            # nothing and holds on all three arms. Do NOT drop this note because a
+            # 2.4.1 box is green today: `mypy` is installed UNPINNED by CI while
+            # [tool.mypy]'s baseline was measured on 2.3.1, so the resolved version
+            # moving backwards resumes the red and the next lane would be told the pin
+            # is not the cause when it is.
             # `load_all`'s except turned it into
             # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
             # review P2, measured). The element loop above already refuses a

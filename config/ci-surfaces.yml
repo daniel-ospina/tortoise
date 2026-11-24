@@ -71,8 +71,7 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a72cfd661`, whose #14482 follow-up to #14439's TEST-CUT fold deletes the 81 names that cut
-# orphaned, and whose #14439 fold's B7/B4/B8 cuts trim the ARITHMETIC over the
+# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
@@ -80,29 +79,22 @@ version: 1
 # and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
-# own dual registration of `tests/test_14407_alert_delivery.py` and #14033's
-# `tests/test_14033_state_cue_gap.py` — registered `core` by THIS PR, with its own flat row, and
-# listed in shard h — every one of them at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs
-# three shards at 837.9 s (a, c, k) and eight at 837.8 s (b, d, e, f, g, h, i, j), so
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs three shards at 837.9 s (a, c, k) and eight at
-# 837.8 s (b, d, e, f, g, h, i, j) — ⛔ MEASURED ON THIS BRANCH'S HEAD, which folded `main` at
-# `2f38053601` and adds this PR's own registration; that parent alone emits five/six at
-# 837.7/837.6 and `da4b76a5851c` a seven/four at 837.5/837.4, so the split quoted here belongs
-# to no `main` sha and the attribution is not allowed to imply one — so
-# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
+# 838.0 s (b, c, d, e, f, g, h, i, j, k) — ⛔ MEASURED ON THIS PR'S REBASED HEAD, which sits on
+# `main` at `59a08fdb8b40` and adds this PR's own registration only
+# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so
+# `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
-# `tests/test_14350_drain_convergence.py` sits in shard d — and #14033's registration re-packed it
-# once more, onto the three/eight split stated above. That map is the union of both parents'
 # `tests/test_14350_drain_convergence.py` sits in shard e at this head. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
 # (`--emit-push-matrix` lists it in shard j at this head) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
@@ -123,7 +115,6 @@ version: 1
 # this emission and left its own reading behind, so the block accumulated five stacked restatements
 # of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
 # ends up claiming two partitions while looking like one. The graded clause is the ONE in the
-# paragraph above, measured on the tree that SHIPS (`main` at `2f38053601831` plus this PR — ⛔ re-verified after the base fold, not carried from the branch that first wrote it). What is kept here is
 # paragraph above, measured on THIS BRANCH'S HEAD. What is kept here is
 # only what a reader cannot get from that clause: which registrations `main` has landed at the flat
 # 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's

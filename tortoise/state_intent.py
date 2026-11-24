@@ -411,7 +411,7 @@ _ENDING_WORDS = (
 #:   `ended` before the guard, which was a REGRESSION against `main` — a content
 #:   lookup served the ended population. A safe miss is the deliberate trade;
 #: * A DASH-JOINED COMPOUND WHOSE SEGMENT IS A STOP WORD **ROUTES** — this was a
-#:   disclosed recall cost (#8) and it is now CLOSED, so it is recorded here rather than
+#:   disclosed recall cost (#14) and it is now CLOSED, so it is recorded here rather than
 #:   left in the residual list. The first cut of the guard refused a dash on the stop
 #:   word ALONE, which gave back `is the state-of-the-art model retired`, `… the
 #:   all-or-nothing plan archived`, `… the everything-or-nothing plan archived`, `… the
@@ -587,6 +587,75 @@ _NP_DASH_BOUNDARY = (
     rf")\b)"
 )
 _NP_WORD_GUARDED = rf"[^\W_](?:(?:-{_NP_DASH_BOUNDARY})|[^\W_]|['’])*"
+
+#: ⛔ THE COMPOUND WHITELIST FOR `is_predicate` — a CLOSED vocabulary, and the
+#: reason it exists is that the grammatical guard above kept MOVING THE HOLE rather
+#: than closing it. Every round widened the frame, and the same wrong-answer class
+#: came back one word further out: `—not—really cancelled` was closed, then
+#: `—not officially cancelled` routed; `—which—was archived` was closed, then
+#: `—anyone abandoned`, `—both teams cancelled` and `—we retired` routed. Measured on
+#: this head before the change below: 810/810 dash-joined NEGATOR + one non-AUX word,
+#: and 1701/1701 dash-joined CLAUSE SUBJECT, all reaching the polarity-INVERTED or
+#: wrong population, while the SPACED twin of each refused. A precision guard that can
+#: be defeated by any word outside a closed adverb list is not a guard.
+#:
+#: So the rule is inverted for this shape: a dash-joined TOKEN is admitted only when
+#: the WHOLE space-delimited token is one of these registered compounds. Anything else
+#: — `plan—not`, `plan—anyone`, `ticket—both`, `states—which` — declines the shape and
+#: keeps the relevance read. That makes the leak class STRUCTURALLY unreachable rather
+#: than patched, and the failure direction is the safe one: an unregistered compound is
+#: a MISS (`0 rows`), never a wrong answer. The three spellings the table already pins
+#: as refusals (`list-of-retired-services`, `going-to-be-cancelled`,
+#: `about-to-be-archived`) are deliberately NOT registered — they stay refused.
+#:
+#: ⛔ THE MATCH IS ON THE FULL TOKEN, which is what keeps this from re-opening: an
+#: registered compound with a negator glued on (`all-hands—not`) is a DIFFERENT token
+#: and is refused. ⛔ AND IT IS VOCABULARY, NOT TYPOGRAPHY: the dash FOLD in
+#: `_fold_typography` already normalises every `Pd` to `-`, so `all—hands` (em dash)
+#: reaches this set as `all-hands` and routes — which is exactly the spelling the
+#: routing table pins.
+_DASH_COMPOUND_TOKENS: frozenset[str] = frozenset({
+    "all-hands",
+    "go-to-market",
+    "point-to-point",
+    "all-in-one",
+    "made-to-order",
+    "up-to-date",
+    "day-to-day",
+    "self-service",
+    "e-mail",
+    "state-of-the-art",
+    "all-or-nothing",
+    "everything-or-nothing",
+    "do-it-yourself",
+    "once-in-a-lifetime",
+    "take-it-or-leave-it",
+    "not-for-profit",
+    "love-of-my-life",
+    "once-a-year",
+    "off-the-shelf",
+    "either-or",
+    "run-of-the-mill",
+    "terms-of-service",
+    "end-of-life",
+})
+
+
+def _admits_dash_joined_tokens(t: str) -> bool:
+    """Whether every dash-joined token in `t` is a registered compound.
+
+    `is_predicate`'s subject NP admits `-` inside a head noun (`company's`, `all-hands`),
+    and that spelling is what lets a dash WELD a negator or a clause subject onto the head
+    noun so no token-start stop can see it. The guarded token class alone cannot close
+    that: `-officially` and `-anyone` are ordinary words, so a frame built from auxiliaries
+    refuses them only until the next word. This predicate is the closed-vocabulary backstop
+    — one space-delimited token at a time, matched WHOLE.
+    """
+    return all(
+        tok in _DASH_COMPOUND_TOKENS
+        for tok in t.split()
+        if "-" in tok
+    )
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -1130,6 +1199,14 @@ def detect_state_question(text: str | None) -> StateQuestion:
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
+            # ⛔ THE DASH-COMPOUND BACKSTOP, and it is checked HERE rather than inside
+            # the pattern because it is a property of the WHOLE query, not of the
+            # matched span: a dash anywhere in a space-delimited token is a weld
+            # attempt unless that token is registered vocabulary. `continue` (not
+            # `return`) so a declined `is_predicate` still lets a later shape match
+            # — this rule may only ever DECLINE one shape, never suppress the others.
+            if shape == "is_predicate" and not _admits_dash_joined_tokens(t):
+                continue
             return StateQuestion(ENDED, shape, m.group(0))
     for shape, pattern in _COMMITMENT_SHAPES:
         m = pattern.search(t)
