@@ -53,9 +53,15 @@ The reaper refuses, deliberately, and the schedule passes **no** `--test-org`,
 
 - `refused-unresolved` — no `organizations` row owns the graph name. An orphan is
   an **adjudication**, not a cleaning job. Do not "fix" it by widening the name
-  markers; find out which org it belonged to. **The one exception is when it is ALL
-  of them** (`unresolved == total`): that is the control plane faulting, not a
-  cluster of orphans, and the run reds for it.
+  markers; find out which org it belonged to. **The one exception is when ALL of
+  them are unresolved AND at least one is orphan-shaped** (`reserved: false`): that
+  is the control plane faulting, not a cluster of orphans, and the run reds for it.
+  ⛔ A reserved-only estate (`tortoise`, `registry_*`) is the **converged, benign**
+  state, not a fault: the tool refuses reserved control-plane graphs before any
+  owner lookup, so they bucket `refused-unresolved` by design. That estate stays
+  **green** (a note, no reason) — otherwise the schedule would red every 15
+  minutes forever once #13218 deprovisions the test orgs, which is the deaf
+  monitor from the other side.
 - `kept-not-test-org` — the owner carries no test/agent marker. A customer called
   `Agent Test` lands here **on purpose** (the marker is anchored on a
   `-`/`_` separator so a real name cannot match). If such an org genuinely must be
@@ -77,7 +83,7 @@ The reaper refuses, deliberately, and the schedule passes **no** `--test-org`,
 |---|---|---|
 | `missing credential(s)` | `FALKORDB_CLOUD_URI` / `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` unset or rotated | fix the repo secret. ⛔ Without the guard an unset URI sends the tool to an **embedded** database and reports "0 graphs, nothing to reap" as a clean sweep |
 | `returned 0 graphs` | the target answered but holds nothing | wrong target or an unreadable store — check `target:` in the "Guard the target" step |
-| `control plane ANSWERED but resolved none` | every graph is `refused-unresolved` | the control plane is faulting (empty/restored project, a key scoped elsewhere, namespace drift), not 138 coincidental orphans — the sweep would be a silent no-op |
+| `control plane ANSWERED but resolved none` | every graph is `refused-unresolved` and at least one is orphan-shaped (`reserved: false`) | the control plane is faulting (empty/restored project, a key scoped elsewhere, namespace drift), not 138 coincidental orphans — the sweep would be a silent no-op. A **reserved-only** estate is the converged state and does NOT red: it appears as a `REFUSED as unresolved (… reserved control-plane)` note |
 | `plan pass did not produce a report` | exit 2 — control plane or graph list unreadable | the reaper REFUSES rather than sweeping a partial view; re-run, then investigate the control plane |
 | `execute pass produced no report` / `exited N` | the reap was killed (124/137) or refused (2) before writing its document | nothing can be read about that pass — its deletion count would be a guess; re-run |
 | `N deletion(s) FAILED` | `GRAPH.DELETE` did not take | read `outcome[]` in the execute artifact |

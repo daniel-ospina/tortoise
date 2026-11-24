@@ -161,6 +161,29 @@ class TestScheduleShape:
             assert at > populated[0], (reader, at, populated[0], names)
             assert needle in str(steps[at].get("run", "")), (reader, needle)
 
+    def test_an_unset_report_directory_fails_closed(self, tmp_path):
+        """The seam step's guard, EXECUTED in both directions.
+
+        Without it an unset `RUNNER_TEMP` writes `/reaper-plan.json` at the root of
+        the runner's filesystem, where nothing uploads it — so the durable record
+        vanishes and `if-no-files-found: warn` keeps the run green. No other test
+        executed this body, so deleting the guard reddened nothing (#14565 review).
+        """
+        script = _script("Report directory")
+        gh_env = tmp_path / "github_env"
+        unset = _bash(script, env={"RUNNER_TEMP": "", "GITHUB_ENV": str(gh_env)},
+                      cwd=tmp_path)
+        assert unset.returncode != 0, "an unset report directory read as a clean run"
+        assert "RUNNER_TEMP is unset" in unset.stdout
+        assert not gh_env.exists(), "the seam was populated from an empty RUNNER_TEMP"
+
+        work = tmp_path / "runner"
+        work.mkdir()
+        setdir = _bash(script, env={"RUNNER_TEMP": str(work), "GITHUB_ENV": str(gh_env)},
+                       cwd=tmp_path)
+        assert setdir.returncode == 0, setdir.stdout + setdir.stderr
+        assert gh_env.read_text().strip() == f"REAPER_WORKDIR={work}"
+
 
 # ── 2. the schedule must not widen a gate ────────────────────────────────────
 
@@ -203,6 +226,16 @@ class TestNoWidener:
         assert len(upload) == 1
         assert upload[0]["with"]["retention-days"] == 90
         assert "reaper-plan.json" in upload[0]["with"]["path"]
+        # ⛔ `warn` here is a fail-OPEN: the artifact IS the durable record, so a run
+        # that uploaded NOTHING must not stay green.
+        assert upload[0]["with"]["if-no-files-found"] == "error", (
+            "an upload that finds no reports is a red run, not a warning")
+        # ...and it must read the ONE seam the steps populate, never a second
+        # spelling of it: a re-pointed REAPER_WORKDIR would leave the record where
+        # nothing uploads it, and the run would still be green.
+        assert "runner.temp" not in upload[0]["with"]["path"], (
+            "the artifact path hard-codes runner.temp instead of the seam")
+        assert "env.REAPER_WORKDIR" in upload[0]["with"]["path"]
 
     def test_secrets_are_bound_in_env_never_interpolated_into_a_run_body(self):
         """#4361: `${{ secrets.X }}` in a `run:` body is substituted into the shell
@@ -263,20 +296,34 @@ class TestCredentialGuard:
 
 # ── 4. the verdict (a dead sweep must not look green) ────────────────────────
 
+#: The reserved control-plane names as the tool sees them: one literal from
+#: `RESERVED_GRAPH_NAMES` and two `registry_*` prefixes (the predicate is
+#: `name in RESERVED_GRAPH_NAMES or name.startswith("registry_")`).
+RESERVED_GRAPH_FIXTURES = ("tortoise", "registry_control_plane", "registry_ops")
+
 def _plan(reapable: int = 1, total: int | None = None, unresolved: int = 0,
-          unreadable: int = 0) -> dict:
+          unreadable: int = 0, reserved: int = 0) -> dict:
+    """The tool's own `build_report` shape, including the `reserved` flag the row
+    carries (`build_report` stamps it from the SAME predicate `classify_graph`
+    refuses on). A reserved graph buckets `refused-unresolved` like an orphan, so
+    the flag — not the bucket — is what a consumer can discriminate on."""
     graphs = []
     for i in range(reapable):
         graphs.append({"graph": f"org_a{i}", "bucket": "reapable", "org_id": f"a{i}",
-                       "org_name": f"agent-{i}", "gid": None, "node_count": 0})
+                       "org_name": f"agent-{i}", "gid": None, "node_count": 0,
+                       "reserved": False})
     for i in range(unresolved):
         graphs.append({"graph": f"orphan{i}", "bucket": "refused-unresolved",
                        "org_id": None, "org_name": None, "gid": None,
-                       "node_count": None})
+                       "node_count": None, "reserved": False})
+    for name in RESERVED_GRAPH_FIXTURES[:reserved]:
+        graphs.append({"graph": name, "bucket": "refused-unresolved",
+                       "org_id": None, "org_name": None, "gid": None,
+                       "node_count": None, "reserved": True})
     for i in range(unreadable):
         graphs.append({"graph": f"org_u{i}", "bucket": "refused-unreadable",
                        "org_id": f"u{i}", "org_name": f"e2e-{i}", "gid": None,
-                       "node_count": None})
+                       "node_count": None, "reserved": False})
     counts: dict[str, int] = {}
     for g in graphs:
         counts[g["bucket"]] = counts.get(g["bucket"], 0) + 1
@@ -472,6 +519,64 @@ class TestReviewFindings:
             verify=_plan(reapable=0, unresolved=3), execute=_execute(deleted=2))
         assert done.returncode == 0, record["reasons"]
 
+    def test_a_RESERVED_only_estate_is_green(self, tmp_path):
+        """⛔ The CONVERGED state, and the arm that did not exist.
+
+        Reserved control-plane graphs (`tortoise`, `registry_*`) are
+        `refused-unresolved` BY DESIGN — `classify_graph` refuses them before any
+        owner lookup, so they can never resolve. Once the test orgs are
+        deprovisioned (#13218) the estate is legitimately reserved-only, so an arm
+        that counts them as evidence of a control-plane fault reds EVERY tick
+        forever, filing on a dedupe key the resolve step can never close (resolve
+        needs green). Measured red before the `reserved` discriminator.
+        """
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=0, reserved=3),
+            verify=_plan(reapable=0, reserved=3), execute=_execute(deleted=0))
+        assert done.returncode == 0, record["reasons"]
+        assert record["verdict"] == "green"
+        assert record["counts"].get("refused-unresolved") == 3
+        assert not any("resolved none" in r for r in record["reasons"]), (
+            "a reserved-only estate read as a control-plane fault")
+        # Still VISIBLE (a note, never silence) — and labelled for what it is.
+        assert any("REFUSED as unresolved" in n and "reserved control-plane" in n
+                   for n in record["notes"]), record["notes"]
+
+    def test_ONE_orphan_among_reserved_rows_reds_the_run(self, tmp_path):
+        """The other half of the discriminator: the flag must not swallow the case
+        the arm exists for. A tenant-shaped unresolved row (no `reserved` stamp)
+        means the control plane answered and resolved nothing, and that stays a
+        FAILURE even when every other unresolved row is reserved."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=0, unresolved=1, reserved=2),
+            verify=_plan(reapable=0, unresolved=1, reserved=2),
+            execute=_execute(deleted=0))
+        assert done.returncode != 0, "an orphan among reserved rows read as clean"
+        assert any("resolved none" in r and "orphan-shaped" in r
+                   for r in record["reasons"]), record["reasons"]
+
+    def test_the_report_stamps_reserved_on_each_row(self, monkeypatch):
+        """The DISCRIMINATOR'S SOURCE. The arm above reads `row["reserved"]`, so the
+        tool has to stamp it — otherwise every row reads as orphan-shaped and the
+        reserved-only estate reds forever again while the workflow tests (which use
+        fixtures) all stay green. Pinned against the real `build_report`, with only
+        the control plane and the node-count read faked.
+        """
+        from tools import reap_empty_test_graphs as reaper
+
+        class _Proj:
+            db = type("D", (), {"list_graphs": lambda self: [
+                "tortoise", "registry_ops", "orphan0"]})()
+
+        counts: list[str] = []
+        monkeypatch.setattr(reaper, "_namespace_index", lambda cp: {})
+        monkeypatch.setattr(reaper, "_node_count",
+                            lambda proj, name: counts.append(name))
+        report = reaper.build_report(proj=_Proj(), cp=object())
+        assert {r["graph"]: r["reserved"] for r in report["graphs"]} == {
+            "tortoise": True, "registry_ops": True, "orphan0": False}, report["graphs"]
+        assert counts == [], "a reserved graph had its node count read"
+
     def test_a_killed_execute_pass_is_a_failure_even_with_a_clean_verify(
             self, tmp_path):
         """A pass killed by the runner (137) or by `timeout` writes NO document, and
@@ -556,8 +661,14 @@ def test_a_reap_tool_only_change_selects_core_so_this_guard_actually_runs():
         ["tools/reap_empty_test_graphs.py"], "pull_request", manifest)
     assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
     files = selection.get("test_files")
-    if files == "ALL":
-        return
-    assert "test_14559_reaper_schedule.py" in files, (
-        "a diff to tools/reap_empty_test_graphs.py no longer selects its own pin — "
-        "the `CORE_ALSO` entry was dropped or the prefix behaviour changed")
+    # ⛔ NOT a bare `return`: a branch that asserts nothing cannot red anything, and
+    # it would pass in exactly the state where the registration guarantee stops
+    # holding. "ALL" is legal ONLY as the full selection — which is the state that
+    # runs this file by definition, so assert that coupling instead of skipping.
+    assert files != "ALL" or selection.get("full") is True, (
+        "test_files == 'ALL' without full=True: an unscoped 'ALL' would make this "
+        "pin vacuous")
+    if files != "ALL":
+        assert "test_14559_reaper_schedule.py" in files, (
+            "a diff to tools/reap_empty_test_graphs.py no longer selects its own pin — "
+            "the `CORE_ALSO` entry was dropped or the prefix behaviour changed")
