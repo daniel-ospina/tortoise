@@ -3806,13 +3806,15 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
 #: independent statement that reds when the DOOR moves — a derivation checked only against
 #: itself cannot tell "unchanged" from "widened".
 #:
-#: ⛔ `_state_route_out` is RE-DERIVED, not rubber-stamped (#14033's re-cut): it is the
-#: search route's second OUT-SINK, a private `_`-prefixed kwarg the handler passes to
-#: receive the missed-state-cue payload, and nothing about which rows survive `limit`
-#: depends on it — the same class as the door's own `_truncation_out`. It is NOT a lever:
-#: the reader ignores it as an input, so naming it cannot widen what this mirror measures.
-_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out",
-                                 "_state_route_out"})
+#: #14033 re-derivation (deliberate, not a silent widening): the door now also hands
+#: ``_state_route_out`` — the out-sink that carries the "a state question missed the cue
+#: table" notice to `/v1/search`'s body. It is an out-sink on exactly the footing of
+#: ``read_status_out`` / ``_truncation_out`` (``dict | None = None``, filled AFTER the read
+#: runs, never consulted before it), so it cannot change WHICH rows survive ``limit``: it
+#: joins the allow-list for the same reason those two are on it, and adds no lever.
+_EXPECTED_DOOR_ARGS = frozenset({
+    "query", "limit", "read_status_out", "_truncation_out", "_state_route_out",
+})
 
 
 def _door_read_contract(
@@ -3880,7 +3882,7 @@ def _door_read_contract(
         allowed |= set(positional[:len(call.args)])  # positional → the read's own names
     # ⛔ THE `named_levers` BACKSTOP RUNS *FIRST* (#14281 review F4, measured). It used to
     # sit BELOW the equality, where it could never fire: the equality pins `allowed` to a
-    # four-name literal, so `allowed & bool_levers` is non-empty only for a class the
+    # five-name literal, so `allowed & bool_levers` is non-empty only for a class the
     # equality already reds — measured, adding `include_terminal=False` to the door reds at
     # the equality and NEVER here, and a `_rerank_candidates` door change was reported by
     # the equality's "re-derive" text instead of this one's "the door already names a
@@ -9712,7 +9714,8 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     the SAME read with a DIFFERENT argument set — seven levers the door does not name
     (``kind``, ``threshold``, ``entity_type``, ``min_confidence``, ``order_by``,
     ``relationship_filter``, ``traversal_path`` — ``tortoise/mcp_server.py``), and
-    NEITHER of the door's two out-sinks (``read_status_out``, ``_truncation_out``) — so
+    NONE of the door's three out-sinks (``read_status_out``, ``_truncation_out``,
+    ``_state_route_out``) — so
     the two are INCOMPARABLE, not ordered. The allow-list below is derived from the
     ``/v1/search`` door alone, so it does NOT describe the MCP arm; a harness that
     mirrors THAT arm needs its own contract, not a widened one here.
@@ -12336,7 +12339,7 @@ def test_every_door_contract_clause_reds() -> None:
     sdk = _SDK.read_text()
 
     # Control / non-vacuity: the real sources satisfy the contract, and it carries the
-    # door's four arguments plus this harness's out-sink.
+    # door's five arguments plus this harness's out-sink.
     assert _door_read_contract() == set(_EXPECTED_DOOR_ARGS) | {"leg_trace"}
 
     def raised(needle: str, *, hosted_source: str | None = None,
@@ -12347,29 +12350,27 @@ def test_every_door_contract_clause_reds() -> None:
         assert needle in message, (needle, message)
         return message
 
-    # #14033's re-cut added a SECOND out-sink to the door's read call,
-    # `_state_route_out=state_out` (the missed-state-cue payload — an out-sink, not a
-    # lever; it is in `_EXPECTED_DOOR_ARGS` above), so the anchor this harness mutates is
-    # the LAST keyword the door hands rather than `_truncation_out`'s now-mid-list one.
-    anchor = "_state_route_out=state_out),"
+    anchor = "_truncation_out=trunc_out, _state_route_out=state_out),"
     assert hosted.count(anchor) == 1
 
     # 1. the door itself names a BOOL lever -> `not named_levers`
     raised("the door itself already names",
            hosted_source=hosted.replace(
-               anchor, "_rerank_candidates=False, _state_route_out=state_out),", 1))
+               anchor, "_truncation_out=trunc_out, _state_route_out=state_out, "
+                       "_rerank_candidates=False),", 1))
 
     # 2. the door names a lever the bool-lever intersection cannot see -> the equality
     raised("re-derive this contract and the harness's",
-           hosted_source=hosted.replace(anchor, 'kind="statement", '
-                                               "_state_route_out=state_out),", 1))
+           hosted_source=hosted.replace(anchor, "_truncation_out=trunc_out, "
+                                               '_state_route_out=state_out, '
+                                               'kind="statement"),', 1))
 
     # 3. a second read call inside `search` (a hoisted `_do_search`, an added arm) -> the
     #    cardinality clause, which is what stops the allow-list being a UNION
     raised("read calls — this contract is derived from exactly one",
            hosted_source=hosted.replace(
                anchor,
-               "_truncation_out=trunc_out),\n"
+               "_truncation_out=trunc_out, _state_route_out=state_out),\n"
                "                lambda: sdk._tortoise_fts_query(q, limit=limit),", 1))
 
     # 4. `_rerank_candidates` stops being a bool-defaulted parameter -> the bool-lever seed,
