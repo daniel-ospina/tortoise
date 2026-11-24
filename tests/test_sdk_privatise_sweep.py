@@ -1062,9 +1062,12 @@ def test_a_tool_only_diff_selects_this_suite():
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
     to `tier1`. ⛔ THE MECHANISM IS A UNION, NOT A SKIP: `tier1` is unioned into EVERY PR
-    selection (`files = set(tier1)` in `select()`, and none of the later subtractions — `slow`,
-    `carve`, `uri_requiring_files`, `on_demand_files` — removes a tier-1 member), so a tier-1
-    membership selects this suite unconditionally. ⛔ AND WHAT THAT COSTS IS THE
+    selection (`files = set(tier1)` in `select()`), and THIS SUITE then survives the later
+    subtractions — `slow`, `carve`, `uri_requiring_files`, `on_demand_files` — because none of
+    them contains it, so a tier-1 membership selects this suite unconditionally. ⛔ NOT
+    "`tier1` is never subtracted": `carve` does remove tier-1 members (`test_config.py`,
+    `test_guard.py`, `test_reaper_orphan.py` are in both), which is irrelevant here only
+    because this file is in neither set. The scoping is the claim; the universal is not. ⛔ AND WHAT THAT COSTS IS THE
     SUITE-SELECTION ASSERT ONLY: with the row
     deleted the `core`-surface assert still reds, so the row's removal is still caught; what a
     tier-1 join takes away is this arm's discrimination on the selection side — the suite assert
