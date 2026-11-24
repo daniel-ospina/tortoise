@@ -25,8 +25,16 @@ the captures in flight rather than a hidden blocker.
 
 So the fix is to take that chain OFF the loop, and the pin is structural rather
 than a wall-clock assertion (a timing assertion in a test rots into a pass, and
-this one would also need a real Postgres). It asserts, for EVERY
-`_stamp_capture_provenance(...)` call in `hosted_api`:
+this one would also need a real Postgres). It asserts, for every
+`_stamp_capture_provenance(...)` call in `hosted_api` SPELLED as that bare name in
+call position — and, separately, that no STATIC reference this pass can see binds,
+aliases, passes or otherwise reads that name, since an alias (`_prov =
+_stamp_capture_provenance; _prov(…)`), a `getattr(…)`, a `.__call__(…)` or an
+attribute form is the same call under a spelling this walk cannot follow. ⛔ THAT
+SEAL IS STATIC-ONLY, exactly as the chain-name paragraph below states: a name
+assembled from an unfoldable string (`eval("".join(["_stamp_capture",
+"_provenance"]))`) or a computed `getattr` is OUTSIDE this pin and needs the
+run-time guard in #14528:
 
 1. the function that contains the call (its innermost enclosing function) is
    handed to `_run_off_loop(_CAPTURE_EXECUTOR, …)` — the #10893/#14086 house
@@ -67,10 +75,11 @@ twice, once on the loop), and `_CAPTURE_EXECUTOR.submit(_stamp_chain)` beside th
 intended submission. Arm 4 closes that: it grades every REFERENCE to the chain,
 not the existence of some submission.
 
-⛔ THE ARMS ARE ASSERTED IN THAT ORDER, and the order is load-bearing. Property 3
-is checked LAST on purpose: the PRE-#13722 chain lives in `_report_capture`, a
-nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
-a 3-check written first reds THERE — reporting "the chain silently does NOT run"
+⛔ ARMS 1 AND 2 COME BEFORE ARM 3, and THAT order is load-bearing (arms 4, 5, 6
+and the door-spelling arm follow arm 3; "in that order" would be false). Property 3
+is checked AFTER them on purpose: the PRE-#13722 chain lives in `_report_capture`,
+a nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
+an arm-3-first check reds THERE — reporting "the chain silently does NOT run"
 about a shape where it runs, inline on the loop, which is the 53 s wedge. The
 submission arm must speak first for a revert; the `async def` arm must only speak
 once submission and await hold (an `async def` that IS submitted and awaited still
@@ -459,7 +468,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
             "keeps a stamp failure non-fatal (#8501/#1529), and a detached task "
             "moves that failure where nothing reports it (#13722)")
 
-    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED LAST ON PURPOSE
+    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED AFTER 1 AND 2, NOT LAST
     # (cycle-10 finding 1, falsified against `origin/main`): `_run_off_loop` hands
     # `fn` to `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
     # (`monitoring.confine_context`'s `ctx.run(fn, ...)`). Given a coroutine
@@ -511,6 +520,54 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     }
     stray = {owner: lines for owner, lines in stray.items() if lines}
 
+    # ⛔ THE DOOR UNDER ANOTHER NAME IS STILL THE DOOR (review finding, P2,
+    # measured). `_stamp_calls` above matches ONE SPELLING — `ast.Name` in call
+    # position — so `_prov = _stamp_capture_provenance; _prov(…)` inline in the
+    # handler put the per-id record writes back on the loop and this pin stayed
+    # GREEN (`1 passed`, 4 of the 5 invocations seen); `getattr(mod,
+    # "_stamp_capture_provenance")(…)` and `_stamp_capture_provenance.__call__(…)`
+    # were green too. Every ARM above keys on the chain NAME, so a door reached
+    # from a name they never see is invisible to all of them. This arm closes the
+    # spelling: the door may appear ONLY as the `func` of a call, and only through
+    # a bare `ast.Name` — binding it to a variable, passing it as an argument,
+    # reading `.__call__`, or any attribute form reds. Measured cost today: zero
+    # (the four calls are all bare-name call positions).
+    door_call_nodes = {
+        id(node.func) for node in _stamp_calls(tree)
+    }
+    door_spellings = {
+        node.lineno: type(node).__name__
+        for node in ast.walk(tree)
+        if _refers_to(node, _STAMP_DOOR) and id(node) not in door_call_nodes
+    }
+    # ⛔ AND NOT BY RENAMING IT AT THE IMPORT (same finding, the case the arm above
+    # cannot see). `_refers_to` matches expression nodes, so `import … _stamp_
+    # capture_provenance AS _prov` is invisible to it — the alias is an `ast.alias`,
+    # not a Name — and a one-token edit then calls the door inline on the loop with
+    # this pin GREEN (measured: `1 passed`; the plain import must stay legal, so
+    # only an alias with an `asname` reds).
+    aliased_imports = {
+        node.lineno: node.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.alias)
+        and node.name.split(".")[-1] == _STAMP_DOOR
+        and node.asname
+    }
+    assert not aliased_imports, (
+        f"{_STAMP_DOOR} is IMPORTED UNDER ANOTHER NAME at {aliased_imports} "
+        "(line: asname) — every arm here keys on the spelling it can regex, so the "
+        "aliased call is the same door under a name none of them watch, and its "
+        "per-id record writes could run on the event loop unseen. Import it under "
+        "its own name, or re-derive this pin to follow the alias (#13722; the "
+        "run-time half is #14528)")
+    assert not door_spellings, (
+        f"{_STAMP_DOOR} is referenced OUTSIDE a bare-name call at "
+        f"{sorted(door_spellings.items())} (line: node) — an alias, a "
+        "`getattr(…)`, or a `.__call__` is the SAME call under a spelling the arms "
+        "above cannot follow, so its per-id record writes could run on the event "
+        "loop with this pin GREEN. Call it by name in call position, or re-derive "
+        "this pin to follow that binding (#13722; the run-time half is #14528)")
+
     # ⛔ A CALLABLE BUILT FROM A STRING IS STILL A WAY TO RUN THE CHAIN (review
     # finding, P2, measured on `/tmp` mutants). The reference walk above sees
     # `ast.Name`/`ast.Attribute` NODES, so `locals().get("_stamp_chain")()` and
@@ -526,7 +583,7 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     string_built = {
         owner: [node.lineno for node in ast.walk(tree)
                 if _string_value(node) == owner]
-        for owner in sorted(owners)
+        for owner in sorted(owners | {_STAMP_DOOR})
     }
     string_built = {owner: lines for owner, lines in string_built.items() if lines}
     assert not string_built, (
