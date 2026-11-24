@@ -760,7 +760,8 @@ class BatchStore(Protocol):
         ...
 
     def put_batch_if_state(self, batch: Batch,
-                           expected: Collection[BatchState]) -> bool:
+                           expected: Collection[BatchState], *,
+                           write_identity: bool = False) -> bool:
         """Write ``batch`` only while the stored row is still in ``expected``.
 
         ⛔ THE ITEM ROW HAS HAD A COMPARE-AND-SET SINCE ROUND 4; THE BATCH ROW
@@ -772,6 +773,18 @@ class BatchStore(Protocol):
         `cancelled_at`/`cancel_reason` were erased on a billing-visible surface
         with no trace. ``expected`` is a COLLECTION because a settle may legally
         land from any non-terminal state.
+
+        ⛔ ``write_identity=True`` IS NOT A HOLE IN THAT RULE — it is the one
+        caller that OWNS the record and cannot write it any other way (#14415
+        review round 22, HIGH — measured). `_submit_rows` whose create lost the
+        race to an orphan adoption must restore the estimate the ACK is required
+        to carry (owner §4), and `put_batch` — the writer that owns
+        `estimate_json`/`corpus_name` — has NO compare, so using it there
+        overwrote a `cancel()` that landed in the gap: measured, the row came back
+        `accepted` with `cancelled_at=''` over items `['cancelled','cancelled']`,
+        losing WHO asked and when on a billing-visible act. So the identity is
+        written under the SAME compare as the state: if a cancel moved the row,
+        this loses and writes nothing.
         """
         ...
 
@@ -955,20 +968,24 @@ class InMemoryBatchStore:
         self._items: dict[tuple[str, str], dict[str, BatchItem]] = {}
 
     def put_batch_if_state(self, batch: Batch,
-                           expected: Collection[BatchState]) -> bool:
+                           expected: Collection[BatchState], *,
+                           write_identity: bool = False) -> bool:
         # Atomic under the same lock as `put_batch`: compare and write together.
         # ⛔ The RECORD's identity (`estimate`, `corpus_name`) is preserved from
         # the stored row, not taken from the caller (#14415 recut review, P1):
         # `_resume_batch` passes a Batch built from an orphan-item snapshot, so
         # copying it wholesale erased the estimate an acceptance had just
-        # written. A state transition writes state.
+        # written. A state transition writes state — unless the caller is the
+        # acceptance taking its own row back (`write_identity=True`), in which
+        # case the identity is written in the SAME atomic compare.
         with self._lock:
             current = self._batches.get((batch.org_id, batch.batch_id))
             if current is None or current.state not in expected:
                 return False
             written = _copy_batch(batch)
-            written.estimate = dict(current.estimate)
-            written.corpus_name = current.corpus_name
+            if not write_identity:
+                written.estimate = dict(current.estimate)
+                written.corpus_name = current.corpus_name
             self._batches[(batch.org_id, batch.batch_id)] = written
             return True
 
@@ -1272,7 +1289,8 @@ class GraphBatchStore:
         return bool(rows) and str(rows[0][0] or "") == token
 
     def put_batch_if_state(self, batch: Batch,
-                           expected: Collection[BatchState]) -> bool:
+                           expected: Collection[BatchState], *,
+                           write_identity: bool = False) -> bool:
         """A compare-and-set on the BATCH row — `MATCH … state IN $expect`.
 
         ⛔ THIS WRITES STATE, NOT THE RECORD'S IDENTITY (#14415 recut review,
@@ -1288,19 +1306,34 @@ class GraphBatchStore:
         outside the two writers that own them), so a state transition has no
         business rewriting them. The columns are written by `put_batch` alone —
         the acceptance that owns the estimate and the orphan adoption that has
-        none to lose.
+        none to lose — EXCEPT under ``write_identity=True``, which exists for the
+        one caller that owns this record and has no other way to write it: an
+        acceptance taking its own row back from an orphan adoption (#14415
+        review round 22). That caller is not exempt from the compare — the
+        identity is written under the SAME `state IN $expect`, so a `cancel()`
+        that landed in the gap still wins and this writes nothing.
         """
+        identity_set = (", b.estimate_json=$estimate, b.corpus_name=$corpus"
+                        if write_identity else "")
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "WHERE b.state IN $expect "
             "SET b.state=$state, b.updated_at=$updated, "
             "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason "
+            f"{identity_set} "
             "RETURN b.id",
             {"bid": batch.batch_id, "org": batch.org_id,
              "expect": [str(e) for e in expected],
              "state": str(batch.state), "updated": batch.updated_at,
              "cancelled_at": batch.cancelled_at,
-             "cancel_reason": batch.cancel_reason},
+             "cancel_reason": batch.cancel_reason,
+             # Sent only when the SET above names them, so an unused parameter
+             # is never handed to the query (`put_item_if_state`'s round-13
+             # lesson: a param dict rebuilt without a named key fails the whole
+             # statement at the engine while a fake `query` stays green).
+             **({"estimate": _json_dumps(batch.estimate),
+                 "corpus": str(batch.corpus_name or "")}
+                if write_identity else {})},
         )
         return bool(rows)
 
@@ -2179,15 +2212,35 @@ class BatchCoordinator:
             # DIFFERENT stamps, so a loser sees a mismatch and is still refused —
             # the takeover can never become a way for a losing writer to claim a
             # winner's row.
+            # ⛔ OWNERSHIP IS PROVEN BY `created_at`, WHICH IS IMMUTABLE, AND THE
+            # WRITE IS A COMPARE-AND-SET — never `put_batch` (round 22, HIGH,
+            # measured twice over). Two defects lived in the first cut:
+            #   * `put_batch` has NO compare, so a `cancel()` landing between the
+            #     re-read and the write was OVERWRITTEN — measured, the row came
+            #     back `accepted` with `cancelled_at=''` over items
+            #     `['cancelled','cancelled']`, losing who asked and when on a
+            #     billing-visible act (round 7's P2 reinstated on a new path).
+            #   * the guard keyed on `state is RESUMING`, and a state is MUTABLE:
+            #     the drain the adoption queued writes `running` through
+            #     `put_batch_if_state`, so a settle landing before this re-read
+            #     brought the original HIGH back verbatim — measured,
+            #     `_BatchIdConflict` over item rows a drain was working.
+            # `created_at` is written once, at create, and the adoption copies it
+            # from the same item stamp this call owns, so it is an identity a
+            # later writer cannot move. The CAS accepts only the two states a live
+            # adoption can be in at this instant; a cancel has already left them.
             current = self._store.get_batch(org_id, bid)
-            if (current is not None
-                    and current.state is BatchState.RESUMING
-                    and current.created_at == stamp):
-                # `put_batch` is the one writer of the record's identity
-                # (`estimate_json`, `corpus_name`) — the same writer the ordinary
-                # acceptance uses, so this takes the row over rather than racing it.
-                self._store.put_batch(batch)
+            if (current is not None and current.created_at == stamp
+                    and self._store.put_batch_if_state(
+                        batch, (BatchState.RESUMING, BatchState.RUNNING),
+                        write_identity=True)):
                 return batch, items
+            if current is not None and current.created_at == stamp:
+                # Our own rows, but the row moved past every state this takeover
+                # may write — a cancel won, or a drain already settled it. The
+                # RECORD is then the truth and the ACK reports it; raising here is
+                # the 503-over-recorded-work defect this arm exists to remove.
+                return current, items
             raise _BatchIdConflict(f"batch id {bid!r} was created concurrently")
         return batch, items
 
@@ -2391,7 +2444,20 @@ class BatchCoordinator:
             # second extraction of a completed document.
             return fresh
         if fresh.duplicate_of:
-            twin = self._store.get_item(org_id, fresh.batch_id, fresh.duplicate_of)
+            # ⛔ THE OTHER TWO PRE-CLAIM READS COUNT TOWARD THE CEILING TOO
+            # (#14415 review round 22, MEDIUM — measured). Wrapping only
+            # `_fresh` left this read and the content-key read below outside every
+            # `try`, and both are graph statements subject to the same 1 505 ms
+            # probe / 10 s timeout the module cites: with
+            # `find_settled_by_content_key` raising, ten passes left `state:
+            # queued, attempts: 0, pending: 1` — the identical unbounded-retry
+            # signature the fix above exists to remove.
+            try:
+                twin = self._store.get_item(
+                    org_id, fresh.batch_id, fresh.duplicate_of)
+            except Exception as exc:
+                self._note_failed_pass(org_id, fresh, exc)
+                raise
             if twin is not None and twin.state is BatchItemState.INDEXED:
                 return self.advance(
                     org_id, fresh, BatchItemState.SKIPPED_DUPLICATE,
@@ -2414,8 +2480,12 @@ class BatchCoordinator:
             # at acceptance); until then the honest statement is "deduped within
             # a batch and against already-settled items, serially".
         if fresh.content_key:
-            prior = self._store.find_settled_by_content_key(org_id,
-                                                            fresh.content_key)
+            try:
+                prior = self._store.find_settled_by_content_key(
+                    org_id, fresh.content_key)
+            except Exception as exc:
+                self._note_failed_pass(org_id, fresh, exc)
+                raise
             if prior is not None and prior.item_id != fresh.item_id:
                 return self.advance(
                     org_id, fresh, BatchItemState.SKIPPED_DUPLICATE,
@@ -2720,6 +2790,21 @@ class BatchCoordinator:
         except Exception:
             return
         if row is None or row.terminal:
+            return
+        if (row.state in (BatchItemState.EXTRACTING, BatchItemState.EMBEDDED)
+                and _age_seconds(row.updated_at) < float(BATCH_RECLAIM_AFTER_S)):
+            # ⛔ THE ONE LIVENESS RULE (#14415 review round 22, MEDIUM —
+            # measured). Without this the ceiling settled a LIVE peer's claim: a
+            # row `extracting, attempts 2, age 0 s` (window 900 s) became
+            # `failed` after three local read faults, and `ITEM_TRANSITIONS
+            # [FAILED] == frozenset()` means the peer's real outcome then has
+            # nowhere to land — `run_item`'s illegal-edge arm bills the spend and
+            # DROPS the document. That is the round-9/10/11 HIGH ("a fresh claim is
+            # settled by NO caller that has not PROVED the holder is gone")
+            # reintroduced on a new path, and it is reachable cross-replica — the
+            # configuration that series exists for. The window is the same one
+            # every other caller applies; a dead claim is still counted and still
+            # reaches the ceiling once it is stale.
             return
         bumped = _copy_item(row)
         bumped.attempts = row.attempts + 1
@@ -3103,6 +3188,28 @@ class BatchCoordinator:
             # accepted work.
             orphan_items = self._store.items(org_id, batch_id)
             if not orphan_items:
+                return None
+            # ⛔ AN ORPHAN YOUNGER THAN THE RECLAIM WINDOW IS AN ACCEPTANCE IN
+            # FLIGHT, NOT A CRASH RESIDUE (#14415 review round 22, HIGH —
+            # measured). This is the SAME liveness rule every other caller here
+            # applies (`run_item`'s claim guard, `abandon_dead_claims`,
+            # `cancel`'s stale-claim arm): a row inside `reclaim_after` may have a
+            # LIVE holder, and no caller that has not proved the holder is gone may
+            # take it. The adoption did not apply it — and the "holder" here is the
+            # acceptance that wrote these very items microseconds ago, still inside
+            # `_submit_rows` (`pending_batches()` UNIONs the ITEM arm, so the scan
+            # sees the shape by construction). Adopting it took the create out from
+            # under the acceptance, whose own `put_batch_if_absent` then failed and
+            # answered "nothing was accepted" over rows already queued for a drain.
+            #
+            # DEFERRED, never stranding: the items are non-terminal, so
+            # `pending_batches()` keeps returning this batch and a later scan — this
+            # one runs every `TORTOISE_BATCH_RESCAN_S` (>= 30 s) — adopts it once the
+            # window has passed. A genuine crash orphan is adopted at most one window
+            # later, which is the same bound the claim paths already accept.
+            if any(i.state not in TERMINAL_ITEM_STATES
+                   and _age_seconds(i.updated_at) < float(reclaim_after)
+                   for i in orphan_items):
                 return None
             # ⛔ RE-READ BEFORE ADOPTING (#14415 recut review, P2). The orphan shape
             # is not only a crash residue: `submit()` writes the item rows BEFORE

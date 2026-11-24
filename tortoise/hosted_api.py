@@ -17763,6 +17763,20 @@ async def list_batches(org: dict = Depends(get_current_org_gated)):  # noqa: B00
         body_b["counts"] = counts.get(b.batch_id) or _batch_ingest.item_counts([])
         body_b["items_total"] = body_b["counts"]["total"]
         body_b.pop("items", None)
+        # ⛔ `complete` IS RE-DERIVED FROM THE COUNTS THAT WERE JUST SUBSTITUTED
+        # (#14415 review round 22, MEDIUM — measured). `as_dict()` derives BOTH
+        # `counts` and `complete` from its `items` argument, and this route passes
+        # none — so `complete` collapsed to "the label is terminal" while the real
+        # counts were pasted in afterwards. Measured on the real routes, same
+        # batch (one item cancelled, one in flight):
+        #     cancel route: status=cancelled complete=False counts.pending=1
+        #     LIST route  : status=cancelled complete=True  counts.pending=1
+        # Two fields of one payload derived from DIFFERENT inputs — and this is
+        # the entry point a list consumer polls, so it served exactly the payload
+        # the cancel fix removed.
+        body_b["complete"] = (
+            b.state in _batch_ingest.TERMINAL_BATCH_STATES
+            and not body_b["counts"].get("pending", 0))
         out.append(body_b)
     return {"batches": out}
 
