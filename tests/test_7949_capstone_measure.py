@@ -5991,11 +5991,27 @@ class _ManifestShapeError(RuntimeError):
     """
 
 
-#: The epic bundle's documents and the two sources its re-derived cites name.
+#: The epic bundle's documents and the sources its re-derived cites name.
 #: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
 #: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
-#: `_BUNDLE_TOOL_SOURCES` before both were CUT in the B4 test-volume cut. Every number below was verified by READING, which is why
+#: `_BUNDLE_TOOL_SOURCES` — the first is still LIVE (the second argument of
+#: `_bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)` in
+#: `test_the_bundles_cites_resolve_where_the_bundle_says_they_do`); the second was
+#: ORPHANED by the B4 test-volume cut (2026-11-23, #14439 — that diff deleted its
+#: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED by #14482's
+#: orphan sweep (2026-11-24, "delete the 81 names the volume cut orphaned") —
+#: 1 h 43 m later, not a day, and the two DATES differ only by the committer's
+#: `-0500` offset (in UTC both are 2026-11-24), so date each event on its own
+#: commit rather than trusting one date to cover both. ⚠️ Two events, two
+#: commits: dating the CUT alone points a reader at
+#: `8c373f59a1`, where the table is still DEFINED — the same
+#: not-verifiable-at-the-point-of-reading failure the named CALL removes. The CALL
+#: is named rather than pointed at with a direction word (#14493 review, P2): it
+#: sits ABOVE this block, so "below" would send a reader the wrong way, and one who
+#: then found no sweep would conclude `_BUNDLE_SOURCES` is unconsumed — the "both
+#: were CUT" error this sentence exists to remove.
+#: Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
     "RECONCILE-A1-A2-A5.md":
