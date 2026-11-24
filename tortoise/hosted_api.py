@@ -21997,7 +21997,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # BEFORE extraction — that ordering is what lets each extracted Point
             # read the session Source's `contentHash` and record it as
             # `sourceVersion`. What is left here is the STAMP half.
-            try:
+            # #13722: the stamp HALF, factored into ONE callable so it can be
+            # handed to a worker thread as a single submission (see the await
+            # below). It stays a closure over this frame's locals and does not
+            # reorder, batch or rewrite anything: same statements, same order,
+            # same records.
+            def _stamp_provenance_off_loop() -> None:
                 if event_id:
                     # W5 (#2104, S1): the provenance stamp now carries the full
                     # write provenance (source_session / source_harness /
@@ -22156,6 +22161,44 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "sessionCaptured Event write returned no id/eventId — "
                         "extracted points not stamped")
+
+            # #13722: THE STAMP CHAIN'S WRITES RAN INLINE ON THE EVENT LOOP.
+            # Each id it stamps journals one `PointRevised` record, and that
+            # record's door (`record_writer.write_live_record`) is 7 BLOCKING DB
+            # round trips per record — `record_projection.replay` executes one
+            # statement per `cursor.execute` and deliberately never batches — on
+            # top of the stamp's own graph round trips. On the single uvicorn
+            # worker that parks the loop for the whole write, so every
+            # concurrent request starves behind it (the #10893 `pre_handler`
+            # shape; #13722's 53 s `loop_blocks` episode).
+            #
+            # ONE submission, not seven per record: the closure is submitted
+            # whole, so the sequence stays atomic with respect to the loop
+            # exactly as it was inline. `_run_off_loop` (NOT a bare
+            # `asyncio.to_thread`) because it confines contextvars onto the
+            # worker, and `_live_write_scope(_CAPTURE_PROVENANCE_LANE)` is
+            # opened INSIDE the moved callable — so the lane's `ContextVar`
+            # authorisation rides the confined context and the only thing that
+            # changes is WHERE the same callable runs (#14104's withdrawn
+            # premise).
+            # ⛔ No batching, no statement change, no change to which records
+            # are written or in what order. Baking those together is what wedged
+            # the previous lane, and batching can reorder a load-bearing stamp
+            # chain — that is a data defect, not a perf win (#13722 half 2).
+            # ACCEPTED TRADE, stated so it is not re-derived: the submit is
+            # CANCELLABLE while the closure is still QUEUED (a `CancelledError`
+            # is not an `Exception`, so the arm below does not catch it). A
+            # cancel in that window skips the stamp silently — the pre-change
+            # inline block was uninterruptible once entered. The repair already
+            # exists: the next POST of that session takes the
+            # `retry_failed_capture` heal leg, and the sibling capture legs this
+            # same handler already awaits through `_run_off_loop` carry the same
+            # window.
+            # Draining the future before re-raising would delay cancellation by
+            # up to the whole write, which is worse than a retry-healed stamp.
+            try:
+                await _run_off_loop(
+                    _CAPTURE_EXECUTOR, _stamp_provenance_off_loop)
             except Exception:
                 import logging
                 # #8501: THIS BLOCK IS THE STAMP HALF ONLY — the mint moved to

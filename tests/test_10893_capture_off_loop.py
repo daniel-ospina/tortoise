@@ -67,6 +67,7 @@ import inspect
 import threading
 import time
 
+import httpx
 import pytest
 
 from tests.test_hosted_api import TEST_ORG_ID, TEST_TEAM  # noqa: F401  (fixture side effects)
@@ -140,64 +141,16 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # said "4 on-loop calls, 81.5 ms" for the same commits (#14086 cycle-4
     # review, F2). State a magnitude once, or not at all.
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
-    # The two provenance stamps in `_capture_session_impl`
-    # (`_stamp_capture_provenance` and the `_capture_stamp_targets` call beside
-    # it — cited by NAME, not line: this PR's own tail rewrite moves every
-    # `hosted_api.py` line below it) go through this ONE retry wrapper —
-    # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
-    # the loop and the census observes BOTH: this wrapper, and the journal
-    # `_emit_event` that precedes it (`sdk.py:11590` — re-derived after the
-    # `origin/main` `e0accb8fe6` merge moved it +31 from `11559`). Measured on FOUR
-    # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
-    # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
-    # this comment said "the census sees a single leg and not two": the second
-    # leg was there and sat under the bar, i.e. the figure was stated wider than
-    # the measurement (#14086 review, P2). Neither leg is listed separately —
-    # this entry is the declaration for the stamp, and both legs are the same
-    # owned work.
-    # ⛔ THE PREMISE THIS PARAGRAPH USED TO STATE IS WITHDRAWN, SO IT IS GONE.
-    # It read: "`_stamp_capture_provenance` is JOURNAL-FIRST (#9350) … so moving
-    # it to another thread changes which thread OWNS that lane, which is a
-    # behaviour change, not a move of WHERE the same callable runs. It needs its
-    # own measurement (#14104)." That reasoning is false and #14104's closing
-    # comment withdraws it in full: the lane identity is a `ContextVar`
-    # (`_CACHE_WRITE_AUTHORIZED`), opened inside the stamp's OWN body, and
-    # `_run_off_loop` confines contextvars by design (`_submit_off_loop` →
-    # `confine_context`, deliberately not a bare `run_in_executor`) — so
-    # relocating these changes WHERE they run and nothing else. Keeping both
-    # paragraphs in one comment block asserted P and ¬P about the same move, which
-    # is why the refuted one is replaced rather than annotated (#14086 round-2
-    # review, R2-2).
-    # ⚠️ This entry is keyed on a GENERIC retry wrapper — measured 36 call sites
-    # in `tortoise/sdk.py` (34 besides the two provenance stamps; the only other
-    # references in `tortoise/` are prose, in `exceptions.py` and `retry.py`), so
-    # it exempts any FUTURE on-loop use of it at any cost, and the size of that
-    # exemption is the number that sizes the residual. An earlier cut of this
-    # comment said "~9 other call sites", understating it ~4× (#14086 review,
-    # P2).
-    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites as ONE
-    # closure and then DELETES this entry — deleting it is what
-    # closes the generic-wrapper hole above. ⛔ An earlier cut pointed at #14104,
-    # which is CLOSED (NOT_PLANNED); an entry whose owner cannot act is a
-    # permanent unowned exemption, the one thing this table exists to prevent, and
-    # this file's contract says every entry NAMES the issue that owns removing it
-    # (#14086 round-2 review, R2-1).
-    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, still "
-    "inline — the issue lists them; no line number here, because this table's "
-    "figures are the ones that rot)",
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
     # declaration about ownership, not a claim that the leg runs today.
-    # ⚠️ AND, LIKE THE `_graph_write_with_retry` ROW ABOVE, ITS SIZE IS THE
-    # PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
+    # ⚠️ ITS SIZE IS THE PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
     # exempts EVERY on-loop `sdk._get_proj()` on the capture path, at any cost,
     # whatever its caller — and `_get_proj` is not a capture-specific leg
     # (measured on this tree with `git grep -c '_get_proj('`: 395 lines under
     # `tortoise/`, 394 besides the one `def`; 207 in `tortoise/sdk.py`, where it
-    # is defined, i.e. 206 besides that `def` — and the sibling row's 36 for
-    # `_graph_write_with_retry(` is likewise its `sdk.py` lines minus its `def`
-    # (37 with it), so compare 206 with 36 and not with the def-included 207),
+    # is defined, i.e. 206 besides that `def`),
     # it is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
@@ -492,3 +445,152 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     # …and a DECLARED leg is never reported, whatever it costs: the table is an
     # ownership declaration, not a budget.
     assert _undeclared_blocking({"_get_registry": 16.29}) == {}
+
+
+# ══ #13722: the STAMP CHAIN's write, and the loop it used to park ═══════════
+# The census above measures COST (ms of on-loop time, against a bar). The test
+# below measures the same invariant the other way round — the loop's own
+# liveness WHILE the write is in flight — because #13722's symptom was not a
+# slow leg but a parked loop: `/health` `loop_blocks.max_age_s` 53.041 s against
+# an in-flight population of ~30 records. `_graph_write_with_retry`'s residual
+# row above was deleted by the change this pins (its owner was #14112), so this
+# test is now the row's replacement: the stamp half of `_capture_session_impl`
+# is submitted as ONE closure through `_run_off_loop(_CAPTURE_EXECUTOR, …)`.
+#
+# MEASURED, pre-fix vs post-fix, same fixture: pre-fix the ticker completes 0
+# ticks inside the blocking window and `/health` answers only after `exited`;
+# post-fix the write is off-loop, tens of ticks land inside it, and `/health` is
+# answered there. ⛔ NO WALL-CLOCK NUMBER IS ASSERTED — the tick count and the
+# in-window probe are the signals with teeth, as in
+# `tests/test_graph_write_loop_responsiveness.py`, whose harness this mirrors.
+#
+# ⛔ WHAT THIS DOES **NOT** CLAIM. Not that fewer DB round trips happen, not that
+# statements are batched, and not that per-record wall time improved: the change
+# moves WHERE the same callable runs and nothing else (batching is #13722's
+# second half, and it can reorder a load-bearing stamp chain — a data defect,
+# not a perf win).
+_STAMP_STALL_S = 1.0
+_STAMP_TICK_S = 0.02
+_STAMP_MIN_TICKS_IN_STALL = 10
+
+
+def _install_blocking_stamp_write(monkeypatch, state: dict) -> None:
+    """Block the stamp chain's write, recording where it ran and its window.
+
+    The seam is ``TortoiseSDK._emit_event`` — the ONE journal door the stamp
+    opens per id (`_stamp_capture_provenance`'s comprehension) and the door
+    whose live arm reaches `record_writer.write_live_record`. Blocking THERE
+    stands in for a slow write: on a configured record the same call carries
+    the 7 blocking DB round trips, and in this fixture (no record armed) it
+    carries the journal append, so the stand-in is faithful either way.
+
+    Keyed on ``type_ == "PointRevised"`` because that is the type the stamp
+    emits; blocking every emit would also block legs this test does not touch
+    and would let it pass for the wrong reason. Blocks ONCE: the window under
+    measurement is the first write's, and every further id would only add
+    another ``_STAMP_STALL_S`` to the run.
+    """
+    real = TortoiseSDK._emit_event
+
+    def _blocking(self, type_, payload=None, **kwargs):
+        if type_ == "PointRevised" and "entered" not in state:
+            # AGGREGATED, never last-call-wins: a later off-loop call must not
+            # erase an earlier on-loop one (the census's own rule above).
+            state["ran_on_loop"] = state.get("ran_on_loop", False) or _on_loop()
+            state["thread"] = threading.current_thread().name
+            state["entered"] = time.perf_counter()
+            try:
+                time.sleep(_STAMP_STALL_S)  # stand-in for the blocking write
+            finally:
+                state["exited"] = time.perf_counter()
+        return real(self, type_, payload, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_emit_event", _blocking)
+
+
+async def _drive_blocked_stamp_write(state: dict):
+    """Fire a capture concurrently with a ticker, then probe /health mid-write.
+
+    Ordering is what makes the measurement sound: the ticker starts first and
+    is given two periods so it is mid-sleep when the write blocks; the capture
+    is launched and awaited only far enough to see it enter the write; /health
+    is requested while the write is parked, and ``write_in_flight`` is sampled
+    BEFORE that request is issued.
+    """
+    from tortoise.hosted_api import app
+
+    ticks: list[float] = []
+    stop = {"done": False}
+
+    async def _ticker():
+        while not stop["done"]:
+            ticks.append(time.perf_counter())
+            await asyncio.sleep(_STAMP_TICK_S)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport,
+                                 base_url="http://test") as ac:
+        tick = asyncio.create_task(_ticker())
+        await asyncio.sleep(_STAMP_TICK_S * 2)  # ticker mid-sleep before it
+        capture = asyncio.create_task(
+            ac.post("/v1/sessions", json={"conversation": _CONV}))
+        for _ in range(2000):  # let the capture reach the blocking write
+            if "entered" in state:
+                break
+            await asyncio.sleep(_STAMP_TICK_S / 2)
+        assert "entered" in state, (
+            "the stamp chain's write was never reached — the capture failed "
+            "before it stamped anything, so this run proves nothing about the "
+            "loop")
+        write_in_flight = not capture.done()
+        health = await ac.get("/health")
+        health_done = time.perf_counter()
+        response = await capture
+        stop["done"] = True
+        await tick
+    return ticks, health, health_done, response, write_in_flight
+
+
+def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
+        client, llm_mock, monkeypatch):
+    """#13722 / #14112: the stamp's blocking write must not park the loop."""
+    state: dict = {}
+    _install_blocking_stamp_write(monkeypatch, state)
+
+    ticks, health, health_done, response, write_in_flight = asyncio.run(
+        _drive_blocked_stamp_write(state))
+
+    assert state.get("ran_on_loop") is False, (
+        "the stamp chain's write ran ON the event loop (thread "
+        f"{state.get('thread')!r}) — every `PointRevised` it journals is 7 "
+        "blocking DB round trips through `record_writer.write_live_record`, so "
+        "the single uvicorn worker's loop is parked for the whole write and "
+        "every concurrent request accrues it as `pre_handler` (#13722's 53 s "
+        "`loop_blocks` episode)")
+
+    entered, exited = state["entered"], state["exited"]
+    in_stall = [t for t in ticks if entered < t < exited]
+    assert len(in_stall) >= _STAMP_MIN_TICKS_IN_STALL, (
+        f"the event loop completed only {len(in_stall)} tick(s) during a "
+        f"{_STAMP_STALL_S:.1f}s blocked stamp write (need "
+        f"{_STAMP_MIN_TICKS_IN_STALL}) — the write is blocking the loop, so "
+        "every concurrent request waits for it (#13722)")
+
+    # The body, not the status, is the assertable part: `/health` catches each
+    # internal step and answers `ok`/`degraded`, so it never 5xxes and a bare
+    # status assertion could not fail.
+    assert health.json()["status"] in {"ok", "degraded"}, health.text
+    assert health_done < exited, (
+        "/health was NOT served while the stamp write was blocked (answered "
+        f"{(health_done - exited) * 1000:.0f} ms AFTER the block released) — a "
+        "concurrent request queued behind the write instead of being served, "
+        "which is the process-wide stall this off-load exists to prevent "
+        "(#13722)")
+    assert write_in_flight, (
+        "the capture had already returned before /health was issued, so this "
+        "run proves nothing about a request served DURING the blocking window "
+        "(#13722)")
+
+    assert response.status_code == 200, (
+        f"the capture did not complete after the off-loaded stamp write "
+        f"({response.status_code}: {response.text[:200]})")
