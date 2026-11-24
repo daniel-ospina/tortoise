@@ -223,8 +223,8 @@ def test_a_constraint_is_still_not_dropped_in_silence():
             f"routing drops what the caller asked for")
 
 
-def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
-    """All three guards of `is_predicate` have a pinned falsifier.
+def test_the_four_guards_inside_is_predicate_are_each_load_bearing():
+    """All four guards of `is_predicate` have a pinned falsifier.
 
     ⛔ A pin has to be able to reach the guard it pins. The `what is the payment
     terms clause given the contract was archived` row of ``NOT_SELECTED`` is
@@ -235,12 +235,20 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
     * widening the NP bound routes `is the payment terms clause given the
-      contract was archived` and `is the policy when a booking is cancelled` —
-      subordinate clauses carrying their own finite verb;
+      contract was archived`; `is the policy when a booking is cancelled` needs
+      the NP stop removed as WELL, because `when` is an overt relativiser — the
+      attribution is measured rather than assumed;
     * dropping the relative-clause stop routes `is the report that legal
       archived` and `is the ticket that support cancelled` — the NP word run
       would swallow the clause and read its own finite verb as the question's
       predicate, which is the round-4/5 hijack class inside the word budget;
+    * dropping the NP stop routes the ZERO-relative spelling, which the
+      marker-only guard left open: `is the plan the team abandoned`, `is the
+      data we retired`, `is the ticket they deprecated`,
+      `is the release the team cancelled`. ⛔ The residual is stated, not hidden:
+      a zero relative with a BARE-NOUN subject (`is the claim finance retracted`)
+      is lexically identical to a two-word head noun plus a predicate, so it
+      routes — see the module's ``_NP_STOP`` note;
     * relaxing the START anchor (`^is` → `(?:^|\\b)is`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
       else in this file moves. That anchor was the clause with no falsifier
@@ -258,6 +266,10 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
         "is the report that legal archived",
         "is the ticket that support cancelled",
         "is the doc which we archived",
+        "is the plan the team abandoned",
+        "is the data we retired",
+        "is the ticket they deprecated",
+        "is the release the team cancelled",
         "the question is the report archived",
         "the question is the onboarding flow retired",
     ):

@@ -147,12 +147,32 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
-#: A RELATIVE-CLAUSE marker. ``is_predicate``'s subject NP is a word run, and a
-#: word run alone admits a SHORT relative clause whose own finite verb then reads
-#: as the question's predicate (`is the report that legal archived`, `is the
-#: ticket that support cancelled`). A clause cannot be the head noun, so the run
-#: stops at one of these.
-_RELATIVE_MARKER = r"(?!\b(?:that|which|who|whom|whose|where|when)\b)"
+#: What a ``is_predicate`` subject NP's word run may NOT cross. A word run alone
+#: admits a relative clause whose own finite verb then reads as the question's
+#: predicate, and there are TWO spellings of that clause:
+#:
+#: * with an OVERT marker — `is the report that legal archived`, `is the ticket
+#:   which support cancelled`, `is the doc where we archived it`;
+#: * with NO marker at all — a zero relative, which is the same clause with the
+#:   relativiser elided: `is the plan the team abandoned`, `is the data we
+#:   retired`, `is the claim finance retracted`, `is the ticket they deprecated`.
+#:   Measured on the marker-only guard: all four routed, i.e. the guard closed one
+#:   spelling and left the other open.
+#:
+#: A clause can be neither the head noun nor a word inside it, so the run stops
+#: at a relativiser AND at a second determiner / pronoun — the token a zero
+#: relative puts where the head noun's own modifier would be. ⛔ THE RESIDUAL IS
+#: STATED, NOT HIDDEN: a zero relative whose subject is a BARE NOUN
+#: (`is the claim finance retracted`) is lexically identical to a two-word head
+#: noun plus a predicate (`is the onboarding flow retired?`), so no word list
+#: separates them without becoming the noun→route assignment #13128 refuses. That
+#: spelling routes. What is closed is the marked relativiser and the
+#: pronoun/determiner subject, which is every spelling measurable without one.
+_NP_STOP = (
+    r"(?!(?:that|which|who|whom|whose|where|when"
+    r"|the|a|an|this|these|those|our|your|their|its|my"
+    r"|we|us|i|they|them|he|she|you|it)\b)"
+)
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -311,8 +331,8 @@ _ENDING_BASE = (
 #:   the description re-cut in the SAME change, and that description is a frozen
 #:   baseline cell (an owner-gated surface edit, #4282). The adverb would in fact
 #:   be harmless for the POPULATION — the ended read is ordered by the row's own
-#:   ``endedAt`` newest-first (a row carrying none sorts last), so nothing a
-#:   caller said is narrowed away — which is why this is deferred rather than
+#:   ``endedAt`` newest-first, so nothing a caller said is narrowed away — which
+#:   is why this is deferred rather than
 #:   refused: it is the DESCRIPTION that binds, not the population.
 #:   `what ended` and `what has been withdrawn` are the route until the re-cut
 #:   lands.
@@ -344,8 +364,7 @@ _ENDING_BASE = (
 #:   VAGUE ADVERB INCLUDED (`what has ended recently`, `list what we retired last
 #:   quarter`). The adverb is deferred on the CONTRACT, not on precision:
 #:   "recently" names no boundary, and the ended read is ordered by the row's
-#:   own ``endedAt`` newest-first (a row carrying none sorts last), so it would
-#:   discard nothing — but the served `tortoise_search` description names that
+#:   own ``endedAt`` newest-first, so it would discard nothing — but the served `tortoise_search` description names that
 #:   exact string a RELEVANCE read, so admitting it here needs the description
 #:   re-cut in the SAME change (owner-gated, #4282). See the adverb bullet above.
 #: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
@@ -370,9 +389,14 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # archived pricing document") and a wh-word in a subordinate clause cannot
     # reach it.
     # ⛔ AND THE TAIL ADMITS NO TRAILING TOKEN AT ALL (#14033). A vague adverb
+    # ⛔ AND `endedAt` IS NOT A GUARANTEE: the read coalesces the five time
+    # properties and NULL sorts FIRST under this `DESC` on FalkorDB
+    # (`analyze.py:1048` records the ASC half of the same backend behaviour), so
+    # an ended row carrying none leads the page rather than trailing it. The
+    # "discards nothing" argument below therefore rests on "recently names no
+    # BOUNDARY", not on the ordering.
     # would be harmless for the POPULATION — `recently` names no boundary, and
-    # the read is ordered by ``endedAt`` newest-first (a row carrying none sorts
-    # last) — but the served
+    # the read is ordered by ``endedAt`` newest-first — but the served
     # `tortoise_search` description names `what has ended recently` as a
     # RELEVANCE read, so a route here would ship a contract that is WRONG about a
     # phrasing it names. The description is a frozen baseline cell (an
@@ -430,8 +454,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # cannot exercise any of them, because `^is` never reaches it.
     ("is_predicate", re.compile(
         rf"^is\s+(?:the|our|your|their|its|my|this|that)\s+"
-        rf"{_RELATIVE_MARKER}[a-z0-9]+"
-        rf"(?:\s+{_RELATIVE_MARKER}[a-z0-9]+){{0,3}}"
+        rf"{_NP_STOP}[a-z0-9]+"
+        rf"(?:\s+{_NP_STOP}[a-z0-9]+){{0,3}}"
         rf"\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
     # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
     # which the `scoped_noun`/`show me` boundary refuses — and the discriminator
