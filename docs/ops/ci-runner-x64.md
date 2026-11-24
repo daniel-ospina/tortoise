@@ -895,8 +895,8 @@ The lever is carried by **both emitter STEPS** on `python-ci.yml`'s `changes` jo
 (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, where its output OVERRIDES
 the push matrix) — and by nothing else. Scoped to ONE step the variable is silently absent on the
 other and the PR surface never splits (measured on head `3db8f7d78`, where only the push step
-carried it); `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
-discovers the emitters from their `run:` commands, so a third one cannot miss the lever either.
+carried it); `tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env` DISCOVERS
+the emitters from their `run:` commands and requires each to carry it, so a third cannot miss it.
 
 ⛔ **Not job scope, and that is a pin, not a preference.** An earlier cut of this lever sat on the
 `changes` JOB; that job also owns the capstone pre-registration gate step, and

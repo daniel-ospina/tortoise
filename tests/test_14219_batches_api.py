@@ -1307,16 +1307,12 @@ def test_a_failed_acceptance_leaves_NO_rows_for_a_resume_to_adopt(
     customer was told were refused got ingested and paid for, and the retry the
     503 invited ingested them a second time.
     """
-    real_put = store.put_item
-    calls = {"n": 0}
+    # The item set is written in ONE statement (#14415 review round 13, P2), so
+    # the failure has to be injected there — the per-item seam is off the path.
+    def _flaky(org_id, items):
+        raise TimeoutError("the graph did not answer")
 
-    def _flaky(org_id, item):
-        calls["n"] += 1
-        if calls["n"] == 3:
-            raise TimeoutError("the graph did not answer")
-        return real_put(org_id, item)
-
-    monkeypatch.setattr(store, "put_item", _flaky)
+    monkeypatch.setattr(store, "put_items", _flaky)
 
     r = client.post("/v1/batches",
                     json={"items": [{"ref": f"/docs/{n}.md"} for n in range(5)]})
@@ -1533,6 +1529,42 @@ def test_the_money_arm_of_the_402_never_prints_a_false_zero(client,
     assert est["overage_tokens"] == 6_379_900, est
     assert "about 6,379,900 tokens" in detail["message"], detail["message"]
     assert "about $6.38" in detail["message"], detail["message"]
+
+
+def test_a_refused_usage_read_does_not_refuse_the_batch(client, monkeypatch):
+    """⛔ ROUND-13 REVIEW P2: a registry read must not borrow the SIGN-IN 503.
+
+    The usage read went through `_cp_offload` with its defaults — FAIL-CLOSED
+    **and** on the `"auth"` pool. A bound miss, a saturated pool or
+    `_ContextNotReproduced` raises `control_plane_unavailable`, copy "Sign-in is
+    temporarily unavailable", and `create_batch`'s `except HTTPException: raise`
+    (written for the estimate's own 503) re-raised it: a metering blip refused a
+    legitimate POST on the strength of a message about SIGN-IN, even when no
+    `max_extraction_tokens` is published and the spend figure cannot change the
+    answer. It also spent sign-in capacity on a registry read, which #3718's
+    contract forbids. `_graph_offload` is the documented lane; its refusal is
+    caught and becomes the UNKNOWN the two-case policy already weighs.
+    """
+    from tortoise import hosted_api as ha
+
+    real = ha._graph_offload
+    seen: list[str] = []
+
+    async def _refuse(fn, *, op, **kw):
+        seen.append(op)
+        if op == "batch_usage":
+            raise ha._graph_unavailable()
+        return await real(fn, op=op, **kw)
+
+    monkeypatch.setattr(ha, "_graph_offload", _refuse)
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    assert "batch_usage" in seen, (
+        "the usage read is not going through the graph lane at all")
+    assert r.status_code == 201, (
+        "a refused metering read refused the whole batch, in the sign-in copy: "
+        f"{r.status_code} {r.text[:200]}")
+    assert r.json()["estimate"]["usage_measured"] is False, r.json()["estimate"]
 
 
 def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,

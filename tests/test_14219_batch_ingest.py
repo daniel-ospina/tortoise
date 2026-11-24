@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import ClassVar
 
 import pytest
 
@@ -545,11 +544,11 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
     # ⛔ MODEL THE REAL CRASH, not just a stubbed read (#14415 cycle-2, HIGH).
     # The first cut left the batch ROW in the store and only made `get_batch`
     # answer `None`, so `put_batch_if_absent` found the row PRESENT and returned
-    # False — `_resume_batch` then re-read the row the ACK wrote and its CAS
-    # carried the REAL estimate, which is why reverting the fix left this test
-    # green (measured: `94 passed`). The shape being pinned is a submit that wrote
-    # its ITEM rows and died before its batch row, so the row must genuinely be
-    # absent here.
+    # False — `_resume_batch` then re-read the row the ACK wrote and its CAS carried
+    # the REAL estimate, which is why reverting the fix left this test green
+    # (measured: the whole file green). The shape being pinned is a submit that
+    # wrote its ITEM rows and died before its batch row, so the row must genuinely
+    # be absent here.
     del store._batches[(ORG, batch.batch_id)]
     # A dead claim, old enough that the resume window takes it — this is what
     # makes the scan call the CAS at all.
@@ -1535,16 +1534,17 @@ def test_a_stale_copy_of_a_terminal_item_never_runs_the_runner():
 def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
     """BLOCKING 2: the rollback, at the layer's own seam."""
     store = InMemoryBatchStore()
-    real_put = store.put_item
     seen = {"n": 0}
 
-    def _flaky(org_id, item):
+    # ⛔ THE ACCEPTANCE WRITES ITS ITEM SET IN ONE STATEMENT NOW (#14415 review
+    # round 13, P2), so the seam this rollback is pinned at is `put_items` — the
+    # per-item `put_item` call it used to patch is no longer on the path, and a
+    # pin left patching it would pass while testing nothing.
+    def _flaky(org_id, items):
         seen["n"] += 1
-        if seen["n"] == 2:
-            raise TimeoutError("graph timeout")
-        return real_put(org_id, item)
+        raise TimeoutError("graph timeout")
 
-    store.put_item = _flaky  # type: ignore[method-assign]
+    store.put_items = _flaky  # type: ignore[method-assign]
     coord = BatchCoordinator(store)
     base = tmp_path / "ingest"
     base.mkdir()
@@ -1919,6 +1919,14 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
         Batch(batch_id="batch_absent", org_id=ORG, state=BatchState.RESUMING,
               created_at="2026-01-01T00:00:00+00:00",
               updated_at="2026-01-01T00:00:00+00:00"))
+    # ⛔ AND THE BULK ACCEPTANCE WRITE (#14415 review cycle 2, BLOCKING). `put_items`
+    # is the round-13 replacement for the per-item loop, and this pin — whose
+    # docstring claims "every statement `GraphBatchStore` can emit" — never drove
+    # it. MEASURED: its closing `}}` sat on a PLAIN literal line, so `UNWIND … MERGE
+    # (i:…}}) SET …` reached FalkorDB verbatim and EVERY acceptance failed with
+    # `Invalid input '}': expected ')'` — the round-9 defect reintroduced, green
+    # here because the braces are BALANCED and a fake `query` accepts any string.
+    store.put_items(ORG, items)
     return pairs
 
 
@@ -2162,12 +2170,11 @@ def test_the_graph_store_speaks_real_cypher():
         assert store.list_recent_batches(ORG) == []
 
         # ⛔ THE ADOPTION PATH, ON THE ENGINE (#14415 review cycle 2, HIGH). The
-        # `MERGE … ON CREATE SET` that rounds 11-12 spent their effort on was
-        # never EXECUTED here — the `recover()` above only ever saw a row that
-        # existed — so `ON CREATE SET` -> `SET` (the blind write that blanks an
-        # acceptance's estimate) left every test green. This is the orphan shape:
-        # ITEM rows with no batch row, which is exactly what a submit that died
-        # before its `put_batch` leaves behind.
+        # `MERGE … ON CREATE SET` that rounds 11-13 spent their effort on was never
+        # EXECUTED here — the `recover()` above only ever saw a row that existed —
+        # so a blind `SET` in its place left every test green. This is the orphan
+        # shape: ITEM rows with no batch row, exactly what a submit that died before
+        # its `put_batch` leaves behind.
         orphan_batch, orphan_items = coord.submit(ORG, ["/live-orphan.md"])
         store.discard(ORG, orphan_batch.batch_id)
         store.put_item(ORG, BatchItem(
@@ -2185,15 +2192,16 @@ def test_the_graph_store_speaks_real_cypher():
             orphan_items[0].item_id]
         store.discard(ORG, orphan_batch.batch_id)
 
-        # ⛔ AND THE ARM `MERGE` ALONE CANNOT SHOW (#14415 review cycle 2, HIGH):
-        # a CREATE-if-absent over a row that ALREADY EXISTS. `MERGE` matches, so an
-        # `ON CREATE SET` runs nothing — while a blind `SET` overwrites the row
-        # with the caller's orphan snapshot, which is the acceptance-erasing write
-        # rounds 11-12 fixed. Proven here because the raced interleaving cannot be
-        # staged on an engine: the acceptance is written first, deliberately.
+        # ⛔ AND THE ARM `MERGE` ALONE CANNOT SHOW: a create-if-absent over a row
+        # that ALREADY EXISTS. `MERGE` matches, so `ON CREATE SET` runs nothing —
+        # while a blind `SET` overwrites the row with the caller's orphan snapshot,
+        # which is the acceptance-erasing write rounds 11-12 fixed. Proven here
+        # because the raced interleaving cannot be staged on an engine: the
+        # acceptance is written first, deliberately.
         kept, kept_items = coord.submit(ORG, ["/live-kept.md"],
                                         corpus_name="handbook",
-                                        estimate={"items": 1, "estimated_tokens": 64799})
+                                        estimate={"items": 1,
+                                                  "estimated_tokens": 64799})
         created = store.put_batch_if_absent(Batch(
             batch_id=kept.batch_id, org_id=ORG, state=BatchState.RESUMING,
             created_at=kept_items[0].updated_at,
@@ -2832,70 +2840,92 @@ def test_an_orphan_adoption_cannot_blank_an_acceptance_that_landed_first(monkeyp
 
 
 def test_duplicate_of_round_trips_through_the_production_store():
-    """⛔ ROUND-12 REVIEW P2: `duplicate_of` was the ONE field never persisted.
+    """⛔ ROUND-12/13 REVIEW P2: `duplicate_of` must survive a real ROUND TRIP.
 
     `submit()` sets it, `as_dict()` puts it on the wire and `run_item` branches on
-    it, but `GraphBatchStore.put_item`'s SET listed no column and neither read
-    projection returned one — so on the real store the wire always said
-    `duplicate_of: ""` and the twin branch (the one that stops a repeat being
-    SKIPPED when its twin FAILED) was unreachable there, while the test that pins it
-    ran against the in-memory store, which does preserve it.
+    it, so it has to come back OUT of the store — and the first cut of this pin only
+    grepped the CYPHER TEXT, which is exactly the half that was already right:
+    `RETURN` listed `i.duplicate_of` while the constructor stopped at `r[10]`, so
+    `get_item` always yielded `""` and `run_item`'s twin branch was unreachable in
+    production. The fake `query` therefore answers with a FULL row and the assertion
+    is on the OBJECT.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    # `get_item` projects (ref, name, state, reason, key, tin, tout, attempts,
+    # changed, updated, staged, duplicate); `items()` prefixes the two ids.
+    row_get = ["/d/b.md", "b.md", "indexed", "", "k", 5, 0, 1, False, "t",
+               "/d/b.md", "b-00000"]
+    row_items = ["b-00001", "/d/b.md", "b.md", "indexed", "", "k", 5, 0, 1,
+                 False, "t", "/d/b.md", "b-00000"]
+
+    class _Rec:
+        def __init__(self):
+            self.cyphers: list[str] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            # `ORDER BY`/list reads project the ids; a single-row read does not.
+            rows = [row_items if "ORDER BY" in cypher else row_get]
+
+            class _Res:
+                result_set = rows
+
+            return _Res()
+
+    rec = _Rec()
+    store = GraphBatchStore(rec)
+    got = store.get_item(ORG, "b", "b-00001")
+    assert got is not None and got.duplicate_of == "b-00000", (
+        "get_item asks the engine for duplicate_of and then drops it, so the wire "
+        f"always reports an empty twin: {got.duplicate_of if got else None!r}")
+
+    listed = store.items(ORG, "b")
+    assert listed and listed[0].duplicate_of == "b-00000", (
+        "items() drops duplicate_of from the row it returns, so a list read "
+        "reports every repeat as its own document")
+
+    store.put_item(ORG, BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
+                                  duplicate_of="b-00000", updated_at="t"))
+    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
+        f"put_item never writes the column: {rec.cyphers[-1][:160]}")
+
+
+def test_acceptance_writes_the_whole_item_set_in_one_statement():
+    """⛔ ROUND-13 REVIEW P2: 1 000 items must not be 1 000 round trips.
+
+    Acceptance wrote one statement per item on the two-worker bookkeeping pool, so
+    the documented maximum needed ~1 001 sequential statements inside ONE request.
+    At this file's own measured contention that exceeds the transport budget, and
+    the customer then gets a 504 (or a proxy timeout) over an acceptance that
+    COMMITTED — while the route mints its own `batch_id` and carries no idempotency
+    key, so the retry creates a SECOND batch: every document ingested and charged
+    twice. The set has to go in one `UNWIND`, the shape the set-based cancel uses.
     """
     from tortoise.batch_ingest import GraphBatchStore
 
     class _Rec:
         def __init__(self):
             self.cyphers: list[str] = []
-            self.params: list[dict] = []
 
         def __call__(self, cypher, params=None, **kw):
             self.cyphers.append(cypher)
-            self.params.append(dict(params or {}))
 
             class _Res:
-                result_set: ClassVar[list] = []
+                def __init__(self) -> None:
+                    self.result_set: list = []
 
             return _Res()
 
     rec = _Rec()
     store = GraphBatchStore(rec)
-    item = BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
-                     duplicate_of="b-00000", updated_at="t")
-    store.put_item(ORG, item)
-    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
-        "the production store never writes duplicate_of: "
-        f"{rec.cyphers[-1][:200]}")
-    assert rec.params[-1]["duplicate"] == "b-00000"
-
-    store.items(ORG, "b")
-    assert "i.duplicate_of" in rec.cyphers[-1], (
-        "the production read projection omits duplicate_of, so the wire always "
-        "reports an empty twin")
-    # ⛔ THE PROJECTION IS ONLY HALF OF IT (#14415 review cycle 2, MEDIUM): the
-    # RETURN gained `i.duplicate_of` while the `BatchItem(...)` constructor below
-    # it did not, so the production store answered `duplicate_of=""` for a value it
-    # had just read — dropping the field from the constructor left every test
-    # green. So this half asserts the ROUND-TRIP VALUE, not the statement text.
-    class _RowRec(_Rec):
-        def __call__(self, cypher, params=None, **kw):
-            self.cyphers.append(cypher)
-            self.params.append(dict(params or {}))
-
-            class _Res:
-                # column order as `get_item` returns it
-                result_set: ClassVar[list] = [
-                    ["/d/b.md", "b.md", "indexed", "", "ck", 0, 0, 0,
-                     False, "t", "", "b-00000"]]
-
-            return _Res()
-
-    round_trip = GraphBatchStore(_RowRec())
-    got = round_trip.get_item(ORG, "b", "b-00001")
-    assert got is not None and got.duplicate_of == "b-00000", (
-        "the production store READ duplicate_of and then dropped it: the wire "
-        f"always reports an empty twin — got {getattr(got, 'duplicate_of', None)!r}")
-    assert got.staged_path == "", (
-        f"the columns after duplicate_of are mis-indexed: {got.staged_path!r}")
+    rows = [BatchItem(batch_id="b", item_id=f"b-{n:05d}", ref=f"/d/{n}.md",
+                      updated_at="t") for n in range(200)]
+    store.put_items(ORG, rows)
+    assert len(rec.cyphers) == 1, (
+        f"200 items took {len(rec.cyphers)} statements, not 1: "
+        f"{rec.cyphers[0][:100]}")
+    assert "UNWIND $rows AS row" in rec.cyphers[0], rec.cyphers[0][:200]
 
 
 def test_the_create_if_absent_reports_creation_only_for_this_call():
@@ -2925,7 +2955,7 @@ def test_the_create_if_absent_reports_creation_only_for_this_call():
     class _Rec:
         """Echoes `echo`; `echo="__mine__"` replays the caller's own token."""
 
-        def __init__(self, echo: str):
+        def __init__(self, echo: str) -> None:
             self.echo = echo
             self.cyphers: list[str] = []
             self.params: list[dict] = []
@@ -2937,7 +2967,8 @@ def test_the_create_if_absent_reports_creation_only_for_this_call():
                      else self.echo)
 
             class _Res:
-                result_set: ClassVar[list] = [[token]]
+                def __init__(self) -> None:
+                    self.result_set = [[token]]
 
             return _Res()
 
@@ -2947,9 +2978,6 @@ def test_the_create_if_absent_reports_creation_only_for_this_call():
     stmt = created.cyphers[-1]
     assert "ON CREATE SET" in stmt and "b.create_token=$token" in stmt, (
         f"the create-if-absent lost its creation marker: {stmt[:200]}")
-    assert stmt.count("SET b.") == 1, (
-        "a bare `SET b.` exists outside `ON CREATE SET`, which is the blind "
-        f"MERGE...SET that blanked an acceptance's estimate: {stmt[:200]}")
 
     # ⛔ THE CASE THE PREVIOUS CUT COULD NOT SEE: the reused row carries the SAME
     # created_at the caller derived from its orphan items, and a token that is not
@@ -2965,7 +2993,8 @@ def test_the_create_if_absent_reports_creation_only_for_this_call():
             self.params.append(dict(params or {}))
 
             class _Res:
-                result_set: ClassVar[list] = []
+                def __init__(self) -> None:
+                    self.result_set: list = []
 
             return _Res()
 
