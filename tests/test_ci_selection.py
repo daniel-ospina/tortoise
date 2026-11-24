@@ -21906,7 +21906,18 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #
 # Nothing graded that prose — it cannot red — and the same class recurred across
 # FOUR consecutive rounds of this PR (the `fast_shards` header, the plan ledger's
-# five Step-4 arms, `slow_wall_projection`'s caller claim, and these). Comparable
+# five Step-4 arms, `slow_wall_projection`'s caller claim, and these). ALL FOUR
+# are scanned below, the plan ledger included: the first cut of this pin named the
+# plan ledger in this very paragraph while `_CUT_CLAIM_FILES` stopped at the
+# four source records, so the one recurrence written in a `docs/plans/` file was
+# the one the scan could not see — the same "the record is not graded" defect it
+# exists to repair, one level up. ⛔ What the plan-ledger entry buys is the CUT
+# DIRECTION only: that round's defect was the inverse ("all five Step-4 arms are
+# LIVE at this head" while three were cut), and a scan keyed on `CUT` cannot see
+# it. The inverse is left as an explicit residual rather than papered over — a
+# `test_*`-only live-verdict scan would red on every legitimate mention of an
+# arm in ANOTHER test file (`config/ci-surfaces.yml` names hundreds), so it
+# over-blocks the tree it is meant to protect. Comparable
 # practice for it is a mechanical pin rather than another round of care: the
 # documented shape of documentation-drift tooling is "references to removed code
 # elements" — detect the stale reference, do not ask the author to re-read
@@ -21919,6 +21930,15 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # already adopted: a historical cut is recorded as "CUT by <sha/PR> … RESTORED by
 # `#14481`", and a name whose restoration is stated in the same passage is read as
 # history, not as a claim about this head.
+#
+# `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
+# above is accountable to: one entry per recurrence, the plan ledger's Step-4
+# ledger included (measured at this head: 6 verdicts there, none contradicting).
+# A file added here with no verdicts is harmless; a recurrence left out is a
+# verdict with no grader, which is how each of the four defects survived a round.
+# Added at the `a2daaa9eba` review round, proved non-vacuous: deleting
+# `**RESTORED by `#14481`**` from the ledger's `test_duration_integrity` line reds
+# this pin (that arm is live), and restoring the line greens it.
 _CUT_CLAIM_WINDOW = 200
 _CUT_CLAIM_RESTORED_SPAN = 400
 _CUT_CLAIM_RESTORED_RE = re.compile(r"RESTORED|restored")
@@ -21929,6 +21949,9 @@ _CUT_CLAIM_FILES = (
     "tests/test_ci_selection.py",
     ".github/workflows/python-ci.yml",
     "config/ci-surfaces.yml",
+    # recurrence 2 of the four this pin's comment names (the Step-4 ledger whose
+    # `test_split_*` verdicts are still the record of what `#14419` cut)
+    "docs/plans/2026-08-18-1473-tier2-duration.md",
 )
 
 
