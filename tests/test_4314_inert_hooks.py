@@ -1488,8 +1488,11 @@ def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
     and cursor's ``session-end`` escaped, which is the same "one-sided fix" class.
 
     Mutation: interpolate ``detail`` raw — the record is then COMPLETE but
-    unparseable, so no COMPLETE breadcrumb is ever read and the assertion
-    REDs, naming the last observed bytes (``Invalid \\escape`` in them)."""
+    unparseable, so no COMPLETE breadcrumb is ever read and the assertion REDs,
+    naming the last observed bytes. What the message carries is ``repr()`` of
+    the RAW RECORD — which is where the unescaped ``\\`` and the closing ``"``
+    are visible. ``Invalid \\escape`` is the JSON decoder's own text and does
+    NOT appear in it: read the record in the message, not the decoder."""
     hook = REPO_ROOT / "tortoise" / seam
     home = tmp_path / "home"
     homedir = home / (".codex" if seam.startswith("codex") else ".cursor") / "hooks"
