@@ -91,7 +91,10 @@ FROZEN_KIND_STRINGS = frozenset({
     # #13102: an armed allowance dimension with no usable reading — the stored-
     # bytes sibling of COHORT_CAP_UNENFORCEABLE (the pre-spend cap).
     "ALLOWANCE_CAP_UNENFORCEABLE",
-    "ABUSE_DECISION_FAULT", "ABUSE_ENFORCEMENT_FAULT", "abuse_review_needed",
+    "ABUSE_DECISION_FAULT", "ABUSE_ENFORCEMENT_FAULT",
+    # #14407: the stage-1 flag now FILES an incident, so the message the owner
+    # receives is attributable (the notification used to be the only trace).
+    "ABUSE_FLAG_RAISED", "abuse_review_needed",
     "abuse_suspended", "BILLING_NOTIFY_REFUSED", "PROVIDER_BILLING_EXHAUSTED",
     "BILLING_SEND_FAILED", "INVITE_SEND_FAILED",
 })
@@ -644,6 +647,14 @@ DR_RECOVERY_KINDS_3146 = frozenset({
     "SWEEP_CONFIG_ERROR", "SWEEP_OFF_STALE", "SWEEP_NO_COVERAGE", "POOL_STALE",
     "PURGE_FAILED", "RECONCILE_FAILED", "STALE", "NEVER_BACKED_UP",
     "METADATA_LOST", "BACKUP_SET_MISSING", "DRIVER_DOWN",
+    # #14407 (review P1): the two abuse kinds a RULE EPISODE can file. Their
+    # recovery condition is the abuse engine's own bounded SLIDING-WINDOW
+    # measurement (points/keys over the last `window_s` against a threshold) —
+    # the same "hovering at its boundary" shape as the DR plane. Without the
+    # window, ONE clean reading ended the episode, closed the incident and
+    # re-armed delivery, so a rule flapping at its threshold produced an
+    # issue open/close pair and a 🚨/✅ pair per crossing.
+    "ABUSE_FLAG_RAISED", "abuse_review_needed",
 })
 
 
@@ -723,7 +734,11 @@ def test_recovery_streak_contract_with_driver():
     pending: list[str] = []
     for raw in body.splitlines():
         line = raw.strip()
-        if re.fullmatch(r"[A-Z0-9_|]+\)", line):
+        # Kinds are matched by their DECLARED spelling, and two of the
+        # vocabulary's spellings are the grandfathered lowercase ones
+        # (``abuse_review_needed``/``abuse_suspended``, #4780's rename policy),
+        # so the pattern character class admits lowercase as well.
+        if re.fullmatch(r"[A-Za-z0-9_|]+\)", line):
             pending = line[:-1].split("|")
             continue
         m = re.fullmatch(r"echo (\d+) ;;", line)
