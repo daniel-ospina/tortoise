@@ -751,6 +751,28 @@ def _fake_lane(cwd, *, env: dict[str, str] | None = None,
     return proc
 
 
+def _drain_lane_stderr(pid: int) -> None:
+    """Drop — and CLOSE — the spool `_fake_lane` registered for `pid` (#14506, P3).
+
+    The spool is an fd this process holds (`tempfile.TemporaryFile`, unlinked), so a
+    teardown that only stops the lane leaves it keyed by a pid the kernel will REUSE:
+    measured, 30 spawn+stop cycles took `/proc/self/fd` 4 → 34 and the registry 0 → 30.
+    Closed rather than merely dropped, so the fd goes with the entry — and drained at
+    BOTH exits of `_stop_fake_lane`, because the early return (a lane whose pid is ALREADY
+    free) is the path that leaves the most residue.
+
+    ⛔ NOT A DUPLICATE OF `tearDown`'s SWEEP (added by a peer lane in `9690c416fe`): that
+    sweep is the per-TEST backstop for what never went through this helper (an arm that
+    registers its own entry), while this fires at the moment the lane's ownership ends —
+    so the pid is free from then on and no later read in the SAME test can be answered by
+    a child this suite did not spawn.
+    """
+    spool = _FAKE_LANE_STDERR.pop(pid, None)
+    if spool is not None:
+        with suppress(OSError, ValueError):
+            spool.close()
+
+
 def _stop_fake_lane(proc: subprocess.Popen) -> None:
     """Reap a fake lane AND its `sleep` child — `terminate()` leaves an orphan.
 
@@ -773,6 +795,7 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     # `returncode` is only set once the child has been REAPED (i.e. its pid is free); while
     # it is `None` the pid is still ours (a zombie holds it).
     if proc.returncode is not None:
+        _drain_lane_stderr(proc.pid)
         return
     if pgid is None:
         with suppress(OSError):
@@ -798,6 +821,7 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
         # would REPLACE the test's real failure with a teardown error.
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=10)
+    _drain_lane_stderr(proc.pid)
 
 
 def _peek_child_status(proc: subprocess.Popen) -> int | None:
@@ -10349,7 +10373,52 @@ class CollisionPreflightTest(unittest.TestCase):
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
 
+    def test_the_teardown_drains_the_stderr_registry_it_registered(self):
+        """#14506 review of `6afd8a217a9b`, P3 — the spool outlived the lane it describes.
+
+        `_fake_lane` registers a `tempfile.TemporaryFile` under the child's pid and the
+        teardown never removed it: MEASURED, 30 spawn+stop cycles took `/proc/self/fd`
+        4 → 34 and the registry 0 → 30. Two consequences, one of them not cosmetic: the fd
+        is a leak this process holds, and once the kernel REUSES a pid a surviving entry
+        answers `_fake_lane_stderr_note` with text from a lane this suite never spawned —
+        a wrong cause printed as though it were measured.
+
+        Both exits are covered on purpose: the early return (`returncode` already set, i.e.
+        the pid is free) is the path that leaves the most residue, and it is the one a fix
+        written at the end of the function alone would miss.
+
+        Mutation: delete either `_drain_lane_stderr(pid)` call and this reddens.
+        """
+        # (1) the normal path: the lane is still live when the teardown runs.
+        live = _fake_lane(self.tmp)
+        spool = _FAKE_LANE_STDERR.get(live.pid)
+        self.assertIsNotNone(spool, "the spawn did not register a spool — nothing to drain")
+        _stop_fake_lane(live)
+        self.assertNotIn(live.pid, _FAKE_LANE_STDERR,
+                         "the teardown left the live lane's spool registered under a pid the "
+                         "kernel will reuse")
+        self.assertTrue(spool.closed,
+                        "the registry entry was dropped but the fd was not closed — the "
+                        "leak just moved")
+
+        # (2) the early-return path: an already-reaped lane, pid free.
+        dead = _fake_lane(self.tmp)
+        dead_spool = _FAKE_LANE_STDERR.get(dead.pid)
+        self.assertIsNotNone(dead_spool)
+        with suppress(OSError):
+            dead.terminate()
+        dead.wait(timeout=10)
+        self.assertIsNotNone(dead.returncode, "the early-return path was not constructed")
+        _stop_fake_lane(dead)
+        self.assertNotIn(dead.pid, _FAKE_LANE_STDERR,
+                         "the EARLY RETURN left the spool registered")
+        self.assertTrue(dead_spool.closed,
+                        "the early return skipped the close as well as the drain")
+
     @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
+                         "_wait_for_grandchild reads /proc — without it the premise cannot "
+                         "be constructed, and `assertTrue` would report a FALSE red")
     def test_a_lane_leads_its_own_group_and_the_teardown_reaps_the_group(self):
         """#14506 review, P2 — the group-reap is claimed and was pinned by NOTHING.
 
@@ -10364,6 +10433,13 @@ class CollisionPreflightTest(unittest.TestCase):
         ⛔ `os.killpg(pgid, 0)` is the assertion, not `proc.poll()`: it fails with
         `ProcessLookupError` only when NOTHING is left in the group, which is the orphan
         this exists for — the shell can be reaped while its `sleep` lives on.
+
+        ⛔ THE STATE THE ASSERTION NAMES IS CONSTRUCTED, NOT ASSUMED (#14506 review of
+        `6afd8a217a9b`, P1 — this arm was MISSED when the sibling arm got the same
+        treatment). Terminating a shell that has not yet forked `sleep` leaves the group
+        EMPTY, so a reverted teardown also passes and the pin cannot fail: MEASURED with
+        `_stop_fake_lane` replaced by the pre-#14506 `proc.terminate()` alone, this arm
+        stayed GREEN in **15 of 15** runs. With the bounded wait below it reds every run.
         """
         real_popen = subprocess.Popen
         seen: dict[str, object] = {}
@@ -10383,6 +10459,15 @@ class CollisionPreflightTest(unittest.TestCase):
             self.assertEqual(os.getpgid(proc.pid), proc.pid,
                              "the pid is not a group id — `killpg` would signal someone "
                              "else's group")
+            # ⛔ WAIT FOR THE CHILD, OR THE PIN PROVES NOTHING (#14506 review of
+            # `6afd8a217a9b`, P1). Measured: 0/120 teardowns of an un-forked shell left any
+            # member in the group, against 60/60 with a 2 ms delay — so without this wait
+            # the `ProcessLookupError` assertion below is satisfied by an EMPTY group and
+            # a reverted teardown stays green (measured 15/15).
+            self.assertTrue(
+                _wait_for_grandchild(proc.pid),
+                "the lane's shell never forked its `sleep` — the group this arm asserts "
+                "about is empty, so the teardown assertion below would prove nothing")
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
