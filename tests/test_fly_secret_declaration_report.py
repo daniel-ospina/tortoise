@@ -739,7 +739,7 @@ def _read_step() -> dict:
 class _Harness:
     """A run of the SHIPPED report step, offline, against the stub `gh`."""
 
-    def __init__(self, root: Path, *, broken_jq: bool = False) -> None:
+    def __init__(self, root: Path, *, jq_tsv_failure: bool = False) -> None:
         self.root = root
         self.last_rc: int | None = None
         self.state = root / "state"
@@ -749,15 +749,21 @@ class _Harness:
         stub = self.bin / "gh"
         stub.write_text(_GH_STUB)
         stub.chmod(0o755)
-        if broken_jq:
-            # The fallback-runner shape the runner-tools step exists for: `jq` is
-            # present but unusable. A step that swallowed this used to exit 0 with
-            # an empty finding (the "reported" and "not reported" same-colour bug).
-            jq = self.bin / "jq"
-            jq.write_text("#!/bin/sh\nexit 5\n")
+        jq = self.bin / "jq"
+        if jq_tsv_failure:
+            # A `jq` that answers the COUNT and fails only on the row enumeration, so
+            # the test grades the ROWS arm specifically rather than being satisfied by
+            # the count guard. It is also the pre-fix shape exactly: `count=$(jq …)`
+            # succeeded and the process substitution produced nothing.
+            real = shutil.which("jq") or "/usr/bin/jq"
+            jq.write_text(
+                "#!/bin/sh\n"
+                'for a in "$@"; do case "$a" in *@tsv*) exit 5 ;; esac; done\n'
+                f'exec "{real}" "$@"\n'
+            )
             jq.chmod(0o755)
         else:
-            (self.bin / "jq").symlink_to(shutil.which("jq") or "/usr/bin/jq")
+            jq.symlink_to(shutil.which("jq") or "/usr/bin/jq")
 
     def calls(self) -> str:
         log = self.state / "calls.log"
@@ -1059,17 +1065,19 @@ def test_an_empty_reading_identity_is_an_error(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
-def test_a_broken_jq_never_exits_green_on_an_unenumerated_finding(tmp_path):
-    """A failing `jq` must not yield an empty loop and a green tick.
+def test_a_failing_row_enumeration_never_exits_green(tmp_path):
+    """A failing row `jq` must not yield an empty loop and a green tick.
 
-    Pre-fix the rows came from `done < <(jq …)`: on a failing jq the process
+    Pre-fix the rows came from `done < <(jq …)` with no error arm: the process
     substitution was empty, the loop body never ran, `failed` stayed 0 and the step
-    exited 0 — "not reported" in the same colour as "reported".
+    exited 0 — "not reported" in the same colour as "reported". The stub below
+    answers the count and fails only on the rows, so this grades the ROWS arm rather
+    than being satisfied by the count guard.
     """
-    h = _Harness(tmp_path, broken_jq=True)
+    h = _Harness(tmp_path, jq_tsv_failure=True)
     out = h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
     assert h.last_rc != 0, out
-    assert "::error::" in out, out
+    assert "could not enumerate" in out, out
     assert "issues --method POST" not in h.calls()
 
 
@@ -1079,7 +1087,7 @@ def test_a_broken_jq_never_exits_green_on_an_unenumerated_finding(tmp_path):
 def _reading_with(classes: list[str], name: str = "ALPHA_SECRET") -> dict:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
-        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+        import fly_secret_declaration_report as tool
     finally:
         sys.path.pop(0)
     return {
@@ -1207,3 +1215,58 @@ def test_a_report_tool_only_change_selects_core_so_this_guard_actually_runs():
             "a diff to tools/fly_secret_declaration_report.py no longer selects its own "
             "pin — the `CORE_ALSO` entry was dropped or the prefix behaviour changed"
         )
+
+
+def test_an_all_guarded_payload_is_exit_2_exactly_as_the_gate_refuses_it(tmp_path):
+    """A payload whose assignments are ALL `-z`-guarded leaves `assigned` EMPTY.
+
+    `payload_partition`'s own docstring names that shape as real (`-z` assigns only
+    when the secret is ABSENT), so the gate refuses it: `if not assigned: exit 2`,
+    "the payload is empty when every GitHub secret is present". A reporter that
+    guarded on `not assigned and not unconditional` reported **CLEAN** here instead —
+    a clean reading for a repo the deploy gate refuses outright, which is exactly the
+    window #14574 exists to close (measured by the #14585 review, and the reason this
+    pin asserts BOTH verdicts rather than the reporter's alone).
+    """
+    guarded_only = _fixture(
+        "guarded-only.yml",
+        """\
+name: Deploy Hosted API
+jobs:
+  deploy:
+    steps:
+      - name: Set all app secrets on Fly.io
+        run: |
+          ARGS=""
+          if [ -z "${{ secrets.ONLY_SECRET }}" ]; then
+            ARGS="GUARDED_NAME="
+          fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture("manifest-guarded.txt", _MANIFEST + "GUARDED_NAME  workflow\n")
+    secrets = _secrets_file(_CLEAN_LIVE, "guarded-only.json")
+
+    proc, reading = _run(
+        secrets, manifest=manifest, workflow=guarded_only, json_to=tmp_path / "g.json"
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "CLEAN" not in proc.stdout
+    assert "UNREADABLE" in proc.stderr
+    assert reading is not None and reading["verdict"] == "UNREADABLE"
+
+    # …and the gate it mirrors refuses the same tree, for the same reason.
+    gate = subprocess.run(
+        [sys.executable, str(GATE)],
+        capture_output=True,
+        text=True,
+        env=_env(
+            secrets,
+            manifest=manifest,
+            workflow=guarded_only,
+            present=set(),
+        ),
+        timeout=120,
+    )
+    assert gate.returncode == 2, gate.stdout + gate.stderr
+    assert "payload is empty" in (gate.stdout + gate.stderr)
