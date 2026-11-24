@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Measure what a `:GraphEvent` row ACTUALLY costs a FalkorDB graph (#13094).
 
-WHY THIS EXISTS. `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` §5.1 is explicit
-that the residency half of its own census is **UNMEASURED**: `#13083` measured the
+WHY THIS EXISTS. The #13083 census said in terms that its own residency half was
+**UNMEASURED** (that census document was deleted on 2026-11-23, `#11081` audit row
+B2; the statement is kept here as the reason this instrument exists): `#13083` measured the
 PAYLOAD per node exactly (12,768 B over 67 `:GraphEvent` rows) and measured nothing
 about what those rows cost the SERVER, because the only per-graph figure it trusted
 was run-dependent drift. `#13094` needs the other number — *does moving this shape
@@ -16,7 +17,7 @@ WHAT IS MEASURED, and what the number means:
 * `INFO memory` `used_memory` at THREE populations — the slope between them is the
   per-node cost, and the slope is what is quoted. A single delta from an empty
   graph would fold in the two indexes' fixed cost and report a constant as a
-  slope, which is the #13083 §5.1 error in the other direction.
+  slope, which is the error #13083 refused to make in the other direction.
 
 The SCHEMA IS PRODUCTION'S *intent*: the three DDL statements below are `event_store.
 ensure_event_schema`'s (`tortoise/event_store.py:410`, `:415`, `:421`), with ONE
@@ -32,7 +33,7 @@ re-run before quoting a coverage claim from them.
 A measurement against an un-indexed graph would understate the
 residency of the exact shape this issue is about.
 
-The PAYLOAD is the census's own size: `#13083` §4 measured 12,768 B over 67
+The PAYLOAD is the census's own size: the `#13083` census measured 12,768 B over 67
 `:GraphEvent` nodes ≈ 190 B each, which is the `PointAdded`-with-actor shape below.
 
 READ-ONLY AGAINST PRODUCTION — this script never runs there. It REQUIRES
@@ -113,8 +114,10 @@ PAYLOAD = json.dumps({
 def _payload(width: int | None) -> str:
     """The measured payload, padded (or not) to `width` bytes.
 
-    `#13083` §4 measured **12,768 B over 67** `:GraphEvent` nodes ≈ **190 B each**
-    on real tenant data, so `190` is the faithful figure and the default. The
+    the `#13083` census measured **12,768 B over 67** `:GraphEvent` nodes ≈ **190 B each**
+    on its FIXED SYNTHETIC corpus (never tenant data — the census says so in as many
+    words), so `190` is the faithful figure and the default, stated for the corpus it
+    was measured on. The
     unpadded shape above is 88 B — the two are both reported so the slope can be
     read against the payload it was measured with, rather than assumed
     payload-independent.
@@ -252,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sizes", type=int, nargs="+", default=[20000, 40000, 60000])
     parser.add_argument("--payload-bytes", type=int, default=190,
                         help="pad the synthetic payload to this width (default 190, "
-                             "#13083 §4's measured average)")
+                             "the #13083 census's measured average)")
     parser.add_argument("--keep", action="store_true",
                         help="leave the measurement graph in place")
     args = parser.parse_args(argv)
