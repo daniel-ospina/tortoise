@@ -2029,9 +2029,17 @@ SWEEP_NAMES = 66
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S — the
-#: pair below is `--repin`'s output HERE **(11910, "adc8229295339239")**; `--check` exits 0 on it.
-SWEEP_RESIDUE = (11910, "adc8229295339239")
+#: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
+#: RE-PINNED DOWN 11910 -> **11908** by #4625's final fold, and the move is the pin's documented
+#: HARMLESS direction (a residue count that FALLS cannot hide a new untyped reference). The two rows
+#: that left are the last `_JSONB_CACHE.update({...})` calls in
+#: `tortoise/record_projection.py`, deleted with the 5 s `jsonb` TTL this PR retires: the TTL was the
+#: only reason that dict was refreshed in place rather than cleared through
+#: `_release_schema_cache()`. Measured, not arithmetic — `--repin` on this tree prints
+#: `(11908, 'f03fb8e5f6e44a9c')`, and a row-level diff of the residue shapes against `origin/main`
+#: shows exactly ONE differing row (`_JSONB_CACHE.update  2`, present there, absent here) with no
+#: shape added or absorbed in either direction.
+SWEEP_RESIDUE = (11908, "f03fb8e5f6e44a9c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
