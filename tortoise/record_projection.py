@@ -2237,9 +2237,14 @@ def _migrations_fingerprint(base: Path) -> tuple:
         try:
             info = (base / name).stat()
         except OSError:
-            # Absent is a fact worth fingerprinting: `table_columns` raises on a
-            # missing schema and must re-raise on every call, never serve a
-            # cached "complete" map after a file disappears.
+            # Absent is a fact worth fingerprinting: an EXPLICIT-directory entry
+            # keyed on this fingerprint must MISS when a file disappears, so a
+            # caller that sees a removal never serves a cached "complete" map.
+            # ⚠️ That is the explicit-directory mode only. The RESIDENT entry is
+            # resolved once and NEVER revalidated (`_RESIDENT_SCHEMA`), so a file
+            # disappearing under it is NOT observed — by design, and the reason
+            # every resident reader gates its memo on a completeness flag and
+            # `table_columns` re-reads while the tree is incomplete.
             entries.append((name, None))
             continue
         entries.append((name, info.st_mtime_ns, info.st_size, info.st_ino,
@@ -2752,11 +2757,21 @@ def _strip_sql_comments(sql: str) -> str:
 def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
     """`{table: {column: declared_type}}` for ONE migrations directory.
 
-    THE one parse. Every reader of a column's DECLARED type answers through this
-    function — `column_types()` (the whole map, for the #11075 contract pin) and
-    `jsonb_columns()` (the `jsonb` names, for the #9548 encoding rule) are two
-    VIEWS of it, so the encoding and the pin can never disagree about what the
-    schema says.
+    THE one parse over the MIGRATIONS DIRECTORY. `column_types()` (the whole map,
+    for the #11075 contract pin) and `jsonb_columns(migrations_dir=…)` (the
+    explicit-directory mode) answer through it, and its result is what
+    :func:`_declared_types_from_chunks` produces from one chunk per file.
+
+    ⛔ IT IS NOT "the one parse every reader answers through" — the RESIDENT
+    `jsonb_columns()` parses the schema entry's memoised SQL instead (through the
+    same :func:`_declared_types_from_chunks`, so the PARSE cannot differ), and that
+    is deliberate: every resident reader must read the SAME bytes or they can
+    disagree after an edit. The consequence is stated rather than denied — this
+    function RE-READS the files on every call, so on a resolved resident entry an
+    edit can be visible here and not there until `_release_schema_cache()`. That is
+    the documented trade (`_schema_entry`), and `#11075`'s pin is a per-call
+    CONTRACT read, not the encoder's source of truth; the encoder and the
+    column map, which must never disagree, both come from the certified SQL.
 
     Three statement shapes, in file order (append-only history: the LAST
     declaration wins, which is the rule `key_properties()` applies):
