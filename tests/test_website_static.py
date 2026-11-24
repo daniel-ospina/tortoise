@@ -4213,6 +4213,11 @@ _CSS_PSEUDO_TOKEN = re.compile(r"::?[\w-]+(?:\([^)]*\))?")
 #: The NEGATION form, whose argument says what the rule does NOT select.
 _CSS_NOT_PSEUDO = re.compile(r":not\(([^)]*)\)", re.IGNORECASE)
 
+#: ONE class-only compound, e.g. `.popular` or `.popular.featured` — the only
+#: `:not()` argument this reader can decide from class sets alone. A tag, id,
+#: attribute or nested pseudo leaves it UNDECIDED, which counts as matching.
+_CSS_NOT_CLASS_ONLY = re.compile(r"(?:\.[\w-]+)+$")
+
 #: The pseudo-classes whose ARGUMENT is a selector list, so the classes inside it
 #: are part of what the rule names (`:is(.pricing-card.popular)` selects the
 #: popular card). Every other pseudo narrows or decorates without naming one.
@@ -4276,6 +4281,19 @@ def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
     while the other direction hides an override). One form IS disprovable:
     `:not(.x)` where `x` is a class the subject carries cannot select it, and
     counting it would false-RED a correct page.
+
+    ⛔ AND `:not()` TAKES A SELECTOR LIST WHOSE ARGUMENT IS A CONJUNCTION
+    (#14406 review round 25, measured). `:not(.a.b)` excludes only an element
+    carrying BOTH `a` and `b`; intersecting the argument's class SET with the
+    subject's read it as "excludes if EITHER", so
+    `.pricing-card:not(.popular.featured) { border-bottom-width: 1px }` was
+    treated as unreachable for the popular card, the reader derived extra_px 1.0
+    against a browser 0.0, and all eleven rows of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a 1px split.
+    Disproof now requires ONE ALTERNATIVE to be provably matched — a class-only
+    compound whose classes the subject carries — because that is the only thing
+    classes alone can decide; `:not(div)` and `:not(.a, .b)` stay undecided and
+    therefore count (fail closed).
     """
     if not compound.startswith("."):
         return False
@@ -4283,8 +4301,11 @@ def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
         return False
     subject = _css_classes(compound)
     for exclusion in _CSS_NOT_PSEUDO.finditer(rightmost):
-        if _css_classes(exclusion.group(1)) & subject:
-            return False
+        for alternative in exclusion.group(1).split(","):
+            candidate = alternative.strip()
+            if _CSS_NOT_CLASS_ONLY.fullmatch(candidate) and (
+                    _css_classes(candidate) <= subject):
+                return False
     rule = _css_classes(_css_class_fragment(
         _CSS_NOT_PSEUDO.sub(" ", rightmost)))
     return bool(rule) and rule <= subject
