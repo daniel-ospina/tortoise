@@ -71,7 +71,9 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `ae9bf0f959`, whose own emission partitions six-at-837.6 (b, f, g, h, i, j) / five-at-837.7
+# `6a72cfd661c` — one fold past the `ae9bf0f959` this paragraph was first re-derived at; #14482 takes
+# no fast registration of its own, so `main`'s own emission is UNMOVED by it and re-emitting at that
+# sha reproduced the partition below unchanged — whose own emission partitions six-at-837.6 (b, f, g, h, i, j) / five-at-837.7
 # (a, c, d, e, k), plus this PR's ONE `core` registration —
 # `tests/test_4625_schema_reads_off_write_path.py` below, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
 # the verb packs eight shards at 837.8 s (b, d, e, f, g, h, i, j) and three at 837.9 s (a, c, k), so
@@ -91,7 +93,7 @@ version: 1
 # this emission and left its own reading behind, so the block accumulated five stacked restatements
 # of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
 # ends up claiming two partitions while looking like one. The graded clause is the ONE in the
-# paragraph above, measured on the tree that SHIPS (`main` at `ae9bf0f959` plus this PR's row). What is kept here is
+# paragraph above, measured on the tree that SHIPS (`main` at `6a72cfd661c` plus this PR's row). What is kept here is
 # only what a reader cannot get from that clause: which registrations `main` has landed at the flat
 # 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's
 # `tests/test_7879_record_chain.py`, #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
