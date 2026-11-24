@@ -79,7 +79,7 @@ to 98.0 s**, so the erratum is not "new tests arrived" — the row was wrong whe
 | **the pinned registration** (`preregistration.json` + checker) | State / config | Read + Write (amended) | `capstone-preregistration/v1`; `criteria[].id`, `denominator_floors`, `below_floor`, `corpus`, `amendments`; the A-rows enter as a **versioned amendment** quoting superseded text |
 | **the verdict gate enum** (`capstone_verdict_check.py:162`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside `RECOGNISED_CRITERIA` (`= (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)`, `:191`; refused at `:1159-1165` — so A1–A5 and `E6` are accepted) — two schemas move, not one |
 | **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed read is `if not frozen.get("sha256")`, `:1194`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
-| **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:21101` (`if count + est > max_points`) / `:21126` (`quota_refusal_payload`); harness resolution `#3681` |
+| **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18205` (`if count + est > max_points`) / `:18230` (`quota_refusal_payload`) — both stamped at `a577d0e25c`, not this head's addresses; harness resolution `#3681` |
 | **the graph the A-rows read** (hosted `live-v4` / per-run graph) | DB | Read | `:Object`/`:Event`/`:Point`/`:Subject` shapes; `hasPart` Object→Object (ONTOLOGY §3.7); `batch_id` on `RelationUpsert.attrs` |
 | **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:472-484`), `hierarchies` (validated only, `:2492-2506`) |
 | **the declared-mechanism registry** (`config/v4-mechanisms.yml`) | Config | Read | 15 rows, read at `d05688df59` (13 when this map was written; `#11717` added `mention_record` and `#11794` `declared_pack_relations`); `state`/`code:`/`tests:`/`symbols:`/`pins:`/`preconditions:`; guard `tests/test_v4_declared_mechanisms.py` |
@@ -144,7 +144,7 @@ the owner already ruled on (#10194).
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
 | **Race / non-determinism** | D6 makes both connection sets model-proposed; the repo measured gold swinging `0,1,1,1,2 of 4` on identical code (`PRE-REGISTRATION.md` §1.4) | E2E-5's repeat policy: deterministic quantities identical, model-proposed arms reported with their disagreement |
-| **Quota as a hidden gate** | capture returns **402** at 25,000 points (`hosted_api.py:21101` — `if count + est > max_points`) | an explicit `BLOCKED — capture refused 402` reporting state, so a capped run can never read as a zero or a pass |
+| **Quota as a hidden gate** | capture returns **402** at 25,000 points (`hosted_api.py:18205` — `if count + est > max_points`, stamped at `a577d0e25c`) | an explicit `BLOCKED — capture refused 402` reporting state, so a capped run can never read as a zero or a pass |
 
 **No pgTAP flag applies** — this epic touches no Postgres function; the state is the graph and the committed
 record, and the skill's pgTAP rule is scoped to SQL business logic.
@@ -233,9 +233,18 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 **Read every `file:line` here as a STAMP, not as an address** — the **symbol** is authoritative. ⛔ **Two
 classes of `file:line` cite live in this file, and neither is "the" right one:** the rows whose cites were
 re-measured resolve at the head that measurement was taken at, while the **stamp-bound** rows carry the head
-they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:21101` and `:147`'s `hosted_api.py:21101` are the
-**same guard** (`if count + est > max_points`) read at two heads hundreds of commits apart — not a
-contradiction to fix. (A *count* or a *duration* is a third class: those carry their own heads inline, §4's
+they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18205` and `:147`'s `hosted_api.py:18205` are the
+**same guard** (`if count + est > max_points`), stamped at the **same** head `a577d0e25c` — one guard
+stated twice, and the repetition is not a contradiction to fix (`:82` also stamps the refusal payload,
+`:18230`). ⛔ **Both rows carry that head INLINE, and the number is why:** a bare number here has been
+re-pointed at least three times on this branch — `#12369`'s `18503` → `18493` on `:82`,
+`387daa31c9`'s `20978`/`18205` → `21101`, and the `21101` → `22257` move that stood at the head the
+last review read — and at that head `22257` was a BLANK line and `22282` an unrelated comment
+(`git show 8c881668b289:tortoise/hosted_api.py | sed -n '22257p;22282p'` re-measures it; the numbers
+are stated in the past tense on purpose, because a present-tense reading of them would be the same rot
+one head later). A value that names its own head cannot rot:
+`git show a577d0e25c:tortoise/hosted_api.py | grep -n 'if count + est > max_points'` prints `18205` at
+every future head of this branch. (A *count* or a *duration* is a third class: those carry their own heads inline, §4's
 `900d4aafc6` and line 31's `durations_captured_at`, because a count is re-taken where a cite is not
 re-pointed.) The full record, including why re-pointing rots, is `05-verify.md` D5.
 

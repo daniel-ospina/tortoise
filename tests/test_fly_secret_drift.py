@@ -118,6 +118,22 @@ EMPTY_LEDGER = _fixture("no-ledger.txt", "# empty\n")
 REAL_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 REAL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 REAL_FLY_TOML = REPO_ROOT / "fly.toml"
+#: The image's ENTRYPOINT script — a provisioning surface for any env-read switch,
+#: and one NO gate reads (`check-fly-secret-drift.py` never opens it, and
+#: `.ci-checks/check-entrypoint-guards.sh` has no closed set of permitted exports).
+#: `Dockerfile.hosted` makes it the process that starts uvicorn
+#: (`ENTRYPOINT ["/entrypoint.sh"]`) and it ends in `exec "$@"`, so every `export`
+#: it makes reaches the process where `record_vector.arm_is_explicit()` reads
+#: `os.environ`. Fly injects secrets as env at BOOT, before this script runs, so a
+#: script `export` overrides them for its children (#14563 review F1).
+REAL_ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
+#: The surfaces a `fly-only:` lever must not be ASSIGNED by. The deploy payload ACROSS
+#: BOTH surfaces: the workflow's steps, and the image's entrypoint script. The
+#: repo's own census of "is this switch provisioned anywhere?" names a third
+#: member (`fly.toml`) — that one is read as `[env]` KEYS by
+#: `module.fly_toml_env_keys` in each lever's own assert, because there an
+#: assignment IS the declaration and the gate refuses it directly.
+FLY_ONLY_LEVER_PAYLOAD_SURFACES = (REAL_WORKFLOW, REAL_ENTRYPOINT)
 #: The orientation table an operator reads before §2's rotation recipes. Its
 #: GitHub Actions column is a CLAIM about the manifest's `gh-secret:` names.
 REAL_RUNBOOK = REPO_ROOT / "docs" / "infra-runbook.md"
@@ -232,6 +248,65 @@ def _referenced_secret_names(workflow: Path) -> set[str]:
     satisfied for the fixture to mean what it says.
     """
     return set(re.findall(r"secrets\.([A-Za-z0-9_]+)", workflow.read_text()))
+
+
+def _env_assignment_sites(name: str, text: str) -> list[str]:
+    r"""Lines of `text` that ASSIGN `name` (`export NAME=…`, `NAME=…`, `ARGS+=(NAME=…)`).
+
+    ⛔ COMMENTS STRIPPED, with the gate's own rule (`(?:^|\s)#`), because both surfaces
+    document operator commands in exactly this shape (`#   fly secrets set NAME=…`,
+    `# REGISTRY_STREAM_KEY is deliberately NOT synced`); a comment-blind scan would red
+    a correct documentation edit and blame it for assigning the value.
+
+    ⛔ The NAME, not a value: a second site at another value is the same defect, so this
+    filters on the name alone.
+    """
+    return [
+        line
+        for line in text.splitlines()
+        if re.search(rf"\b{name}=", re.split(r"(?:^|\s)#", line)[0])
+    ]
+
+
+def _lever_payload_sites(
+    name: str, surfaces: tuple[Path, ...] = FLY_ONLY_LEVER_PAYLOAD_SURFACES
+) -> list[str]:
+    """Every `<surface>: <line>` that assigns `name`, across EVERY payload surface.
+
+    One reader, called for EVERY `fly-only:` lever — and the lever set is DERIVED from
+    the shipped manifest (`_fly_only_lever_payload_offenders`), never a hand-kept list
+    of call sites. It was a hand-kept list once: this docstring claimed "every
+    `fly-only:` lever" while `TORTOISE_RECORD_ALLOCATE` had no call site at all, so the
+    fourth member stayed guarded by nothing (#14563 review F2). Deriving closes that by
+    construction and covers a FIFTH member without a new assert.
+    """
+    return [
+        f"{surface.name}: {line}"
+        for surface in surfaces
+        for line in _env_assignment_sites(name, surface.read_text())
+    ]
+
+
+def _fly_only_levers(declared: dict[str, str]) -> list[str]:
+    """Every `fly-only:` lever a manifest declares, sorted — DERIVED, never listed.
+
+    The pre-fix scan was wired for three of the four members (#14563 review F2);
+    reading the set out of `declared` makes "every `fly-only:` lever" true by
+    construction instead of by whoever remembers to add the next call site.
+    """
+    return sorted(name for name, source in declared.items() if source.startswith("fly-only:"))
+
+
+def _fly_only_lever_payload_offenders(
+    declared: dict[str, str],
+    surfaces: tuple[Path, ...] = FLY_ONLY_LEVER_PAYLOAD_SURFACES,
+) -> dict[str, list[str]]:
+    """`{lever: [<surface>: <line>]}` for every `fly-only:` lever a deploy ASSIGNS."""
+    return {
+        lever: sites
+        for lever in _fly_only_levers(declared)
+        if (sites := _lever_payload_sites(lever, surfaces))
+    }
 
 
 def _run_env(
@@ -2116,6 +2191,14 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     assert "REGISTRY_STREAM_KEY" not in workflow_refs, (
         "REGISTRY_STREAM_KEY must stay OUT of the GitHub trust boundary (#661)"
     )
+    # ⛔ The PAYLOAD across BOTH surfaces, not just `secrets.…` references: neither a
+    # `NAME=` literal in `deploy-hosted.yml` nor an `export NAME=…` in `entrypoint.sh`
+    # ever appears as `secrets.NAME`, and both override the operator-set secret for
+    # everything downstream (#14563 review F1).
+    assert not _lever_payload_sites("REGISTRY_STREAM_KEY"), (
+        "the deploy ASSIGNS REGISTRY_STREAM_KEY — the value is set out-of-band by the "
+        f"operator and no deploy may state it (#661): {_lever_payload_sites('REGISTRY_STREAM_KEY')}"
+    )
     # ── #13209: the hosted READ-MODE lever, the second decision-backed exception ─
     # `TORTOISE_RECORD_SERVE` is armed by an operator (`flyctl secrets set`) and
     # reverted by the same lever (`flyctl secrets unset`) — the runbook's arming
@@ -2149,12 +2232,118 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # files and a future divergence in EITHER should red HERE — do not read it as
     # independent evidence of a second surface.
     assert record_serve not in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    # ⛔ This one is NOT a belt: an `ARGS+=(TORTOISE_RECORD_SERVE=…)` literal in the
+    # deploy payload, and an `export TORTOISE_RECORD_SERVE=…` in `entrypoint.sh`, are
+    # both invisible to every reader above (no `secrets.X` reference, and no gate reads
+    # the entrypoint), and both make the deploy the managing source — the ruling
+    # reversed (#13209, #14563 review F1).
+    assert not _lever_payload_sites(record_serve), (
+        "the deploy ASSIGNS TORTOISE_RECORD_SERVE, so it is no longer out-of-band — "
+        "arming is an operator action and no deploy sets it (#13209): "
+        f"{_lever_payload_sites(record_serve)}"
+    )
     assert record_serve not in env_keys, (
         "TORTOISE_RECORD_SERVE is versioned in fly.toml [env], so it is NOT "
         "out-of-band any more — REVERT the [env] entry: the `fly-only:` "
         "declaration IS the recorded decision (#13209), and `fly-toml-env` — the "
         "route its OVERRIDES marker names and refuses — would re-introduce a "
         "deploy-set value"
+    )
+
+    # ── #7879: the record's DENSE-leg arm/rollback lever, the fourth exception ──
+    # `TORTOISE_RECORD_VECTOR_LEG` arrived on Fly undeclared and the fail-closed
+    # provenance gate refused every `deploy-hosted` run that reached it (run
+    # `45454704119`: `UNDECLARED — 'TORTOISE_RECORD_VECTOR_LEG' is on Fly but
+    # declared nowhere`). It is declared `fly-only:` and NOT `workflow` — the route
+    # the sibling tunable above took — because `#13610` makes all three of its
+    # states a PRODUCT decision: `unset` armed for the read, explicit falsy the
+    # ROLLBACK, explicit truthy (`1`/`true`/`yes`/`on`) the only posture
+    # `arm_is_explicit()` accepts (the arm that retires the in-graph vector index).
+    # A staged literal therefore ships one of those as a side effect of deploy
+    # plumbing, and `flyctl secrets set` being ADDITIVE means it would silently
+    # re-arm a rollback an operator took — the failure #13209's ruling refuses one
+    # member above.
+    #
+    # Pinned by KIND and in BOTH directions, because each wrong route is one
+    # plausible "helpful" edit away: `gh-secret:`/`fly-toml-env` make the deploy the
+    # managing source, an `ARGS+=(…=…)` line in `deploy-hosted.yml` does the same
+    # through the payload, and `unmanaged` is the #4126 defect the gate exists to
+    # refuse.
+    dense_leg = "TORTOISE_RECORD_VECTOR_LEG"
+    assert declared[dense_leg] == "fly-only:#7879", declared[dense_leg]
+    assert dense_leg not in workflow_refs, (
+        "TORTOISE_RECORD_VECTOR_LEG must stay OUT of the deploy payload — its "
+        "value is a PRODUCT decision (#13610: `0` is the rollback, `1` retires the "
+        "in-graph index) and no deploy may set it (#7879)"
+    )
+    assert dense_leg not in env_keys, (
+        "TORTOISE_RECORD_VECTOR_LEG is versioned in fly.toml [env], so it is NOT "
+        "out-of-band any more — REVERT the [env] entry: the `fly-only:` "
+        "declaration IS the recorded decision (#7879), and `fly-toml-env` would "
+        "re-introduce a deploy-set value"
+    )
+    # ⛔ The PAYLOAD across BOTH surfaces, not `secrets.…` references: an
+    # `ARGS+=(NAME=…)` literal never appears as `secrets.NAME`, so `workflow_refs`
+    # alone cannot see the one edit that most directly reverses this declaration — and
+    # `entrypoint.sh` carries the exact idiom (`entrypoint.sh:386-387` already does
+    # `export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"`), which NOTHING in this
+    # repo's gates reads. `export TORTOISE_RECORD_VECTOR_LEG="${…:-1}"` there converts
+    # the documented DEFAULT into an EXPLICIT arm, so `arm_is_explicit()` turns true
+    # with every check green and `_ensure_indexes` DROPS the in-graph HNSW index at
+    # every setup (#14563 review F1: the #4126 class, reached through the one surface
+    # the registry cannot see).
+    payload_sites = _lever_payload_sites(dense_leg)
+    assert not payload_sites, (
+        "the deploy ASSIGNS TORTOISE_RECORD_VECTOR_LEG (deploy-hosted.yml or "
+        "entrypoint.sh), so the deploy "
+        "states a product decision on every run (an explicit `1` retires in-graph "
+        "indexes, `0` rolls the dense leg back) and `flycli secrets set`'s additive "
+        f"semantics silently re-arm an operator's rollback: {payload_sites}. "
+        "Delete the assignment — the lever is operator-only (#7879, #13209)"
+    )
+
+    # ── #12894: the allocator cutover, the lever the hand-kept scan MISSED ─────
+    # `TORTOISE_RECORD_ALLOCATE` is the fourth `fly-only:` member and it had no call
+    # site at all, so the hole the two asserts above close stayed open for the lever
+    # whose mis-set changes the WRITE path rather than a read mode — behind a docstring
+    # that said every lever was covered (#14563 review F2). `export
+    # TORTOISE_RECORD_ALLOCATE=1` in `entrypoint.sh` arms the cutover on every boot with
+    # every check green, and the manifest's own block says why that is not undoable:
+    # "UNSETTING IS NOT THE REVERT. On a graph that has been cut over the enumerated arm
+    # is refused on the CURSOR ROW" (`.github/scripts/fly-managed-secrets.txt:553-556`).
+    allocate = "TORTOISE_RECORD_ALLOCATE"
+    assert declared[allocate] == "fly-only:#12894", declared[allocate]
+    assert allocate not in workflow_refs, (
+        "TORTOISE_RECORD_ALLOCATE must stay OUT of the deploy payload — the cutover is "
+        "armed by an operator, per box, at the moment every graph is seeded and armed "
+        "(`CUTOVER_ACK_TEXT` is the authority for that order), which no deploy can "
+        "know (#12894)"
+    )
+    assert allocate not in env_keys, (
+        "TORTOISE_RECORD_ALLOCATE is versioned in fly.toml [env], so the deploy arms "
+        "the cutover instead of the operator at the acknowledged moment — REVERT the "
+        "[env] entry: the `fly-only:` declaration IS the recorded decision (#12894)"
+    )
+    # ⛔ EVERY `fly-only:` lever, read out of the manifest: the three asserts above are
+    # one claim written out three times, and writing it out by hand is exactly how the
+    # fourth member was missed. The membership assert keeps the loop non-vacuous (a
+    # declaration that VANISHED would silently shrink the derived set); it is a subset
+    # test, not an equality, so a FIFTH `fly-only:` member is covered with no edit here.
+    fly_only_levers = _fly_only_levers(declared)
+    assert {"REGISTRY_STREAM_KEY", record_serve, allocate, dense_leg} <= set(
+        fly_only_levers
+    ), (
+        "a declared `fly-only:` lever is missing from the derived set, so the scan "
+        f"below no longer covers it: {sorted(fly_only_levers)}"
+    )
+    offenders = _fly_only_lever_payload_offenders(declared)
+    assert offenders == {}, (
+        "the deploy ASSIGNS a `fly-only:` lever (a `NAME=` literal in "
+        "deploy-hosted.yml's payload, or an `export NAME=…` in entrypoint.sh — which no "
+        "gate in this repo reads), so the deploy states an operator decision on every "
+        "run and the value is no longer out-of-band: "
+        f"{offenders}. Delete the assignment — every `fly-only:` lever is "
+        "operator-only (#661, #13209, #12894, #7879)"
     )
 
     # ── #13674 / #13926: the embedder warm-up's EMERGENCY SWITCH ──────────────
@@ -2192,6 +2381,95 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # check). The day this entry leaves `open_route_b` this asserts 0 — it does not
     # happen by itself.
     assert r.returncode == (1 if stale else 0), r.stdout + r.stderr
+
+
+def test_the_fly_only_payload_scan_covers_the_entrypoint_and_strips_comments(tmp_path):
+    """#14563 review F1: the pre-fix scan read ONE surface and was blind to `entrypoint.sh`.
+
+    The mutant is the plausible "helpful" edit the finding names — the exact idiom
+    `entrypoint.sh:386-387` already uses two screens above where a lane would add it:
+
+        export TORTOISE_RECORD_VECTOR_LEG="${TORTOISE_RECORD_VECTOR_LEG:-1}"
+
+    It converts the documented DEFAULT (unset → armed for the read, in-graph index
+    KEPT) into an EXPLICIT arm, so `arm_is_explicit()` turns true and `_ensure_indexes`
+    DROPS the in-graph HNSW index at every setup — with every other check green.
+
+    Both directions are pinned: the multi-surface scan SEES it, and the single-surface
+    scan this file used before the fix (the CONTROL) does not — so the test fails on the
+    pre-fix code rather than merely asserting that some scan exists.
+    """
+    name = "TORTOISE_RECORD_VECTOR_LEG"
+    mutant = f'export {name}="${{{name}:-1}}"'
+    workflow = tmp_path / "deploy-hosted.yml"
+    # The comment half: a documented operator command is NOT an assignment, and the
+    # gate's own comment grammar (`(?:^|\s)#`) is what tells them apart.
+    workflow.write_text(f"#   fly secrets set {name}=1\n")
+    entrypoint = tmp_path / "entrypoint.sh"
+    entrypoint.write_text(mutant + "\n")
+
+    assert _lever_payload_sites(name, (workflow, entrypoint)) == [
+        f"entrypoint.sh: {mutant}"
+    ]
+    # CONTROL — the pre-fix reader (workflow only) is BLIND to the mutant. If this ever
+    # starts passing, the surfaces tuple is no longer what makes the scan work and the
+    # assert above has stopped proving anything about `entrypoint.sh`.
+    assert _lever_payload_sites(name, (workflow,)) == []
+    # The wiring pin: the production tuple is what every `fly-only:` assert above calls.
+    assert REAL_ENTRYPOINT in FLY_ONLY_LEVER_PAYLOAD_SURFACES, (
+        "the payload scan dropped entrypoint.sh — it is what `Dockerfile.hosted` runs as "
+        "ENTRYPOINT and what `exec \"$@\"` propagates into the uvicorn process, so an "
+        "`export` there reaches `arm_is_explicit()` with no gate red (#14563 review F1)"
+    )
+    assert REAL_ENTRYPOINT.exists()
+
+
+def test_every_fly_only_lever_is_scanned_not_only_the_ones_with_a_call_site(tmp_path):
+    """#14563 review F2: the pre-fix scan was wired for three of the FOUR `fly-only:`
+    levers, and the missing one was `TORTOISE_RECORD_ALLOCATE` (`fly-only:#12894`).
+
+    The mutant is the one F2 names, on the surface no gate in this repo reads:
+
+        export TORTOISE_RECORD_ALLOCATE=1
+
+    It arms the allocator cutover for the booted process with every check green, and
+    the manifest's own block states why that is a one-way door — unsetting is NOT the
+    revert, because the enumerated arm is then refused on the cursor row. That is the
+    #4126 class reached through `entrypoint.sh`, on the lever whose consequence is a
+    WRITE-path change.
+
+    Both directions are pinned: the DERIVED scan sees it for a lever nobody listed, and
+    the pre-fix shape (the three names the assert block writes out by hand) is blind —
+    so this fails on the pre-fix code rather than merely asserting some scan exists.
+    """
+    name = "TORTOISE_RECORD_ALLOCATE"
+    mutant = f"export {name}=1"
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(f"{name}        fly-only:#12894\n")
+    workflow = tmp_path / "deploy-hosted.yml"
+    workflow.write_text("jobs: {}\n")  # the mutant lives on the OTHER surface
+    entrypoint = tmp_path / "entrypoint.sh"
+    entrypoint.write_text(mutant + "\n")
+    surfaces = (workflow, entrypoint)
+
+    module = _load_gate_module()
+    declared = module.read_manifest(manifest)
+    assert _fly_only_levers(declared) == [name]
+    assert _fly_only_lever_payload_offenders(declared, surfaces) == {
+        name: [f"entrypoint.sh: {mutant}"]
+    }
+    # CONTROL — the PRE-FIX call sites, written out by hand: exactly the three levers
+    # `test_shipped_manifest_matches_the_real_workflow_and_recorded_debt` named before
+    # the fix. The same mutant is invisible to them, which is F2 in one line. If this
+    # ever stops being empty, the derived scan above has stopped being what closes it.
+    pre_fix = ["REGISTRY_STREAM_KEY", "TORTOISE_RECORD_SERVE", "TORTOISE_RECORD_VECTOR_LEG"]
+    assert {
+        lever: sites for lever in pre_fix if (sites := _lever_payload_sites(lever, surfaces))
+    } == {}
+    # The wiring pin: the SHIPPED manifest really does declare this lever `fly-only:`, so
+    # the derived production scan covers it — a derived helper over a set that omits the
+    # name would be as blind as the hand-kept list it replaced.
+    assert name in _fly_only_levers(_load_gate_module().read_manifest(REAL_MANIFEST))
 
 
 # ── The #13674 line citations (#13814) ───────────────────────────────────────
@@ -6816,3 +7094,98 @@ def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatc
     )
     with pytest.raises(AssertionError, match="never labels itself"):
         test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
+
+
+# ── #7879 — the dense-leg lever's declaration, proved against the REAL gate ───
+#
+# The manifest pins above say the LINE says the right thing. They cannot say the
+# line is what makes the deploy pass: the gate is a subprocess, the Fly secret
+# list is an input, and the pre-fix tree was red on a name that appeared in NO
+# manifest at all. So this runs the shipped gate twice over one Fly state — with
+# the declaration, and with the declaration DELETED — and requires the verdict to
+# flip. That is the mutation proof, and it is also the non-vacuity guard for the
+# pins above: removing the declaration reds HERE by the gate, not only by a
+# string comparison in the test file.
+_DENSE_LEG_ENV = "TORTOISE_RECORD_VECTOR_LEG"
+
+
+def _fly_state_naming(name: str) -> Path:
+    """The Fly secret list `flyctl secrets list` prints: EVERY `fly-only:` member.
+
+    `name` is one OF those members (`assert name in fly_only` below), so the list is the
+    `fly-only:` set itself. It was `[name, *fly_only]` until review round 2's observation 1
+    — that listed the name TWICE, which is a state `flyctl secrets list` cannot produce,
+    and the docstring above it already claimed "`name` plus every OTHER member".
+
+    The other members have to be present too: the gate refuses a `fly-only:`
+    declaration whose name is not on Fly, so a fixture that carried only the name
+    under test would red on the three pre-existing members and say nothing about
+    this one.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    fly_only = sorted(n for n, s in sources.items() if s.startswith("fly-only:"))
+    assert name in fly_only, f"{name} is not declared fly-only in the shipped manifest"
+    return _fixture(
+        "dense-leg-fly-state.json",
+        json.dumps([{"name": n} for n in fly_only]),
+    )
+
+
+def _manifest_without_the_dense_leg_declaration() -> Path:
+    lines = REAL_MANIFEST.read_text().splitlines(True)
+    kept = [line for line in lines if not line.startswith(_DENSE_LEG_ENV)]
+    assert len(kept) == len(lines) - 1, (
+        "the mutation removed more than the one declaration line — this probe "
+        "would then be measuring a different manifest than the one it names"
+    )
+    return _fixture("manifest-without-dense-leg.txt", "".join(kept))
+
+
+def test_the_dense_leg_declaration_is_what_clears_the_provenance_gate():
+    """`UNDECLARED — 'TORTOISE_RECORD_VECTOR_LEG' …` must be gone, and by THIS line.
+
+    Measured on the deploy run that blocked production: run `45454704119`, step
+    `Check Fly secret provenance (fail-closed)`, reported exactly that string and
+    `1 violation(s)` — the last undeclared name in the set. The pre-fix manifest
+    does not mention the name, so the gate's verdict is a property of the
+    DECLARATION and of nothing else in this change.
+    """
+    fly_state = _fly_state_naming(_DENSE_LEG_ENV)
+
+    fixed = _run(
+        fly_state,
+        manifest=REAL_MANIFEST,
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+    )
+    assert fixed.returncode == 0, (
+        "the shipped manifest does not clear the gate on the Fly state that "
+        "blocked production — the declaration is not accepted as a managing "
+        f"source:\n{fixed.stdout}\n{fixed.stderr}"
+    )
+    # ⛔ NO `name not in fixed.stdout` ASSERT HERE. Exit 0 prints ONE summary line
+    # ("OK: all N Fly secret(s) are declared …") with counts and no names, so an
+    # assert on the name in that output could never fire — the dead-assert class
+    # this file deletes elsewhere (`returncode == 0` is the whole control
+    # predicate). The mutation below is what proves the verdict depends on the
+    # declaration.
+
+    # The mutation: same Fly state, same workflow, the declaration deleted. A probe
+    # that cannot red is not evidence, and this is the exact state the deploy was
+    # in before this change.
+    broken = _run(
+        fly_state,
+        manifest=_manifest_without_the_dense_leg_declaration(),
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+    )
+    assert broken.returncode == 1, (
+        "deleting the declaration left the gate green, so the declaration is not "
+        f"what the verdict depends on (exit {broken.returncode}):\n{broken.stdout}"
+    )
+    assert "UNDECLARED" in broken.stdout and _DENSE_LEG_ENV in broken.stdout, (
+        "the mutated run did not report the UNDECLARED violation this change "
+        f"closes, so it is red for some other reason:\n{broken.stdout}\n{broken.stderr}"
+    )
