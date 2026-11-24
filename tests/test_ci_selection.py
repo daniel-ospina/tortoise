@@ -9263,7 +9263,7 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on the ~1,900-word block this head carries (measured: 1,936 words; the spliced
+#: bounds the read on the ~1,950-word block this head carries (measured: 1,948 words; the spliced
 #: fold's block was ~2,950). jscpd's clone taxonomy draws the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
@@ -9298,7 +9298,7 @@ def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
     the whole block, so ONE duplicated line carrying an odd number of `"` flips the parity for
     every quote after it: previously-masked quoted prose becomes LIVE and most live prose becomes
     MASKED. Measured at `d8fd31c268c5a` — where 10 of the block's lines carried an odd quote count;
-    **4 of the 160 lines do at this head** (12 quotes, even) — with a fold that duplicates one such
+    **4 of the 161 lines do at this head** (12 quotes, even) — with a fold that duplicates one such
     line and the ratio line:
 
         parity even -> the duplicated ratio line is reported (2 spans of 25 words)
@@ -9589,8 +9589,8 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
-    # below would be decoration on the one file it exists to grade. This block is ~1,900 words at
-    # this head (measured: 1,936; the spliced fold's was ~2,950), so the floor is roughly 19x below
+    # below would be decoration on the one file it exists to grade. This block is ~1,950 words at
+    # this head (measured: 1,948; the spliced fold's was ~2,950), so the floor is roughly 19x below
     # it — not a tuned value.
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
