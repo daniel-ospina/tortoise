@@ -3478,10 +3478,9 @@ jobs:
         # reddened a REQUIRED check on a diff that never touched this job.
         #
         # This job cannot amortize that save, and no cap can make it able to.
-        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the LARGEST per-shard
-        # watchdog the selector emits — 3x, asserted in
-        # `test_every_bounded_pytest_job_caps_above_its_watchdog` — and 30m is
-        # already 19m of shard watchdog
+        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
+        # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
+        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
         # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
         # + the 1m38s HF POST ≈ 31.6m — already ~1.6m PAST the 30m cap, and worse
         # against a slow one. Raising the cap instead would re-open #3239's stale-head
