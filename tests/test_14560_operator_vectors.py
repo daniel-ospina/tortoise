@@ -380,3 +380,49 @@ def test_the_Point_restore_drop_is_HELD_until_the_per_id_ask_lands(monkeypatch):
     assert hosted_backup._restore_retires_vector(["Object"]) is True, (
         "the same shape with a NON-held label must still retire — otherwise the hold "
         "above is indistinguishable from a broken decision")
+
+
+def test_the_sdk_UPDATE_door_holds_the_Point_vector_too(sdk, monkeypatch):
+    """⛔ F5'S TWIN DOOR, AND THE ONE THAT LOSES A WRITE INSTEAD OF A ROW (#14560 review, P1).
+
+    `sdk::_update_entity`'s `:Point` branch pops `embedding` out of the props it applies,
+    exactly as `hosted_backup.restore_graph` retires the restored copy. `#14560` made the
+    `operator` conjunct VERIFY (an empty operator slice is TRIVIAL, and `mirror_required`
+    without `require_substantive` reads a trivial verdict as stop), so this pop — which was
+    unreachable for its whole life by ARITHMETIC — became reachable on the same AGGREGATE
+    the restore door refuses to trust. The difference is what a pop costs here: this door
+    journals NO embedding record (`#4094`), so a caller-supplied vector that is popped from
+    the props reaches NEITHER store while the call still returns success.
+
+    Driven in BOTH directions on the ONE declaration that decides it, so the hold cannot
+    become a blanket refusal: with the hold in force the caller's vector LANDS on the
+    graph; with `_RESTORE_DROP_HELD` emptied the same call drops it and the old vector
+    survives — which is the pre-`#14560` behaviour, made deliberate here rather than
+    depending on a mis-measured denominator.
+    """
+    from tortoise import hosted_backup, sdk as sdk_module
+
+    point = sdk._create_point("statement", "the caller will revise this", embedding=_vector(1))
+    pid = point["id"]
+    assert sdk._get_point(pid)["embedding"], "the fixture point carries no vector to replace"
+
+    # The gate is FORCED to stop for both `:Point` types — that is the state `#14560` makes
+    # reachable, and stubbing it keeps this arm about the HOLD rather than about coverage.
+    monkeypatch.setattr(sdk_module, "_derived_mirror_required",
+                        lambda entity_type, *a, **kw: False, raising=True)
+
+    sdk._update_entity(pid, embedding=_vector(5))
+    landed = sdk._get_point(pid).get("embedding")
+    assert landed and abs(float(landed[5]) - 1.0) < 1e-9, (
+        "the hold is not in force: a caller-supplied vector was popped out of the props, "
+        "this door journals no embedding record, so the write reached NEITHER store and "
+        "the call returned success anyway")
+
+    # …AND THE OTHER DIRECTION: lift the hold and the pop is real again, so this arm is a
+    # hold and not a stub that never looks at the declaration.
+    monkeypatch.setattr(hosted_backup, "_RESTORE_DROP_HELD", frozenset())
+    sdk._update_entity(pid, embedding=_vector(7))
+    after = sdk._get_point(pid).get("embedding")
+    assert after and abs(float(after[5]) - 1.0) < 1e-9, (
+        "with the hold lifted the pop did not happen, so this arm grades nothing — the "
+        "conjunct `not _derived_mirror_required('operator')` must still be consulted")

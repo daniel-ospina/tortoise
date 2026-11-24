@@ -473,11 +473,31 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
         "alone, exactly as for `:Source`'s two halves")
     g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
     _gate_map(monkeypatch, set())
+    # ⛔ THE POP IS DRIVEN WITH THE HOLD LIFTED (`#14560` review, P1). `:Point`'s drop is HELD
+    # (`hosted_backup._RESTORE_DROP_HELD`, `#13971`'s per-ID ask is outstanding) on BOTH doors
+    # now, so with the real set this arm would keep the vector for the WRONG reason and grade
+    # nothing. Lifting it here keeps the conjunction graded; the hold itself is asserted below,
+    # on the real set.
+    import tortoise.hosted_backup as _hb
+    _hold = _hb._RESTORE_DROP_HELD
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is None, (
-        "a `:Point` write kept the graph vector with BOTH halves answering stop")
+        "a `:Point` write kept the graph vector with BOTH halves answering stop and the "
+        "hold LIFTED — the conjunction is not being asked")
     assert _prop(g, "(n:Point {id:'pt-13826'})", "content") == "a claim", (
         "the ROW write did not land on the stop arm")
+    # ⛔ AND THE HOLD, ON THE REAL SET (`#14560` review, P1). This door journals NO embedding
+    # record (`#4094`), so a pop here does not "let the record hold it": the caller's vector
+    # reaches NEITHER store and the call still returns success. The same both-stop answer
+    # therefore KEEPS the vector until `#13971` can answer about the row being written.
+    g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", _hold)
+    sdk.update_knowledge("pt-13826", embedding=list(VEC))
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
+        "the hold is not in force on the SDK door: a caller-supplied `:Point` vector was "
+        "dropped from the props, and this door journals no embedding record — the write "
+        "landed in neither store")
 
 
 def test_update_entity_journals_the_gated_state(sdk, monkeypatch):
