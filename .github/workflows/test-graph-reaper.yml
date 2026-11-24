@@ -72,12 +72,20 @@ name: test-graph-reaper
 #     comment.
 #   * `total == 0` from the plan pass — same class, one layer down: a wrong target
 #     that answers is indistinguishable from an empty one.
-#   * a control plane that ANSWERS but resolves NONE of the graphs (`refused-unresolved
-#     == total`). This is the `total == 0` guard's mirror image: a restored/empty
-#     project or a key scoped elsewhere turns every graph into an unresolved orphan,
-#     so `reapable` is 0 and the total is healthy while the sweep deletes nothing
-#     forever — green, every 15 minutes. A CLUSTER of orphans (some, not all) is the
-#     tool working as designed; ALL of them is a control-plane fault.
+#   * a control plane that ANSWERS but resolves NONE of the graphs AND at least one
+#     of them is ORPHAN-SHAPED (`refused-unresolved` with `reserved: false`). This
+#     is the `total == 0` guard's mirror image: a restored/empty project or a key
+#     scoped elsewhere turns every graph into an unresolved orphan, so `reapable`
+#     is 0 and the total is healthy while the sweep deletes nothing forever —
+#     green, every 15 minutes. A CLUSTER of orphans (some, not all) is the tool
+#     working as designed. ⛔ ALL of them being unresolved is NOT on its own a
+#     fault: the reserved control-plane graphs (`tortoise`, `registry_*`) are
+#     `refused-unresolved` BY DESIGN — `classify_graph` refuses them before any
+#     owner lookup — so once the test orgs are deprovisioned (#13218) the estate
+#     is legitimately reserved-only, and an arm that counted reserved rows as
+#     evidence of a fault would red every tick, forever. That is the deaf monitor
+#     from the other side. The row's `reserved` flag is the discriminator; a row
+#     that carries none counts as NON-reserved (fail closed).
 #   * the plan or verify pass returning 2 (REFUSED: control plane or graph list
 #     unreadable) — a partial view is never a clean one. The verify pass's own health
 #     is checked on EVERY path, rehearsal included; only its RESIDUE invariant is
@@ -94,7 +102,7 @@ name: test-graph-reaper
 #     counted, named and warned on, not red. (The issue says exactly this:
 #     "a refusal is visible rather than silent".) The one exception is the
 #     ALL-unresolved case above, which is a control-plane fault wearing the same
-#     bucket.
+#     bucket — and only while an orphan-shaped row is among them.
 #
 # WHO RUNS IT. GitHub Actions, not a box timer and not an in-process thread: the
 # fleet's own scheduling doctrine (billing-reconcile-cron, registry-backup-cron)
@@ -360,17 +368,32 @@ jobs:
           unreadable = counts.get("refused-unreadable", 0)
           total = plan.get("total", 0)
 
-          # ⛔ THE MIRROR OF THE `total == 0` GUARD, one layer over. A control plane
-          # that ANSWERS but resolves NONE of the graphs (a restored/empty project,
-          # a key scoped elsewhere, a namespace-derivation drift) turns EVERY graph
-          # into `refused-unresolved`: `reapable` is 0, the total is healthy, so
-          # every other arm passes — and the sweep deletes nothing forever while
-          # the leak keeps running, green, every 15 minutes. That is the #2140 deaf
-          # monitor exactly, so it is a FAILURE, not a warning.
-          if total > 0 and unresolved == total:
+          # ⛔ THE MIRROR OF THE `total == 0` GUARD, one layer over — WITH A
+          # DISCRIMINATOR. Reserved control-plane graphs (`tortoise`, `registry_*`)
+          # are `refused-unresolved` BY DESIGN (`classify_graph` refuses them
+          # before any owner lookup), so they can never resolve. Counting them as
+          # evidence of a control-plane fault means an estate that is
+          # legitimately reserved-only — the CONVERGED state, once the test orgs
+          # are deprovisioned (#13218) — reds on every tick forever, filing on a
+          # dedupe key the resolve step can never close (resolve needs green). A
+          # permanently-red schedule is a schedule nobody reads: the #2140 deaf
+          # monitor, arriving from the other side.
+          #
+          # So the arm fires only when an UNRESOLVED row is ORPHAN-SHAPED, which
+          # is the case it was written for (a restored/empty project, a key
+          # scoped elsewhere, namespace drift: tenant-shaped graphs, HTTP 200,
+          # zero owners). A row that carries no `reserved` key counts as
+          # NON-reserved — fail closed, never fail open.
+          orphan_unresolved = [
+              row for row in (plan.get("graphs") or [])
+              if not row.get("reserved")
+              and row.get("bucket") == "refused-unresolved"
+          ]
+          if total > 0 and unresolved == total and orphan_unresolved:
               reasons.append(
                   f"the control plane ANSWERED but resolved none of the {total} "
-                  f"graph(s): every one is `refused-unresolved`, so `reapable` is 0 "
+                  f"graph(s): {len(orphan_unresolved)} of them are orphan-shaped "
+                  f"(`refused-unresolved` and not reserved), so `reapable` is 0 "
                   f"without a single owner being consulted. That is a control-plane "
                   f"fault, not a clean sweep")
 
@@ -408,8 +431,17 @@ jobs:
               reasons.append(f"{unreadable} graph(s) could not be READ for emptiness (`refused-unreadable`) — the sweep is partly blind, which is a defect in the sweep, not a data question")
           if unresolved:
               # NOT a failure: the tool refusing an orphan is it working as
-              # designed. Counted, named and warned on so it is visible.
-              notes.append(f"{unresolved} graph(s) REFUSED as unresolved (no owning org) — adjudication, not cleaning")
+              # designed. Counted, named and warned on so it is visible — and
+              # SPLIT, so the warning cannot contradict the reason above it about
+              # the same rows (a reserved graph is not an orphan).
+              reserved_unresolved = unresolved - len(orphan_unresolved)
+              detail = []
+              if orphan_unresolved:
+                  detail.append(f"{len(orphan_unresolved)} orphan-shaped — no owning org")
+              if reserved_unresolved:
+                  detail.append(f"{reserved_unresolved} reserved control-plane")
+              notes.append(f"{unresolved} graph(s) REFUSED as unresolved "
+                           f"({'; '.join(detail)}) — adjudication, not cleaning")
           if total > band:
               reasons.append(f"resident total {total} is above the stated band {band} — the sweep is not keeping up with the leak RATE; that is a test-org question (#13218), not a cleaning one")
 
@@ -490,15 +522,20 @@ jobs:
           # outlives it is filed as an issue by the step below, so nothing that
           # needs a human depends on the retention window.
           retention-days: 90
-          if-no-files-found: warn
+          # ⛔ `error`, never `warn`: the artifact IS the durable log, so a green run
+          # that uploaded nothing is the fail-open shape this step exists to close.
+          # The verdict reds anyway when no pass ran, so the two agree.
+          if-no-files-found: error
+          # ONE source for the directory: the seam the steps populate, never a second
+          # spelling of it. A re-pointed seam must move the artifact with it.
           path: |
-            ${{ runner.temp }}/reaper-plan.json
-            ${{ runner.temp }}/reaper-plan.err
-            ${{ runner.temp }}/reaper-execute.json
-            ${{ runner.temp }}/reaper-execute.err
-            ${{ runner.temp }}/reaper-verify.json
-            ${{ runner.temp }}/reaper-verify.err
-            ${{ runner.temp }}/reaper-verdict.json
+            ${{ env.REAPER_WORKDIR }}/reaper-plan.json
+            ${{ env.REAPER_WORKDIR }}/reaper-plan.err
+            ${{ env.REAPER_WORKDIR }}/reaper-execute.json
+            ${{ env.REAPER_WORKDIR }}/reaper-execute.err
+            ${{ env.REAPER_WORKDIR }}/reaper-verify.json
+            ${{ env.REAPER_WORKDIR }}/reaper-verify.err
+            ${{ env.REAPER_WORKDIR }}/reaper-verdict.json
 
       # ── The durable, deduped ledger (#3907 / #8841) ─────────────────
       # ONE stable title: the FINDING ("a run needs adjudication"), never the

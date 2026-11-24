@@ -755,13 +755,20 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
         raise Refusal(f"graph listing failed: {e}") from e
     rows = []
     for name in names:
+        # ONE predicate for "this is a reserved control-plane graph", shared by
+        # the count-skip below and the `reserved` the row carries. It matters
+        # that the row carries it: a consumer cannot tell a reserved graph from
+        # a tenant-shaped orphan by its bucket (`classify_graph` puts BOTH in
+        # `refused-unresolved`), so a callback that discriminates on the bucket
+        # alone reads every reserved graph as an orphan (#14565 review).
+        is_reserved = (name in RESERVED_GRAPH_NAMES
+                       or name.startswith("registry_"))
         # `node_count` is only read for names that could possibly be reaped —
         # a read per graph is cheap, but a read per CUSTOMER graph is a
         # needless scan of live tenants' data.
         entry = org_index.get(name)
         org = (entry or {}).get("org")
-        needs_count = (name not in RESERVED_GRAPH_NAMES
-                       and not name.startswith("registry_")
+        needs_count = (not is_reserved
                        and org is not None
                        and not (entry or {}).get("refused")
                        and is_test_org(org, explicitly_named))
@@ -773,6 +780,7 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
             "graph": name,
             "bucket": bucket,
             "reason": reason,
+            "reserved": is_reserved,
             "org_id": (org or {}).get("id"),
             "org_name": (org or {}).get("name"),
             "gid": (entry or {}).get("gid"),
