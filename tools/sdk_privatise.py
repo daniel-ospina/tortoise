@@ -2226,8 +2226,8 @@ SWEEP_NAMES = 66
 #: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
-#: THIS ONE: after `#14445`'s re-cut and this fold of `origin/main` `2cccf90f4dd4`, `--repin` here
-#: prints (11912, "73827c80583e139f") — see the pin's own note below, which owns this tree's value.
+#: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the note below owns this tree's pair.
 #: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
 #: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
 #: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
@@ -2288,9 +2288,9 @@ SWEEP_NAMES = 66
 #: REPORTS rather than refuses. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by this re-cut. ⛔ THAT TREE IS `main`'s, NOT THIS ONE'S.
 #: ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
-#: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. `main` pins (11911, "3e92044bab08cc3d")
-#: while its OWN tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a PRISTINE detached
-#: worktree at `2cccf90f4dd4` (`git status --porcelain` empty, `git ls-files --others` 0), so the
+#: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. At `2cccf90f4dd4`, `main` pinned (11911,
+#: "3e92044bab08cc3d") while that tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a
+#: PRISTINE detached worktree there (`git status --porcelain` empty, `git ls-files --others` 0), so the
 #: required `surface-guard` leg was red ON `main` and every open PR inherited that red — the #14062
 #: class, again, and repaired here for that reason rather than absorbed.
 #: ⛔ THIS PR ADDS NO ROW, AND THAT IS THE MEASUREMENT, NOT A CLAIM: `--repin` on THIS merge tree
