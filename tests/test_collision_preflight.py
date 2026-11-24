@@ -9874,6 +9874,7 @@ class CollisionPreflightTest(unittest.TestCase):
                     return
             time.sleep(0.1)
         fatal = ""
+        rc = proc.poll() if proc is not None else None
         if last_err:
             # A CENSUS THAT NEVER ANSWERED IS NOT A GAP IN A CENSUS THAT DID.
             fatal = (
@@ -9888,14 +9889,23 @@ class CollisionPreflightTest(unittest.TestCase):
                 "population answered, so what failed is the attribution read, not the census"
             )
         elif proc is not None:
-            rc = proc.poll()
             fatal = (
                 f"; the fake lane pid {pid} EXITED with rc={rc} — a dead process has no "
                 "readable cwd, so no wait could ever attribute it (a DEAD FIXTURE, not a "
-                f"census gap){self._fake_lane_stderr_note(pid)}"
+                "census gap)"
                 if rc is not None else
                 f"; the fake lane pid {pid} is still running — so this IS a census gap"
             )
+        if rc is not None:
+            # ⛔ A DEAD CHILD IS EVIDENCE IN EVERY ARM, NOT ONLY THE DEAD-FIXTURE ONE
+            # (#14506 review, F3). When the census never answered (`last_err`) or the cwd
+            # read failed (`last_cerr`) AND the lane had also died, the message reported the
+            # census failure and DROPPED the child's own words — the one datum saying why
+            # the fixture's lane vanished, and "`ps` produced nothing and the lane is dead"
+            # is exactly the pooled-host shape that produced this red. Read `rc` once above
+            # and append the note in EVERY arm; it stays on the continuation tail, so it can
+            # never reach the identity.
+            fatal += self._fake_lane_stderr_note(pid)
         # ⛔ LINE 1 IS A GATE IDENTITY, NOT PROSE — DO NOT PUT A MEASUREMENT ON IT (#14506).
         # `ci_exemption.py::_signature_from` reads pytest's FIRST `E   ` line of the
         # FAILURES block, so the pre-merge exemption decision compares line 1 and nothing
@@ -10089,6 +10099,54 @@ class CollisionPreflightTest(unittest.TestCase):
         for measured in ("the census returned", "wanted cwd", "DEAD FIXTURE"):
             self.assertIn(measured, rest)
             self.assertNotIn(measured, first)
+
+    def test_the_dead_fixture_note_reports_the_childs_own_words_in_EVERY_arm(self):
+        """#14506 review F1+F3 — the note must fire, in every arm, on the TAIL.
+
+        F1: the stderr capture was unreachable from the suite — every arm of
+        `_fake_lane_stderr_note` except `path is None` was never executed, so reverting the
+        capture to `DEVNULL` (exactly the #14388 defect) reddened nothing. F3: the note was
+        interpolated into the DEAD-FIXTURE arm only, so a child that died WHILE the census
+        never answered — "`ps` produced nothing and the lane is dead", the pooled-host shape
+        that produced this red — lost its own words.
+
+        Three arms, each on a dead child the registry explains, each asserting the note is
+        on the continuation line and the identity line is untouched.
+        """
+        mod = _tool_module()
+        identity = ("the process census never saw the fake pi lane — the test cannot "
+                    "discriminate process-cwd liveness")
+
+        def run(census: str, stderr_text: str) -> str:
+            dead = subprocess.Popen(["/bin/true"])
+            dead.wait(timeout=10)
+            log = self.tmp / f"note-{dead.pid}.stderr"
+            log.write_text(stderr_text, encoding="utf-8")
+            self._fake_pi_stderr_paths()[dead.pid] = log
+            try:
+                with mock.patch.object(mod.fleet_state, "pi_processes",
+                                       return_value=([], census)), \
+                     self.assertRaises(AssertionError) as caught:
+                    self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=dead)
+            finally:
+                if dead.poll() is None:  # pragma: no cover — /bin/true is already reaped
+                    dead.kill()
+            first, _, rest = str(caught.exception).partition("\n")
+            self.assertEqual(first, identity, "the note must never reach the identity line")
+            return rest
+
+        rest = run("", "RuntimeError: the interpreter refused to start\n")
+        self.assertIn("its stderr:", rest)
+        self.assertIn("the interpreter refused to start", rest)
+
+        rest = run("", "")
+        self.assertIn("captured and was EMPTY", rest,
+                      "a silent child must be reported as silent, not as a cause")
+
+        rest = run("the census printed nothing", "ImportError: cannot import name x\n")
+        self.assertIn("census NEVER ANSWERED", rest)
+        self.assertIn("cannot import name x", rest,
+                      "a dead child's words survive even when the census never answered")
 
     def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
         """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
