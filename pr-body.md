@@ -429,7 +429,7 @@ head it belongs to.
 | **P3** R6's "everything else … is the same on both sides" | **fixed**: the sentence now names the shared-format writer the cross-leg matrix grades, instead of asserting sameness. |
 
 **Cycle 21** (a fresh-context reviewer at `2b36e643` — 5 **P3**, and one measurement that was not on
-its list): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
+its list; the table below holds all six, the measured one last): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
 `306 passed` and `327 pass / 0 fail`, because every other row asserts only that the LIVE number and
 the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
 them all. That is the shape that reads green everywhere and blocks installs everywhere.
@@ -440,6 +440,7 @@ them all. That is the shape that reads green everywhere and blocks installs ever
 | **P3** "cycle 19" was cited for findings owned by the `bcb52e1d` round | **fixed**: the citations name cycle 20 (or the head). |
 | **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
 | **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
+| **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts four plus the measured one. |
 | **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
 ## Residuals, stated
@@ -453,14 +454,13 @@ them all. That is the shape that reads green everywhere and blocks installs ever
   `main`'s digests and this PR ships **34** on both halves (a marker change on one half
   alone makes `contract_version_for("pi")` answer `None`).
   ⛔ AND THE FREEZE IS A CONVENTION PLUS ONE NEW ROW, NOT AN EXISTING GATE — stated because it
-  was measured, not assumed (review at `bcb52e1d`, P3): reverting the whole fix at `f69c2113` (both markers
-  back to 33, both pins back to the branch's re-cut pair, `_EXPECTED_INSTALL_CONTRACT["pi"]` back to
-  33, and the `== 34` in `test_pi_seam_carries_exactly_one_canonical_marker` back to 33 — all four,
-  because the shorter enumeration reds those two sites as well and would read as if the new row were
-  not the gate) left `306 passed` and
-  `327 pass / 0 fail`, because every other row asserts only that the LIVE number and the LIVE
-  digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
-  all of them. That is why this PR adds
+  was measured, not assumed (review at `bcb52e1d`, P1 — it MEASURED that the test which should have
+  caught the re-cut concedes it cannot). Before the new row: reverting the whole fix at `f69c2113`
+  left `306 passed` and `327 pass / 0 fail`, because every other row asserted only that the LIVE
+  number and the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped
+  number satisfies all of them. Since the new row: that same revert — six sites, listed in the
+  row's docstring — leaves `306 passed, 1 failed`, and the failure is that row. The node pair is
+  unchanged at `327 pass / 0 fail` either way (the Pi suites never ran the ship-frozen assertion). That is why this PR adds
   `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`: it pins the artifacts at 34 AND
   pins `_GENERATION_DIGESTS[33]`/`_READ_SEAM_GENERATION_DIGESTS[33]` as something other than
   this branch's pair, so re-cutting the shipped 33 reds. Verified RED under that re-cut.
