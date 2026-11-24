@@ -235,9 +235,9 @@ jobs:
     # every job and a job-scope lever reds a required fast shard (measured: 44
     # reds in that pin at head `3eaf43fda`). Step scope on BOTH emitters is the
     # shape that keeps the gate clean AND the lever live;
-    # `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
+    # `tests/test_ci_selection.py::test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job`
     # discovers the emitters from their `run:` commands, so a third one added
-    # later cannot silently miss it.
+    # later cannot silently miss it (the `_label_set` opt-in arm was CUT, B7).
     outputs:
       python: ${{ steps.select.outputs.python }}
       full: ${{ steps.select.outputs.full }}
@@ -1102,6 +1102,12 @@ jobs:
         # timeout. (--no-dev here would mismatch the bare `uv run` consumer and
         # force a dev-group re-sync in the subprocess.)
         run: |
+          # ⛔ HEAL THE PIP PREFIX FIRST (#14407): `pip install -e` uninstalls the installed
+          # distribution first, and a cancelled job leaves pip's `~` stash plus a `RECORD`-less
+          # `dist-info` in the shared `setup-python` tool cache — every later install in that
+          # prefix then dies `uninstall-no-record-file`, which no retry can clear. See
+          # `.github/scripts/pip-wedge.sh` (sibling of `npm-global-wedge.sh`, #10523).
+          bash .github/scripts/pip-wedge.sh clear tortoise-graph
           pip install -e '.[test,embeddings]' uv
           # #1917 (CI unblock): some ubuntu-latest runner images ship a stale
           # workspace .venv that uv refuses to touch (uv #13986 / #9423 —
@@ -2393,6 +2399,8 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
       - uses: ./.github/actions/install-cpu-torch
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]' build==1.6.0
         # build pinned (#1929 code-review P2): test_pack_shipping_wheel.py's
@@ -2647,9 +2655,9 @@ jobs:
           # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
           # pair is deliberately NOT derived from the leg weight — tightening it
           # belongs with the per-leg `matrix.watchdog_minutes` follow-up. Re-deriving
-          # the budget when the leg set moves is
-          # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
-          # which reds here if this literal stops clearing the committed work.
+          # the budget when the leg set moves is UNGRADED now: the arm that
+          # redded it (`test_slow_leg_bounds_..._committed_work`) was CUT with
+          # the B7 arithmetic (2026-11-23); the cap/watchdog ORDER survives.
           # #3719: pytest's own start stamp — see the fast-shard site above.
           PYTEST_T0=$SECONDS
           timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
@@ -2947,6 +2955,8 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
       - uses: ./.github/actions/install-cpu-torch
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package + test extras
         # [test,embeddings] — NOT just [test]: the pre-cache step imports
         # sentence_transformers (embeddings extra), and create_point calls
@@ -3144,6 +3154,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package
         run: pip install -e .
       - name: Whole-registry compile (all packs, zero validation errors)
@@ -3228,6 +3240,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install
         run: pip install -e '.[test]' falkordblite 2>&1 | tail -2
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
@@ -3426,8 +3440,8 @@ jobs:
     # exposure #3239 is about rather than loosening it. Both directions are
     # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
     # watchdog` asserts cap > the LARGEST emitted shard watchdog, and
-    # `test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it`
-    # asserts cap <= 3x that watchdog (and <= 3x the measured step).
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` also asserts cap
+    # <= `_CAP_CEILING_FACTOR` (3x) that watchdog (the `_shard_bounds_*` arm CUT).
     timeout-minutes: 30
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
@@ -3478,9 +3492,9 @@ jobs:
         # reddened a REQUIRED check on a diff that never touched this job.
         #
         # This job cannot amortize that save, and no cap can make it able to.
-        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
-        # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
-        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
+        # Its cap is bounded at ≤ `_CAP_CEILING_FACTOR` x the LARGEST per-shard
+        # watchdog the selector emits (3x; `test_every_bounded_pytest_job_caps_
+        # above_its_watchdog`) — and 30m is already 19m of shard watchdog
         # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
         # + the 1m38s HF POST ≈ 31.6m — already ~1.6m PAST the 30m cap, and worse
         # against a slow one. Raising the cap instead would re-open #3239's stale-head
@@ -3503,6 +3517,8 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
       - uses: ./.github/actions/install-cpu-torch
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Reap ABANDONED redislite litter (#1005 / #3653)
@@ -3974,6 +3990,8 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
       - uses: ./.github/actions/install-cpu-torch
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Run the embedded_only marker selection (URI unset — #4164)
@@ -4245,6 +4263,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install
         run: pip install -e .
       # ── THE RECORDED CUT COMMIT MUST RESOLVE AND SURVIVE (#11057) ───────────────
@@ -4809,6 +4829,8 @@ jobs:
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             pip-${{ runner.os }}-
+      - name: Heal the pip prefix (pool-runner stash residue, #14407)
+        run: bash .github/scripts/pip-wedge.sh clear tortoise-graph
       - name: Install package + the postgres extra
         # `[postgres]` is one of the TWO skip causes (the other is the DSN).
         # `[embeddings]`/torch are deliberately absent: this file needs neither

@@ -1975,7 +1975,14 @@ SWEEP_NAMES = 66
 #: in the other direction, so nothing went uncounted and no undeclared shape appeared.
 #: ⚠️ The 28 conflicted files of this re-cut were cite line-number drift and are resolved to `main`'s
 #: side; a pin is the exception, because it is a reading of the tree the merge produced.
-SWEEP_RESIDUE = (11905, "c6711738242533f0")
+SWEEP_RESIDUE = (11913, "ab0b517099c3c9d9")
+#: ⛔ RE-PINNED AGAIN ON THE FOLD OF `origin/main` `6a72cfd661` (2026-11-24), and the +8 over the
+#: `e6b3cf2908` reading above is NOT attributed by arithmetic: `main` re-pinned ITS own line to
+#: `(11910, "adc8229295339239")` for its own tree, and this MERGED tree measures
+#: **(11913, 'ab0b517099c3c9d9')** with `--check` exiting 0 and `typed references still pointing at a
+#: public name: 0`. A pin is a reading of a TREE, so it is taken by `--repin` on the merged tree and
+#: neither parent's pair is carried. `main`'s own block above this one is kept rather than deleted —
+#: merging two correct records by dropping one is how a measured fact becomes folklore.
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

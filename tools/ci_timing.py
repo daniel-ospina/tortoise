@@ -2335,9 +2335,10 @@ def _balance_cut_parens(text: str) -> str:
 # (measured at `a91123c76`, the sha this paragraph was written at: 1 row of 1222
 # did — `test_source_staleness_sweep_5038.py` — and re-derive it AT YOUR HEAD, do
 # not trust the figure, because a refresh re-emits notes and moves it: the map
-# held 1236 rows at `7e6d1d8da`). The guard that judges the written map joins a
-# row's tail with its continuations before it judges a note
-# (`tests/test_ci_selection.py::_durations_row_comments`).
+# held 1236 rows at `7e6d1d8da`). The guard that judged the written map joined a
+# row's tail with its continuations before it judged a note
+# (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test cut,
+# 2026-11-23 — `_row_continuation_lines` is the surviving reader).
 #
 # ⛔ …but “under a row” is NOT “belongs to that row”, and the difference is the
 # whole of `_row_continuation_lines`' third condition. See its docstring: this
@@ -2353,8 +2354,9 @@ def _balance_cut_parens(text: str) -> str:
 # `_balance_cut_parens` — seeing an unclosed `(` and no `)` — deleted the OPENER,
 # leaving `never ran cannot appear in an artifact), so this is the LOCAL wall …`.
 # That reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623) while that pin existed — it went with the durations-map
-# arithmetic cut — which is a P3 note-damage defect and not a wrong weight.
+# legs (run 41395489623) — that arm was CUT in the B7 cut, 2026-11-23, so the
+# consequence now is note damage a reader has to notice — a P3 note-damage defect
+# and not a wrong weight.
 #
 # So the renderer joins the span before it touches it (`_joined_note_tail`) and
 # re-emits it per the shape of the change (see `render_refreshed_manifest`):
@@ -2406,10 +2408,10 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        "note" would delete the header with it.
 
     2. A blank line does not end a note and any other non-comment line does. This
-       mirrors the READER that judges a written map
-       (`tests/test_ci_selection.py::_durations_row_comments`): a writer reasoning
-       about a different span than the guard is how a cut came to orphan a
-       parenthesis the guard was counting.
+       mirrors the READER that judged a written map
+       (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test
+       cut, 2026-11-23): a writer reasoning about a different span than the guard is
+       how a cut came to orphan a parenthesis the guard was counting.
 
     3. ⛔ The block must actually CONTINUE the row's sentence — its first line must
        not OPEN a note (`_starts_a_new_note`). This is the condition YAML cannot
@@ -2435,19 +2437,18 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        it was written for is left with no note at all. Measured on the REAL map
        (this head, every row re-based once, which is what a weekly refresh does):
        **36 rows lost their block, 349 lines were folded into row lines**. The text
-       survives but the ATTRIBUTION does not, and the guard that reads prose
-       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`)
-       — a swallowed block carrying that claim shape is judged against the wrong
-       row's value, i.e. a false red or a false green in a required leg. (The
-       watchdog-floor sibling of that guard went with the durations-map
-       arithmetic cut; this note names only the arm that still runs.)
+       survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
+       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
+       `_durations_rows_stating_a_stale_watchdog_floor` — BOTH CUT in the B7 test cut,
+       2026-11-23, so this is now a by-hand hazard) — a swallowed block carrying
+       one of those claim shapes is judged against the wrong row's value, i.e. a
+       false red or a false green in a required leg.
 
        So: a block that opens a note is NOT this row's note. It is not joined, not
        appended into, and not dropped — the row line is rewritten and the block is
        left byte-identical. `test_a_note_block_that_opens_of_its_own_is_never_this_rows`
-       pins the behaviour on a synthetic map (its companion arm, which read the real
-       map and asserted the same rule there, went with the durations-map
-       arithmetic cut).
+       pins the behaviour on a synthetic map (the arm that pinned it on the REAL
+       map was cut in the B7 test-bureaucracy cut, 2026-11-23).
     """
     out: list[int] = []
     for j in range(index + 1, len(lines)):
@@ -2490,14 +2491,13 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 
 # ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
 #
-# A guard in the suite reads ONE rule off this map, and the writer did not
+# Two guards in the suite read ONE rule off this map, and the writer did not
 # implement it: a row that carries a MEASUREMENT may not also carry the note of a
-# row no sweep has collected. TWO arms read that rule, and both are live: the one
-# below, and `test_ci_selection.py`'s
-# `test_no_durations_row_claims_the_flat_default_at_a_measured_value` (restored
-# with the `durations:` rows it guards, whose notes cite it).
+# row no sweep has collected.
 #
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
+#   (the `test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value`
+#   arm was cut in the B7 test-bureaucracy cut, 2026-11-23)
 #
 # The map's own rule for it is stated above `durations:` — "a row's comment is kept
 # only while the value AND its stated basis are unchanged" — and the 2026-10-26
@@ -3983,7 +3983,9 @@ def _md_code_span(text: str) -> str:
     the same file at the previous head**, which redded the REQUIRED `docs` check
     on a data-only refresh — the renderer had simply never been fed a nodeid
     containing a backtick (this week's flake list is mostly
-    `test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-…]`).
+    `test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-…]` — the arm
+    itself was CUT in the B4 test cut, 2026-11-23; the id is kept as the frozen
+    fixture the renderer must survive).
 
     CommonMark: a span opened with N backticks is closed only by a run of
     EXACTLY N, so N = (longest run in the content) + 1 always holds. Content
