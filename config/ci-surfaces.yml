@@ -85,6 +85,37 @@ version: 1
 # `test_the_fast_shards_header_block_states_no_span_twice` redded on the duplicate. The newer
 # spelling wins — as that guard's message says — and the ONE thing the removed copy carried that it
 # did not is the pool's SIZE, kept above.
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
+# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
+# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
+# this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT`) — the block states ONE graded emission, and it is the clause set
+# ABOVE, re-derived on this PR's resolved tree; this paragraph is the PROVENANCE of that pool, not a
+# second reading of it. ⛔ IT STATES NO FIGURE ON PURPOSE (its own pre-fold text published eleven
+# shards at one weight, which is a reading of `10f0107689b9` and not of this tree): two graded clause
+# sets in one block is the two-partitions defect this header records, and the emission guard reds on
+# exactly that. Measured with the verb on each tree's own map, `main` `10f0107689b9` alone packs
+# nine shards at 825.4 s and two at 825.5 s — quoted WITHOUT name lists on purpose, because a name
+# list would parse as a second clause and red the guard — so no parent's figure may be carried
+# here, and none is. The delta is measurable and
+# small: `fast_pool()` holds **1331** files at this head — `main`'s 1330 (which already carries
+# `#14565`'s `tests/test_14559_reaper_schedule.py`) plus exactly ONE row of THIS branch's,
+# `tests/test_expansion_fusion_14344.py`, re-counted on the resolved tree rather than carried from
+# either parent's paragraph. ⛔ `#14415`'s two rows
+# `69dda95ab9f8` folded into `fix/14344-expansion` — the verb packs nine shards at 825.8 s
+# (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so `ceil(825.8/60 x 2.0)` = 28 m governs
+# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 825.8 = 2.0344), so the two agree
+# by construction rather than by a hand re-read. Never carry this 825.8/825.7.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: `main` packs its own split at
+# its own sha, as the reading two paragraphs up shows, so the figures here are this tree's and not a
+# parent's. ⛔ AND THIS BRANCH'S OWN ROW IS PART OF THE
+# DELTA: this PR (#14344) adds exactly ONE fast-file registration of its own,
+# `tests/test_expansion_fusion_14344.py`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348
+# trap: a file a PR ADDS cannot carry a junit reading yet) — so the partition stated above is the
+# union of BOTH parents' pools and is NOT `main`'s reading, and `#14415`'s two rows
+# (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
+# NOT this PR's: they were that PR's own additions and they landed before this fold.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
