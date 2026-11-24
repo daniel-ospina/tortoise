@@ -104,8 +104,8 @@ def _wait_for(predicate, timeout: float = 8.0) -> bool:
     return predicate()
 
 
-def _read_complete_breadcrumb(path: Path) -> dict | None:
-    """The breadcrumb's parsed body, or None while it is not yet COMPLETE.
+def _breadcrumb_body(text: str) -> dict | None:
+    """The parsed body of a breadcrumb RECORD, or None while it is not COMPLETE.
 
     The shipped writers emit their record with ONE ``printf`` whose output
     reaches the file conversion by conversion, so a concurrent reader can
@@ -120,10 +120,6 @@ def _read_complete_breadcrumb(path: Path) -> dict | None:
     instrument-not-effect mistake this module exists to catch (#4314): a
     non-empty reading is not the record it is taken to prove.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
     if not text.strip():
         return None
     try:
@@ -133,17 +129,44 @@ def _read_complete_breadcrumb(path: Path) -> dict | None:
     return body if isinstance(body, dict) else None
 
 
+def _read_text(path: Path) -> str | None:
+    """The file's bytes as text, or None when it cannot be read as UTF-8."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_complete_breadcrumb(path: Path) -> dict | None:
+    """The breadcrumb's parsed body, or None while it is not yet complete."""
+    text = _read_text(path)
+    return None if text is None else _breadcrumb_body(text)
+
+
 def _wait_for_breadcrumb(path: Path, what: str, *,
                         timeout: float = 8.0) -> dict:
     """Wait for a COMPLETE breadcrumb at ``path``; return the body it READ.
 
     The body is returned from the same read the predicate accepted, so the
     caller never re-reads a file a writer may have truncated in between.
+
+    The failure message carries the LAST BYTES OBSERVED. Without that, a
+    complete-but-unparseable record — the escaping defect two arms below are
+    specifically about — is reported as "not recorded", which is the same
+    unparseable-reads-as-absent inversion ``session_verify`` is documented for
+    (#4314). An unescaped writer must be diagnosable from the message, not by
+    re-running with a debugger.
     """
     seen: list[dict] = []
+    last: list[str] = []
 
     def _complete() -> bool:
-        body = _read_complete_breadcrumb(path)
+        text = _read_text(path)
+        if text is None:
+            last.append("<absent, or bytes that are not valid UTF-8>")
+            return False
+        last.append(text)
+        body = _breadcrumb_body(text)
         if body is None:
             return False
         seen.append(body)
@@ -151,7 +174,7 @@ def _wait_for_breadcrumb(path: Path, what: str, *,
 
     assert _wait_for(_complete, timeout=timeout), (
         f"{what} — no COMPLETE breadcrumb at {path} (absent, still being "
-        f"written, or not a JSON object)")
+        f"written, or not a JSON object); last observed: {last[-1][:600]!r}")
     return seen[-1]
 
 
@@ -1464,8 +1487,9 @@ def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
     whole file exists to prevent. Five of the seven seams were raw while codex's
     and cursor's ``session-end`` escaped, which is the same "one-sided fix" class.
 
-    Mutation: interpolate ``detail`` raw — ``json.loads`` REDs with
-    ``Invalid \\escape``."""
+    Mutation: interpolate ``detail`` raw — the record is then COMPLETE but
+    unparseable, so no COMPLETE breadcrumb is ever read and the assertion
+    REDs, naming the last observed bytes (``Invalid \\escape`` in them)."""
     hook = REPO_ROOT / "tortoise" / seam
     home = tmp_path / "home"
     homedir = home / (".codex" if seam.startswith("codex") else ".cursor") / "hooks"
@@ -1499,7 +1523,8 @@ def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
 
     harness = "codex" if seam.startswith("codex") else "cursor"
     crumb = home / ".tortoise" / "capture-errors" / f"{harness}-install.json"
-    # the assertion: a writer that does not escape raises while PARSING
+    # RED if unescaped: the record is then complete but unparseable, so it
+    # never satisfies readiness — and the message carries the raw bytes.
     body = _wait_for_breadcrumb(
         crumb,
         "the refusal was not recorded at all — no evidence, no diagnosis")
@@ -1812,7 +1837,7 @@ def test_the_claude_refusal_naming_a_hostile_path_is_valid_json(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     crumb = home / ".tortoise" / "capture-errors" / "claude-install.json"
-    # RED if unescaped
+    # RED if unescaped (complete-but-unparseable: named, with its bytes)
     body = _wait_for_breadcrumb(crumb, "the refusal was not recorded")
     assert str(stale) in body["detail"], body
 
@@ -1845,3 +1870,33 @@ def test_a_breadcrumb_reads_only_once_it_is_COMPLETE(tmp_path, prefix):
                                 "kind": "install-inert"}), encoding="utf-8")
     body = _wait_for_breadcrumb(path, "the completed record was never read")
     assert body["kind"] == "install-inert", body
+
+
+def test_an_unparseable_record_is_NAMED_by_its_bytes_not_reported_as_absent(
+        tmp_path):
+    """A COMPLETE-but-unparseable record is not "never recorded".
+
+    The two ``*_refusal_naming_a_hostile_path*`` arms are about an UNESCAPED
+    ``detail``: their record is fully written, and invalid. Reporting that state
+    as "the refusal was not recorded at all" would put the diagnosis back where
+    the product already loses it — ``session_verify._local_capture_error``
+    folds ``ValueError`` to ``None``, so an unparseable breadcrumb reads as no
+    breadcrumb and an inert install reports PROVEN (#4314). The message must
+    carry the bytes a reader would have to see.
+
+    Mutation: drop the ``last observed`` half of ``_wait_for_breadcrumb``'s
+    assertion — this REDs, because the message then says only "no COMPLETE
+    breadcrumb" over a writer whose real defect is an unescaped ``detail``."""
+    path = tmp_path / "codex-install.json"
+    # A path with a backslash: legal on disk, invalid raw inside a JSON string.
+    path.write_text(
+        '{\n  "harness": "codex",\n'
+        '  "detail": "resolved a dir at /tmp/weird\\dir",\n'
+        '  "kind": "install-inert"\n}\n', encoding="utf-8")
+    assert _read_complete_breadcrumb(path) is None
+    with pytest.raises(AssertionError) as excinfo:
+        _wait_for_breadcrumb(path, "the refusal was not recorded", timeout=0.2)
+    message = str(excinfo.value)
+    assert "last observed:" in message, message
+    assert "/tmp/weird" in message, (
+        f"the message does not carry the record that WAS written: {message}")
