@@ -1569,6 +1569,18 @@ def test_the_door_arm_grades_every_spelling_the_call_resolver_accepts() -> None:
         "    _prov()",
     ])
     assert _door_references_outside_call_position(rebound) == {2: "Name"}
+    # ⛔ AND THE SAME REBIND IN THE ATTRIBUTE SPELLING, which is a separate row on
+    # purpose: this function's docstring says it is "LIFTED OUT OF THE TEST SO IT
+    # CAN BE MEASURED", so a Name-only reader of it must be observably wrong here —
+    # narrowing the call site above to `isinstance(node, ast.Name)` left every
+    # other row green (`92 passed`), i.e. the attribute alias of the door could
+    # have re-opened a measured fail-open with nothing red.
+    rebound_attr = _tree([
+        "async def g(holder):",
+        f"    _prov = holder.{_STAMP_DOOR}",
+        "    _prov()",
+    ])
+    assert _door_references_outside_call_position(rebound_attr) == {2: "Attribute"}
     as_call_dunder = _tree([
         "async def g():",
         f"    {_STAMP_DOOR}.__call__()",
@@ -1733,6 +1745,19 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
     ])
     assert _every_submission_dead_guarded(both_dead, {"chain"}) == {
         "chain": [(2, "False"), (4, "0")]}
+
+    # ⛔ AND THE ATTRIBUTE SPELLING OF A SUBMISSION, which `_callable_name` resolves
+    # and a Name-only reader of this helper would drop — measured: narrowing the
+    # call site to `isinstance(node, ast.Name)` kept every other row green
+    # (`92 passed`), so the attribute-spelled silent-loss state could have gone
+    # unreported with nothing red.
+    attribute_dead = _tree([
+        "async def f(holder):",
+        "    if False:",
+        f"        await {_OFF_LOOP}({_OFF_LOOP_POOL}, holder.chain)",
+    ])
+    assert _every_submission_dead_guarded(attribute_dead, {"chain"}) == {
+        "chain": [(2, "False")]}
 
 
 @pytest.mark.parametrize(
