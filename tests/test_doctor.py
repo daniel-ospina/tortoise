@@ -4357,6 +4357,45 @@ class TestDoctorPreInit:
         assert "not used by this setup" in line
         assert "hosted credential" in line
         assert "Run `tortoise init` to create it" not in line
+        # ⛔ AND IT MUST NOT SEND AN MCP-ONLY TOKEN AT A REST VERB. `/v1/*`
+        # rejects any non-`tt_`/`tk_` Bearer (401 "Invalid API key format"), so
+        # naming `create-point` here contradicted the Hosted row printed one line
+        # below. Mutation: restore the unconditional create-point sentence and
+        # this REDs.
+        assert "create-point" not in line.replace(
+            "For `tortoise create-point`, mint a `tt_`/`tk_` API key.", "")
+        assert "MCP door" in line
+
+    def test_a_key_that_cannot_be_sent_is_not_routed_to_a_transmitting_verb(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """An unsendable key must not be pointed at `tortoise create-point`.
+
+        `http.client` raises `ValueError: Invalid header value b'Bearer <THE
+        KEY>'` when the key carries CR/LF or is not latin-1 encodable — and that
+        traceback ECHOES the key, into a transcript this module's own contract
+        says users paste into issues. The sibling row already refuses to PROBE
+        such a key (`_doctor_hosted_rows`); this arm must not route it to the one
+        command that echoes it either.
+
+        Mutation: drop the `_is_sendable_key` branch and this REDs.
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_abc\nINJECTED")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        # The report still FAILS (the Hosted row's ❌ for that key is a failure),
+        # which is the same verdict the sibling row gives it — this arm only has
+        # to stop redirecting the user at a verb that would echo the key.
+        assert rc == 1
+        assert "not used by this setup" in line
+        assert "create-point" not in line
+        assert "cannot be sent in a request header" in line
 
     def test_an_unrelated_env_key_still_gets_the_init_remedy(
             self, monkeypatch, clear_db_env, tmp_path, capsys):

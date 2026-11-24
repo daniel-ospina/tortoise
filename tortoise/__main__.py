@@ -16357,9 +16357,12 @@ def _cmd_doctor(args):
                 # ADR-010). Omitting it here left the same one-screen
                 # contradiction this gate exists to remove, narrowed to `oat_`: a
                 # Graph row saying "Run `tortoise init`" beside a Hosted row
-                # naming an OAuth identity. The row's own wording defers
-                # (`the Hosted row below says whether that will work`), which is
-                # what makes the deferral correct for a REST-only verb.
+                # naming an OAuth identity. The row then names the MCP door for
+                # that family rather than `create-point`, because `oat_` tokens
+                # are MCP-only and REST `/v1/*` refuses them — the deferral that
+                # used to excuse this (`the Hosted row below says …`) no longer
+                # ships, and it was wrong anyway: the pointer must name a step
+                # the key can take, not a row that may decline to grade.
                 # ⛔ Do NOT widen `_HOSTED_KEY_PREFIXES` itself —
                 # `test_the_hosted_prefixes_match_the_auth_contract` pins it to
                 # `tortoise/auth.py::API_KEY_PREFIXES`.
@@ -16404,16 +16407,39 @@ def _cmd_doctor(args):
                 # too.
                 _display_url = _printable(_mask_display_target(
                     _h_url if isinstance(_h_url, str) else str(_h_url or "")))
-                _detail = (
+                # ⛔ THE NAMED NEXT STEP MUST BE ONE THIS KEY CAN ACTUALLY TAKE.
+                # `_h_hosted_shaped` admits `_OAUTH_ONLY_KEY_PREFIX`, but an
+                # `oat_` token is MCP-only (ADR-010) and REST `/v1/*` refuses it,
+                # and an unsendable key makes every transmitting verb raise — so
+                # naming `create-point` unconditionally contradicted the Hosted
+                # row printed two lines below and, for a CR/LF key, steered the
+                # user into the one command whose traceback ECHOES the key.
+                _prefix = (
                     f"not used by this setup — you have a hosted credential "
                     f"({_src}{', ' + _display_url if _display_url else ''}), "
-                    f"so your memory "
-                    f"lives there and a local graph is not required. Your next "
-                    f"step is `tortoise create-point \"…\"` — `tortoise doctor` "
-                    f"without `--offline` checks whether that will work. "
-                    f"Override: run `tortoise init` only if you "
-                    f"ALSO want a local graph."
+                    f"so your memory lives there and a local graph is not "
+                    f"required. "
                 )
+                _override = (" Override: run `tortoise init` only if you ALSO "
+                             "want a local graph.")
+                if not _is_sendable_key(_h_key):
+                    _detail = _prefix + (
+                        "⛔ This credential cannot be sent in a request header "
+                        "(not latin-1 encodable, or contains CR/LF), so no verb "
+                        "here can use it — re-minting is the next step: "
+                        "`tortoise signup`, `tortoise recover`, or `tortoise "
+                        "key create`.") + _override
+                elif (_h_key or "").startswith(_OAUTH_ONLY_KEY_PREFIX):
+                    _detail = _prefix + (
+                        "Your next step is the MCP door, not a REST verb: this "
+                        "is an OAuth access token, and `oat_` tokens are "
+                        "MCP-only (ADR-010), so `/v1/*` refuses them. For "
+                        "`tortoise create-point`, mint a `tt_`/`tk_` API key.") + _override
+                else:
+                    _detail = _prefix + (
+                        "Your next step is `tortoise create-point \"…\"` — "
+                        "`tortoise doctor` without `--offline` checks whether "
+                        "that will work.") + _override
             else:
                 _detail = (
                     f"not set up yet — no Tortoise DB at {target}"
