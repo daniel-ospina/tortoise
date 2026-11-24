@@ -21993,9 +21993,19 @@ _CUT_CLAIM_RESTORED_RE = re.compile(
 #: punctuation form, and the lookbehind is what excludes `re-cut` in both.
 _CUT_CLAIM_VERDICT_RE = re.compile(
     r"\bCUT\b"
-    r"|(?<![-A-Za-z_])cut\s+(?:by|in|with|on|as|at|from|for)\b"
-    r"|(?<![-A-Za-z_])cut\s*[\(,]",
+    r"|(?<![-A-Za-z_])[Cc]ut\s+(?:by|in|with|on|as|at|from|for)\b"
+    r"|(?<![-A-Za-z_])[Cc]ut\s*[\(,.;:]",
 )
+#: ⛔ A NEGATED VERDICT IS NOT A VERDICT. The corpus writes its survive-convention the
+#: same way it writes its cut-convention (`never cut by #14419`, `not cut in the squash`),
+#: and without this the pin charged a TRUE record as a contradiction — measured: adding
+#: "… was never cut by B7" red a required leg. The check is LOCAL (the words
+#: immediately before the verdict), deliberately: a sentence-wide escape excuses real
+#: false claims (#11065), and "X was never cut by B7, unlike Y, which was CUT" must
+#: still red for Y.
+_CUT_CLAIM_NEGATION_RE = re.compile(
+    r"(?:\bnever|\bnot|\bno\s+longer|\bisn['’]t|\bwasn['’]t)"
+    r"[\s,]+$")
 #: ⛔ THE `tests/` PREFIX IS OPTIONAL: the corpus cites the same arm both ways
 #: (`tests/test_ci_selection.py::arm` and `test_ci_selection.py::arm`), and a scan that
 #: required the prefix read the unprefixed spelling as no claim at all — measured FALSE
@@ -22303,14 +22313,17 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     live name beside the word CUT in THIS file is itself a claim the scan reads), so a
     filter can never drop a name this file defines.
 
-    A verdict is CONSIDERED when the word `CUT` sits within `_CUT_CLAIM_WINDOW`
-    characters of the name, FORWARD OR BACKWARD, **inside the same bullet or
-    paragraph** (see the block-bounds helper below). Both orders are in the class this pin
-    exists for — "`test_x`, cut by #14439" and "CUT: `test_x`" — and the forward-only
-    first cut read the second as no verdict at all, i.e. CLEAN over exactly the
-    prose it was written to catch; an unbounded backward window then charged a
-    clean bullet with its neighbour's verdict, which is the false RED this bound
-    removes.
+    A verdict is CONSIDERED when the word `CUT` sits in the name's own CLAUSE — the
+    bullet or paragraph, narrowed at sentence ends (see the clause-bounds helper) — NOT
+    merely within N characters of it. Both orders are in the class this pin exists for
+    ("`test_x`, cut by #14439" and "CUT: `test_x`"): a forward-only first cut read the
+    second as no verdict at all, i.e. CLEAN over exactly the prose it was written to
+    catch, and a block-wide window then charged an INCIDENTAL name — one mentioned as a
+    sibling pin — with the PREVIOUS sentence's verdict (measured: a restored arm's
+    docstring listing five sibling arms red the whole required leg). ⚠️ The cost is a
+    documented residual: a COLLECTIVE verdict in a heading (`Two arms were CUT by
+    #14439:` followed by a bulleted list of names) is not read, because no clause holds
+    both the verdict and the names.
 
     `contradicts` is True only when this file DEFINES that name and no ATTRIBUTED
     restoration ("RESTORED by `#14481`", "restored by <sha>") is recorded in the
@@ -22326,10 +22339,14 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
     for m, name in sorted(found, key=lambda pair: pair[0].start()):
         if not _cut_claim_is_claim(name, live):
             continue
-        block_lo, block_hi = _claim_block_bounds(text, m.start())
-        window = text[max(block_lo, m.start() - _CUT_CLAIM_WINDOW):
-                      min(block_hi, m.end() + _CUT_CLAIM_WINDOW)]
-        if not _CUT_CLAIM_VERDICT_RE.search(window):
+        clause_lo, clause_hi = _claim_clause_bounds(text, m.start())
+        clause_text = text[clause_lo:clause_hi]
+        verdict = next(
+            (x for x in _CUT_CLAIM_VERDICT_RE.finditer(clause_text)
+             if not _CUT_CLAIM_NEGATION_RE.search(
+                 clause_text[max(0, x.start() - 24):x.start()])),
+            None)
+        if verdict is None:
             continue
         claims.append((m.start(), name,
                        name in live
@@ -22554,6 +22571,32 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         got = _cut_claims_in(passage, {"test_live"})
         assert got and not any(c for _o, _n, c in got), (
             f"a semicolon must join, not bound, in every spelling ({sep!r}): {got!r}")
+
+    # ⛔ NEGATION IS NOT A VERDICT, and an INCIDENTAL name does not inherit a neighbour's
+    # verdict. Both were measured: "`X` was never cut by B7" red a required leg, and a
+    # restored arm's docstring that merely LISTED five sibling arms charged all five with
+    # the enclosing sentence's verdict. Title case and the sentence-final punctuation the
+    # corpus writes (`was cut.`, `— Cut (B7)`) are verdicts too.
+    live3 = {"test_live", "test_other"}
+    for passage in ("`test_live` was never cut by #14419.",
+                    "`test_live` was never cut, as measured at e6b3cf2908.",
+                    "`test_live` was not cut in the squash."):
+        got = _cut_claims_in(passage, live3)
+        assert not got, f"a negated verdict is not a verdict: {passage!r} -> {got!r}"
+    for passage in ("- `test_live` — Cut (B7).", "`test_live` was cut.",
+                    "`test_live` was Cut by #14419."):
+        got = [c for _o, _n, c in _cut_claims_in(passage, live3)]
+        assert got == [True], f"a real verdict in any case must red: {passage!r} -> {got!r}"
+    incidental = ("The cut deleted the whole-set arm. The per-file pins "
+                  "(`test_live`, `test_other`) each cover one row.")
+    got = {n: c for _o, n, c in _cut_claims_in(incidental, live3)}
+    assert not got, (
+        f"a sibling mentioned after a verdict sentence is not charged with it: {got!r}")
+    # …but the verdict sentence itself still reds its own subject.
+    got = {n: c for _o, n, c in _cut_claims_in(
+        "`test_live` was cut by #14439. The sibling `test_other` covers one row.", live3)}
+    assert got.get("test_live") is True and "test_other" not in got, (
+        f"the verdict must still bind its own subject: {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
