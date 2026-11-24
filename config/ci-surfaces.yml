@@ -72,12 +72,24 @@ version: 1
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
+# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
+# SETS move on every landed registration while the minute has stood at 28 m across every reading of
+# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
+# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
+# the last revision's minute, seconds, or split.
+#
 # `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
 # re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
+# and re-measures the graded extent on ITS resolved tree — that pair is THAT FOLD'S OWN READING,
+# not a count of the tree a reader is holding: the `#:` run has MOVED with every fold since, and the
+# figure that may be trusted is the one `_residue_block`'s docstring publishes, graded against its
+# own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
+# (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
+# describing a run that had already moved — nothing in this file grades an extent, so a figure here
+# can only be history and is spelled as history) — rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s

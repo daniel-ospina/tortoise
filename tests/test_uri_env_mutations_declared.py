@@ -1794,39 +1794,34 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$'],
-    # #14232 (#14429): the spool-drain REHEARSAL — a `--mode` harness that replays a
-    # recorded spool against a graph. Every site is DELIBERATE_URI, and none of them
-    # reaches a store:
-    #   :389  a PRODUCTION target (`bolt://api.premiselabs.co:6379/live-v5`) is set
-    #         precisely so the rehearsal's own gate must REFUSE it — the URI is the
-    #         input the refusal assertion quotes, and `_run` exits before any client.
-    #   :395  the loopback twin is the NON-VACUITY half: the same call must get far
-    #         enough to trip the next guard, so "refusing a production target" is
-    #         not satisfied by a gate that refuses everything.
-    #   :568, :590, :614, :649, :676  the run/refusal rehearsals drive a LOCAL
-    #         `docker://:pw@127.0.0.1:6379/tortoise_test` graph with `_stub_one_mode`,
-    #         i.e. the drain sequence is exercised against a throwaway graph this
-    #         box serves, never the shared lane.
-    # every site uses `monkeypatch.setenv`, so the parent env is reverted at teardown.
-    #
-    # ⛔ ONE ROW, NOT TWO — `main`'s #14491 (`07a483ab38c7`) swept this same file
-    # independently while this branch was open (this branch's `28a56f3d9254`), and the
-    # fold AUTO-merged the two declarations into a DUPLICATE MAPPING KEY at two
-    # different lines. Python silently resolves a duplicate key to the LAST one, and
-    # ⛔ `--integrity` DOES grade duplicate mapping keys — `duplicate_mapping_key_issues()`
-    # is composed into it FIRST (`tools/ci_selection.py:8348`), added for #5373 and
-    # documented as the check to re-run after every merge, rebase or replayed commit —
-    # but that walk reads the MANIFEST (`config/ci-surfaces.yml`), not a dict literal in
-    # a test module. So THIS land still went uncaught: the branch's row would have been
-    # shadowed with nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
-    # (strictly stronger scoping than this branch's unanchored ones) and this site map
-    # is the fuller record.
-    # ⛔ THE ARMS MUST STAY VALUE-SCOPED, NOT `setenv`-SHAPED (#14318): a
-    # `docker://`-only row would leave the two gate sites unauthorised while turning
-    # the gate green, and a row matching any `setenv` in this file would authorise the
-    # next site nobody triaged — the #942 vacuity vector this census exists to catch.
-    # `test_the_spool_rehearsal_row_covers_only_its_triaged_values` pins both
-    # directions, so widening this row to a shape reds.
+    # ── #14429 (for #14232) — the spool-drain rehearsal, and why none of these three
+    #    spellings can reach a server ─────────────────────────────────────────────────
+    # #14429 added seven mutation sites and no rows here, which redded THIS census on
+    # `main` (measured at 84f0d4440f03: `test (b)`'s only failure was
+    # `test_uri_env_mutations_declared.py::test_uri_env_mutations_declared`). The ten
+    # sibling shards were then cancelled by the NEXT push on the PR SUPERSEDING that
+    # run (`concurrency: cancel-in-progress: github.event_name == 'pull_request'`,
+    # python-ci.yml:154) — not by fail-fast: all three matrices set
+    # `fail-fast: false` (python-ci.yml:747, :2209, :3411) and no `fail-fast: true`
+    # exists in this repo. That supersede left the predicate at
+    # `VERDICT: UNMEASURED` and `python-ci-gate` at `failure`, because a cancelled
+    # shard's failure set cannot be measured. Triaged as
+    # DELIBERATE_URI, per site:
+    #   :389  the production-target REFUSAL probe — the assertion is `SystemExit` plus
+    #         "refusing a production target", so the gate READS the value and the
+    #         refusal fires before anything constructs a connection.
+    #   :395  the non-vacuity arm for that same gate ("refuse everything" would pass
+    #         :389 alone): the call proceeds PAST the gate and then dies on the stubbed
+    #         `_mode_knobs` assertion, so again nothing connects.
+    #   :568, :590, :614, :649, :676  each runs with `_stub_one_mode`, which replaces the
+    #         mode's work with a stub (`test_spool_drain_rehearsal.py:529`, whose own
+    #         docstring says it drives `_run`'s tail "without a graph, a server or a
+    #         drain") — the URI selects a branch of the acceptance path and no server
+    #         is contacted. ⛔ NOT "a throwaway graph this box serves": the URI's host
+    #         and port are never dialled on these five rows.
+    # Every site uses `monkeypatch`, so no lane state leaks. The literals are anchored to
+    # these exact values on purpose: a FUTURE, different URI in this file must red until
+    # it is triaged here, which is the whole point of the census.
     "test_spool_drain_rehearsal.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',
