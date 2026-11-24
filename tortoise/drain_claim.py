@@ -310,19 +310,34 @@ def _restore_quarantine(quarantine: Path, path: Path) -> bool:
     file at the claim path whose bytes could not be read. It is a possible holder
     (the doctrine is "an unprovable read is ALIVE"), so it is honoured rather
     than deleted — see the call site in :func:`_clear_unusable_claim_path`.
+
+    Returns ``True`` when the object is back at ``path`` (or when a newer object
+    holds it, which is a holder either way) and ``False`` when the restore could
+    not happen — in which case the object is LEFT in the quarantine, because after
+    the rename it is the only copy of that holder's claim (review, cycle 16, P1).
     """
     try:
         os.link(quarantine, path)
     except FileExistsError:
         pass  # a newer object holds the path; that is a holder either way
     except OSError as exc:
+        # ⛔ THE ONLY OTHER COPY (review, cycle 16, P1). The rename already vacated
+        # `path`, so on a non-`EEXIST` failure this quarantined file is ALL that is
+        # left of a live holder's claim — and this used to warn and then unlink it,
+        # answering HELD over an EMPTY path so the next `link` won and two holders
+        # coexisted for up to `TTL/3`, silently. `link(2)` lists
+        # EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and
+        # ENOSPC/EDQUOT on a spool directory is the ordinary case. Leaving it behind
+        # is BOUNDED: the `.tmp-` infix is what the scratch sweeper collects by mtime.
         print(
             f"tortoise.drain_claim: an unreadable object at {path} could not be "
-            f"restored ({exc}); it is honoured as a holder, so this pass must not "
-            "run beside it",
+            f"restored ({exc}); it is left in the quarantine, honoured as a holder, "
+            "so this pass must not run beside it",
             file=sys.stderr)
+        return False
     with contextlib.suppress(OSError):
         os.unlink(quarantine)
+    return True
 
 
 def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:

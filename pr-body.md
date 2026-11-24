@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 75 cases — the claim protocol, the capacity rule, the falsifier, 7 CROSS-LEG
+# 76 cases — the claim protocol, the capacity rule, the falsifier, 7 CROSS-LEG
 uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
-75 passed
+76 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
@@ -105,7 +105,7 @@ uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-774 passed
+775 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
@@ -117,9 +117,9 @@ Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the
 
 All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
 (`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
-family count moves with `main` and is re-run rather than arithmetic'd from the last head. `75` is the
-collection count for `tests/test_14350_drain_convergence.py` (68 `def test_` with one 8-way
-`parametrize`: 68 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
+family count moves with `main` and is re-run rather than arithmetic'd from the last head. `76` is the
+collection count for `tests/test_14350_drain_convergence.py` (69 `def test_` with one 8-way
+`parametrize`: 69 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
 incremented: `69`/`768`/`317` were the figures at `ef4c1405`, and every later round's cases moved them
 by re-running. The number is re-derived whenever a round changes it; a carried count has been the
 wrong figure in this record four times, which is why the sentence states the collection MODEL beside
@@ -360,9 +360,18 @@ file, running the named row and restoring it (`sha256`-checked):
 
 | finding | disposition |
 |---|---|
-| **P3 — the only real one** a FAILED restore DELETED the live claim it promised to honour. `restoreQuarantine` / `_restore_quarantine` and `disposeQuarantine` / `_dispose_quarantine` warned on any `link` failure that was not `EEXIST` and then ran an UNCONDITIONAL `unlink` — and because the rename had already vacated the claim path, the quarantined file was the ONLY copy of that holder's claim. The next `link` then won the emptied path: two holders for up to `ttl/3`, silently, with the moved-aside evidence gone. `link(2)` lists `EACCES`/`EDQUOT`/`EIO`/`EMLINK`/`ENOSPC`/`EPERM`/`EROFS`/`EXDEV` beside `EEXIST`, and `ENOSPC`/`EDQUOT` on a spool directory is the ordinary case. It also contradicted the module's own doctrine ("an unprovable read is ALIVE") and four statements in this record | **fixed on BOTH legs**: a non-`EEXIST` failure leaves the quarantined object in place (the `*.tmp-*` shape is swept by the scratch sweeper on mtime, so nothing outlives the process) and the answer stays HELD — the fail-CLOSED one. ⛔ NOT `REFUSED`, which the reviewer proposed and which is WORSE here: `REFUSED` raises `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and runs the pass **UNCLAIMED** with the false reason "the spool root cannot hold a claim". On the Pi leg the same HELD answer over an empty path additionally records the lost race, because `flushSpool`'s first arm looks for a record and would otherwise fall through to its unclaimed arm. One row per leg, each RED under the unconditional `unlink` (verified). |
+| **P1 — the one that mattered, and my own fix had MISSED IT** a FAILED restore DELETED the live claim it promised to honour. `restoreQuarantine` / `_restore_quarantine` and `disposeQuarantine` / `_dispose_quarantine` warned on any `link` failure that was not `EEXIST` and then ran an UNCONDITIONAL `unlink` — and because the rename had already vacated the claim path, the quarantined file was the ONLY copy of that holder's claim. The next `link` then won the emptied path: two holders for up to `ttl/3`, silently, with the moved-aside evidence gone. `link(2)` lists `EACCES`/`EDQUOT`/`EIO`/`EMLINK`/`ENOSPC`/`EPERM`/`EROFS`/`EXDEV` beside `EEXIST`, and `ENOSPC`/`EDQUOT` on a spool directory is the ordinary case. It also contradicted the module's own doctrine ("an unprovable read is ALIVE") and four statements in this record | **fixed on BOTH legs**: a non-`EEXIST` failure leaves the quarantined object in place (the `*.tmp-*` shape is swept by the scratch sweeper on mtime, so nothing outlives the process) and the answer stays HELD — the fail-CLOSED one. ⛔ NOT `REFUSED`, which the reviewer proposed and which is WORSE here: `REFUSED` raises `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and runs the pass **UNCLAIMED** with the false reason "the spool root cannot hold a claim". On the Pi leg the same HELD answer over an empty path additionally records the lost race, because `flushSpool`'s first arm looks for a record and would otherwise fall through to its unclaimed arm. One row per leg, each RED under the unconditional `unlink` (verified). ⛔ **AND THE FIRST ATTEMPT AT THIS FIX SHIPPED WITHOUT LANDING ON ONE OF THE FOUR FUNCTIONS**: the next cycle measured `_restore_quarantine`'s body still byte-identical to the pre-fix version (signature changed, body not), with the delete still live and the call site printing a false diagnosis on the healthy path — and no row reached it, so nothing redded. Fixed for real, with a row that drives THAT branch (unreadable mandatory quarantine + `ENOSPC` from `link`) and is RED under the unconditional `unlink`. A disposition is not done until the artifact is verified, and this row is the evidence for why the rule exists. |
 | **P3** the cycle log had no **Cycle 15** (headings ran 13, 14, 16) and seven new comments cited "cycle 13" for findings that live in the 16-round's table | **fixed**: the reconciliation round is **Cycle 15** (it is one round after 14, which is what its own position says), its header now COUNTS its rows instead of describing them (5 pinning gaps + 2 record fixes + 1 already closed — the old sentence said "four … and four", which matches no reading of its own eight rows), and its citations point at the round that owns those rows. |
-| **P3** the record's `withClaimTerm`-block and other residual prose drifted from the code | re-verified against the tree at this head rather than restated; the rows that could not be verified were deleted rather than reworded. |
+| **P3** the record's `withClaimTerm`-block and other residual prose drifted from the code | re-verified against the tree at this head rather than restated. ⛔ An earlier wording of this row said the unverifiable rows "were deleted rather than reworded" — no row was deleted (`git diff b17a8828..HEAD -- pr-body.md | grep '^-|'` shows only the two digest rows, each re-added), and a disposition naming an action with no artifact behind it is the class this record polices. The claim is removed rather than reworded. |
+
+**Cycle 17** (a fresh-context reviewer at `a3a80e68` — the head after cycle 16's fixes) — 1 **P1**,
+2 P3. The P1 is cycle 16's OWN fix, measured as not landed:
+
+| finding | disposition |
+|---|---|
+| **P1** `_restore_quarantine`'s body was byte-identical to the pre-fix version — the signature had changed to `-> bool` and the body had not, so the only-copy deletion was STILL live on the Python leg, `if not _restore_quarantine(…)` printed a FALSE diagnosis on the healthy path (`None` is falsy), and `grep -rn _restore_quarantine tests/` was still zero hits, so nothing redded | **fixed for real, and pinned at the branch**: `return False` in the `except OSError` arm (object left in the quarantine) and `return True` after a successful sweep; the docstring states the contract. A new row drives THAT branch — the mandatory quarantine is made UNREADABLE so `landed is None` and the lstat says regular, `link` raises `ENOSPC` — and asserts HELD plus the peer's bytes still on disk. Verified RED under the unconditional `unlink`. ⛔ Why it survived a round: the round's row exercised `_dispose_quarantine` (its peer claim was READABLE, so `landed is not None`), which was fixed — the two functions are adjacent and only one was covered. A disposition is not done until the artifact is verified, and this is the measured cost of skipping that check. |
+| **P3** one of the seven re-pointed citations still said "cycle 13" for a finding owned by cycle 15's table | **fixed**: it names cycle 15 and says which two P2s cycle 13 actually owns. |
+| **P3** the cycle-16 table asserted rows "were deleted rather than reworded" and NO row had been deleted | **fixed**: the claim is removed rather than reworded — the diff shows only the two digest rows, each re-added. |
 
 ## Residuals, stated
 

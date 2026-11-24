@@ -2189,9 +2189,10 @@ def test_the_measurement_is_NO_VERDICT_when_a_process_never_arrived():
 def test_the_measurement_is_NO_VERDICT_when_the_winner_RELEASED_early():
     """⛔ THE THIRD WAY OF MEASURING NOTHING, and the one no case exercised.
 
-    Every other F2 case passes `bounded=True`, so the `bounded is False` row of
-    `_no_verdict` could be deleted with the suite still green (#14480 review,
-    cycle 13 P2). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
+    Every other case in this family passes `bounded=True`, so the `bounded is False`
+    row of `_no_verdict` could be deleted with the suite still green (#14480 review,
+    cycle 15 P2 — the round that added it, not cycle 13, whose two P2s are the
+    `processes - 1` hold and the Pi leg's `held` wiring). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
     receipt then exits 0 — byte-indistinguishable from a real two-drainer
     FINDING, which is exactly the fail-open this field exists to close.
 
@@ -2403,6 +2404,77 @@ def test_a_FAILED_restore_does_not_delete_the_only_copy(tmp_path, monkeypatch):
         return real_link(src, dst, *a, **kw)
 
     monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
+    leftovers = list(root.glob("*.tmp-clear-*"))
+    assert leftovers, (
+        "the only copy of the peer's claim was DELETED when the restore failed")
+    assert json.loads(leftovers[0].read_text())["token"] == "peer-token"
+
+
+def test_an_UNREADABLE_quarantined_claim_whose_RESTORE_FAILS_is_kept(
+        tmp_path, monkeypatch):
+    """⛔ THE `_restore_quarantine` HALF, WHICH THE ROW ABOVE DOES NOT REACH (review,
+    cycle 16, P1).
+
+    The row above drives `_dispose_quarantine`: its peer claim is READABLE, so
+    `landed is not None` and the `_lstat_is_regular` branch — the one that calls
+    `_restore_quarantine` — never executes. `grep -rn _restore_quarantine tests/`
+    returned zero hits, so the function's own failure branch was unpinned, and it
+    still unlinked the only copy.
+
+    This row makes the quarantine UNREADABLE (so `landed is None` and the lstat says
+    regular), makes `link` fail with `ENOSPC` (a non-`EEXIST` errno — the ordinary
+    full-disk case on a spool directory), and requires the peer's bytes to survive.
+
+    MUTATION THAT REDS THIS: restore the unconditional `os.unlink(quarantine)` in the
+    `except OSError` branch (the object vanishes and the "still on disk" assertion
+    fails).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+    real_link = os.link
+
+    def read_fails_in_the_quarantine(path):
+        # A REGULAR file whose BYTES cannot be had: `landed is None`, and the lstat
+        # below still says regular — the `_restore_quarantine` branch.
+        if ".tmp-clear-" in str(path):
+            return None
+        return real_read_raw(path)
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-clear-" in str(src):
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", read_fails_in_the_quarantine)
     monkeypatch.setattr(os, "link", link_fails)
     try:
         outcome = drain_claim._clear_unusable_claim_path(fifo)
