@@ -376,7 +376,7 @@ this record — and the graded figures below are re-derived by `--refresh` rathe
 sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
 why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
-(`157` distinct cite targets above the pivot from `726` in all, over `208` citing files —
+(`157` distinct cite targets above the pivot from `725` in all, over `208` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
