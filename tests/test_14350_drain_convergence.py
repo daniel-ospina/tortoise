@@ -1794,6 +1794,231 @@ def test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass(tmp_p
         f"the peer's claim must still be readable at the path: {held!r}")
 
 
+def test_the_clear_RESTORES_by_RENAME_when_the_LINK_is_REFUSED(tmp_path):
+    """A filesystem that refuses hard links is the reachable failure of the
+    restore, and the first cut deleted the object it had just promised to honour:
+    `link` raised, the warning went to the stderr a session discards, and the
+    quarantine was `unlink`ed unconditionally. The claim path had ALREADY been
+    vacated by the caller's `rename`, so the peer's record existed nowhere while
+    the peer still believed it held — and this process then won the next `link`,
+    i.e. the two-holder window this whole mechanism exists to close, with the only
+    copy of the evidence destroyed (#14480 cycle-17 review, P3).
+
+    `rename` needs no hard link, so it puts the object back while the claim path is
+    still free — the fallback `filelock`'s stale break takes (`tox-dev/filelock#843`).
+
+    MUTATION THAT REDS THIS: `unlink` the quarantine on the non-`EEXIST` failure
+    (the pre-fix body) — the peer's claim is gone and the path is empty.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "the object is a possible HOLDER: contention, not an unclearable path — "
+        "got " + repr(outcome))
+    assert fifo.exists(), (
+        "the restore must not DELETE the object it could not link back: the path "
+        "was vacated and the quarantined copy is the only one left")
+    assert fifo.read_text() == peer_raw, (
+        "the peer's claim must be back at the path, byte for byte")
+    assert not list(root.glob("drain.claim.tmp-clear-*")), (
+        "a restore that succeeded leaves no quarantine behind")
+
+
+def test_the_clear_PRESERVES_the_copy_it_cannot_restore(tmp_path):
+    """The DOUBLE failure: the link is refused AND the rename back fails. Both
+    restores are gone, so the quarantined copy is the ONLY surviving evidence of
+    the holder this call displaced — deleting it is how a live claim becomes
+    unprovable (and how a support engineer is told there is nothing to look at).
+
+    The answer stays `HELD`: the displaced holder still believes it holds, so this
+    pass must not run beside it. `REFUSED` would raise `DrainClaimUnavailable`,
+    whose consumer (`capture_spool.py:4366-4375`) finds the path EMPTY and runs the
+    whole pass UNCLAIMED beside that holder — the two-drainer defect this arm
+    exists to prevent, verified against the consumer rather than assumed.
+
+    MUTATION THAT REDS THIS: `unlink` the quarantine when the restore fails.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    def rename_refuses_the_restore(src, dst, *a, **kw):
+        # The FIRST rename (obstruction -> quarantine) must work; only the restore
+        # back to the claim path is refused.
+        if str(dst) == str(fifo):
+            raise PermissionError(13, "Permission denied")
+        return peer_installs_first(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", rename_refuses_the_restore)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "the displaced holder still believes it holds: `HELD`, never `REFUSED` "
+        "(which runs the pass unclaimed) — got " + repr(outcome))
+    preserved = list(root.glob("drain.claim.tmp-clear-*"))
+    assert len(preserved) == 1, (
+        "the only surviving copy of an object we could neither judge nor restore "
+        "must be LEFT IN PLACE, not deleted: " + repr(preserved))
+    assert preserved[0].read_text() == peer_raw, (
+        "the preserved copy must be the peer's claim, byte for byte")
+    assert not fifo.exists(), (
+        "both restores failed, so the path stays as the caller left it")
+
+
+def test_a_peer_claim_we_cannot_RESTORE_is_CONTENTION_end_to_end(tmp_path):
+    """The DISPOSITION of the failed restore, not just the primitive: `acquire`
+    must answer "somebody holds it" (no claim, no raise) in the state where the
+    displaced claim could not be linked and was renamed back.
+
+    `REFUSED` here would raise `DrainClaimUnavailable`, and `flush_spool`'s handler
+    re-`lstat`s the path — which the caller's own `rename` emptied — so the whole
+    pass would run UNCLAIMED beside the holder that still holds. Answering `None`
+    is the only disposition that keeps the one-drainer rule.
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` from the restore arm
+    (`acquire` raises instead of returning `None`), or delete the quarantined copy
+    (the peer's claim is no longer at the path).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    real_link = os.link
+
+    def link_refused(src, dst, *a, **kw):
+        # Only the RESTORE's link is refused: a filesystem that refuses hard links
+        # cannot install a claim at all, so modelling that would never reach this
+        # arm. (The obstruction's own presence is what raises `FileExistsError`.)
+        if ".tmp-clear-" in Path(src).name:
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    monkeypatch.setattr(os, "link", link_refused)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the restore"
+    assert claim is None, (
+        "a claim we displaced and could not link back is still a HOLDER: `acquire` "
+        "answering a claim here runs the pass beside it")
+    held = drain_claim.read_claim(root)
+    assert held is not None and held.get("token") == "peer-token", (
+        "the restored claim must be readable at the path: " + repr(held))
+
+
 def test_an_UNCLEARABLE_obstruction_runs_the_pass_UNCLAIMED_and_SAYS_what_it_is(tmp_path):
     """A non-empty directory at the claim path cannot be a CLAIM, so reporting
     contention over it names a holder that does not exist — and wedges the spool

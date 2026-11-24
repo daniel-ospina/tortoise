@@ -298,31 +298,77 @@ def _lstat_is_regular(path: Path) -> bool:
         return False
 
 
-def _restore_quarantine(quarantine: Path, path: Path) -> None:
+def _restore_quarantine(quarantine: Path, path: Path) -> bool:
     """Put a quarantined object BACK, never replacing a newer one.
 
     ``link`` is the create-if-absent arbiter, so a claim a peer installs while
     this object sits in quarantine SURVIVES at the path and only the quarantined
-    copy is dropped; ``rename`` would replace it, which is the "both processes
-    win" hazard :func:`_takedown` exists to avoid.
+    copy is dropped; ``rename`` REPLACES, which is the "both processes win"
+    hazard :func:`_takedown` exists to avoid.
 
     This is the disposal for the one object this module cannot judge: a REGULAR
     file at the claim path whose bytes could not be read. It is a possible holder
     (the doctrine is "an unprovable read is ALIVE"), so it is honoured rather
     than deleted — see the call site in :func:`_clear_unusable_claim_path`.
+
+    ⛔ THE FAILURE PATH MUST NOT DELETE THE OBJECT EITHER, and the first cut of this
+    function did: on any ``link`` failure other than ``EEXIST`` it warned and then
+    ``unlink``ed the quarantine unconditionally. The claim path had already been
+    VACATED by the caller's ``rename``, so the peer's record existed NOWHERE while
+    the peer still believed it held — and this process won the next ``link``, i.e.
+    the two-holder window this module exists to close, with the only copy of the
+    evidence destroyed and the warning going to the stderr a session discards
+    (#14480 cycle-17 review, P3). "Honoured rather than deleted" is not a promise
+    that holds only while the honouring is convenient.
+
+    A filesystem that refuses hard links (``EPERM``/``EXDEV``/``EMLINK``/``ENOSYS``)
+    is the reachable case, and it has a restore that needs no link: ``rename`` the
+    object back **while the claim path is still free** — the fallback
+    ``filelock``'s stale break takes for exactly this reason
+    (``tox-dev/filelock#843``, ``_util._linked_back``). ``rename`` replaces, so it is
+    used ONLY after ``lexists`` says the path is empty; the window between that
+    check and the rename is the one every check-then-create protocol carries, and
+    it is strictly narrower than the delete it replaces (a peer's newer object
+    keeps the path, and only the quarantined copy waits).
+
+    Returns ``True`` when the object is back at ``path`` or a NEWER object holds it,
+    and ``False`` when it could not be put back — in which case the quarantined copy
+    is LEFT IN PLACE for whoever looks next, NEVER unlinked.
     """
     try:
         os.link(quarantine, path)
     except FileExistsError:
-        pass  # a newer object holds the path; that is a holder either way
+        # A newer object holds the path; that is a holder either way.
+        with contextlib.suppress(OSError):
+            os.unlink(quarantine)
+        return True
     except OSError as exc:
+        if not os.path.lexists(path):
+            # The path is still free, and `rename` needs no hard link: put the
+            # object BACK rather than leave a live holder's record stranded.
+            try:
+                os.rename(quarantine, path)
+                return True
+            except OSError as rename_exc:
+                print(
+                    "tortoise.drain_claim: an unreadable object at "
+                    f"{path} could not be restored (link: {exc}; "
+                    f"rename: {rename_exc}) and is PRESERVED at {quarantine}; "
+                    "it is honoured as a holder, so this pass must not run "
+                    "beside it",
+                    file=sys.stderr)
+                return False
         print(
             f"tortoise.drain_claim: an unreadable object at {path} could not be "
-            f"restored ({exc}); it is honoured as a holder, so this pass must not "
-            "run beside it",
+            f"restored ({exc}) — the path is OCCUPIED, so it is not replaced — "
+            "and the "
+            f"copy is PRESERVED at {quarantine}; it is honoured as a holder, so "
+            "this pass must not run beside it",
             file=sys.stderr)
+        return False
     with contextlib.suppress(OSError):
         os.unlink(quarantine)
+    return True
 
 
 def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:
@@ -799,6 +845,16 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
         # doctrine `acquire` states 40 lines above: a regular file we could not read
         # is HONOURED and never unlinked (#14480 review, F3).
+        # ⛔ AND THE ANSWER IS `HELD`, NOT `REFUSED`, EVEN WHEN THE RESTORE ITSELF
+        # FAILED. ``REFUSED`` raises ``DrainClaimUnavailable``, whose consumer
+        # re-derives the truth from the path — and this object is no longer AT the
+        # path, so `flush_spool`'s handler sees nothing there and runs the whole
+        # pass UNCLAIMED beside the holder whose record we displaced
+        # (`capture_spool.py:4366-4375`; the Pi twin takes the same unclaimed arm at
+        # `tortoise-capture.ts:4546`). `HELD` is the one answer that keeps the pass
+        # off the spool, and a displaced holder that still believes it holds IS a
+        # holder. The cycle-17 review proposed `REFUSED`; verified against the
+        # consumers, it would reintroduce the two-drainer defect this arm removes.
         _restore_quarantine(quarantine, path)
         return _CLEAR_HELD
     try:

@@ -8429,6 +8429,123 @@ test("#14350: the clear HONOURS a landed REGULAR file it could not READ", () => 
     "the peer's claim must be back in the path, byte for byte");
 });
 
+test("#14350: the clear RESTORES by rename when the link is refused", () => {
+  // A filesystem that refuses hard links is the reachable failure of the restore,
+  // and the first cut deleted the object it had just promised to honour: the
+  // `linkSync` raised, the warning went to a stderr the session discards, and the
+  // quarantine was unlinked unconditionally. The claim path had ALREADY been
+  // vacated by the caller's `rename`, so the peer's record existed nowhere while
+  // the peer still believed it held — and this process then won the next
+  // `linkSync`: the two-holder window this mechanism exists to close, with the only
+  // copy of the evidence destroyed (#14480 cycle-17 review, P3).
+  //
+  // `rename` needs no hard link, so it puts the object back while the claim path is
+  // still free — the fallback `filelock`'s stale break takes (`tox-dev/filelock#843`).
+  //
+  // MUTATION THAT REDS THIS: unlink the quarantine on the non-`EEXIST` failure (the
+  // pre-fix body) — the peer's claim is gone and the path is empty.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);                     // a transient read error on a good file
+  };
+  const linkRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-")) {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    }
+    linkSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirstThenUnreadable, linkRefused);
+  assert.ok(installed, "the test never reached the restore");
+  assert.equal(outcome, "held",
+    "the object is a possible HOLDER: contention, not an unclearable path: " + outcome);
+  assert.ok(existsSync(fifo),
+    "the restore must not DELETE the object it could not link back: the path " +
+    "was vacated and the quarantined copy is the only one left");
+  chmodSync(fifo, 0o600);
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be back at the path, byte for byte");
+  assert.deepEqual(readdirSync(spool).filter((n) => n.includes(".tmp-clear-")), [],
+    "a restore that succeeded leaves no quarantine behind");
+});
+
+test("#14350: the clear PRESERVES the copy it cannot restore", () => {
+  // The DOUBLE failure: the link is refused AND the rename back fails. Both
+  // restores are gone, so the quarantined copy is the ONLY surviving evidence of
+  // the holder this call displaced. The answer stays `held`: the displaced holder
+  // still believes it holds, so this pass must not run beside it (`refused` sets
+  // `state.obstruction`, whose flush arm runs the pass UNCLAIMED).
+  //
+  // MUTATION THAT REDS THIS: unlink the quarantine when the restore fails.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);
+      writeFileSync(from, peerRaw);
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);
+  };
+  const renameBackRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-") && to === fifo) {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    peerInstallsFirstThenUnreadable(from, to);
+  };
+  const linkRefused = (from: string, to: string): void => {
+    if (from.includes(".tmp-clear-")) {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    }
+    linkSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, renameBackRefused, linkRefused);
+  assert.ok(installed, "the test never reached the restore");
+  assert.equal(outcome, "held",
+    "the displaced holder still believes it holds: `held`, never `refused` " +
+    "(whose flush arm runs the pass unclaimed): " + outcome);
+  const preserved = readdirSync(spool).filter((n) => n.includes(".tmp-clear-"));
+  assert.equal(preserved.length, 1,
+    "the only surviving copy of an object we could neither judge nor restore must " +
+    "be LEFT IN PLACE: " + JSON.stringify(preserved));
+  chmodSync(join(spool, preserved[0]), 0o600);
+  assert.equal(readFileSync(join(spool, preserved[0]), "utf8"), peerRaw,
+    "the preserved copy must be the peer's claim, byte for byte");
+  assert.equal(existsSync(fifo), false,
+    "both restores failed, so the path stays as the caller left it");
+});
+
 test("#14350: a peer claim landing in the clear window is CONTENTION, not an unclaimed pass", () => {
   // ⛔ THE DISPOSITION, NOT JUST THE PRIMITIVE. The `held` arm of
   // `acquireDrainClaim` is the whole difference between "somebody holds it, do
