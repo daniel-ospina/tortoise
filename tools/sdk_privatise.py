@@ -809,7 +809,7 @@ SWEEP_NAMES = 66
 #: equals 1.
 #:
 #: RE-CUT ONTO `origin/main` `d4a8dddc4e` (#14043/#14045/#14050/#14010/#14020/#14032/#14022…) —
-#: re-measured on the merged tree with `--repin`, never computed: `(11913, "7f983a0f90145874")`. The
+#: re-measured on the merged tree with `--repin`, never computed: `(11916, "cae41401eaba8c5c")`. The
 #: two trees were measured separately on the same instrument, and the ROW LIST was diffed row by row
 #: (`--report --base 28ca66878d --top 5000` on each): `origin/main` `d4a8dddc4e` prints **11829**, this
 #: tree prints **11841**, and the twelve rows between them are exactly the four this branch has
@@ -1122,7 +1122,7 @@ SWEEP_NAMES = 66
 #: pointing at a public name` stays **0**, so no typed site moved and the SDK population is untouched.
 #:
 #: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
-#: combined from the two sides' figures: it printed `(11913, "7f983a0f90145874")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
+#: combined from the two sides' figures: it printed `(11916, "cae41401eaba8c5c")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
 #: (the visible edge): 11837", `proj.g.query` 3642 and `g.query` 1492 — this branch's OWN rows,
 #: carried unchanged through the merge — and NO `create_subject` residue row anywhere (the rename
 #: map still lists `create_subject → _create_subject`, which is the map, not a residue), so the 11
@@ -1247,7 +1247,7 @@ SWEEP_NAMES = 66
 #: their evidence.
 #:
 #: ⛔ CARRIED FORWARD THROUGH A CONCURRENT-LANE MERGE — and this is the pin, re-measured on THIS
-#: tree with `--repin`, never combined from the two sides: `(11913, "7f983a0f90145874")`. TWO lanes
+#: tree with `--repin`, never combined from the two sides: `(11916, "cae41401eaba8c5c")`. TWO lanes
 #: were fixing this PR at once (one on review round 1, one on round 2), so the branch is a merge of
 #: two branches off the same head, and a merge of two measured trees is a THIRD tree — the case all
 #: the blocks above say must be re-measured rather than inherited. ⛔ NEITHER 11844 (round 1's tree)
@@ -1259,7 +1259,7 @@ SWEEP_NAMES = 66
 #: evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ MERGED `origin/main` (`69908d006b`) INTO THIS BRANCH, one merge after the block above — and
-#: the pin is RE-MEASURED on THIS tree with `--repin`, never carried: `(11913, "7f983a0f90145874")`.
+#: the pin is RE-MEASURED on THIS tree with `--repin`, never carried: `(11916, "cae41401eaba8c5c")`.
 #: ⛔ THE +8 IS ATTRIBUTED BY THE TOOL'S OWN ROW DIFF, not by arithmetic: `--report --base
 #: 28ca66878d… --top 5000` was run in a detached worktree at the pre-merge head `aaf341542b` AND on
 #: this tree, both row sets sorted and diffed, and EXACTLY TWO rows differ, both `main`'s and neither
@@ -1558,7 +1558,7 @@ SWEEP_NAMES = 66
 #: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's PRE-REBASE base point: the
 #: PRE-REBASE head's parent, NOT the branch's base point, the branch having been rebased onto a
 #: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
-#: `(11913, "7f983a0f90145874")`. `10e51693f1` — the squash that committed that stale pair. Its own
+#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair. Its own
 #: pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already moved under it, so
 #: the pair was committed to a tree it was not a reading of. ⛔ AND THE INTERVAL COMES AFTER THE
 #: CLAUSE, NEVER BETWEEN THE REV AND IT (#14282 review cycle 5, P3): `_own_pin_claims` attributes a
@@ -1636,7 +1636,7 @@ SWEEP_NAMES = 66
 #: a DESCENDANT of `0351fe856942`, pushed after the squash, whose own content never landed, and it
 #: happens to commit the same pair — which is why it reads the same and is still the wrong tree to
 #: name (an earlier cut of this paragraph did, review round 2, P2). `main` at `70fbd1a27dd5`
-#: re-measured with `--repin` reads `(11913, "7f983a0f90145874")`.
+#: re-measured with `--repin` reads `(11916, "cae41401eaba8c5c")`.
 #: ⛔ THE PAIRS COME FROM `--repin`, NOT `--report`. `--report` prints the untyped COUNT and the
 #: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
 #: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
@@ -1853,7 +1853,7 @@ SWEEP_NAMES = 66
 #: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
 #: ⛔ RE-CUT AT THIS BRANCH'S MERGE WITH `origin/main` `0fbfbb5b210c` — AND THE RE-CUT REPAIRS `main`'s OWN
 #: RED. `main`'s committed pin at that sha is `(11896, "ea44c5f732d2a97d")`, and `--check` on `main`'s OWN
-#: tree there exits 1 with `untyped receivers left alone (deliberate, reported): 11913`: two untyped
+#: tree there exits 1 with `untyped receivers left alone (deliberate, reported): 11916`: two untyped
 #: receivers landed on `main` between its last re-cut and this head, so `main` is RED on `surface-guard`
 #: before this branch is involved at all. This cut re-derives the pair from the MERGED tree, so it repairs
 #: that red. ⛔ Those two are RECORDED, not attributed: resolving which rows came from where is
@@ -1882,10 +1882,10 @@ SWEEP_NAMES = 66
 #:   * `seen.update` **101 → 102** (+1) — an ordinary-word receiver on a Python SET (`.update(...)` in the
 #:     meter bookkeeping), which is the class this pin exists to DECLARE and deliberately leaves alone: the
 #:     sweep cannot type the receiver, and a `set` is not an SDK method, so "fixing" it would mean renaming
-#:     a builtin method call. `untyped receivers left alone (deliberate, reported): 11913`, and
+#:     a builtin method call. `untyped receivers left alone (deliberate, reported): 11916`, and
 #:     `typed references still pointing at a public name` stays **0**, so no typed call site is legitimised
 #:     by this re-cut — that is the property `--check` gates, and the pin only records where the edge sits.
-#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11913, "7f983a0f90145874")`.
+#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11916, "cae41401eaba8c5c")`.
 #: ⛔ MERGED `origin/main` `43182ac09a7d` (the `#14186` embedder seam and the `#14394`
 #: witness budget) INTO THIS BRANCH. BOTH SIDES' BLOCKS ABOVE ARE KEPT, this file's
 #: standing ground rule; the pair below is `--repin`'s own output on the RESOLVED merge
@@ -1914,7 +1914,7 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11913, "7f983a0f90145874")`.
+#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11916, "cae41401eaba8c5c")`.
 #: The last two re-cuts are attributable and worth knowing: 11896 -> 11900 was this PR's own batch
 #: surface at `4b7be98fb38b`; 11900 -> 11908 is the 402-copy tests added on the recut, whose new
 #: `ha.` / `est.` / `detail` attribute reads are untyped receivers the sweep deliberately leaves alone.
