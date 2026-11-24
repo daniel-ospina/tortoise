@@ -331,8 +331,10 @@ def claim_path_unreadable(root: Path) -> bool:
     names exactly this TOCTOU and prescribes `O_RDONLY|O_NONBLOCK` then `fstat`/
     `S_ISREG` on the FD; that is deliberately NOT adopted here, so that this probe and
     the status gate stay ONE mechanism with one stated residual, and because the box
-    owner is by definition the only writer that could perform the swap (review,
-    cycle 19, P3 — the earlier wording promised more than the two syscalls can).
+    owner is by definition the only writer that could perform the swap (the confirmation
+    review AT `bcb52e1d` — dated rather than round-cited, because the over-claiming
+    sentence did not exist at any head cycle 19 reviewed; the earlier wording promised
+    more than the two syscalls can).
     """
     path = claim_path(root)
     try:
