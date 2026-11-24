@@ -21820,7 +21820,8 @@ def test_the_committed_map_still_declares_its_three_caps():
 #   * `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard` is the only arm
 #     reading the required `test` job's own `strategy.matrix` — its siblings build their
 #     own fixture YAML, so a literal `include:` in that matrix reds nothing else.
-# Both pass unmodified against this tree.
+# Both pass against this tree with their ASSERTIONS unmodified — one docstring among
+# them was corrected by a later fold, which is text, not behaviour.
 
 def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
     """#3400: the coverage floor FIRES, is INCLUSIVE, and is PINNED at 0.90.
@@ -21888,3 +21889,107 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
               if s.get("name", "").startswith("Download producer-shard"))
     assert dl["with"]["name"] == "pytest-canary-producer"
 
+
+
+# ── a record that says an arm is GONE must agree with the tree ────────────────
+#
+# #14481's own defect, in the direction it was fixing. The restore re-added
+# `_durations_row_comments` to this file — RESTORED by `#14481` after `#14439`'s
+# squash `8c373f59a1` deleted it, NOT a B7 casualty: the post-B7 main
+# `e6b3cf2908` still carried it — while `tools/ci_timing.py`, a file the PR does
+# not touch and which the head therefore shipped as current, still carried two
+# docstrings calling that reader "CUT in the B7 test cut". The reader is LIVE and
+# MERGE-GATING at the same head, so `_row_continuation_lines`' third condition and
+# the writer's span rule were justified by "the reader is gone, be conservative by
+# construction" — i.e. a writer reasoning about a span no live guard reads, which
+# is exactly the drift those paragraphs exist to prevent.
+#
+# Nothing graded that prose — it cannot red — and the same class recurred across
+# FOUR consecutive rounds of this PR (the `fast_shards` header, the plan ledger's
+# five Step-4 arms, `slow_wall_projection`'s caller claim, and these). Comparable
+# practice for it is a mechanical pin rather than another round of care: the
+# documented shape of documentation-drift tooling is "references to removed code
+# elements" — detect the stale reference, do not ask the author to re-read
+# (RUNG 2, `web_search` model `sonar`: the `drift-documentation-drift-check`
+# action, `doc-drift-detector`, `autodocs` — all three key on exactly this pair,
+# a named code element plus a prose verdict about whether it exists).
+#
+# So this pin reads every record that carries such a verdict and requires it to
+# match the tree. The convention it enforces is the one this PR's fix rounds
+# already adopted: a historical cut is recorded as "CUT by <sha/PR> … RESTORED by
+# `#14481`", and a name whose restoration is stated in the same passage is read as
+# history, not as a claim about this head.
+_CUT_CLAIM_WINDOW = 200
+_CUT_CLAIM_RESTORED_SPAN = 400
+_CUT_CLAIM_RESTORED_RE = re.compile(r"RESTORED|restored")
+_CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
+_CUT_CLAIM_FILES = (
+    "tools/ci_timing.py",
+    "tools/ci_selection.py",
+    "tests/test_ci_selection.py",
+    ".github/workflows/python-ci.yml",
+    "config/ci-surfaces.yml",
+)
+
+
+def _cut_claims() -> list[tuple[str, int, str, bool]]:
+    """`(path, line, name, contradicts_this_file)` for every CUT verdict on a name.
+
+    A verdict is CONSIDERED when the record backticks a name and the word `CUT`
+    follows within `_CUT_CLAIM_WINDOW` characters — the shape both defects had.
+    `contradicts` is True only when this file DEFINES that name and no restoration
+    is recorded within `_CUT_CLAIM_RESTORED_SPAN`: that is the pair no reviewer
+    should have to catch, because the tree, not the prose, is the authority for
+    what is graded. The two spans differ on purpose — a verdict has to sit close
+    to the name it judges, while a restoration is often the next sentence.
+
+    Scope is deliberately this file's `def`s. That is where the arms a cut removes
+    live, so it is the direction that can contradict; a name this file does not
+    define is not asserted either way (it may be a `tools/` function or a genuinely
+    deleted arm, and both are legal).
+    """
+    live = set(re.findall(r"^def (\w+)", (REPO / "tests" / "test_ci_selection.py")
+                          .read_text(encoding="utf-8"), re.M))
+    claims = []
+    for rel in _CUT_CLAIM_FILES:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for m in _CUT_CLAIM_NAME_RE.finditer(text):
+            name = m.group(1)
+            window = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
+            if not re.search(r"\bCUT\b", window):
+                continue
+            claims.append((rel, text[:m.start()].count("\n") + 1, name,
+                           name in live
+                           and not _CUT_CLAIM_RESTORED_RE.search(
+                               text[m.end():m.end() + _CUT_CLAIM_RESTORED_SPAN])))
+    return claims
+
+
+def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
+    """#14481 ISSUE 1: a "it is gone" verdict must match the tree, or it misleads.
+
+    The wrong outcome is specific and not cosmetic: a lane that reads "the reader
+    is CUT" at a head where the reader grades concludes the behaviour is ungraded,
+    and either over-fits a by-hand rule or retires the subject. `#14419`'s cut
+    deleted real arms too, so "it is gone" is a claim that is RIGHT half the time —
+    which is why it needs the tree, not a reviewer, as its authority.
+
+    Non-vacuity is asserted: a scan that finds no verdict at all (a refactor moved
+    the prose, a rename broke the regex) fails here rather than passing green,
+    because an empty result is the one outcome that cannot distinguish "every
+    claim is true" from "read nothing".
+    """
+    claims = _cut_claims()
+    assert len(claims) >= 2, (
+        "the CUT-verdict scan read no verdict at all. The records DO carry them "
+        "(the durations arithmetic this PR restored, and the arms B7 really did "
+        "take), so this is the scan going blind — a renamed verdict word or file — "
+        f"not a tree with nothing to check. claims={claims!r}")
+    contradictions = [c for c in claims if c[3]]
+    assert not contradictions, (
+        "these records call an arm CUT while `tests/test_ci_selection.py` defines "
+        "it, so the record contradicts the tree and the next lane reads a live "
+        "grader as retired — or as an ungraded by-hand hazard, which is how a "
+        "conservative rule gets justified by a reader that is in fact grading. "
+        "Record the restoration in the same passage, or fix the verdict: "
+        f"{contradictions!r}")
