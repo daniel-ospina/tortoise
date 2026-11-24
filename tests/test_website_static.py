@@ -4498,6 +4498,118 @@ PADDING_END_PROPS = ("padding-bottom", "padding-block-end", "padding",
 BLOCK_END_MARGIN_PROPS = ("margin-bottom", "margin-block-end", "margin",
                           "margin-block")
 
+#: Every property through which the CTA's OWN box can take the card's leftover
+#: space — growth, or a block size DERIVED FROM THE CARD — instead of leaving it
+#: to the pinned `margin-top: auto`. `SLACK_PROPS` covers the other mechanism
+#: (a declaration that STARVES the auto margin); this is the one where the auto
+#: margin is starved by the CTA's own box growing to meet it (#14406 review
+#: round 17, measured — see `_cta_takes_the_slack_by_sizing`).
+GROW_PROPS = ("flex", "flex-grow")
+CONTAINER_RELATIVE_BLOCK_SIZE_PROPS = ("flex-basis", "height", "block-size",
+                                       "min-height", "min-block-size")
+
+#: A percentage anywhere in a block-size value — the only spelling that makes an
+#: element's size depend on its CONTAINER. Captured with its number so that the
+#: inert `0%` (a zero basis/floor is overridden by the flex item's own
+#: `min-height: auto`, measured) is not read as container-relative.
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
+
+
+def _is_nonzero_percentage(value: str) -> bool:
+    """Is any percentage in `value` non-zero (`calc(100% - 2rem)` included)?"""
+    return any(float(match.group(1)) != 0.0
+               for match in _PERCENT_RE.finditer(value))
+
+
+def _sizing_takes_the_slack(prop: str, value: str) -> bool:
+    """Would `prop: value` on the CTA consume the space `margin-top: auto` needs?
+
+    The property decides what the value MEANS, so this is a per-family read and
+    not a substring test:
+
+    * `flex-grow` — any non-zero value grows the item into the card's leftover.
+    * `flex` — the shorthand's FIRST number is `flex-grow` (CSS Flexible Box
+      Layout §7.1.1), so `1` / `1 1 auto` / `1 1 0%` all grow, while `none`
+      (`0 0 auto`) and `initial` (`0 1 auto`) do not. `auto` is `1 1 auto` — it
+      grows — and is caught by the keyword not being a number. An unreadable
+      shorthand fails CLOSED (treated as growing), the direction every reader in
+      this file takes for a value it cannot decide.
+    * `flex-basis` and the block-size family — a NON-ZERO PERCENTAGE is the only
+      spelling whose value is derived from the card; `3rem`, `50vh`, `0%` and
+      `max-height` are not (the last two are measured inert on this page).
+    """
+    bare = _without_important(value).strip().lower()
+    if prop == "flex-grow":
+        try:
+            return float(bare) > 0
+        except ValueError:
+            return True
+    if prop == "flex":
+        if bare in ("none", "initial"):
+            return False
+        tokens = bare.split()
+        grow = None
+        for token in tokens:
+            try:
+                grow = float(token)
+            except ValueError:
+                continue
+            break
+        if grow is None or grow > 0:
+            return True
+        return any(_is_nonzero_percentage(token) for token in tokens[1:])
+    # `flex-basis` / `height` / `block-size` / `min-height` / `min-block-size`.
+    return _is_nonzero_percentage(bare)
+
+
+def _cta_takes_the_slack_by_sizing(css: str) -> list[tuple[str, str, str]]:
+    """Rules that make the CTA's OWN box grow into the slack, as `(prelude, prop, value)`.
+
+    ⛔ THE PINNED `margin-top: auto` CAN BE STARVED WITHOUT TOUCHING A MARGIN.
+    Every row in `TestProductTeamsPricingCardCtaBaseline` pinned the SLACK
+    MECHANISM (`SLACK_PROPS`, `BLOCK_END_MARGIN_PROPS`) or the card's own box
+    (`display` / `flex-direction` / `height` on `.pricing-card`) — and a flex
+    item that GROWS, or whose block size is a percentage of its card, takes the
+    free space itself, so the auto margin has nothing left to absorb and the
+    button stops being pinned to the card's bottom edge. Each card's content is
+    a different height (that IS #13645 item 6), so the four CTA tops re-split.
+
+    Measured at `bc6525269cba` at 1440x900 (headless Chromium; the page restored
+    byte-identically, `sha256 d74e7c9dd20d`, after every mutant) — CTA tops, and
+    the verdict of all NINE rows of the class:
+
+        .pricing-card .btn { flex: 1 }             6345.58 6345.58 6367.05 6415.78  GREEN
+        .pricing-card .btn { flex: auto }          (same)                            GREEN
+        .pricing-card .btn { flex-grow: 1 }        (same)                            GREEN
+        .pricing-card .btn { flex-grow: 0.5 }      6380.69 6380.69 6391.42 6415.78  GREEN
+        .pricing-card .btn { flex-basis: 100% }    (the 3-baseline split)            GREEN
+        .pricing-card .btn { flex: 0 0 100% }      (same)                            GREEN
+        .pricing-card .btn { flex: 1 1 0% }        (same)                            GREEN
+        .pricing-card .btn { height: 100% }        (same)                            GREEN
+        .pricing-card .btn { block-size: 100% }    (same)                            GREEN
+        .pricing-card .btn { min-height: 100% }    (same)                            GREEN
+        .pricing-card .btn { min-block-size: 100% } (same)                           GREEN
+
+    — the shipped page reads 6415.78 four times, and `margin-top: 0` (already
+    RED) reads the same three-baseline split, so the signature is the one this
+    class exists for and not a shape of its own. The controls that must stay
+    GREEN are measured too, and are NOT refused: `flex: none` / `flex: initial`
+    / `flex: 0 1 auto` / `flex-grow: 0` / `flex-basis: auto` / `flex-basis: 0%`
+    / `flex: 0 1 0%` / `height: 3rem` / `height: 50vh` / `inline-size: 100%` /
+    `max-height: 100%` — every one of them leaves the four tops equal.
+
+    Reach is `_css_reaching_decls`'s (rightmost-compound matching, ancestors and
+    media blocks included, with the specificity floor that keeps the page's own
+    `a { … }` rules out), so a rule that reaches the CTA through a DIFFERENT
+    selector is seen as well as one that names `.pricing-card .btn`.
+    """
+    offenders: list[tuple[str, str, str]] = []
+    for prop in (*GROW_PROPS, *CONTAINER_RELATIVE_BLOCK_SIZE_PROPS):
+        for prelude, value in _css_reaching_decls(css, prop, ".btn"):
+            if _sizing_takes_the_slack(prop, value):
+                offenders.append((prelude, prop, value))
+    return offenders
+
 
 def _css_tokens(value: str) -> list[str]:
     """A declaration value split on whitespace, but keeping `calc(…)` whole.
@@ -12415,6 +12527,53 @@ class TestProductTeamsPricingCardCtaBaseline:
             "own leftover and the four baselines split (#13645 item 6), with "
             "every other row in this class still GREEN")
 
+    def test_nothing_lets_the_cta_take_the_slack_with_its_own_box(self):
+        """The CTA must not GROW into the slack its `margin-top: auto` needs.
+
+        ⛔ THE MARGIN FAMILY IS NOT THE ONLY WAY TO TAKE THE SLACK. Every row
+        above pins the mechanism (`margin-top: auto` present, nothing else
+        touching it) and the card's own box — but a flex ITEM that grows, or
+        whose block size is a percentage of its card, absorbs the very space
+        the auto margin would have taken: the button stops being pinned to the
+        card's bottom edge, and because each card's content is a different
+        height (that is #13645 item 6) the four tops re-split.
+
+        Measured at `bc6525269cba`, 1440x900, headless Chromium, the page
+        restored byte-identically (`sha256 d74e7c9dd20d`) after every mutant —
+        CTA tops, from the shipped page's four equal `6415.78`:
+
+            .pricing-card .btn { flex: 1 }               6345.58 6345.58 6367.05 6415.78
+            .pricing-card .btn { flex-grow: 0.5 }        6380.69 6380.69 6391.42 6415.78
+            .pricing-card .btn { flex-basis: 100% }      the same 3-baseline split
+            .pricing-card .btn { height: 100% }          the same
+            .pricing-card .btn { min-block-size: 100% } the same
+
+        — and ALL NINE rows of this class stayed GREEN on every one of them.
+        `margin-top: 0` (already RED) produces the same three values, so this is
+        the class's own defect signature rather than a tolerance argument. The
+        first spelling is the one a maintainer reaches for when they mean "make
+        the button fill the leftover": it does, and it breaks the invariant
+        this class exists to hold.
+
+        `flex: none` / `flex: initial` / `flex: 0 1 auto` / `flex-grow: 0` /
+        `height: 3rem` / `height: 50vh` / `flex-basis: 0%` are measured to leave
+        the four tops EQUAL, so the reader permits them — refusing every size
+        declaration would red correct pages (`_cta_takes_the_slack_by_sizing`
+        carries the full measured table, both directions).
+        """
+        offenders = _cta_takes_the_slack_by_sizing(_product_teams_html())
+        assert offenders == [], (
+            "a rule that can select `.pricing-card .btn` lets the CTA's own box "
+            f"take the card's leftover space (`{offenders[0][1]}: "
+            f"{offenders[0][2]}`, {offenders[0][0]!r}). Growth and a "
+            "container-relative block size starve the pinned `margin-top: "
+            "auto` of the free space it absorbs, so the button is no longer "
+            "pushed to its card's bottom edge — and each card's content is a "
+            "different height, so the four baselines split to three, 70.2px "
+            "apart (#13645 item 6), with every other row in this class still "
+            "GREEN (#14406 review round 17, measured: `.pricing-card .btn "
+            "{ flex: 1 }` reads 6345.58 / 6345.58 / 6367.05 / 6415.78)")
+
     def test_no_other_rule_takes_the_ctas_slack(self):
         """The card CTA's ONLY vertical slack is the pinned `margin-top: auto`.
 
@@ -12927,6 +13086,78 @@ class TestCssDesktopReachAndSpecificity:
             "an appended `.pricing-card { border: … }` is no longer read as the "
             "owner of `border`, so the popular card's compensation relation "
             "would be derived from the border the page no longer has")
+
+    def test_the_growth_reader_separates_a_growing_cta_from_a_sized_one(self):
+        """`_sizing_takes_the_slack` must red GROWTH and permit a definite size.
+
+        Unlike every other reader in this class this one has to decide between
+        two spellings that look alike — `height: 100%` (the size is derived from
+        the card, so the CTA's top moves to the card's content bottom and the
+        baselines split) and `height: 3rem` (the same box on all four cards, so
+        the tops stay equal). A reader that refused both would red a correct
+        page, and one that refused neither is the fail-open found at
+        `bc6525269cba`; `TestProductTeamsPricingCardCtaBaseline` carries the
+        browser measurement, and this row pins the DECISION on the page text.
+
+        Both arms are non-vacuous by construction: every refused mutant is
+        first shown to really reach the CTA through `_css_reaching_decls` with
+        the property it declares, and every permitted one is shown to reach it
+        too — so "not an offender" cannot pass on a rule the reader never saw.
+        """
+        reaching = (
+            ".pricing-card .btn { %s }",
+            ".pricing-grid .btn { %s }",
+            ".pricing-card > .btn { %s }",
+        )
+        cases = (
+            # (declaration, refused?) — measured at 1440x900: the refused rows
+            # are the three-baseline split, the permitted rows leave all four
+            # CTA tops equal (see `_cta_takes_the_slack_by_sizing`).
+            (("flex: 1", True), ("flex: auto", True),
+             ("flex: 1 1 0%", True), ("flex: 0 0 100%", True),
+             ("flex-grow: 1", True), ("flex-grow: 0.5", True),
+             ("flex-basis: 100%", True), ("flex-basis: 50%", True),
+             ("height: 100%", True), ("height: calc(100% - 2rem)", True),
+             ("block-size: 100%", True), ("min-height: 100%", True),
+             ("min-block-size: 100%", True),
+             ("flex: none", False), ("flex: initial", False),
+             ("flex: 0 1 auto", False), ("flex-grow: 0", False),
+             ("flex-basis: auto", False), ("flex-basis: 0%", False),
+             ("flex: 0 1 0%", False), ("height: 3rem", False),
+             ("height: 50vh", False), ("min-height: 0%", False),
+             ("max-height: 100%", False), ("inline-size: 100%", False))
+        )
+        for template in reaching:
+            for declaration, refused in cases:
+                prop, _sep, value = declaration.partition(":")
+                rule = template % declaration
+                mutated = self._page_with(rule)
+                seen = _css_reaching_decls(mutated, prop.strip(), ".btn")
+                assert (rule.strip("{} ").split("{")[0].strip(), value.strip()) in seen, (
+                    f"`{rule}` does not reach `.btn` through "
+                    f"`_css_reaching_decls` (got {seen!r}), so this arm would "
+                    "be VACUOUS — the reader could not see the declaration "
+                    "under any policy")
+                offenders = _cta_takes_the_slack_by_sizing(mutated)
+                got = any(offender_prop == prop.strip()
+                          and _without_important(offender_value) == value.strip()
+                          for _prelude, offender_prop, offender_value in offenders)
+                assert got is refused, (
+                    f"`{rule}` was expected to be "
+                    f"{'REFUSED' if refused else 'PERMITTED'} by "
+                    f"`_cta_takes_the_slack_by_sizing`, and it was "
+                    f"{'permitted' if refused else 'refused'} "
+                    f"(offenders={offenders!r}). "
+                    + ("A growing CTA, or one sized as a percentage of its "
+                       "card, takes the space `margin-top: auto` needs and "
+                       "re-splits the four baselines (#14406 review round "
+                       "17, measured)." if refused else
+                       "This spelling leaves the four CTA tops EQUAL "
+                       "(measured), so refusing it reds a correct page — a "
+                       "guard a maintainer deletes."))
+        # The shipped page is not an offender, so the row it backs is a real
+        # invariant rather than one the page already violates.
+        assert _cta_takes_the_slack_by_sizing(_product_teams_html()) == []
 
     def test_the_owner_reader_sees_a_desktop_media_block_and_skips_a_narrow_hatch(self):
         """A media CONDITION, not `inside_media`, decides what owns the property.
