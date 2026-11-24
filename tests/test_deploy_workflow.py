@@ -427,9 +427,10 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
 def test_the_capture_in_flight_tunable_is_staged_at_its_versioned_value():
     """#12992: the hosted capture in-flight ceiling is VERSIONED at 16, not 8.
 
-    The undeclared Fly secret of this name blocked every `deploy-hosted` run from
-    2026-11-21T21:34Z and was still blocking at the last measurement (2026-11-24T00:39Z)
-    (the #4126 defect class). Declaring it is only half
+    The undeclared Fly secret of this name blocked every `deploy-hosted` run that
+    REACHED the gate from 2026-11-21T21:34Z (one run died earlier at `packaging-smoke`
+    and two were cancelled), and was still blocking at the last measurement
+    (2026-11-24T00:39Z) — the #4126 defect class. Declaring it is only half
     the fix — the deploy must also carry the LIVE value across. `8` is the code
     default, and a deploy that silently reverted to it would re-open the 429 that
     parked 500+ sessions. A REMOVAL of the append is caught by the provenance gate
@@ -453,8 +454,15 @@ def test_the_capture_in_flight_tunable_is_staged_at_its_versioned_value():
     # the name is absent, so Fly's hand-set copy would survive every deploy and
     # "the tunable is unset" would be indistinguishable from "deliberately using
     # the live value" — the #4126 shape this declaration closes.
+    # ⛔ FILTER ON THE NAME, NOT THE VALUE (#14448 review at `8b74d2d2e07`, P2-1). This
+    # list filtered the literal `TORTOISE_CAPTURE_IN_FLIGHT=16`, so a SECOND site at
+    # another value was never counted: adding `ARGS+=(TORTOISE_CAPTURE_IN_FLIGHT=8)`
+    # below the real one left this pin GREEN and the provenance gate GREEN (`OK: all 52
+    # … declared`), with production silently at the code default — the exact quiet
+    # `16 -> 8` this docstring says the pin is the only thing standing against. Filtering
+    # on the NAME makes the `len(...) == 1` assertion mean what it says.
     staging = [
-        line for line in run.splitlines() if "TORTOISE_CAPTURE_IN_FLIGHT=16" in line
+        line for line in run.splitlines() if "TORTOISE_CAPTURE_IN_FLIGHT=" in line
     ]
     assert len(staging) == 1, f"expected exactly one staging site, found {staging}"
     assert staging[0].strip().startswith("ARGS+=("), (

@@ -198,8 +198,10 @@ default `16` (`deploy-hosted.yml`, next to `TORTOISE_GIT_DIRTY`), so
 `flyctl secrets set TORTOISE_CAPTURE_IN_FLIGHT=<n>` is overwritten by the next
 deploy. **Change the number in the workflow, not on the app** — a hand-set value
 is exactly the state that reds the provenance gate until it is declared, which
-is how every hosted deploy was blocked from 2026-11-21T21:34Z — the gate was
-still refusing at the last measurement (2026-11-24T00:39Z).
+is how every hosted deploy that REACHED the gate was blocked from
+2026-11-21T21:34Z (one run died earlier at `packaging-smoke`, so it never got
+there, and two were cancelled) — the gate was still refusing at the last
+measurement (2026-11-24T00:39Z).
 `BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
 the whole backup/R2/DR secret set is present, and otherwise the assignment is
 skipped and any Fly-side value is left as it was (the fail-closed default —
