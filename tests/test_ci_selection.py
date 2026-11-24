@@ -8818,6 +8818,62 @@ def test_halves_guard_reports_all_zero_map_without_crashing():
     assert any("duration-imbalanced" in i for i in issues), issues
 
 
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145: this check compared the EXACT ratio and then rendered both operands
+    at 2 dp, so a fire inside (1.25, 1.255) printed "ratio 1.25x, tolerance
+    1.25x" — a diagnosis that reads as compliant while the check refuses, the
+    very contradiction the #6145 change removes next door. The ratio is now
+    decided at the precision it publishes, and the `beyond` block below pins the
+    RENDERED pair as well, so no message can print a value that reads as within
+    tolerance.
+
+    FORWARD-PORTED by #14481 from `main` (#14474). This arm lived on
+    `edd9c68585`, was removed with #14419's squash, and its restore landed after
+    that merge's window — so `main` carried the `#6145` decision with no killer
+    for a while, and #14474 put the arm back. This branch reverts this file to
+    its pre-merge state, which means the revert has to carry `main`'s
+    post-merge additions forward rather than drop them: that is the accounting
+    in BOTH directions this PR owes (the 42 arms restored, and every arm `main`
+    gained afterwards kept).
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # ⛔ THE PUBLISHED PRECISION IS 2 dp, NOT "AT LEAST 2 dp": 1250.9 / 1000 =
+    # 1.2509 renders as `1.25` but is > 1.25 at THREE dp, so an arm that only
+    # sampled 1250.4 would let `round(hi / lo, 3)` survive — and that mutant
+    # fires here printing `ratio 1.25x, tolerance 1.25x`, the exact
+    # self-contradiction this arm exists to forbid. Third sample closes it.
+    finer = _halves_manifest()
+    finer["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                          "test_crypto.py": 250.9}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(finer, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    messages = [i for i in workflow_halves_issues(beyond, halves)
+                if "imbalanced" in i]
+    assert messages
+    # The headline above is about the MESSAGE, not only the decision, so pin the
+    # pair it renders. The target is a render that makes the two values equal or
+    # reversed — e.g. BOTH operands truncated to 1 dp gives "1.2x, tolerance
+    # 1.2x", which passes every decision-side arm above and reads as compliant
+    # while the check refuses. A ratio-only `.1f` render is NOT such a case
+    # (1.256 prints 1.3, still above 1.25), so it is not what this pin targets.
+    rendered = re.search(r"\(ratio ([\d.]+)x, tolerance ([\d.]+)x\)", messages[0])
+    assert rendered, messages[0]
+    assert float(rendered[1]) > float(rendered[2]), messages[0]
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_fast_files_absent_from_halves_reports_coverage_hole():
     from tools.ci_selection import fast_files_absent_from_halves
     halves = {"a": ["test_api"], "b": ["test_crypto"]}
@@ -13403,14 +13459,16 @@ def test_the_cache_family_citation_lands_on_the_setup_python_input_it_names():
 
     The comment enumerates the ways a cache save can be armed and cites the ONE live
     instance in this workflow — `setup-python`'s `cache:` input, in `test-track-b`. That
-    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at this
-    head `3226` is `- uses: actions/checkout@v4`, `3227` the `setup-python` step, `3228`
-    its `with:` — the `cache:` input itself is `3230`. So a reader following the citation
-    landed one line ABOVE the offending input and saw no `cache:` key at all, which is
-    exactly the "resolves, but to the wrong construct" shape the window's other citation
+    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at the
+    #11602 head `3226` was `- uses: actions/checkout@v4`, `3227` the `setup-python` step,
+    `3228` its `with:` — the `cache:` input itself was `3230`. So a reader following the
+    citation landed one line ABOVE the offending input and saw no `cache:` key at all, which
+    is exactly the "resolves, but to the wrong construct" shape the window's other citation
     pins exist to prevent (`tests/test_ci_runner_x64_install.py::_WALL_CLOCK_CITATION_ANCHORS`
-    pins `python-ci.yml:3230`, so one construct had two locations in the tree and only one
-    of them was under a pin).
+    pins the same `cache:` line, so one construct had two locations in the tree and only one
+    of them was under a pin). At THIS head that construct is `3239-3242`, and the citation in
+    the comment below was re-cut to `3239-3242` for it — the span was re-derived from the
+    workflow, not shifted by hand.
 
     Three arms, because the sentence makes three claims:
 
@@ -13729,7 +13787,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3227-3230`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3239-3242`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
