@@ -2873,6 +2873,75 @@ def test_every_signal_is_its_shape_without_the_end_anchor():
     assert "do_support" not in signals
 
 
+def test_the_shape_with_no_tail_anchor_states_BOTH_of_its_boundaries():
+    """#14500 review P2 + P3 — the do-support frame's two boundaries, stated.
+
+    `do_support` is the one shape with no tail anchor, so on that frame the module
+    can neither refuse an appended window (P2) nor report one (P3 — a shape with no
+    end anchor yields no derived signal row). Both behaviours predate this PR and
+    anchoring the shape would overturn a pinned SELECTED row, so the remedy the
+    review names is that the boundary is STATED where a caller reads it. This test
+    pins the measurement on both sides, so the prose cannot drift off the code:
+
+      * the frame still ROUTES with the window unapplied — the pinned trade, so a
+        ``_TAIL_END`` slipped onto the shape reds here and has to go through that
+        decision instead of arriving as an unremarked "fix";
+      * a non-`we|i` subject is still SILENT — the residual, named rather than
+        claimed away;
+      * and the SERVED `tortoise_search` description names BOTH frames, each under
+        the heading the recogniser agrees with.
+    """
+    from tortoise.state_intent import ROUTING_NOTE, detect_state_question
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    # P2 — routed, window dropped, no report. (The silence is by construction: a
+    # shape with no end anchor has no prefix to derive a signal from.)
+    for query in ("what did we retire in Q3",
+                  "what did we retire last quarter",
+                  "what did we archive last quarter"):
+        sq = detect_state_question(query)
+        assert sq.shape == "do_support", query
+        assert sq.population is not None, (
+            f"{query!r} no longer routes from the do-support frame, so the "
+            "pinned SELECTED trade (and `ROUTING_NOTE`'s WINDOW row) is stale")
+        assert sq.signal is None, query
+
+    # P3 — neither routed nor reported: the reply is indistinguishable from
+    # "nothing has ended", which is why it is named in the served description.
+    for query in ("what did legal retire", "what did legal retire in Q3"):
+        sq = detect_state_question(query)
+        assert sq.shape is None and sq.signal is None and sq.population is None, (
+            f"{query!r} now answers shape={sq.shape!r} signal={sq.signal!r} — the "
+            "named silent residual changed, so the prose that calls it silent is "
+            "now false and must move with it")
+
+    doc = next(t for t in TOOL_REGISTRY if t.name == "tortoise_search").description
+    assert ROUTING_NOTE in doc
+    routes_head = "ROUTES — answered from the ended population"
+    declines_head = "DOES NOT ROUTE — you get the relevance rows"
+    boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
+    routes = doc[doc.index(routes_head):doc.index(declines_head)]
+    declines = doc[doc.index(declines_head):doc.index(boundary_head)]
+
+    # The window-dropping frame is filed under ROUTES (it does route) and the
+    # caveat is stated, not merely the row named.
+    assert "what did we retire in Q3" in routes, (
+        "the served description does not name the one frame that ROUTES with a "
+        "boundary attached, so a caller cannot predict that the window is dropped")
+    assert "WINDOW is NOT applied" in routes, (
+        "the served description names that frame but not the consequence — it "
+        "must say the window is NOT applied and that each row carries `endedAt`")
+    # …and the silent-subject frame is filed under DOES NOT ROUTE, with its
+    # silence stated (the existing per-phrasing loop in the description test
+    # already checks that every phrasing filed there really does not route).
+    assert "what did legal retire" in declines, (
+        "the served description does not name the do-support frame whose subject "
+        "is not `we|i`, so that silence stays undocumented (#14500 review, P3)")
+    assert "neither routed NOR" in declines, (
+        "the served description names the silent frame without saying it is "
+        "unreported as well, which is the half a caller cannot recover from")
+
+
 def test_the_mcp_description_predicts_which_of_the_six_route():
     """A caller reading ONLY the tool description can predict all six (#14033).
 

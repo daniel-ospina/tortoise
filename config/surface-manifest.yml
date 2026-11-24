@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 6a72cfd661cc64d43c23efdcbf06ee29fcf1b1cc
+cut_at_commit: f3665ea89d58aa346cf2e4c291b8eb65dd693d0e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1625,9 +1625,13 @@ rows:
     (has/have + quantifier + been) `what ended` (the whole question is the ending) `what has ended recently` (a
     RECENCY adverb only: it names no window the read must apply, and every row carries `endedAt`) `is the onboarding
     flow retired?` (yes/no, subject = the record) `list what we retired` (imperative over `what we …`, i.e. a request
-    for a SET) DOES NOT ROUTE — you get the relevance rows, and ONLY the rows change: `which of our withdrawn claims
-    affected pricing` (the ending word MODIFIES `claims`; the question''s own predicate is `affected pricing`, which
-    the population cannot answer) ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH.
+    for a SET) `what did we retire in Q3` (⛔ THIS FRAME CARRIES NO TAIL ANCHOR: it is anchored on `did we <verb>`,
+    so a trailing WINDOW is NOT applied — you get the whole ended population, newest-first, and each row states
+    its own `endedAt`, so read the window off the rows) DOES NOT ROUTE — you get the relevance rows, and ONLY the
+    rows change: `which of our withdrawn claims affected pricing` (the ending word MODIFIES `claims`; the question''s
+    own predicate is `affected pricing`, which the population cannot answer) `what did legal retire` (this frame
+    needs a `we`/`i` subject; with any other subject it is neither routed NOR reported, so an answer here is NOT
+    evidence that nothing has ended) ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH.
     There is no second attempt and no fallback: you get the rows the words match, which may be empty or unrelated,
     and an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the
     ended read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.

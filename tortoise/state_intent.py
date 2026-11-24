@@ -156,6 +156,11 @@ _ENDING_BASE = (
 #: `this week` are NOT members on purpose — they name a window the read cannot
 #: apply, and admitting one would be the silently-dropped-constraint defect this
 #: table's history is mostly about.
+#: ⛔ AND THAT RULE BINDS ONLY THE SHAPES THAT USE THIS TAIL (#14500 review, P2).
+#: `do_support` carries no tail anchor at all, so a window after it is not refused:
+#: `what did we retire in Q3` routes and serves the whole population with the window
+#: unapplied (the pinned SELECTED trade — see the notice-scope paragraph above). That
+#: is a one-shape gap, and it is not a licence to widen this list.
 #: ⛔ THE RULE ADMITS MORE SPELLINGS THAN THE LIST DOES, and that is deliberate: this
 #: is the set of recency adverbs the shape ROUTES on, because a route serves the whole
 #: population and every admission is a decision. The boundary-free adverbs it does not
@@ -297,9 +302,25 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:   review, P1): it asks what we do, not which records ended.
 #: * "have any claims been retracted in Q3" / "has anything been withdrawn by
 #:   legal" / "which claims were retracted by legal" — an appended CONSTRAINT,
-#:   refused by every shape's tail anchor so the caller keeps the relevance read
-#:   instead of having the narrowing dropped. These are the rows the missed-cue
-#:   notice exists for: each one IS a state question, and none of them routes.
+#:   refused by the tail anchor of every shape that HAS one, so the caller keeps
+#:   the relevance read instead of having the narrowing dropped. These are the rows
+#:   the missed-cue notice exists for: each one IS a state question, and none of
+#:   them routes. ⛔ ONE SHAPE HAS NO TAIL ANCHOR TO REFUSE A CONSTRAINT WITH, and it
+#:   is named here because this paragraph used to claim otherwise (#14500 review,
+#:   P2, measured): `do_support` is prefix-anchored on `did we|i <verb>`, so
+#:   `what did we retire in Q3` and `what did we archive last quarter` ROUTE and are
+#:   served the WHOLE ended population with the window unapplied — every returned row
+#:   carries its own `endedAt`, and the trade is deliberately pinned as a SELECTED
+#:   row (`what did we archive last quarter`, with its identity assertion, in
+#:   `tests/test_13557_13558_reachable_reads.py`). The served `ROUTING_NOTE` names
+#:   the same frame, so a caller reading only the tool description can predict it.
+#:   ⛔ AND THE SAME SHAPE IS SILENT FOR A SUBJECT THAT IS NOT `we|i` (#14500 review,
+#:   P3, measured): `what did legal retire` and `what did legal retire in Q3` answer
+#:   ``shape=None, signal=None`` — neither a route nor a notice — so that reply is
+#:   indistinguishable from the claim "nothing has ended". Routing it is a RECALL
+#:   decision (a wider subject class on the shape), not a documentation one, so it is
+#:   a residual NAMED here and in `ROUTING_NOTE` rather than one taken inside a
+#:   reconciliation.
 #:
 #: ⛔ AND A STRONG CUE THAT DOES NOT FIRE IS NOT SILENT (#14033). The precision
 #: rules above are what keep a content question out of the population, and the
@@ -1969,6 +1990,14 @@ wording. Of the phrasings this read is asked about:
     `is the onboarding flow retired?`            (yes/no, subject = the record)
     `list what we retired`                       (imperative over `what we …`,
                                                   i.e. a request for a SET)
+    `what did we retire in Q3`                   (⛔ THIS FRAME CARRIES NO TAIL
+                                                  ANCHOR: it is anchored on
+                                                  `did we <verb>`, so a trailing
+                                                  WINDOW is NOT applied — you get
+                                                  the whole ended population,
+                                                  newest-first, and each row
+                                                  states its own `endedAt`, so
+                                                  read the window off the rows)
   DOES NOT ROUTE — you get the relevance rows, and ONLY the rows change:
     `which of our withdrawn claims affected pricing`
                                                  (the ending word MODIFIES
@@ -1976,6 +2005,12 @@ wording. Of the phrasings this read is asked about:
                                                   predicate is `affected
                                                   pricing`, which the
                                                   population cannot answer)
+    `what did legal retire`                      (this frame needs a `we`/`i`
+                                                  subject; with any other subject
+                                                  it is neither routed NOR
+                                                  reported, so an answer here is
+                                                  NOT evidence that nothing has
+                                                  ended)
 
 ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL
 SEARCH. There is no second attempt and no fallback: you get the rows the words
