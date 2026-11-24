@@ -112,15 +112,10 @@ version: 1
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
-# is why `main` alone emits this same split. A restatement
-# here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
-# reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
-# `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
-# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
-# SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 825.1 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
-# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# is why `main` alone emits this same split. ⛔ A restatement here would be graded as a second claim;
+# the WHY — that the split is 0.1 s wide, that the NAME SETS are what move rather than the minute,
+# and that only the `est_seconds` partition can catch a carried figure — is stated ONCE, in the
+# "ONE CLAUSE" paragraph below. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
@@ -129,14 +124,14 @@ version: 1
 # `tests/test_13998_capacity_notice.py` among them), and the pool matters only because it sits one
 # landing away from rounding the minute up again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
-# `test_notify`), and that registration is part of the partition stated above — the minute did not
-# move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
+# `test_notify`), and that registration is part of the partition stated above. ⛔ #13722's
 # `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is a registration that MOVED the
 # NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
 # its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
 # at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
 # was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
 # six/five graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
+# at 28 m. ⛔ Stated at the sha it
 # was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
 # rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
