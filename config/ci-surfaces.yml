@@ -127,7 +127,7 @@ version: 1
 # (`--integrity` is a 0.90 ratio check and stays green over an absent row), which is the
 # #3400/#4348 trap stated as if it had been avoided. EVERY one of them re-partitions every bin,
 # which is why the split is quoted and not only the worst figure — and why the minute, which has NOT
-# moved (28 m at every reading from 825.1 s to 838.2 s), could never be the operand that catches a
+# moved (28 m at every reading from 825.1 s to 838.6 s), could never be the operand that catches a
 # carried one.
 # The direction of the readings, as history (the 23 m / 24 m / 25 m chain is the S=11 rationale
 # above, not restated here): the 2026-11-23 sweep took the worst-shard watchdog to the 28 m stated
