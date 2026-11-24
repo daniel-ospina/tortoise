@@ -6523,6 +6523,28 @@ def tortoise_status() -> dict:
     return _safe(_get_org_sdk().graph_overview, "status")
 
 
+#: #13526: the truncation bound and marker, DUPLICATED here on purpose.
+#:
+#: ``quota.bounded_reason`` is the one implementation and it is used everywhere
+#: else on this surface. This copy exists for exactly one arm — the hand-built
+#: fallback below, whose whole reason for existing is that ``tortoise.quota``
+#: could not be imported. A fallback that imports its own helper fails with the
+#: module it is standing in for, so the bound is spelled here as well; the test
+#: `test_the_health_block_fallback_arm_carries_the_same_keys` keeps the two in
+#: step, and the defect this bound removes is the unmarked one — an exception's
+#: text cut mid-number with nothing saying anything had been removed.
+_QUOTA_FALLBACK_REASON_MAX = 2000
+_QUOTA_FALLBACK_REASON_MARK = " …[truncated]"
+
+
+def _fallback_reason(exc: BaseException) -> str:
+    """``type: message``, bounded — and MARKED when it has to be cut."""
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) <= _QUOTA_FALLBACK_REASON_MAX:
+        return text
+    return text[:_QUOTA_FALLBACK_REASON_MAX].rstrip() + _QUOTA_FALLBACK_REASON_MARK
+
+
 def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
     """The ``health.quota`` block: the ENFORCED boundary, from the gate's numbers.
 
@@ -6544,11 +6566,25 @@ def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
     carry itself raises, the write gate refuses in that state, so the block says
     ``closed`` and names it rather than shrugging.
 
-    The ruled-dimension *dimensions* are still not modelled (graph MB / Postgres
-    bytes / extraction tokens have their own meters; this block reports the
-    ``points`` node cap) — but their REFUSAL is honoured, because it refuses the
-    same writes. Only the ``points`` resource is modelled: that is the one #11892
-    measured.
+    The ruled dimensions are still not MEASURED here — graph MB / Postgres
+    bytes / extraction tokens each have their own meter, and this block takes no
+    reading of its own; it reports the ``points`` node cap. Their REFUSAL is
+    honoured, because it refuses the same writes, and (below, #13526) the
+    figures the gate compared are reported with it. Only the ``points`` resource
+    is COUNTED: that is the one #11892 measured.
+
+    #13526: when the refusal comes from a RULED DIMENSION, the block now carries
+    that dimension's own facts as fields — ``dimension``, ``dimension_used``,
+    ``dimension_limit``, ``dimension_unit``, ``dimension_estimated`` — instead
+    of only a slice of prose. The gate's ``QuotaExceededError`` already held
+    them (the values it COMPARED, #4614) and this report used to flatten them
+    back into a 160-character string, which on the deployed graph published
+    ``points_used: null`` and a threshold of ``"The hard stop is 15"`` — an
+    order of magnitude under the real 153 MB — to every lane the write mandate
+    tells to read this block first. ``resource``/``points_*`` keep their
+    meaning: the resource ASKED ABOUT and its count, which a refusal may never
+    reach. The five keys are present on every state, ``None`` when no dimension
+    refused, so a consumer never has to infer the arm from the prose.
 
     Never raises and never degrades ``status``: a closed or unmeasurable quota is
     REPORTED, not folded into ``status``. Folding it in would pin a healthy
@@ -6574,6 +6610,7 @@ def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
         # what failed.
         from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
         from tortoise.quota import (
+            bounded_reason,
             count_resource_now,
             org_quota_state,
             quota_state_refused,
@@ -6615,8 +6652,8 @@ def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
                 return quota_state_refused(
                     "points",
                     f"the limits could not be resolved/carried for this request "
-                    f"({type(exc).__name__}: {str(exc)[:160]}), and the write "
-                    f"gate refuses in that state")
+                    f"({type(exc).__name__}: {bounded_reason(str(exc))}), and "
+                    f"the write gate refuses in that state")
             # ⛔ INLINE count: we are ALREADY on the single-slot worker, so a
             # nested submit would queue behind our own call and deadlock.
             return org_quota_state(limits, "points", sdk=sdk,
@@ -6626,10 +6663,17 @@ def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
         # Same shape as every other unmeasurable arm: `unknown` + None values +
         # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.
+        # ⛔ The ruled-dimension keys are present here too (#13526), as the honest
+        # ``None``: they are spelled LITERALLY rather than imported because this
+        # arm exists precisely for the case where ``tortoise.quota`` could not be
+        # imported — a fallback that imports its own helper fails with the module
+        # it is standing in for.
         return {"resource": "points", "state": "unknown", "points_used": None,
                 "points_limit": None, "points_remaining": None,
-                "error": f"quota state unavailable: {type(exc).__name__}: "
-                         f"{str(exc)[:160]}"}
+                "dimension": None, "dimension_used": None,
+                "dimension_limit": None, "dimension_unit": None,
+                "dimension_estimated": None,
+                "error": f"quota state unavailable: {_fallback_reason(exc)}"}
 
 
 def tortoise_health() -> dict:
