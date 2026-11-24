@@ -318,8 +318,8 @@ def _residue_block() -> str:
     moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
     gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
     on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
-    — and #14530's own record of `main`'s EARLIER red — `59a08fdb`, the rev #14480 integrated,
-    publishing `(11910, "adc8229295339239")` while its OWN TREE measures `(11911, "4ed42694957a174d")`
+    — and #14530's own record of `main`'s EARLIER red — `07a483ab38c76`, the rev #14480's merge
+    landed ON, publishing `(11910, "adc8229295339239")` while its OWN TREE measures `(11911, "4ed42694957a174d")`
     — plus its correction of the `#14480` note above, which had published the BRANCH head's pair as
     the MERGE tree's (`2cccf90f4dd4` commits `(11911, ...)` while that tree derives `(11912, ...)`),
     appended `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this
@@ -448,13 +448,6 @@ _ARM_REFSPECS: dict[str, str] = {
     "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/pi/5e83c2a2f6",
     "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f1",
     "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/pi/efe5605e976a",
-    # ⛔ `main`'s own red (#14530, P3), the same class as the rest: a rev whose own COMMITTED pin
-    # the block now publishes, so it needs an address to be graded rather than trusted. It is an
-    # ancestor of `main`, served by full SHA; `refs/pi/*` per the prune rule above.
-    "59a08fdb": "+59a08fdb8b4094c1b0394d4191804797facce47b:refs/pi/59a08fdb",
-    # ⛔ AND THE MERGE THAT MADE `main` RED — the rev this whole PR is named after. Ancestor of
-    # `main`, served by full SHA; `refs/pi/*` per the prune rule above.
-    "2cccf90f4dd4": "+2cccf90f4dd4262b20e4dfeec3339204611702b8:refs/pi/2cccf90f4dd4",
     #
     # ⛔ AND #14258's TWO, FROM THE OTHER SIDE OF THIS MERGE. They are kept alongside the
     # three above rather than replacing them: all five are an `OWN_PINS` key on the MERGED
@@ -521,6 +514,15 @@ _ARM_REFSPECS: dict[str, str] = {
     # `fatal: remote error: upload-pack: not our ref` (the negative control that makes the first
     # line evidence rather than a coincidence). This map grades the FORM of the remedy; the
     # want-ability behind it is what that pair of commands measures.
+    # ⛔ #14530's TWO — the `main` revs whose own census pair this block grades. Both are ANCESTORS of
+    # `origin/main`, so an advertised ref carries them; the full-sha want is kept for the same reason
+    # as their neighbours — it does not depend on how deep the clone checked out.
+    #   * `07a483ab38c76` is the rev #14480's merge LANDED ON. It COMMITS `(11910, ...)` while its tree
+    #     measures `(11911, ...)`, so that red was INHERITED by the merge, not created by it.
+    #   * `2cccf90f4dd4` is that merge itself, which COMMITS `(11911, ...)` and whose tree measures
+    #     `11912` — the red it kept, one row further up.
+    "07a483ab38c76": "+07a483ab38c7636a1aed0ba1ac7bece729c9e5ef:refs/pi/07a483ab38c76",
+    "2cccf90f4dd4": "+2cccf90f4dd4262b20e4dfeec3339204611702b8:refs/pi/2cccf90f4dd4",
 }
 
 
@@ -2215,15 +2217,15 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # graded once. Measured: `(11835, "891187f5a4636487")` and `(11843, "6aed5368ffa10513")`.
     "8889f1140105": (11835, "891187f5a4636487"),
     "27cd81d55ebd": (11843, "6aed5368ffa10513"),
-    # ⛔ `main`'s OWN RED, WHICH PREDATES THE MERGE THIS BRANCH WAS OPENED AGAINST (#14530, P3).
-    # `59a08fdb` is the `main` #14480 integrated; it COMMITS `(11910, "adc8229295339239")` while
-    # its TREE measures `(11911, "4ed42694957a174d")` — measured by RUNNING `--repin` on a pristine
-    # worktree at that rev, not by arithmetic. So that rev's own `surface-guard` was ALREADY red, and
-    # #14480 inherited the red rather than creating it. No probe reaches this rev otherwise (it is
-    # not a published `--repin` output), so it is recorded here to make the prose address GRADED
-    # rather than trusted; the premise arm re-derives it from the object.
-    "59a08fdb": (11910, "adc8229295339239"),
-    # ⛔ THE MERGE THAT ACTUALLY MADE `main` RED (#14530). #14480's merge commit COMMITS
+    # ⛔ `main`'s OWN RED, WHICH #14480 INHERITED RATHER THAN CREATED (#14530, P3).
+    # `07a483ab38c76` is the rev #14480's merge LANDED ON; it COMMITS `(11910, "adc8229295339239")`
+    # while its TREE measures `(11911, "4ed42694957a174d")` — measured by RUNNING `--repin` on a
+    # pristine worktree at that rev, not by arithmetic. So "#14480 made main red" is the wrong
+    # reading and the record has to say so: the merge KEPT a red main red. No probe reaches this rev
+    # otherwise (it is not a published `--repin` output), so it is recorded here to make the prose
+    # address GRADED rather than trusted; the premise arm re-derives it from the object.
+    "07a483ab38c76": (11910, "adc8229295339239"),
+    # ⛔ THE MERGE THAT KEPT `main` RED (#14530). #14480's merge commit COMMITS
     # `(11911, "3e92044bab08cc3d")` — the pair its own branch head derived — while the MERGE TREE it
     # produced derives `(11912, "73827c80583e139f")`, measured by RUNNING `--repin` on a pristine
     # worktree at that rev. This is the `address that resolves to a different tree` shape the pin
