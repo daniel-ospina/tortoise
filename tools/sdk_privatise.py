@@ -1518,9 +1518,10 @@ SWEEP_NAMES = 66
 #: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
 #: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
 #: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
-#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the
-#: pin, which it reports just as readily on a tree whose pin was re-cut after the integration
-#: added rows.
+#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: under the equality gate this record was written
+#: against, `--check` exiting 0 meant the observed pair equalled the pin — and it said so just as
+#: readily on a tree whose pin was re-cut after the integration added rows. Since #14548 it says
+#: less still: the COUNT did not EXCEED a base point, and the pin is not consulted at all.
 #: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
 #: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
 #: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).

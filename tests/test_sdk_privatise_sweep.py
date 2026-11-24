@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2068 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2069 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -2921,6 +2921,30 @@ def test_the_reported_line_is_singled_out_only_when_the_baseline_can_explain_it(
     assert "shifted" in text, f"the report must admit it cannot single the line out: {text}"
     assert "line 10" in text and "line 21" in text, (
         f"every site is printed, so the added one IS among them: {text}")
+
+
+def test_the_site_subtraction_is_a_MULTISET_not_a_set():
+    """⛔ THE OTHER half of the shift rationale: TWO receivers on ONE line are TWO rows.
+
+    The review of #14548 (P3) noted that the docstring's multiset claim was graded by nothing: a
+    plain `set(have) - set(had)` gives the SAME answer on every other fixture, because they all
+    carry one receiver per line. It differs exactly here — `have=[10, 10]`, `had=[10]` is a real
+    +1 whose set difference is EMPTY, so the one line an added receiver sits on would be reported
+    as `site not located`.
+
+    Mutation: `fresh = sorted(Counter(have) - Counter(had))` -> `sorted(set(have) - set(had))` —
+    this arm REDs (the line vanishes and a `shifted` caveat appears); no other arm distinguishes
+    them.
+    """
+    flat = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": Counter({"reg.update": 1})},
+        {"f.py": {"reg.update": [10, 10]}},
+        baseline_sites={"f.py": {"reg.update": [10]}},
+    )
+    assert flat == ["f.py  (baseline 1 -> now 2): line 10"], (
+        f"two receivers on one line is a +1, and the line IS locatable: {flat}")
 
 
 def test_an_untouched_carrier_file_is_not_blamed_for_growth():
