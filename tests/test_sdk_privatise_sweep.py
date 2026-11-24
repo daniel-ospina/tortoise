@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2032 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2035 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -358,9 +358,16 @@ def _residue_block() -> str:
     — and THIS PR'S OWN TEST CUT THEN MOVED THE PAIR DOWN, 11910 -> `11903`, on a tree that is
     neither of the fold's parents: `tests/test_dod_5090_probe.py` loses 270 cases, and that file's
     own residue rows go 8 -> 1 (`edits_for` on each side, not differenced from the two pins), so
-    the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
+    the movement is `-7` and the figure was RE-MEASURED at 2032 rather than carried from the
     fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
-    the extent moved with the pair here instead of only with a merge,
+    the extent moved with the pair here instead of only with a merge, — and the `#14415` RE-CUT's
+    own re-pin note (`SWEEP_RESIDUE` `11903` -> `11913`, three `#:` lines appended to
+    `tools/sdk_privatise.py` because the batch-ingest surface adds 10 untyped residues) took the
+    run to 2035, RE-MEASURED by this function's walk on THIS tree rather than inherited from the
+    fold's 2032 reading, which is the figure above. ⛔ `--check` could NOT have caught that one: it
+    grades the `(count, digest)` PAIR, and the pair was correctly re-pinned while this extent
+    sentence was carried — which is the whole reason the extent is GRADED by the arm below rather
+    than left as advice,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
