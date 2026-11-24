@@ -167,7 +167,7 @@ Tortoise ships as **two distributions** — the MongoDB-driver model: the engine
 # `tortoise-client` is not on PyPI yet (pypi.org/pypi/tortoise-client → 404), and it
 # cannot be pip-installed straight from the repo: the driver's shared modules are
 # staged at build time, so `pip install ...#subdirectory=client` yields a package
-# that fails on `import tortoise.mcp_client`. Build the wheel, then install it —
+# that is missing its own `tortoise.mcp_client` module. Build the wheel, then install it —
 # in its OWN venv, never the one holding `tortoise-graph` (they share a `tortoise` package):
 python3 -m venv ~/.venv-tortoise-client && source ~/.venv-tortoise-client/bin/activate
 git clone https://github.com/daniel-ospina/tortoise.git ~/tortoise-client-src   # build tree, outside any repo
