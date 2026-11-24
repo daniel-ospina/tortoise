@@ -400,7 +400,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     * `parses` counts `_declared_types_for_dir` — THE parse — and is the assertion
       that matters: one per plan build, never one per bound parameter (the
       regressed shape measured ~180 for this plan);
-    * `reads` counts `_read_migrations` as a cross-check on the column map, which
+    * `reads` counts `_read_migrations_state` as a cross-check on the column map, which
       is now memoised per TREE (`_entry_sql`), so a cleared-cache build reads once
       and a warm one reads zero.
 
@@ -412,7 +412,10 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
 
     reads: list[int] = []
     parses: list[int] = []
-    real_reads = rp._read_migrations
+    # ⛔ `_read_migrations_state` is the seam `_entry_sql_state` calls (#4625); it
+    # returns `(sql, complete)`. `_read_migrations` is a `[0]` wrapper over it, so
+    # patching that would count nothing.
+    real_reads = rp._read_migrations_state
     real_parse = rp._declared_types_for_dir
 
     def _counting_reads(migrations_dir=None):
@@ -423,7 +426,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
         parses.append(1)
         return real_parse(migrations_dir)
 
-    monkeypatch.setattr(rp, "_read_migrations", _counting_reads)
+    monkeypatch.setattr(rp, "_read_migrations_state", _counting_reads)
     monkeypatch.setattr(rp, "_declared_types_for_dir", _counting_parse)
     rp._jsonb_cache_clear()
     rp._release_schema_cache()

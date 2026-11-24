@@ -2014,12 +2014,35 @@ def _migrations_dir() -> Path:
 
 
 def _read_migrations(migrations_dir: Path | None = None) -> str:
+    """The concatenated SQL only — `_read_migrations_state` carries the completeness."""
+    return _read_migrations_state(migrations_dir)[0]
+
+
+def _read_migrations_state(
+        migrations_dir: Path | None = None) -> tuple[str, bool]:
+    """The concatenated SQL, and whether EVERY registered migration was read.
+
+    ⛔ THE COMPLETENESS IS DECIDED BY THE SAME `exists()` THAT DECIDES WHETHER TO
+    READ (#4625 review, F1a). A separate `_complete()` call AFTER the read is a
+    check of a LATER instant than the read it certifies: one file appearing in
+    between makes it return True for a join that is still short. Measured on that
+    shape: nineteen files read, the twentieth copied in mid-call, `_complete()`
+    True — and the nineteen-file join was memoised as the process's schema,
+    freezing a column map missing that migration's columns with no error and no
+    production caller of the refresh verb (the row-drop class #9548 exists to
+    end). Deciding it here, per file, from the stat the read already performs,
+    costs nothing extra and cannot disagree with the bytes returned.
+    """
     base = migrations_dir or _migrations_dir()
-    return "\n".join(
-        (base / name).read_text(encoding="utf-8")
-        for name in RECORD_MIGRATIONS
-        if (base / name).exists()
-    )
+    parts: list[str] = []
+    complete = True
+    for name in RECORD_MIGRATIONS:
+        path = base / name
+        if not path.exists():
+            complete = False
+            continue
+        parts.append(path.read_text(encoding="utf-8"))
+    return "\n".join(parts), complete
 
 
 #: How many distinct migration fingerprints the parsed-schema cache holds.
@@ -2086,17 +2109,27 @@ def _resident_entry() -> dict[str, Any]:
     by the NEXT resolution, i.e. after :func:`_release_schema_cache`.
 
     ⚠️ AN ABSENT-OR-INCOMPLETE SCHEMA DOES SELF-HEAL HERE, and the cost of that
-    is bounded. `_entry_sql` memoises a read only when `_complete()` confirms
-    every registered migration was present, so neither a total absence nor a
-    PARTIALLY-present tree is frozen — a partial tree is the silent shape
-    (`_read_migrations` SKIPS absent files, so the join is non-empty and simply
-    short), and freezing it would hand the record write a column map missing the
-    absent migration's columns, the row-drop class #9548 exists to end. An
-    absence→appear (or incomplete→complete) transition on the resident path is
-    therefore seen by the very next consult — the same self-heal the pre-#4625
-    code had, kept because the alternative is a permanent, self-inflicted
-    `RecordProjectionError` (or a silently short map) on the record write path
-    with no production caller for the refresh verb to cure it (#4625 review).
+    is bounded. `_entry_sql_state` memoises a read only when every registered
+    migration was actually read, so neither a total absence nor a
+    PARTIALLY-present tree is frozen — a partial tree is the silent shape (the
+    read SKIPS absent files, so the join is non-empty and simply short), and
+    freezing it would hand the record write a column map missing the absent
+    migration's columns, the row-drop class #9548 exists to end. An
+    absence→appear (or incomplete→complete) transition **within the directory this
+    entry resolved** is therefore seen by the very next consult, kept because the
+    alternative is a permanent, self-inflicted `RecordProjectionError` (or a
+    silently short map) on the record write path with no production caller for the
+    refresh verb to cure it (#4625 review).
+    ⛔ STATED NO WIDER THAN THE CODE: the DIRECTORY is bound once, at the first
+    consult (`_migrations_dir()` below), so this is NOT the pre-#4625 self-heal in
+    full — that re-resolved the directory per consult. A process whose first
+    consult found NEITHER location complete is bound to the repo path until a
+    refresh, so a packaged copy that becomes complete later is not picked up (and
+    the process keeps re-reading per consult while the repo tree stays incomplete).
+    No production shape is known to reach it — both resolver candidates are
+    rebuilt/installed before a process consults them — and it is disclosed rather
+    than closed because closing it means a per-consult resolver probe, which is the
+    `stat` pass #4625 exists to remove.
     While the tree is not complete the process pays one read per consult, on a
     path that is already raising or degraded; once a COMPLETE set is readable the
     parse is memoised and the zero-filesystem-operations property holds from then
@@ -2163,7 +2196,9 @@ def _migrations_fingerprint(base: Path) -> tuple:
     rejected — with the arithmetic quoted from the SAME measurement, because an
     earlier revision of this docstring compared the digest against one pass
     instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`),
-    blake2b over the same fifteen files (129,355 bytes) is 0.543–0.592 ms
+    blake2b over the same files is 0.543–0.592 ms (measured over the FIFTEEN
+    registered at the #9558 head, 129,355 bytes; `RECORD_MIGRATIONS` is twenty at
+    this head, so both sides of the comparison scale with the population)
     (`fingerprint-cost.json` — min and mean, the same convention as the pass's
     0.160–0.169), and the cached read it
     would guard saves ~1.2 ms PER CONSULT (uncached `table_columns()` 1.546–1.588
@@ -2262,39 +2297,47 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
         return entry
 
 
-def _entry_sql(entry: dict[str, Any]) -> str:
-    """The concatenated migration SQL for `entry`, read at most once per file set.
+def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
+    """The concatenated migration SQL for `entry`, and whether it is COMPLETE.
 
-    ⛔ ONLY A COMPLETE READ IS MEMOISED (#4625 review, gate on `_complete`).
-    `_read_migrations` returns `""` when no registered migration is readable AND
-    silently SKIPS every absent one (`if (base / name).exists()`), so the read is
-    lossy in two directions: total absence yields `""`, and a tree that is
-    PARTIALLY present yields a non-empty join of only the files that happened to
-    be there. An entry that memoised either would freeze it for the life of the
-    process — every later `table_columns()` raising without touching the disk
-    (total absence), or answering a map that is silently short of the migrations
-    that were missing on the first consult (partial), which is the row-drop class
-    #9548 exists to end. The only cure would be `_release_schema_cache()`, which
-    has no production caller, and pre-#4625 the next consult healed because the
-    entry was keyed on a fingerprint that MOVED. So the memo is taken only when
-    `_complete(entry["base"])` — every registered migration present — and while
-    it is not, the process pays one read per consult on a path that is already
-    failing or degraded. The healthy path is untouched: a first read that finds a
-    complete tree still memoises, so a warm process keeps its
-    zero-filesystem-operations property.
+    ⛔ ONLY A COMPLETE READ IS MEMOISED, AND "COMPLETE" IS A PROPERTY OF THIS
+    CALL'S OWN READ (#4625 review, F1). `_read_migrations_state` skips every
+    absent file, so the read is lossy in two directions: total absence yields
+    `""`, and a tree that is PARTIALLY present yields a non-empty join of only the
+    files that happened to be there. An entry that memoised either would freeze it
+    for the life of the process — every later `table_columns()` raising without
+    touching the disk (total absence), or answering a map silently short of the
+    migrations that were missing (partial), which is the row-drop class #9548
+    exists to end. The only cure would be `_release_schema_cache()`, which has no
+    production caller, and pre-#4625 the next consult healed because the entry was
+    keyed on a fingerprint that MOVED.
 
+    ⛔ THE RETURNED FLAG IS THIS CALL'S, NOT THE ENTRY'S — so a reader that gates
+    on it cannot memoise an answer derived from a read ANOTHER thread has since
+    completed (measured: thread B memoising a complete read between A's read and
+    A's memo made `entry["sql"] is not None` true, and A's SHORT map was stored
+    under it — the losing race stored the wrong answer, which the entry's own
+    idempotence argument at `_schema_entry` does not cover). A reader that gates
+    on the flag stores only what its own local read certified.
+
+    The healthy path is untouched: a first read that finds a complete tree still
+    memoises, so a warm process keeps its zero-filesystem-operations property.
     The explicit-directory mode is unaffected in the direction that matters: its
-    entry is keyed on the migration fingerprint (`_schema_entry`), so the
-    absence→appear transition is a cache MISS there whether or not this is
-    memoised — and `_complete` there is a cheap re-confirmation of what the key
-    already answered.
+    entry is keyed on the migration fingerprint (`_schema_entry`), so an
+    edit/addition/removal is a cache MISS there whether or not this is memoised.
     """
     sql = entry["sql"]
-    if sql is None:
-        sql = _read_migrations(entry["base"])
-        if sql and _complete(entry["base"]):
-            entry["sql"] = sql
-    return sql
+    if sql is not None:
+        return sql, True
+    sql, complete = _read_migrations_state(entry["base"])
+    if complete:
+        entry["sql"] = sql
+    return sql, complete
+
+
+def _entry_sql(entry: dict[str, Any]) -> str:
+    """The SQL only; use :func:`_entry_sql_state` when the completeness decides a memo."""
+    return _entry_sql_state(entry)[0]
 
 
 def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
@@ -2856,18 +2899,27 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     entry = _resident_entry()
     names = entry["parsed"].get("jsonb_columns")
     if names is None:
+        _sql, complete = _entry_sql_state(entry)
         names = _jsonb_columns_for_dir(entry["base"])
-        # ⛔ MEMOISE ONLY A COMPLETE READ (#4625 review, the same rule as
-        # `_entry_sql` and `refused_props_names`). `_jsonb_columns_for_dir` fails
-        # CLOSED on a tree with no record table at all, but it cannot see a tree
-        # that is merely MISSING one migration — that yields a shorter, plausible
-        # name set (a `jsonb` column added by a forward migration would be read
-        # as a scalar and JSON-quoted, or vice versa: silent corruption, no
-        # error). Memoising it would freeze that for the life of the process, so
-        # the memo waits for `_complete`, which costs twenty `exists()` on this
-        # already-degraded path and NOTHING on the healthy one — a warm process
-        # never reaches here.
-        if _complete(entry["base"]):
+        # ⛔ MEMOISE ONLY WHEN THIS CALL'S OWN READ WAS COMPLETE (#4625 review,
+        # the same rule as `table_columns` and `refused_props_names`).
+        # `_jsonb_columns_for_dir` fails CLOSED on a tree with no record table at
+        # all, but it cannot see a tree that is merely MISSING one migration —
+        # that yields a shorter, plausible name set (a `jsonb` column added by a
+        # forward migration would be read as a scalar and JSON-quoted, or a
+        # narrowed one as a container: silent corruption, no error). Memoising it
+        # would freeze that for the life of the process. Gating on
+        # `_entry_sql_state`'s flag costs NOTHING on the healthy path — on a warm
+        # process `entry["sql"]` is already memoised, so the state call is a dict
+        # read, and this block is never reached at all.
+        # ⚠️ Residual, stated: the jsonb parse performs its OWN reads
+        # (`_declared_types_for_dir`), so a migration REMOVED between the
+        # certification above and that parse can still yield a short name set.
+        # That direction is a shrink nobody has measured a production path for,
+        # and closing it needs a parser over the certified SQL rather than a
+        # second reader over the directory; the growth direction — the one #4625
+        # measured — is closed here.
+        if complete:
             entry["parsed"]["jsonb_columns"] = names
     return names
 
@@ -2896,8 +2948,10 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
     diverge from the live schema silently. Refreshing an explicit tree costs one
-    stat pass (0.160–0.169 ms of pure `stat` for the fifteen registered files;
-    the whole cached call, which also copies the map, measures 0.460–0.583 ms)
+    stat pass (0.160–0.169 ms of pure `stat`, measured over the FIFTEEN files
+    registered at the #9558 head — `RECORD_MIGRATIONS` is twenty at this head, so
+    the pass scales with the population; the whole cached call, which also copies
+    the map, measures 0.460–0.583 ms at that population)
     versus the read+parse+regex 1.582–1.651 ms it replaces. For the resident
     schema the refresh is a VERB (`_release_schema_cache()`), not a per-batch
     `stat`: #4625 measured that even the cheap pass runs on the serving thread.
@@ -2911,7 +2965,7 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     cached = entry["parsed"].get("table_columns")
     if cached is not None:
         return dict(cached)
-    sql = _entry_sql(entry)
+    sql, complete = _entry_sql_state(entry)
     tables = _parse_record_tables(sql)
     for table, added in _parse_added_columns(sql).items():
         if table in tables:
@@ -2936,14 +2990,14 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             f"{PACKAGED_MIGRATIONS} (installed package — a wheel ships the "
             "record's migrations there)."
         )
-    # ⛔ THE SAME RULE AS `_entry_sql` AND `refused_props_names` (#4625 review):
-    # `entry["sql"] is not None` means a COMPLETE read was memoised, so the map
-    # parsed from it is final. On a part-read tree the sql is re-read per consult
-    # and so must this map be — memoising a SHORT column map is invisible (every
-    # record table is present, so the `missing` guard above cannot fire) and it
-    # would let the record write a row without the absent migration's columns,
-    # which is the row-drop class `#9548` exists to end.
-    if entry["sql"] is not None:
+    # ⛔ THE SAME RULE AS `_entry_sql_STATE` (#4625 review): `complete` is THIS
+    # call's own read, so a map parsed from a SHORT read is never stored — not
+    # even when another thread has since memoised a complete read onto the same
+    # entry. Memoising a short column map is invisible (every record table is
+    # present, so the `missing` guard above cannot fire) and it would let the
+    # record write a row without the absent migration's columns, which is the
+    # row-drop class `#9548` exists to end.
+    if complete:
         entry["parsed"]["table_columns"] = tables
     return dict(tables)
 
@@ -3024,7 +3078,7 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     cached = entry["parsed"].get("refused_props_names")
     if cached is not None:
         return dict(cached)
-    sql = _entry_sql(entry)
+    sql, complete = _entry_sql_state(entry)
     out: dict[str, frozenset[str]] = {}
     # Bound each table to ITS OWN `CREATE TABLE … );` body (`_TABLE_RE`, the
     # same regex `table_columns` uses). Splitting on the CREATE headers alone
@@ -3047,24 +3101,25 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
             continue
         extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
         out[table] = out[table] | extra
-    # ⛔ THE MEMO IS TAKEN ONLY WHEN THE READ BEHIND IT WAS COMPLETE (#4625
-    # review, F1). `_entry_sql` refuses to store an ABSENT or PARTIALLY-PRESENT
-    # read, but the answer derived FROM that read would store just as
-    # permanently: `cached` at the top is tested with `is not None`, so an empty
-    # (or SHORT) map memoised on the unfinished path is returned FOREVER without
-    # consulting `_entry_sql` again — the §17.5 carve-out this function IS would
-    # be silently disabled for the life of the process (refused names land in the
+    # ⛔ THE MEMO IS TAKEN ONLY WHEN THIS CALL'S OWN READ WAS COMPLETE (#4625
+    # review, F1). `_entry_sql_state` refuses to store an ABSENT or
+    # PARTIALLY-PRESENT read, but the answer derived FROM that read would store
+    # just as permanently: `cached` at the top is tested with `is not None`, so an
+    # empty (or SHORT) map memoised on the unfinished path is returned FOREVER
+    # without reading again — the §17.5 carve-out this function IS would be
+    # silently disabled for the life of the process (refused names land in the
     # `props` tail, and `chk_*_props_no_derived` then rejects the row), cured only
     # by `_release_schema_cache()`, which has no production caller. Measured at
-    # the review head: with `_migrations_dir()` pointed at an empty tree,
+    # an earlier head: with `_migrations_dir()` pointed at an empty tree,
     # `refused_props_names()` returned `{}` and still returned `{}` after every
     # migration file was copied in, while `table_columns()` healed — it RAISES
     # before its memo, and that asymmetry is what made this invisible.
-    # `entry["sql"] is not None` is exactly "a COMPLETE read has been memoised",
-    # so it is the condition this memo needs; a schema that is present and
-    # genuinely refuses nothing still memoises normally. (`if sql:` alone would
-    # also let a PARTIAL read's short map through — the same class one layer down.)
-    if entry["sql"] is None:
+    # ⛔ `complete` is the LOCAL flag, not `entry["sql"] is not None`: the latter
+    # can be true because ANOTHER thread memoised a complete read after this
+    # call's short one (measured), which would store this call's short map under
+    # it. A schema that is present and genuinely refuses nothing still memoises
+    # normally.
+    if not complete:
         return dict(out)
     entry["parsed"]["refused_props_names"] = out
     return dict(out)

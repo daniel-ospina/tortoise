@@ -323,14 +323,19 @@ def test_the_second_reader_parses_once_for_an_unchanged_schema(
     tree = _tree(tmp_path)
     parses = {"n": 0}
     reads = {"n": 0}
-    real_read = rp._read_migrations
+    # ⛔ THE READ SEAM IS `_read_migrations_state` (#4625): it returns
+    # `(sql, complete)` so a reader can gate its own memo on the completeness of
+    # the read it just made, and it is the function `_entry_sql_state` calls.
+    # `_read_migrations` is now a thin `[0]` wrapper over it, so patching THAT
+    # would count nothing.
+    real_read = rp._read_migrations_state
 
-    def counting_read(base: Path | None = None) -> str:
+    def counting_read(base: Path | None = None) -> tuple[str, bool]:
         reads["n"] += 1
         return real_read(base)
 
     monkeypatch.setattr(rp, "_TABLE_RE", _CountingPattern(rp._TABLE_RE, parses))
-    monkeypatch.setattr(rp, "_read_migrations", counting_read)
+    monkeypatch.setattr(rp, "_read_migrations_state", counting_read)
     first = rp.refused_props_names(tree)
     second = rp.refused_props_names(tree)
     assert parses["n"] == 1, (

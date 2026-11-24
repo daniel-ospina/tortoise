@@ -156,7 +156,7 @@ version: 1
 # the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i), so
 # `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `148dece319`, whose pool already carries #14423's `test_14350_drain_convergence.py`, #14220's
+# `e6b3cf2908ba`, whose pool already carries #14423's `test_14350_drain_convergence.py`, #14220's
 # `test_14186_embedder_seam_batching.py`, #14038's `test_13998_capacity_notice.py`, #14429's
 # `tests/test_spool_drain_rehearsal.py` and #14371's `test_14371_offline_embed_json.py`) this PR's
 # `core` registration — `tests/test_4625_schema_reads_off_write_path.py` below, at the flat 2.0 s
