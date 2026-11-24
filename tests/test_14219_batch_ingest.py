@@ -2167,7 +2167,7 @@ def test_the_graph_store_speaks_real_cypher():
     depends on. It skips VISIBLY (never early-return-green) where the docker lane
     is not configured, the same rule `tests/_live_utils` applies to its peers.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     from _live_utils import _skip_unless_live_uri
 
@@ -2176,8 +2176,19 @@ def test_the_graph_store_speaks_real_cypher():
     from falkordb import FalkorDB
 
     parsed = urlparse(uri.replace("docker://", "http://"))
+    # ⛔ THE PASSWORD IS `:password@`, NOT `user@` (measured on the #6673
+    # passworded lane, #14415 shard `g`): the suite's docker URI is
+    # `docker://:falkordb@host:port/graph`, so `parsed.username` is EMPTY and
+    # reading it as the password handed the client `None` against a server
+    # started with `--requirepass`. Both live arms then raised
+    # `redis.exceptions.AuthenticationError: Authentication required.` in CI
+    # while every hermetic arm stayed green — the same class the fixture this
+    # file already carries is guarding against. This is the form the rest of the
+    # suite uses (`tests/test_13337_cache_graph_declaration.py`, `:1163`): the
+    # password field, percent-decoded, and `None` when the URI carries no
+    # userinfo at all.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
-                  password=parsed.username or None)
+                  password=unquote(parsed.password) if parsed.password else None)
     graph_name = parsed.path.strip("/") or "tortoise"
     graph = db.select_graph(f"{graph_name}_batch_store_probe")
     graph.query("MATCH (n) DETACH DELETE n")
@@ -2328,7 +2339,7 @@ def test_the_store_statements_carry_the_tenant_filter():
 
 def test_a_foreign_org_cannot_reach_a_batch():
     """The live half of the tenant-filter pin — real engine, two orgs."""
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     from _live_utils import _skip_unless_live_uri
 
@@ -2337,8 +2348,12 @@ def test_a_foreign_org_cannot_reach_a_batch():
     from falkordb import FalkorDB
 
     parsed = urlparse(uri.replace("docker://", "http://"))
+    # ⛔ `:password@`, not `user@` — see the sibling arm's note. On the #6673
+    # passworded lane `parsed.username` is empty, so this read as "no password"
+    # and the tenant probe raised `AuthenticationError` before it could assert
+    # anything about tenants.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
-                  password=parsed.username or None)
+                  password=unquote(parsed.password) if parsed.password else None)
     graph = db.select_graph(
         f"{parsed.path.strip('/') or 'tortoise'}_batch_tenant_probe")
     graph.query("MATCH (n) DETACH DELETE n")
