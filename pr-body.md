@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 76 cases — the claim protocol, the capacity rule, the falsifier, 7 CROSS-LEG
+# 77 cases — the claim protocol, the capacity rule, the falsifier, 7 CROSS-LEG
 uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
-76 passed
+77 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
@@ -105,7 +105,7 @@ uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-775 passed
+776 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
@@ -117,9 +117,9 @@ Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the
 
 All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
 (`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
-family count moves with `main` and is re-run rather than arithmetic'd from the last head. `76` is the
-collection count for `tests/test_14350_drain_convergence.py` (69 `def test_` with one 8-way
-`parametrize`: 69 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
+family count moves with `main` and is re-run rather than arithmetic'd from the last head. `77` is the
+collection count for `tests/test_14350_drain_convergence.py` (70 `def test_` with one 8-way
+`parametrize`: 70 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
 incremented: `69`/`768`/`317` were the figures at `ef4c1405`, and every later round's cases moved them
 by re-running. The number is re-derived whenever a round changes it; a carried count has been the
 wrong figure in this record four times, which is why the sentence states the collection MODEL beside
@@ -365,7 +365,9 @@ file, running the named row and restoring it (`sha256`-checked):
 | **P3** the record's `withClaimTerm`-block and other residual prose drifted from the code | re-verified against the tree at this head rather than restated. ⛔ An earlier wording of this row said the unverifiable rows "were deleted rather than reworded" — no row was deleted (`git diff b17a8828..HEAD -- pr-body.md | grep '^-|'` shows only the two digest rows, each re-added), and a disposition naming an action with no artifact behind it is the class this record polices. The claim is removed rather than reworded. |
 
 **Cycle 17** (a fresh-context reviewer at `a3a80e68` — the head after cycle 16's fixes) — 1 **P1**,
-2 P3. The P1 is cycle 16's OWN fix, measured as not landed:
+2 P3. The P1 is cycle 16's OWN fix, measured as not landed. ⚠️ That head drew TWO independent
+reviews; this table is the first, and the second (a pinning gap, no code finding) is the same
+number's second table below — the numbering repeats because the head does.
 
 | finding | disposition |
 |---|---|
