@@ -9289,11 +9289,35 @@ _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
 def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
     """The block as one flat string, plus the WORD positions of every window stated twice.
 
-    Both readers below need the same subject — double-quoted spans masked (the block quotes the
-    clause it retracted), comment line breaks joined (a splice re-wraps, so a break is
-    presentation), whitespace collapsed — and the same window, so one enumeration keeps their
-    notions of "repeat" from drifting apart.
+    Both readers below need the same subject — double-quoted spans masked (the block legitimately
+    quotes clauses; its honesty is a quotation), comment line breaks joined (a splice re-wraps, so a
+    break is presentation), whitespace collapsed — and the same window, so one enumeration keeps
+    their notions of "repeat" from drifting apart.
+
+    ⛔ QUOTE PARITY IS A FAIL-CLOSED PRECONDITION, not a convenience. `"[^\"]*"` pairs quotes ACROSS
+    the whole block, so ONE duplicated line carrying an odd number of `"` flips the parity for
+    every quote after it: previously-masked quoted prose becomes LIVE and most live prose becomes
+    MASKED. Measured at `d8fd31c268c5a` — where 10 of the block's lines carried an odd quote count;
+    **4 of the 160 lines do at this head** (12 quotes, even) — with a fold that duplicates one such
+    line and the ratio line:
+
+        parity even -> the duplicated ratio line is reported (2 spans of 25 words)
+        parity ODD  -> the ratio line is NOT reported; the 2 reported spans are the block's own
+                       legitimate quoted RETRACTION; 1,775 of 2,992 words end up masked
+        ...and after the message's own "delete the reported span" is obeyed -> `[]`, with the
+        ratio line STILL stated twice and severed: a false PASS over a live splice, reached by
+        following this arm's remediation.
+
+    So an odd count RAISES rather than de-splicing around the mis-pairing — the parity is itself the
+    splice tell, and a guard that answers "no splice" on a spliced tree is worse than no guard.
     """
+    quotes = header.count('"')
+    if quotes % 2:
+        raise AssertionError(
+            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}) — a "
+            "`merge=union` fold duplicated a line that OPENS a quoted clause, which re-pairs every "
+            "quote after it and makes the masked spans meaningless. Re-derive the block with "
+            "`--emit-push-matrix`; do not de-splice around it.")
     masked = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
     flat = re.sub(r"\s+", " ", masked).strip()
     words = flat.split()
@@ -9675,9 +9699,12 @@ def test_the_fast_shards_header_block_states_no_span_twice():
         "two copies that differ only in what FOLLOWS them were reported as a DIVERGENT pair — the "
         "re-agreement requirement is what tells a carried figure from a repeated claim, and "
         f"without it every duplicate reads as one: {_splice_divergences(ends_differently)!r}")
-    # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
-    # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
-    # is what keeps the guard from redding on the block's own honesty.
+    # …and a DOUBLE-QUOTED retraction is NOT a second claim. The block at `d8fd31c268c5a` quoted
+    # the clause it retracted, twice, and that quotation is how the retraction stays checkable;
+    # masking quotes is what keeps the guard from redding on a block's own honesty. ⛔ That retraction
+    # is NOT in the block `main` now carries (`main`'s #14415 cut it: `retract` appears 0 times in the
+    # header, measured at this head) — so this fixture is where the rule is graded, and it must stay
+    # graded here rather than being read off the live block.
     quoted = _emission_block_header(
         """# ⛔ The live clause that stood here — "because THIS PR re-cuts that file pin, its fold
 # KEEPS the branch copy of it" — was re-spliced back, and the paragraph below records it
@@ -9687,9 +9714,33 @@ def test_the_fast_shards_header_block_states_no_span_twice():
 fast_shards: 11
 """)
     assert not _repeated_header_spans(quoted), (
-        "a quoted retraction was read as a live second claim — the block records what it deleted "
+        "a quoted retraction was read as a live second claim — a block records what it deleted "
         "by quoting it, so masking the quoted span is required for this guard not to red on the "
         "block's own provenance")
+    # ⛔ AN ODD QUOTE COUNT RAISES, and that is the arm's most important fail-closed path: the mask
+    # pairs quotes ACROSS the block, so one duplicated line that OPENS a quoted clause re-pairs every
+    # quote after it and INVERTS the mask — live prose masked, the block's own quoted retraction
+    # exposed. Measured at `d8fd31c268c5a` (the head whose quoted retraction this is): with parity
+    # intact a duplicated ratio line is reported; with parity ODD the ratio line is NOT reported,
+    # the block's retraction is, and following the
+    # message's "delete the reported span" leaves the arm GREEN over a ratio line stated twice and
+    # severed. This fixture is the shape of that fold — a quote opened and never closed.
+    odd_parity = _emission_block_header(
+        "# ⛔ The live clause that stood here — \"because THIS PR re-cuts that file pin\n"
+        "# and a duplicated ratio line at 825.1 s and `2.04` at 825.1 s (1680 / 825.1 = 2.0361)\n"
+        "# and `2.04` at 825.1 s (1680 / 825.1 = 2.0361)\n"
+        "\nfast_shards: 11\n")
+    assert odd_parity.count('"') % 2, "the fixture is meant to carry an ODD quote count"
+    with pytest.raises(AssertionError, match="ODD number of double quotes"):
+        _repeated_header_spans(odd_parity)
+    # …and the SAME body with the quote balanced is reported as a splice, so the raise above is not
+    # a vacuous branch that swallows every header carrying a quote.
+    balanced = odd_parity.replace('\"because THIS PR re-cuts that file pin',
+                                  '\"because THIS PR re-cuts that file pin\"')
+    assert balanced.count('"') % 2 == 0
+    assert _repeated_header_spans(balanced), (
+        "a spliced block whose quotes are BALANCED must still be reported — otherwise the parity "
+        "check has become a way for a spliced header to pass")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
