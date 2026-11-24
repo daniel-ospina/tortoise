@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1862 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1870 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -294,7 +294,7 @@ def _residue_block() -> str:
     and the `SWEEP_RESIDUE` pair itself did NOT move on that fold (measured with `--repin`, not
     differenced from either parent's pin), — and a LATER fold of `origin/main` `f635f9e000` kept
     both sides' blocks once more and took the run to 1862, which is ALSO the figure re-measured by
-    this walk on the resolved file; only on that later fold did the pair move (+1, `11910`), so the
+    this walk on the resolved file; only on that later fold did the pair move (+1, `11910`; a subsequent fold of the peer head took it to `11914`), so the
     two folds are not interchangeable and neither figure is inherited from the other:
     — and `#14395`'s read-wave re-pin arrived on `main` in the same window and changed NOTHING in
     this file: `git log f635f9e000..989765162fbc -- tools/sdk_privatise.py` is empty and

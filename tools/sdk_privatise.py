@@ -1972,6 +1972,14 @@ SWEEP_NAMES = 66
 #: already gives for its own `+3`: the committed pin stores a COUNT and a DIGEST, never the row set.
 #: `--check` exits 0 on the new pair with
 #: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ AND A LATER FOLD MOVED IT AGAIN, so the paragraph above is HISTORY with its own
+#: tree's reading, not this one's: folding the peer lane's head brought main's `#:`
+#: blocks and main's own rows, and `--repin` on the resolved tree prints
+#: **(11914, "4732a51728684cca")** — +4 over the `11910` above, +5 over the `11909`
+#: before it. The arithmetic is stated only as a CROSS-CHECK against those two
+#: measurements, never as the source; each figure is `--repin`'s own output on its own
+#: tree, and the pair below is the only one this commit publishes.
 SWEEP_RESIDUE = (11914, "4732a51728684cca")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

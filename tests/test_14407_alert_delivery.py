@@ -7,8 +7,8 @@ that the human channel and the agent channel were two different decisions:
   ``(kind, subject)`` — one issue for a lifecycle;
 * the TELEGRAM PUSH was emitted per DETECTION by ``notify.notify_abuse``, gated
   only by the engine's in-process window claim — so one open incident pushed every
-  window, and 4 of the 6 abuse classes never filed anything at all, leaving a
-  message no issue, runbook or search could attribute.
+  window, and 5 of the 7 abuse kinds never filed anything at all (only the two
+  incident kinds did), leaving a message no issue, runbook or search could attribute.
 
 These tests pin the fixed contract:
 
@@ -202,15 +202,68 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
     # label. They do not even share a KIND spelling: the two store templates spell the
     # INCIDENT kind (`ABUSE_FLAG_RAISED`) while this reminder spells the EVENT kind
     # (`abuse_flag`), so a triager who greps one label — or one spelling — concludes the
-    # other message does not exist. (The reminder names the issue only when the incident
-    # carries one; on a placeholder or a post-close tombstone it says the number could
-    # not be read, which is still attributable.) Both ALERT labels are read here.
+    # other message does not exist. (The reminder has THREE strings: `issue #N` when the
+    # sentinel carries a number, `an open incident with no issue number on record` when
+    # it carries none — a deferred-filing placeholder or a post-close tombstone — and
+    # `could not be read just now` only when the read-back ITSELF raised. All three are
+    # attributable, which is what `number_known` exists to keep apart.) Both ALERT
+    # labels are read here.
     assert delivered.pushes[0].startswith("🚨 DR alert: ABUSE_FLAG_RAISED"), (
         delivered.pushes[0])
     assert delivered.pushes[-1].startswith("🚨 Tortoise Security:"), (
         "the reminder's abuse-specific header changed — if that is deliberate, the "
         f"runbook row names both labels and must change with it: {delivered.pushes[-1][:60]!r}")
     assert len(delivered.filed) == 1, "a re-alarm must never re-file"
+
+
+def test_a_reminder_over_a_number_less_sentinel_says_which_state_it_is(monkeypatch):
+    """The reminder's THREE strings, the two that are NOT `issue #N` pinned (#14407 review 12).
+
+    `notify._notify_abuse_incident` selects its reference with
+    `f"issue #{number}" if number else ..." if not number_known else ..."`, so the
+    string for a sentinel that exists WITHOUT a number (a deferred-filing
+    placeholder, or the tombstone a failed delete leaves after a close) is
+    "an open incident with no issue number on record" — NOT the "could not be
+    read just now" text, which belongs to the arm where the read-back itself RAISED.
+    The distinction is what `number_known` exists for, and no test drove the
+    number-less arm: swapping its string for the raise arm's left the whole file
+    green (measured, 47 passed).
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    class _NumberlessStore:
+        """A live incident whose sentinel carries no `issue_number`."""
+
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": None, "detail": "deferred filing"}
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_NumberlessStore(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    # first detection spends the window on the store's create-once push (which the
+    # store does, not this path), so drive the RE-ALARM by releasing the window.
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+    notify.release_abuse_delivery("abuse_review_needed", "org-a:point_create")
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    reminder = sent[-1]
+    assert "an open incident with no issue number on record" in reminder, reminder
+    assert "could not be read" not in reminder, (
+        "the number-less arm borrowed the RAISE arm's string — a reader is told the "
+        f"read failed when it did not: {reminder!r}")
+    notify.reset_abuse_delivery_for_tests()
 
 
 # ── 2. the bound is the EPISODE, never a mute ────────────────────────────────

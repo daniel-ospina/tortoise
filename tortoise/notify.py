@@ -829,8 +829,8 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     One decision point for both channels — the store's create-once object files
     the issue AND emits the single Telegram push for the lifecycle, so the human
     and agent channels cannot disagree. Pre-fix they were two decisions: the
-    push here fired on every detection, the issue was deduped, and 4 of the 6
-    classes filed nothing at all.
+    push here fired on every detection, the issue was deduped, and 5 of the 7
+    abuse kinds filed nothing at all (only the two incident kinds did).
 
     ``DEDUP`` means the human was already told for this incident and the issue is
     live: repeats inside the delivery window are folded (the store records them

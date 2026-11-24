@@ -82,7 +82,10 @@ the delivery contract: a state change files an incident and is pushed once when
 the episode opens, then at most one reminder per 24h while it stays open; a
 measurement (#10156's ACTIVITY register) files nothing by design and is
 DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
-incidents on the first clean window, so the bound is the EPISODE — never a mute.
+incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2) of the
+#3146 recovery window, not the first clean one: the first clean window only counts
+observation 1 and `resolve_incident_state` answers SKIPPED_WINDOW, so nothing is closed
+and nothing is re-armed yet. The bound is the EPISODE — never a mute.
 The in-process claim below stays as the ATTEMPT bound (it self-heals a store
 failure, which an episode-scoped claim could not), so the honest ceiling across
 replicas is N replicas x 1 attempt per window and 1 delivery per episode.
