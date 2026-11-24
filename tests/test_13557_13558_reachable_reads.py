@@ -4169,6 +4169,31 @@ def test_a_missed_state_cue_is_distinguishable_from_an_honest_empty(sdk):
     # …and the same payload reaches the caller who asked for the read status.
     assert status["state_question"]["cue"] == notice["cue"]
 
+    # (1b) …and the THIRD-PARTY do-support frame, which is #14500's P3 as a CALLER
+    # meets it: `what did legal retire` reaches no shape (the route is first-person
+    # only), so before `do_support_other_subject` its reply was the relevance rows
+    # with NO notice — byte-identical to "nothing has ended". ⛔ THE FIX'S CLAIM IS
+    # ABOUT THE READ, NOT THE DETECTOR: the served `ROUTING_NOTE` tells the caller
+    # this frame "IS reported as a missed-cue notice", so the notice is pinned
+    # where it would be missing — on the sink the read path writes, over a real
+    # graph. A detector-only assertion cannot fail here, and this one does.
+    legal_notice: dict = {}
+    legal_status: dict = {}
+    rows = sdk._tortoise_fts_query("what did legal retire", entity_type="point",
+                                   limit=50, _state_route_out=legal_notice,
+                                   read_status_out=legal_status)
+    assert legal_notice, (
+        "the third-party do-support frame came back with NO notice — the served "
+        "description says it IS reported, so a caller told that and answered "
+        "silently is #14500's P3 on a worse surface")
+    assert legal_notice["routed"] is False
+    assert legal_notice["reason"] == "shape"
+    assert "legal retire" in legal_notice["cue"], legal_notice["cue"]
+    # …the population is NOT served: the route belongs to the first-person frame,
+    # and a third party's action must not answer with OUR ended set.
+    assert world["retracted"]["id"] not in _ids(rows)
+    assert legal_status["state_question"]["cue"] == legal_notice["cue"]
+
     # (2) the honest empty: a question that DOES route, read on a graph where
     # nothing of the family has ended (a fresh namespace, so no record was
     # retired there). Same empty reply, NO notice — the two are distinguishable,
