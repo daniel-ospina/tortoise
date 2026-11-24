@@ -456,6 +456,67 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
         "the batch's own age is lost")
 
 
+def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
+    """⛔ RECUT-2 REVIEW P1: the estimate was erased one statement AFTER the fix.
+
+    `_resume_batch` builds its `Batch` from an ORPHAN-ITEM snapshot (estimate `{}`,
+    corpus `""`) whenever the batch row was not there when it read. Re-reading
+    before adopting closed the `put_batch` window — but the resume's own
+    compare-and-set then ran with that same empty object, and
+    `put_batch_if_state` used to `SET b.estimate_json=$estimate,
+    b.corpus_name=$corpus` FROM THE CALLER. So an acceptance landing after the
+    re-read was MATCHED (`submit()` writes `ACCEPTED`) and then overwritten with
+    `{}` — the arithmetic owner §4 requires on the record, gone permanently, and
+    `GET /v1/batches` reporting `estimate: {}`.
+
+    The window is injected exactly: `get_batch` reports the row ABSENT for the
+    initial read and the re-read (so the orphan path is genuinely taken), and the
+    acceptance's `put_batch` lands on the SECOND `items()` read — after the
+    adoption wrote, before the state CAS. FAILS on the pre-fix code with
+    `estimate after: {}`.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    estimate = {"items": 2, "tokens_per_item": 64799,
+                "estimated_tokens": 129598, "included_tokens": None,
+                "overage_tokens": 0, "overage_usd": 0.0}
+    batch, _items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
+                                 corpus_name="handbook", estimate=estimate)
+
+    real_items = store.items
+    real_get = store.get_batch
+    state = {"gets": 0, "items": 0}
+
+    def stale_get(org_id, batch_id):
+        state["gets"] += 1
+        if state["gets"] <= 2:
+            return None          # both the read and the re-read: row not seen yet
+        return real_get(org_id, batch_id)
+
+    def items_then_ack(org_id, batch_id):
+        state["items"] += 1
+        rows = real_items(org_id, batch_id)
+        if state["items"] == 2:
+            # The acceptance's own write lands here — after the adoption wrote,
+            # before the resume CAS.
+            store.put_batch(batch)
+        return rows
+
+    store.get_batch = stale_get  # type: ignore[method-assign]
+    store.items = items_then_ack  # type: ignore[method-assign]
+    coord.recover(ORG)
+
+    assert state["items"] >= 2 and state["gets"] >= 2, (
+        f"the injected window did not fire — proves nothing: {state}")
+    after = real_get(ORG, batch.batch_id)
+    assert after is not None
+    assert after.estimate == estimate, (
+        "a state compare-and-set rewrote the ACK's estimate from the caller's "
+        f"orphan snapshot — owner §4 requires it on the record: {after.estimate!r}")
+    assert after.corpus_name == "handbook", (
+        f"the state CAS blanked corpus_name: {after.corpus_name!r}")
+
+
 def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     """A crash AFTER a cancel must not leave a permanently non-terminal row."""
     store = InMemoryBatchStore()
@@ -1726,13 +1787,16 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
     # recut review, P3). A pin wider than its reach is the no-op-gate class.
     store.add_item_tokens(ORG, batch.batch_id, items[0].item_id,
                           tokens_in=1, tokens_out=1)
-    # ⛔ AND THE SET-BASED CANCEL (#14415 review round 9, P2). This helper claims
-    # "every Cypher statement `GraphBatchStore` can emit", but it did not drive the
-    # one statement the round-7 change introduced — so deleting `"updated"` from
-    # its parameter map left all 154 tests green while FalkorDB answered `Missing
-    # parameters` on EVERY cancel (the round-9 BLOCKING class, retuned). The only
-    # test that drives it needs a live DB, which skips here.
-    store.cancel_queued_items(ORG, batch.batch_id, reason="r", updated_at="t")
+    # ⛔ TWO MORE the pin claimed but did not reach (#14415 recut-2 review,
+    # note 1). `cancel_queued_items` is the round-7 replacement for the per-item
+    # cancel loop, and the `token_delta` form of `put_item_if_state` is the
+    # claim/settle MONEY path — the one place a dropped `$param` would bill the
+    # wrong number rather than fail loudly. A pin whose prose is wider than its
+    # reach is the no-op-gate class this file keeps re-learning.
+    store.put_item_if_state(ORG, items[0], BatchItemState.QUEUED,
+                            token_delta=(1, 1))
+    store.cancel_queued_items(ORG, batch.batch_id, reason="stopped",
+                              updated_at="t")
     return pairs
 
 
@@ -1758,7 +1822,7 @@ def test_every_emitted_statement_is_brace_balanced():
     doubled brace anywhere in any statement) and not only that one line.
     """
     seen = _every_store_statement()
-    assert len(seen) >= 15, f"only {len(seen)} statements reached the store"
+    assert len(seen) >= 17, f"only {len(seen)} statements reached the store"
     # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
     # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
     # leaves the braces balanced and emits the literal text `{attempts_clause}`,
@@ -1850,7 +1914,12 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/a.md"])
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    # ⛔ A CLAIMED item, because the `resuming` write only happens for a scan that
+    # actually MOVED a row (`moved`) — a batch of `queued` items that never ran is
+    # reported, not relabelled (round 13, LOW). So the interleaving under test is
+    # "the scan requeues a dead claim while the customer cancels".
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
     stale.updated_at = _ancient_stamp()  # a genuinely dead claim
     store.put_item(ORG, stale)
