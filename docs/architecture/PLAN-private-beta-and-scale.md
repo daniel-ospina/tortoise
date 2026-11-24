@@ -115,6 +115,47 @@ acceptance bar).
 `#2952`'s declared-read rule (`declared_retrieval_kind`) instead of defaulting to unlabelled keyword-only results — `#2952` is
 **closed**, so this is inheriting a rule, not pending work. *Exit:* all four pair shapes resolve; **the demo runs**, numeric and noun-substitution variants.
 
+**F4 · Bulk ingest — the document BATCH surface (`#14219`).** F1/F2/F3 make bulk work *survivable*; they do not
+make it a *product*. A customer who hands us a folder of documents needs, in addition: a batch identity, per-item
+status, dedup by content hash, resumability, a declared concurrency ceiling and a progress surface. Every comparable
+has this shape (Hindsight publishes 500–2,000 ms per retain batch, Mem0 acknowledges an add in <50 ms and works on a
+queue, Supermemory runs a later "dreaming" phase) — all of them separate **acceptance** from **completion**.
+
+⛔ Named **batch**, never "pack": `/v1/packs` is the ONTOLOGY pack surface (#318/#9583, #1935/epic #1891) and stays
+untouched. *Exit:* `POST /v1/batches` accepts N items inside the existing wait budget (#3834 — a batch ACKs, it does
+not get a longer timeout), every item reaches a terminal state (`queued · extracting · embedded · indexed · failed ·
+skipped-duplicate · cancelled`, each non-success with a reason), a re-submitted file is a no-op that spends zero
+tokens, a restart resumes (and the batch says it is resuming), and a cancel stops future work while keeping what was
+done. Batch document processing is **off-peak only** (owner, 2026-11-23): the layer makes scheduling possible and
+publishes the estimate; the scheduler is F4's remaining half.
+
+**Landed:** the layer and the routes (`tortoise/batch_ingest.py`, PR #14415) with the per-item indexer door,
+content-hash dedup, resume (claim-staleness bounded, so a poll on one instance cannot take another's live claim),
+cancel (compare-and-set, so an in-flight item keeps its result), a liveness rule for a claim applied in the
+coordinator's claim arm (so a drain cannot re-extract a document a peer is inside), a throttled, rotating recovery
+scan (so a claim left behind by a dead process is revisited once it ages out, and no batch past the per-scan bound is
+stranded),
+the proactive estimate against the ONE
+`capture_extraction` budget (#14275), and a **retry tick** — a deferred batch, or one whose drain leaves a retryable
+item `queued`, is re-swept instead of sitting `running` until the process restarts
+(`TORTOISE_BATCH_OFF_PEAK_UTC` gates the window; `TORTOISE_BATCH_RETRY_S` sets the interval).
+**Not yet:** the LLM-extraction half of a batched item — and ⛔ **that is a GAP, not a quietly-covered half: a
+batch-ingested document is registered, embedded and searchable, and NOTHING routes it to extraction.** An earlier
+cut of this paragraph claimed `needs_extraction` carries it through the pending-document sweep; measured at this PR's
+head, that is false. `tortoise/sdk.py` never writes the flag (`grep -c needs_extraction tortoise/sdk.py` → 0), the fold
+stamps an explicit `false` (`tortoise/projection/entities.py:5827`), and `_discover_pending_documents`'s CASE
+(`tortoise/ingest.py:721-735`) reads a stored `false` as already-extracted — so the document is excluded by both the
+default arm and `include_unstamped`, and `ingest --upgrade-all` reports nothing pending over it. Filing the gap is
+tracked as #14431; `record_item_spend` therefore makes no ledger call today, because the indexer spends no model
+tokens. Also not yet: the scheduler itself (the tick is an interval re-sweep, not an off-peak planner); a
+20/500-document scale measurement on the production shape; an ack-latency instrument for a 1000-item acceptance; and a
+cross-process drain lease (the claim is process-local).
+The meter records what EACH runner call spent, and the item row ACCUMULATES it — including when the outcome could not
+be written (the row went terminal first, or the compare-and-set lost) — so the customer's `tokens_spent` and the ledger
+hold the same number (a row that kept only the last call's figures reported 100 for a 200-token spend, and a dropped
+write recorded the spend on neither surface). It moves the TOKEN dimension only — the charge is `calls=0` with no measured price, so the COST
+ceiling does not see batch spend; that becomes load-bearing the moment extraction lands here.
+
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 
 Track S is **not** blocked on Track F. Its first four items (S1–S4) are free and independent, and doing them now is exactly what
