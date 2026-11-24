@@ -59,6 +59,20 @@ Exit codes: 0 = complete report (dry run or executed, nothing failed);
 1 = at least one delete failed; 2 = the report could not be produced (control
 plane unreadable, graph list unreadable, or no control plane configured) — a
 partial run is never reported as clean.
+
+SCHEDULED USE (#14559)
+----------------------
+This tool is the mechanism; it is driven unattended by
+``.github/workflows/test-graph-reaper.yml`` — every 15 minutes, three passes:
+plan (dry run, artifact), execute (``--execute``), verify (dry run again, which
+must report 0 ``reapable``). The cadence, the resident band, and the durable log
+are stated there, in one place; nothing in this file is schedule-specific.
+
+``--execute`` also reports ``used_memory`` BEFORE and AFTER the reap, in bytes
+and in MB freed (``memory`` in the ``--json`` document). Read it the way the
+docstring above measures cost — the delta is the only figure that reflects what
+the allocator actually released, and it is an INSTANCE-WIDE reading, so it
+carries concurrent tenant writes in the window (see :func:`_used_memory`).
 """
 
 from __future__ import annotations
@@ -639,6 +653,52 @@ def _node_count(proj, graph_name: str) -> int | None:
         return None
 
 
+def _used_memory(proj) -> int | None:
+    """Instance ``used_memory`` in BYTES, or ``None`` when it cannot be read.
+
+    This is the "how much did the sweep actually reclaim" figure, and it is only
+    honest read the way the module docstring measures it: **by deleting**. A
+    create-probe reports ~346 KiB per graph because the allocator already holds
+    those pages; the resident cost only appears on DELETE (1.46 MB/graph measured,
+    216.4 MB freed for 148 graphs). So the tool takes this reading BEFORE and
+    AFTER a reap and reports the delta; nothing here probes a graph.
+
+    ⛔ It is an INSTANCE-WIDE reading, so the delta carries whatever else the
+    instance did in the window (a tenant write, a peer sweep). That is the
+    measurement's residual, stated rather than corrected away: a per-graph memory
+    figure does not exist on FalkorDB, and inventing one from the name or the node
+    count would be the same false-negative the create-probe produces.
+
+    Returns ``None`` — never ``0`` — when the reading is unavailable: a 0 would be
+    minted downstream as "freed nothing", which is the opposite of "not measured"
+    (the same over-claim rule `FalkorProjection._memory_pressure` follows).
+    """
+    info = None
+    try:
+        # Two client shapes, in the order `_memory_pressure` uses: the raw redis
+        # connection (falkordb >= 1.x) and the client's own `.info()` (older /
+        # duck-typed handles).
+        conn = getattr(proj.db, "connection", None)
+        if conn is not None:
+            info = conn.info("memory")
+        else:
+            info = proj.db.info("memory")
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    try:
+        value = int(info["used_memory"])
+    except Exception:
+        return None
+    return value if value >= 0 else None
+
+
+def _mb(value: int | None) -> str:
+    """A byte figure for a report line. ``None`` stays UNMEASURED, never 0."""
+    return "unreadable" if value is None else f"{value / 1048576:.1f} MB"
+
+
 def _read_handle():
     """THE ONE store handle: a projection that CANNOT materialise a graph.
 
@@ -838,22 +898,37 @@ def main(argv: list[str] | None = None) -> int:
     # The SAME write-free handle the report was built on — never `_make_sdk`,
     # which would MINT the reserved `tortoise` graph on the deletion path (the
     # very write `_read_handle` exists to avoid).
-    outcome = reap(report, proj=_read_handle())
+    #
+    # One handle for the reap AND both memory readings, on purpose: the delta is
+    # only a measurement of THIS sweep if both ends of it are the same store
+    # (see `_used_memory`).
+    proj = _read_handle()
+    used_before = _used_memory(proj)
+    outcome = reap(report, proj=proj)
+    used_after = _used_memory(proj)
+    freed = (None if used_before is None or used_after is None
+             else used_before - used_after)
+    memory = {"used_before": used_before, "used_after": used_after,
+              "bytes_freed": freed}
     failed = [o for o in outcome
               if not o["deleted"] or o["error"] not in (None, "already absent")]
     if args.json:
         print(json.dumps({"report": report, "outcome": outcome,
-                          "failed": len(failed)}, indent=2, sort_keys=True))
+                          "failed": len(failed), "memory": memory},
+                         indent=2, sort_keys=True))
         for o in outcome:
             print(f"  {'deleted' if o['deleted'] else 'FAILED '} {o['graph']}"
                   + (f" — {o['error']}" if o["error"] else ""), file=sys.stderr)
-        print(f"\n{len(outcome) - len(failed)} deleted, {len(failed)} failed",
-              file=sys.stderr)
+        print(f"\n{len(outcome) - len(failed)} deleted, {len(failed)} failed, "
+              f"used_memory {_mb(used_before)} -> {_mb(used_after)} "
+              f"(freed {_mb(freed)})", file=sys.stderr)
         return 1 if failed else 0
     for o in outcome:
         print(f"  {'deleted' if o['deleted'] else 'FAILED '} {o['graph']}"
               + (f" — {o['error']}" if o["error"] else ""))
     print(f"\n{len(outcome) - len(failed)} deleted, {len(failed)} failed")
+    print(f"used_memory {_mb(used_before)} -> {_mb(used_after)} "
+          f"(freed {_mb(freed)})")
     return 1 if failed else 0
 
 
