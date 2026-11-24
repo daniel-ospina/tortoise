@@ -2087,7 +2087,19 @@ SWEEP_NAMES = 66
 #: driving a real graph handle, the ordinary-word receiver shape this pin exists to DECLARE rather
 #: than rewrite; `seen.update` is a Python set's own method, the same class. `typed references still
 #: pointing at a public name: 0` on this tree, so no typed call site is legitimised by the re-cut.
-SWEEP_RESIDUE = (11920, "4fd188645b9ecef0")
+#: ⛔ RE-CUT AT THIS LANE'S FOLD OF `origin/main` `59a08fdb8b40` INTO THE BRANCH — the pair below is
+#: `--repin`'s own output on the RESOLVED tree, never inherited from either parent and never
+#: arithmetic across them. Both parents' records stay (this file's standing rule). The +1 over the
+#: branch's own pre-fold pin (`11920`, `4fd188645b9ecef0`) is attributed ROW BY ROW: `--report --base
+#: 28ca66878d --top 5000` was run on this tree and in a detached worktree at the branch's pre-fold
+#: head `4cc0eff8619b`, the two row sets sorted (860 rows on BOTH sides) and diffed, and EXACTLY ONE
+#: row differs:
+#:   * `seen.update` 102 → 103 (+1)
+#: No row SHAPE is added or absorbed in either direction, and `seen.update` is a Python set's own
+#: method — the ordinary-word receiver class this pin DECLARES rather than rewrites. `typed
+#: references still pointing at a public name: 0` on this tree, so no typed call site is legitimised
+#: by the re-cut.
+SWEEP_RESIDUE = (11921, "6c91d77bf0791ca6")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

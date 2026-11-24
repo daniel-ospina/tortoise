@@ -4940,6 +4940,20 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # predicate exists to stop, so the CODE is not the thing to change here;
     # the systemic resolver work is #9387, and this row shrinks when it lands.
     ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"),
+    # #14284 follow-up (a main red measured on `2f38053601`): `_endpoint_kind_map`'s
+    # ONLY handle reach, one batched query per label. The label is interpolated
+    # from `self._ENDPOINT_KIND_LABELS` (`f"MATCH (n:{label}) WHERE n.id IN $ids
+    # RETURN n.id, coalesce(...)"`), so `_text` reports '<unresolved>' and the
+    # census's over-report polarity counts it as a write. By hand it is a READ —
+    # `MATCH … RETURN` with no SET/CREATE/MERGE/DELETE/REMOVE arm, no write
+    # procedure, appending no record; the function's own docstring calls it "the
+    # read half of the relation-PAIR leg". What it returns is an in-memory
+    # `dict[str, tuple[label, kind]]`; the graph write it feeds
+    # (`_create_direct_edge`) is a separate censused door, so this read-side
+    # verdict blesses no undeclared write. ⛔ NOT an `_UNRESOLVED` row, for the
+    # reason the `_hydrate_evidence` entry above gives: that inventory satisfies
+    # the census test but leaves the flip gate permanently unproven.
+    ("tortoise/sdk.py", "TortoiseSDK._endpoint_kind_map"),
 }
 
 #: WHAT WAS PROVEN, not only whose statement was — keyed like `_PROVEN_READS`,
@@ -4983,6 +4997,8 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # `writes == [(38824, 'query', '<unresolved>', 0)]` (the fourth element is the
     # control-flow depth), `_is_unresolved_only` True.
     ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("query",),
+    # one `g.query`, resolving to `MATCH (n:{label}) WHERE n.id IN $ids … RETURN …`
+    ("tortoise/sdk.py", "TortoiseSDK._endpoint_kind_map"): ("query",),
 }
 
 

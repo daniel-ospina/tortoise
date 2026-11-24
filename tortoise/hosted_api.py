@@ -23310,7 +23310,59 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # BEFORE extraction — that ordering is what lets each extracted Point
             # read the session Source's `contentHash` and record it as
             # `sourceVersion`. What is left here is the STAMP half.
-            try:
+            #
+            # ⛔ #13722 — THE STAMP CHAIN RUNS OFF THE EVENT LOOP, and this is the
+            # measured leg of that issue, not a precaution. Every
+            # `_stamp_capture_provenance` call below appends ONE `PointRevised`
+            # per id and then writes it, and each of those writes is a
+            # synchronous `live_write.write` -> `record_writer.write_live_record`
+            # -> `record_projection.replay`: blocking Postgres round trips PER
+            # RECORD (two tenant-prologue statements, the cursor-presence read,
+            # the plan's statements, one commit), on whatever thread called it.
+            # Called inline, that thread was the single uvicorn worker's loop.
+            # ⛔ THE COUNT IS SIX HERE, NOT SEVEN, because the stamp emits
+            # `PointRevised` and its plan is TWO statements (`UPDATE public.point`
+            # + the `journal_event` row); SEVEN is the `PointAdded` shape the
+            # diagnosis measured for the turn/mint writes, whose EXTRA plan
+            # statement is the `node_identity` insert — the FIRST of that
+            # shape's three (identity row, point row, `journal_event`), because
+            # `node_identity` is the composite-FK parent of the node row.
+            # Measured through `record_projection.replay_plan` at this head:
+            # `PointRevised` -> 2 statements, `PointAdded` -> 3 (2 without the
+            # position row). So a stamp write is 2 + 1 + 2 executes + 1 commit
+            # = 6 round trips; the turn write is 7.
+            #
+            # MEASURED (issue #13722, `/health` -> `loop_blocks`, the loop
+            # thread's own stack, innermost LAST):
+            #
+            #   record_projection.py:2203 in _ordered_column_ops  (the production
+            #     box's checkout read that frame at :2119; #14432 moved the
+            #     definition, so the line is re-pointed at this head — a cite is
+            #     pinned to its content, never to the box's copy)
+            #     -> ... -> record_writer.write_live_record -> replay
+            #
+            # with `loop_blocks.max_age_s` 53.041 against `wait_bound_breaches`
+            # 107, and `workload_in_flight` observed 19-32. The arithmetic that
+            # closes it: 53.041 s / (N x round-trip latency) gives 1647 / 49.7 /
+            # 31.5 records at N = 7 and the 4.6 / 152.5 / 240.7 ms latencies
+            # measured 45 s apart, or 1921 / 58 / 36.7 at N = 6 — i.e. at the
+            # worst latency the wedge is a few dozen records, the order of the
+            # in-flight population itself, so it is the stamp chains of the
+            # captures in flight rather than a hidden blocker. The count is
+            # quoted per record TYPE rather than rounded to one number: the
+            # arithmetic is only honest at the shape the caller actually writes.
+            #
+            # ⛔ ONLY WHERE IT RUNS CHANGES. The records, their order and their
+            # content are untouched (#13722's hard scope: a cost fix, not a
+            # semantics change), the appends stay in the comprehension's order,
+            # and the §17.1 journal-first ordering inside
+            # `_stamp_capture_provenance` is unchanged. It rides the SAME
+            # `_CAPTURE_EXECUTOR` pool and the same `_run_off_loop` contract as
+            # the mint above (`contextvars` copied per attempt, bounded workers)
+            # — which is why this is `_run_off_loop` and not `asyncio.to_thread`:
+            # the module-level comment at `_run_off_loop`'s definition says why
+            # the shared default executor is the wrong pool for capture work.
+            def _stamp_chain() -> None:
                 if event_id:
                     # W5 (#2104, S1): the provenance stamp now carries the full
                     # write provenance (source_session / source_harness /
@@ -23469,6 +23521,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "sessionCaptured Event write returned no id/eventId — "
                         "extracted points not stamped")
+            try:
+                # #13722: awaited, so the handler still sees the chain's failure
+                # on the same arm it saw it on before — the `except` below is
+                # unchanged, and a raise inside the worker still lands here
+                # (a raise that escaped the `await` would otherwise fail the
+                # capture for a stamp that is explicitly non-fatal).
+                await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)
             except Exception:
                 import logging
                 # #8501: THIS BLOCK IS THE STAMP HALF ONLY — the mint moved to

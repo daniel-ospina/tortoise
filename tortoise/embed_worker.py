@@ -55,6 +55,8 @@ import sys
 import threading
 import time
 
+from tortoise.env_truthy import is_truthy
+
 _logger = logging.getLogger(__name__)
 
 #: How often the parent-liveness check runs when no request is in flight. The
@@ -77,17 +79,13 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 def _require_peer() -> bool:
     """Whether an unverifiable peer must be REFUSED rather than allowed.
 
-    ⛔ THE VOCABULARY IS IMPORTED, NOT RESTATED (#4097, red on the required
-    `test` lane at `bf68509ae87`). This module declared its own
-    ``{"1","true","yes","on"}`` literal — a sixth convention in a tree whose
-    single declared contract is :data:`tortoise.env_truthy.TRUTHY`. The
-    ownership guard counts literal owners, so a copy here reds
-    `tests/test_env_truthy.py` even when the two sets happen to agree today, and
-    "agree today" is exactly the property that has no pin.
+    ⛔ THE ONE VOCABULARY, NOT A LOCAL COPY (#4097). The set here used to be a
+    literal `{"1", "true", "yes", "on"}` — byte-identical to `env_truthy.TRUTHY`
+    and still a second declaration of it, which is the drift `test_env_truthy.py`
+    exists to refuse. `is_truthy` reads the same vocabulary and the same way
+    (unset/blank/falsy/garbage -> False), so the answer is unchanged.
     """
-    from .env_truthy import TRUTHY
-
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in TRUTHY
+    return is_truthy(os.environ.get(ENV_WORKER_REQUIRE_PEER))
 
 
 def _peer_uid(conn: socket.socket) -> int | None:

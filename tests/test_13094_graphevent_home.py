@@ -521,7 +521,7 @@ def test_a_payload_only_emit_writes_the_store_and_no_journal_record(tmp_path):
     """THE refutation of "the journal already holds everything the feed serves".
 
     `sdk._emit_event("PointRetracted", {...})` is a SHIPPED call style — the turn
-    hard-delete lane uses it verbatim (`sdk.py:3801`, "Two stores, one meaning
+    hard-delete lane uses it verbatim (`sdk.py:3831`, "Two stores, one meaning
     each"). It is payload-only: no ``point``, no ``id``, no ``turns``. So:
 
     * the change feed gets a row (``type`` is in ``_GRAPH_EVENT_TYPES``),
@@ -712,7 +712,7 @@ def test_a_type_the_record_carries_under_another_name_is_a_named_deficit():
     """`PointRetracted` vs `EntityMutated` must not read as "covered" NOR as "absent".
 
     The hard-delete lane announces ONE removal to two surfaces with different
-    names AND different payload shapes (`sdk.py:3801`). Comparing the names
+    names AND different payload shapes (`sdk.py:3831`). Comparing the names
     literally would say "the record has no such type" (false — it has the event
     under another name); comparing the payloads would be meaningless. So the
     verdict names it: `mapped_types`, `row_coverage: not_comparable`, and

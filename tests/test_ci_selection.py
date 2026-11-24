@@ -9683,6 +9683,17 @@ ROWED_BY_THIS_FOLD = (
     # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main
     # runs, so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
     "test_14371_offline_embed_json.py",
+    # #13722 — the capture provenance stamp chain's off-loop pin, a file this PR ADDED
+    # and registered on `api` + `core` (which is what puts it in `fast_pool()`). Its
+    # `durations:` row first carried a hand-picked 0.2 s, which the review round on this
+    # PR caught: no push-to-main sweep can have measured a file the PR adds, so a
+    # sub-default figure is a DECLARED weight dressed as a reading — and because the
+    # shard packer is greedy it re-packed the `fast_shards` partition and moved the
+    # graded name sets. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local reading
+    # (#3400/#4348), and `test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722`
+    # asserts that VALUE — this tuple is what puts the file behind an assertion at all,
+    # since `--integrity` cannot see which files a PR added.
+    "test_13722_stamp_chain_off_loop.py",
 )
 
 
@@ -9751,6 +9762,134 @@ def test_the_record_chain_suite_is_in_the_entry_rule_set_7879():
         "distinguish that state from the one it guards")
 
 
+def _durations_row_comment(name: str) -> str:
+    """The comment on `name`'s `durations:` row, or `""` when the row carries none.
+
+    Read from the manifest TEXT rather than from the loaded map because the provenance a
+    measured row states lives in its comment (`ci-timing junit-census+top-15 … (run …);
+    was X`), which `load_manifest()` drops. `""` for an absent row is deliberate: the
+    callers assert presence separately, so this helper never has to invent a verdict for
+    a row that does not exist.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    m = re.search(
+        rf"^  {re.escape(name)}:\s*[0-9.]+\s*(#.*)$", text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+#: A row's ADOPTED-SWEEP BASIS, in the shape `tools/ci_timing.py --refresh-durations`
+#: appends: the sample label, the date it sampled and the run it read, optionally
+#: followed by the previous value. END-ANCHORED on the note, because the refresher
+#: emits the basis as the note's tail — and because an unanchored `ci-timing junit`
+#: search accepts a note that merely PROMISES a future sweep, which is where a
+#: hand-picked weight hides (measured: `0.3` with "… a hand-picked local reading;
+#: ci-timing junit-census+top-15 will replace it from the first sweep" stayed GREEN
+#: over the previous spelling — #13722 review cycle 6, P2). The label shape is
+#: `tools/ci_timing.py::_SAMPLE_LABEL_RE`'s; it is restated here rather than imported
+#: because that constant is private to the refresher and this pin must not move with
+#: its internals, and because the two assertions below grade this spelling itself.
+_ADOPTED_SWEEP_BASIS_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} \(run [^)]*\)"
+    # ⛔ TWO TAIL SHAPES, because a refresh has TWO outcomes: it ADOPTS the reading
+    # (`; was N`) or, when the reading is a lower bound or the row is not provable,
+    # it HOLDS the previous value and writes `: <why>; kept N` (`tools/ci_timing.py`
+    # ~:3189-3193, appended as the tail). Matching only the first made the escape
+    # refuse a CORRECT refresh of a held row (measured: `test_worker_topology.py`'s
+    # committed tail `… ; kept 5.6` did not match), and this pin's own row is
+    # reachable by it — one test means `declared == 1`, so it is never `provable`
+    # and a LOWER reading is HELD (#13722 review cycle 7, P2).
+    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?"
+    r"|:.*;[ \t]*kept [0-9]+(?:\.[0-9]+)?)?[ \t]*$")
+
+
+def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
+    """#13722 review finding: a file a PR ADDS takes the flat default, not a local weight.
+
+    MEASURED on this PR's head before this pin: the row read
+    `test_13722_stamp_chain_off_loop.py: 0.2` — a hand-picked sub-default figure for a
+    file **this PR adds**, so no push-to-main junit sweep can possibly have measured it
+    (the `durations` refresher samples those runs only) and the row's own comment said in
+    as many words that no prior sweep included the file. Nothing reddened over it, which
+    is why a review finding and not a CI red carried it here: `--integrity` cannot see
+    which files a PR added, and the ENTRY-RULE pins above assert membership and row
+    PRESENCE, never the VALUE.
+
+    ⛔ It was not inert. `push_legs()` packs greedily, so the weight re-packed the
+    `fast_shards` partition and moved the graded `est_seconds` name sets in the header
+    block — a graded claim resting on a number no run measured. At the flat default the
+    row is equivalent to no row at all (which is the point: it packages nothing the
+    default does not already supply), and only the documentation stays.
+
+    The VALUE arm is the one that reds on the pre-fix map: `0.2 != 2.0`. The other two
+    arms are the `#13123`/`#14362`/`#7879` shape, so the file cannot fall out of this
+    tuple (and out of the guard's sight) silently either.
+
+    ⛔ THE VALUE ARM EXPIRES WITH ITS OWN PREMISE, and the escape is the row's own
+    provenance, not a widening of the assertion. "A file a PR ADDS takes the flat
+    default" is true only UNTIL the `durations` refresher has swept it: the moment a
+    push-to-main junit reading exists, the MEASURED figure is the correct one and the
+    flat default is the stale one. A pin that demanded `2.0` unconditionally would then
+    red on a correct refresh — and the cheapest way to green it is to put an unmeasured
+    `2.0` back into a shard-layout input, i.e. the very defect this pin exists for. So
+    a non-default figure is accepted when the row states an adopted-sweep tail
+    (`ci-timing junit-census…` in the refresher's own `… <date> (run …); was N` shape),
+    which is how the `durations` refresher records its readings, and nothing else is —
+    a note that only MENTIONS the refresher is not a basis, and the two assertions below
+    grade that distinction so this escape cannot widen into a hole.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
+    name = "test_13722_stamp_chain_off_loop.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#13722 registers {name} in two fast surfaces, but it is not in "
+        "ROWED_BY_THIS_FOLD — nothing then grades its `durations:` row, so dropping it "
+        "(or re-introducing a hand-picked weight) would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#13722 put {name} in a fast surface but ships no `durations:` row, so it "
+        "packs at the flat default with nothing recording what the weight covers")
+    assert real[name] == DEFAULT_FAST_WEIGHT or _ADOPTED_SWEEP_BASIS_RE.search(
+        _durations_row_comment(name)), (
+        f"{name} carries {real[name]!r} s, not the flat `DEFAULT_FAST_WEIGHT` "
+        f"({DEFAULT_FAST_WEIGHT!r} s) — a file a PR ADDS cannot carry a junit reading "
+        "yet (#3400/#4348), so any other figure without an adopted-sweep tail is a "
+        f"hand-picked shard-layout input, and the packer re-packs every bin around it "
+        "(moving the graded `fast_shards` partition this map states). The two escapes "
+        "are the flat default and an adopted-sweep BASIS in the refresher's own "
+        "`ci-timing junit-census+top-15 <date> (run …)` tail shape; a note that merely "
+        f"promises a future sweep is not one. The row says: "
+        f"{_durations_row_comment(name)[:160]!r}")
+    # ⛔ AND THE ESCAPE IS GRADED, not trusted (#13722 review cycle 6, P2): a note that
+    # only MENTIONS the refresher — the shape a hand weight hides behind — must not
+    # pass, and the refresher's own tail must not be refused (a correct refresh is not
+    # a defect, and the cheapest green for a false red is an unmeasured default).
+    assert not _ADOPTED_SWEEP_BASIS_RE.search(
+        "a hand-picked local reading; ci-timing junit-census+top-15 will replace it "
+        "from the first sweep"), (
+        "the adopted-sweep escape accepts a note that merely PROMISES a sweep, so a "
+        "hand-picked weight can ride behind the promise — the defect this pin exists for")
+    assert _ADOPTED_SWEEP_BASIS_RE.search(
+        "ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0"), (
+        "the adopted-sweep escape rejects the refresher's OWN adopted-basis tail, so a "
+        "correctly refreshed reading would red this pin and the cheapest green is an "
+        "unmeasured `DEFAULT_FAST_WEIGHT`")
+    # ⛔ …AND ITS OTHER OUTCOME, the HELD tail (`: <why>; kept N`), graded against a
+    # REAL committed row rather than a hand-typed string: a refresh that HOLDS a
+    # value writes this shape, and refusing it would red a correct refresh of a row
+    # that can never be `provable` (#13722 review cycle 7, P2).
+    held = _durations_row_comment("test_worker_topology.py")
+    assert held, (
+        "`test_worker_topology.py` carries no `durations:` row any more, so the "
+        "held-tail arm below grades nothing — re-point it at another HELD row")
+    assert _ADOPTED_SWEEP_BASIS_RE.search(held), (
+        "the adopted-sweep escape does not recognise this map's own HELD tail "
+        f"({held[-120:]!r}), so a correct `kept` refresh would red this pin")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
+
+
 def test_the_14357_pins_run_on_the_diffs_they_guard_14362():
     """#14362 review (P2): the suite's TWO surface rows must be pinned by a SELECTION.
 
@@ -9797,14 +9936,6 @@ def test_the_14357_pins_run_on_the_diffs_they_guard_14362():
             f"a {'+'.join(paths)}-only diff does not run {name}, so the #14357 pins cannot "
             "fire on the change that breaks them. Either the surface row was dropped "
             f"(`{surface}`) or the file was renamed (#14362)")
-
-
-# ⛔ `_CLAUSE` is the window the surviving claim arms share: `.` and `;` bound it, and a `.`
-# followed by a digit does NOT (#12962 rebase review, P1 — the DECIMAL POINT of a figure used
-# to end the "sentence", so the most natural weight note returned `[]` while the claim was on
-# the page). The flat-default / UN-OVERSTATE family that gave this window its name was CUT in
-# the B7 test-volume cut, 2026-11-23.
-_CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
 
 
 #: The `fast_shards` header block is the ONE place in the manifest that restates
