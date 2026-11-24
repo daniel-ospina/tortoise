@@ -89,14 +89,33 @@ _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
 # also reds if the gate stops reading it, which would be a fail-OPEN regression.
 _ENFORCEMENT_CONSUMERS = {"allowance_gate.py", "hosted_api.py"}
 
-# ⚠️ ``hosted_api.py`` joins the pinned set at #14219 (Track F4's batch surface),
-# and it is listed BY NAME for the same reason the pin is exact: a second request
-# path reading this meter is a scope change that must be recorded, not absorbed.
-# The batch route reads it for ONE thing — the acceptance estimate, which reports
-# the customer's own spend against the SAME ``capture_extraction`` dimension the
-# owner mandated ("one budget, not a fourth metered thing", #14275). It does not
-# enforce: a batch is never refused for want of allowance (#4010). A call site
-# anywhere else still reds this pin.
+# ⛔ THE PIN IS PER CALL SITE, NOT PER FILE (#14415 recut review, MEDIUM — measured).
+# `_ENFORCEMENT_CONSUMERS` above is a set of PATHS, so adding ``hosted_api.py`` at
+# #14219 (Track F4's batch surface, which reads the meter for the acceptance
+# estimate) loosened the granularity the comment above claims: a SECOND call site
+# inside that 40k-line module — a usage route, a report, a dashboard — left
+# `set(offenders)` unchanged and the pin green. That is exactly the failure the
+# ``allowance_gate.py`` sentence says the exemption would cause, arriving through
+# the file granularity instead of through the exemption.
+#
+# So the exact set is (module, ENCLOSING FUNCTION). ``<module>`` is a reference at
+# module scope — an import or a constant naming the reader outside any function —
+# which no allowance may legitimately be, since it cannot be attributed to a
+# caller.
+_ENFORCEMENT_CALL_SITES = {
+    ("allowance_gate.py", "_extraction_tokens"),
+    ("hosted_api.py", "create_batch"),
+}
+
+# ⚠️ ``hosted_api.py::create_batch`` joins the pinned set at #14219 (Track F4's
+# batch surface), listed BY NAME for the same reason the pin is exact: a second
+# request path reading this meter is a scope change that must be recorded, not
+# absorbed. The batch route reads it for ONE thing — the acceptance estimate,
+# which reports the customer's own spend against the SAME ``capture_extraction``
+# dimension the owner mandated ("one budget, not a fourth metered thing", #14275).
+# It does not enforce: a batch is never refused for want of allowance (#4010).
+# A call site anywhere else — INCLUDING a second one in this same module — still
+# reds the per-call-site pin below.
 
 
 def _names_the_reader(path):
@@ -186,43 +205,69 @@ def _names_the_reader(path):
             ):
                 docstrings.add(id(body[0].value))
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == "get_capture_usage":
-            return True
-        if isinstance(node, ast.Name) and node.id == "get_capture_usage":
-            return True
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if "get_capture_usage" in (alias.name, alias.asname):
-                    return True
-        if (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and id(node) not in docstrings
-            and (
-                node.value == "get_capture_usage"
-                or (
-                    node.value.endswith(".get_capture_usage")
-                    and node.value.rsplit(".", 2)[-2] == "metering"
-                )
+    return any(_node_names_the_reader(node, docstrings) for node in ast.walk(tree))
+
+
+def _node_names_the_reader(node, docstrings):
+    """Is THIS one node a direct syntactic reference to the reader?
+
+    Split out of ``_names_the_reader`` so the call-site scan can attribute a hit
+    to its ENCLOSING SCOPE without the predicate existing twice (#14415 recut
+    review, MEDIUM).
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "get_capture_usage":
+        return True
+    if isinstance(node, ast.Name) and node.id == "get_capture_usage":
+        return True
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            if "get_capture_usage" in (alias.name, alias.asname):
+                return True
+    # ⛔ A string Constant ANYWHERE in the module, not only as a call
+    # argument or a subscript key. A name-keyed registration is a reference
+    # whatever spelling it takes — ``Binding("tortoise.metering",
+    # "get_capture_usage", READER)`` (``cost_dimensions.py``),
+    # ``{"get_capture_usage": READER}``, or a dotted path held in a
+    # constant. Scoping this arm to ``Call``/``Subscript`` read the last two
+    # as CLEAN while the text scan it replaced caught them — a narrowing,
+    # not the strengthening the docstring claimed (#10962 review P2).
+    # ``endswith`` covers the dotted path, and it is CONSTRAINED to the
+    # ``metering`` segment: a bare ``endswith`` also matched an error MESSAGE
+    # (``"… could not be resolved: metering.get_capture_usage"``) and a
+    # ``"%s.get_capture_usage"`` placeholder, both of which are prose and
+    # would FALSE-RED the required scan. ``id(node) not in docstrings``
+    # keeps a docstring that IS the path from reading as a consumer.
+    return bool(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and (
+            node.value == "get_capture_usage"
+            or (
+                node.value.endswith(".get_capture_usage")
+                and node.value.rsplit(".", 2)[-2] == "metering"
             )
+        )
+    )
+
+
+def _docstring_ids(tree):
+    """Ids of the docstring Constants in ``tree`` — PROSE, never a reference."""
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
         ):
-            # ⛔ A string Constant ANYWHERE in the module, not only as a call
-            # argument or a subscript key. A name-keyed registration is a reference
-            # whatever spelling it takes — ``Binding("tortoise.metering",
-            # "get_capture_usage", READER)`` (``cost_dimensions.py``),
-            # ``{"get_capture_usage": READER}``, or a dotted path held in a
-            # constant. Scoping this arm to ``Call``/``Subscript`` read the last two
-            # as CLEAN while the text scan it replaced caught them — a narrowing,
-            # not the strengthening the docstring claimed (#10962 review P2).
-            # ``endswith`` covers the dotted path, and it is CONSTRAINED to the
-            # ``metering`` segment: a bare ``endswith`` also matched an error MESSAGE
-            # (``"… could not be resolved: metering.get_capture_usage"``) and a
-            # ``"%s.get_capture_usage"`` placeholder, both of which are prose and
-            # would FALSE-RED the required scan. ``id(node) not in docstrings``
-            # keeps a docstring that IS the path from reading as a consumer.
-            return True
-    return False
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+    return docstrings
+
 
 
 def _scan_capture_call_sites(root):
@@ -241,6 +286,40 @@ def _scan_capture_call_sites(root):
         if _names_the_reader(path):
             offenders.append(rel)
     return offenders, scanned
+
+
+def _scan_capture_call_sites_precise(root):
+    """The same scan at CALL-SITE granularity: ``{(relative path, scope)}``.
+
+    ``_scan_capture_call_sites`` answers which FILES reference the reader, which
+    cannot distinguish one call site from five inside one file — and
+    ``hosted_api.py`` is a 40k-line module, so that distinction is the whole
+    point of pinning ``hosted_api.py`` at #14219. ``scope`` is the name of the
+    innermost enclosing ``def``/``async def``, or ``"<module>"`` for a reference
+    at module scope (an import or a constant naming the reader, which no
+    allowance may legitimately be because it cannot be attributed to a caller).
+    Every reference inside one scope collapses to one pair: this pins WHICH call
+    sites exist, not how many times a name is mentioned within one of them.
+    """
+    sites: set[tuple[str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        if path.name in _ALLOWED:
+            continue
+        rel = str(path.relative_to(root))
+        tree = ast.parse(path.read_bytes())
+        docstrings = _docstring_ids(tree)
+
+        def _walk(node, scope, _rel=rel, _docstrings=docstrings):
+            for child in ast.iter_child_nodes(node):
+                if _node_names_the_reader(child, _docstrings):
+                    sites.add((_rel, scope))
+                inner = scope
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    inner = child.name
+                _walk(child, inner)
+
+        _walk(tree, "<module>")
+    return sites
 
 
 def test_the_gate_is_the_readers_only_consumer():
@@ -288,6 +367,67 @@ def test_the_gate_is_the_readers_only_consumer():
         "get_capture_usage must be read by the allowance gate and NOTHING else "
         f"(#9567 narrows #4051 §1b); it is referenced in {offenders}"
     )
+
+
+def test_each_call_site_is_pinned_not_just_each_file():
+    """#14415 recut review (MEDIUM): the exactness claim was per-FILE.
+
+    `_ENFORCEMENT_CONSUMERS` is a set of paths, so ``set(offenders) == …`` above
+    cannot see MULTIPLICITY within a file. Measured: adding a second
+    ``get_capture_usage`` call site inside ``hosted_api.py`` (a usage route, the
+    plausible next one) left this suite GREEN — precisely the failure the
+    allowance-gate sentence above says the exemption would cause, arriving
+    through file granularity instead.
+
+    So the exact set is (module, enclosing function). A call site anywhere else —
+    including a second one in an already-listed module — reds here.
+    """
+    from pathlib import Path
+
+    root = Path(metering.__file__).parent
+    sites = _scan_capture_call_sites_precise(root)
+    assert sites == _ENFORCEMENT_CALL_SITES, (
+        "get_capture_usage call sites changed (module, enclosing function) — a "
+        "new request path reading this meter is a SCOPE change that must be "
+        "recorded, not absorbed (#9567 §1b, #14275). Found: "
+        f"{sorted(sites)}; pinned: {sorted(_ENFORCEMENT_CALL_SITES)}"
+    )
+
+
+def test_the_precise_scan_flags_a_second_call_site_in_a_listed_file(tmp_path):
+    """Non-vacuity, and exactly the hole the file-granularity pin had.
+
+    The fixture puts TWO call sites in ONE file. A file-level scan reports one
+    offender (it cannot do better); the precise scan must report two scopes. If
+    this ever collapses back to one pair, the pin above is decorative.
+    """
+    (tmp_path / "hosted_api.py").write_text(
+        "def create_batch(org):\n"
+        "    return metering.get_capture_usage(org)\n"
+        "\n"
+        "def some_usage_route(org):\n"
+        "    return metering.get_capture_usage(org)\n",
+        encoding="utf-8")
+    sites = _scan_capture_call_sites_precise(tmp_path)
+    assert sites == {
+        ("hosted_api.py", "create_batch"),
+        ("hosted_api.py", "some_usage_route"),
+    }, (
+        "a SECOND call site inside an already-listed file was not distinguished "
+        f"— the pin is still per-file: {sorted(sites)}"
+    )
+
+
+def test_a_module_scope_reference_is_not_an_attributable_call_site(tmp_path):
+    """A reference outside any function cannot belong to a caller: it reds.
+
+    ``from tortoise.metering import get_capture_usage`` at module scope, or a
+    constant holding it, is a reference this pin cannot attribute to a decision —
+    so it reports ``<module>``, which is in no allowance list.
+    """
+    (tmp_path / "tool.py").write_text(
+        "from tortoise.metering import get_capture_usage\n", encoding="utf-8")
+    assert _scan_capture_call_sites_precise(tmp_path) == {("tool.py", "<module>")}
 
 
 def test_the_scope_scan_flags_a_wired_call_site(tmp_path):
