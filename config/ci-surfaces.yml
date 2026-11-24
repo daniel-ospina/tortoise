@@ -73,15 +73,8 @@ version: 1
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
-# SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
-# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
-# the last revision's minute, seconds, or split.
-#
-# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
-# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
-# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
+# `8c373f59a1` (#14439's TEST-CUT fold; `da4b76a5851c` is the same fold re-merged) — its B7/B4/B8
+# cuts trim the ARITHMETIC over the durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
 # re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
@@ -162,7 +155,7 @@ version: 1
 # re-emission and this branch's arrived side by side and the guard red (`838.1/838.0` beside
 # `838.1/838.2`). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
 # be read as a second claim, and re-derived with `--emit-push-matrix` on the merged tree rather than
-# carried.
+# carried — never carry the last revision's minute, seconds, or split.
 #
 # The registrations this reading counts are enumerated ONCE, below — ⛔ NOT re-listed here, and with
 # NO per-file shard letter (the paragraph after it says why a letter rots).
