@@ -2304,10 +2304,13 @@ def rename_map(rev: str | None = None) -> list[Entry]:
     return out
 
 
-#: ⛔ GIT QUOTES ANY PATH HOLDING A NON-ASCII BYTE BY DEFAULT (`core.quotePath`), and a quoted path
-#: is not the path — every reader in this file then disagrees, SILENTLY, about which files exist
-#: (#14548 review, P3 latent). MEASURED with the flag removed, on a tree carrying `tortoise/añ.py`
-#: (the review named the third state; the FIRST is the one this file was actually in):
+#: ⛔ GIT DOES NOT HAND BACK PATHS VERBATIM BY DEFAULT, AND A PATH THAT IS NOT VERBATIM IS NOT THE
+#: PATH — every reader in this file then disagrees, SILENTLY, about which files exist (#14548
+#: review, P3 latent). TWO default behaviours do it, and only `-z` answers BOTH: `core.quotePath`
+#: (on by default) octal-escapes any byte above 0x7F, so `añ.py` arrives as `"a\303\261.py"`; and a
+#: name holding a quote, tab or newline is C-quoted REGARDLESS of that flag. MEASURED on a tree
+#: carrying `tortoise/añ.py` (the review named the third state; the FIRST is the one this file was
+#: actually in):
 #:   * BOTH reads quoted, `py_files()` as shipped: it is handed `"tortoise/a\303\261.py"`,
 #:     `ROOT / name` is not a file on disk, so the WHOLE FILE LEAVES THE CENSUS. Every receiver in
 #:     it leaves `now` — and a ratchet passes any shrink — so **growth written into that file is
@@ -2320,16 +2323,20 @@ def rename_map(rev: str | None = None) -> list[Entry]:
 #:     count AND its `diff` row is skipped, so it keeps the working tree's own count as its baseline
 #:     and **growth inside it is absorbed** — the mechanism the review named, and it needs the two
 #:     reads to disagree.
-#: One flag on EVERY read is what keeps the three populations the SAME population, so no mixed state
-#: is reachable. Measured in this clone: `git ls-files | grep -cP '[^\x00-\x7F]'` → **0**, so the
-#: hole is LATENT; it is closed anyway because one of its states is a silent PASS.
-#: Residual, stated rather than hidden: a path holding a TAB or a NEWLINE still breaks the line/`\t`
-#: parsing below. The documented form for that is `-z` — git-config(1) says `core.quotePath`
-#: defaults to `true` and "quotes unusual characters in path names", while git-diff-options(1) and
-#: git-ls-files(1) name `-z` as the machine-parsing form (`--name-status -z` emits paths verbatim and
-#: NUL-terminated); `core.quotePath=false` is the narrower fix this file takes because it changes no
-#: parsing shape. This clone has neither a TAB nor a NEWLINE in a tracked path.
-_QUOTE_PATH_OFF = ("-c", "core.quotePath=false")
+#: ONE mechanism on EVERY path-naming read is what keeps the three populations the SAME population,
+#: so no mixed state is reachable — and it has to be `-z`, not `-c core.quotePath=false`, because
+#: the flag leaves the SEPARATOR problem: `py_files()` split its rows on WHITESPACE, so `a b.py` —
+#: which git emits UNQUOTED, flag or no flag — became the two tokens `a` and `b.py`, neither of them
+#: a file, and the whole file left the census (MEASURED on exactly that fixture). SOURCES, so the
+#: next lane can check rather than re-derive: git-config(1) says `core.quotePath` defaults to `true`
+#: and "quotes unusual characters in path names"; git-diff-options(1) and git-ls-files(1) name `-z`
+#: as the machine-parsing form (paths VERBATIM and NUL-terminated). `core.quotePath=false` is the
+#: narrower fix — it changes no parsing shape — and it is exactly why it cannot close this half.
+#: `-z` is one path per NUL-terminated field, a separator that cannot occur inside a name, so a
+#: space, a tab and a newline all survive. Same rule and same reason as `tools/lane_wip.py`'s note.
+#: Measured in this clone: `git ls-files | grep -cP '[^\x00-\x7F]'` → **0** and no tracked path
+#: holds a space, tab or newline, so every hole here is LATENT; they are closed anyway because one
+#: of the states is a silent PASS.
 
 
 def py_files() -> list[Path]:
@@ -2338,14 +2345,8 @@ def py_files() -> list[Path]:
     # With a total-count ratchet that reads as `0 now vs 0` — a PASS — so a lost measurement must
     # be an ERROR, never an empty population. (The equality pin this change replaced could not be
     # fooled that way; a ratchet has to refuse it explicitly.)
-    tracked = subprocess.run(
-        ["git", *_QUOTE_PATH_OFF, "ls-files", "*.py"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.split()
-    untracked = subprocess.run(
-        ["git", *_QUOTE_PATH_OFF, "ls-files", "--others", "--exclude-standard", "*.py"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.split()
+    tracked = _git_paths("ls-files", "-z", "*.py")
+    untracked = _git_paths("ls-files", "-z", "--others", "--exclude-standard", "*.py")
     out = []
     for f in tracked + untracked:
         if f.startswith(("archive/", ".venv/", ".worktrees/")):
@@ -2385,14 +2386,29 @@ _SKIP_PREFIXES = ("archive/", ".venv/", ".worktrees/")
 def _git(*args: str) -> str:
     """Run `git` in ROOT and return its stdout. Raises `CalledProcessError` on failure.
 
-    ⛔ `-c core.quotePath=false` on EVERY read — see `_QUOTE_PATH_OFF`. Without it a non-ASCII path
-    comes back quoted from `ls-tree`/`diff`, and a quoted path is either dropped from the baseline
-    population or skipped off `dest.endswith(".py")` — the two reads disagreeing is what absorbs
-    growth in that file.
+    ⛔ For a read that NAMES PATHS, use `_git_paths()` instead: this one returns the raw stream, and
+    a path read out of it is quoted or whitespace-split unless the caller asked for `-z` — see the
+    block above `py_files()`. The readers here that stay on text are `rev-parse`/`merge-base`/
+    `show`, none of which hands a path BACK.
     """
     return subprocess.run(
-        ["git", *_QUOTE_PATH_OFF, *args], cwd=ROOT, capture_output=True, text=True, check=True
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout
+
+
+def _git_paths(*args: str) -> list[str]:
+    """The NUL-separated fields of a `git` read — paths VERBATIM, never quoted, never split.
+
+    The caller passes `-z`, because its position is subcommand-specific (`ls-files -z <pathspec>`,
+    `diff … -z <rev>`) and a helper that appended it would hand `ls-files` a pathspec named `-z`.
+    """
+    out = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    fields = out.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()  # the stream is NUL-TERMINATED, so the last field is empty by construction
+    return fields
 
 
 def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
@@ -2457,6 +2473,33 @@ def _is_own_base(rev: str) -> bool:
         return False
 
 
+def _diff_name_status(rev: str) -> list[tuple[str, list[str]]]:
+    """`git diff --name-status -M <rev>` as `(status, [path, …])` records, paths VERBATIM.
+
+    ⛔ THE LINE-AND-TAB PARSE BROKE ON A NAME THE SEPARATORS COULD OCCUR IN. A non-ASCII path
+    arrives C-quoted (`dest.endswith(".py")` is then False, so the row was `continue`d and the
+    file kept its MEASURED rows as its baseline: growth inside it absorbed), and a name holding a
+    TAB splits into fields that are not paths at all. `-z` is git's documented machine format:
+    the status and each path are separate NUL-terminated fields, so a rename still yields its two
+    paths in order and the separator cannot occur inside a name.
+    """
+    fields = _git_paths("diff", "--name-status", "-M", "-z", rev)
+    records: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(fields):
+        kind = fields[i]
+        i += 1
+        width = 2 if kind.startswith(("R", "C")) else 1
+        paths = fields[i:i + width]
+        i += width
+        if not kind or len(paths) != width:
+            # A TRUNCATED record is not a moveless diff, so it must not be completed by guess:
+            # stop rather than invent a path from the next record's status field.
+            break
+        records.append((kind, paths))
+    return records
+
+
 def baseline_rows(
     rev: str,
     rmap: dict[str, str],
@@ -2478,7 +2521,7 @@ def baseline_rows(
     """
     try:
         tree_paths = {
-            p for p in _git("ls-tree", "-r", "--name-only", rev).splitlines()
+            p for p in _git_paths("ls-tree", "-r", "--name-only", "-z", rev)
             if p.endswith(".py") and not p.startswith(_SKIP_PREFIXES)
         }
     except subprocess.CalledProcessError:
@@ -2500,11 +2543,7 @@ def baseline_rows(
     # is seeded here and the diff loop below REPLACES the ones that moved.
     for rows in per_file.values():
         out += rows
-    for line in _git("diff", "--name-status", "-M", rev).splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        kind, paths = parts[0], parts[1:]
+    for kind, paths in _diff_name_status(rev):
         dest = paths[-1]
         if not dest.endswith(".py") or dest.startswith(_SKIP_PREFIXES):
             continue

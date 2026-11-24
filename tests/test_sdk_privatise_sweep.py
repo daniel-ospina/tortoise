@@ -3105,11 +3105,15 @@ def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch
     loses every receiver in it, and a ratchet passes any shrink — growth written into that file is
     absorbed for free. Second site, same root: with the census fixed but the reads still quoted, the
     path is missing from `tree_paths` and its `diff` row fails `dest.endswith(".py")`, so its
-    rows read as `baseline 0` (a false attribution). Both are graded below; `-c
-    core.quotePath=false` on every read closes them together.
+    rows read as `baseline 0` (a false attribution). Both are graded below; `-z` on every read that
+    names a path closes them together — a FLAG cannot, because `core.quotePath=false` only stops the
+    >0x7F escaping and leaves `py_files()` splitting rows on WHITESPACE (see
+    `test_a_path_with_a_SPACE_is_MEASURED_not_split_away`).
 
-    Mutation: remove `-c core.quotePath=false` from `_git`/`py_files` → `py_files()` stops listing
-    the file at all (the first assert REDs), and the baseline misses the committed blob.
+    Mutation: drop `-z` from the `ls-files`/`ls-tree` reads (back to `.split()`/`.splitlines()`) →
+    `py_files()` stops listing the file at all (the first assert REDs); drop it from the `diff` read
+    → the baseline and the attribution RED. Restoring either one alone leaves a MIXED state, which
+    is the third state described above.
     """
     repo = _git_repo(tmp_path / "r")
     (repo / "tortoise").mkdir()
@@ -3156,6 +3160,53 @@ def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch
     text = "\n".join(lines)
     assert "tortoise/añ.py" in text and "baseline 1 -> now 2" in text, (
         f"and the growth is ATTRIBUTED to that file at its real baseline, not `baseline 0`: {text}")
+
+
+def test_a_path_with_a_SPACE_is_MEASURED_not_split_away(tmp_path, monkeypatch):
+    """⛔ THE SEPARATOR, not the quoting: a name git emits UNQUOTED can still leave the census.
+
+    `py_files()` read its rows with `.stdout.split()`, which splits on ANY whitespace. A file named
+    `a b.py` is emitted by `git ls-files` as the single line `a b.py` — UNQUOTED, so
+    `-c core.quotePath=false` has nothing to normalise — and `.split()` turned it into the two
+    tokens `a` and `b.py`, neither of which is a file: the whole file left the census, every
+    untyped receiver in it left `now`, and a ratchet passes any shrink, so growth written there was
+    absorbed. MEASURED pre-fix on exactly this fixture: `py_files()` listed `['plain.py']`.
+
+    This is the half a quoting flag cannot close, and the reason the mechanism is `-z`: one path
+    per NUL-terminated field, a separator that cannot occur inside a name, so a space, a tab and a
+    newline all survive.
+
+    Mutation: `_git_paths(...)` back to `.split()` on the `ls-files` rows → the census assert REDs
+    and the baseline assert REDs with it (the file is in neither population, which is a PASS).
+    """
+    repo = _git_repo(tmp_path / "r")
+    spaced = repo / "a b.py"
+    spaced.write_text(_UNTYPED, encoding="utf-8")
+    (repo / "plain.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    # PREMISE, measured rather than assumed: git emits the name UNQUOTED, so this is NOT the
+    # `core.quotePath` hole — a flag cannot reach it.
+    rows = subprocess.run(
+        ["git", "ls-files", "*.py"], cwd=repo, capture_output=True, text=True, check=True).stdout
+    assert "a b.py" in rows and '"' not in rows, (
+        f"premise: a spaced name is emitted raw, not quoted: {rows!r}")
+
+    walked = sorted(p.name for p in privatise.py_files())
+    assert "a b.py" in walked, (
+        "whitespace-splitting a path row drops the file from the census entirely, and a ratchet "
+        f"passes the shrink that follows: {walked}")
+
+    measured = {
+        "a b.py": privatise.edits_for(spaced, rmap).residue,
+        "plain.py": privatise.edits_for(repo / "plain.py", rmap).residue,
+    }
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base_files["a b.py"].values()) == 1, (
+        f"the committed blob's receiver must be seeded against its real path: {base_files}")
+    assert sum(base.values()) == 2, f"both files carry one receiver on the baseline: {base}"
 
 
 def _standin_src(shift: int = 0) -> tuple[str, str]:
