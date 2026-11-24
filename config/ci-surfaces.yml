@@ -168,8 +168,10 @@ version: 1
 # nine shards at 825.4 s and two at 825.5 s — quoted WITHOUT name lists on purpose, because a name
 # list would parse as a second clause and red the guard — so no parent's figure may be carried
 # here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1330 files at this head against 1329 on `main`, and the ONE addition is
-# this PR's `tests/test_14559_reaper_schedule.py`. ⛔ `#14415`'s two rows
+# small: `fast_pool()` holds **1331** files at this head — `main`'s 1330 (which already carries
+# `#14565`'s `tests/test_14559_reaper_schedule.py`) plus exactly ONE row of THIS branch's,
+# `tests/test_expansion_fusion_14344.py`, re-counted on the resolved tree rather than carried from
+# either parent's paragraph. ⛔ `#14415`'s two rows
 # (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
 # NOT this PR's: they were that PR's own additions and they landed before this fold.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
