@@ -2057,11 +2057,21 @@ SWEEP_NAMES = 66
 #:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
 #:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
 #:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
-#:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
-#:     inherits main's row set, not main's number.
+#:     ITSELF **at `2cccf90f4dd4`** (the `#14062` recurrence the blocks above record a sixth time);
+#:     this branch inherits main's row set, not main's number. ⛔ AND `main` HAS SINCE MOVED PAST IT:
+#:     #4625's fold re-derived the pin on ITS OWN tree and `--check` exits 0 at `6a02515d14ad5`,
+#:     so "right now" was true of the pre-fold main and is not true of the tree this note lands on.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
 #:     took with it — 2 rows on `origin/main`, 0 here, and the report row sets are otherwise IDENTICAL
 #:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
+#:   * ⛔ AND THE RED PREDATES THAT MERGE, WHICH IS THE PART THE RECORD ABOVE WOULD OTHERWISE LOSE.
+#:     `main` `59a08fdb` — the rev #14480 integrated — COMMITS
+#:     `(11910, "adc8229295339239")` while its OWN TREE measures `(11911, "4ed42694957a174d")`,
+#:     measured by RUNNING `--repin` on a pristine worktree at that rev rather than by arithmetic. So
+#:     that rev's own `surface-guard` was ALREADY red BEFORE the merge: #14480 inherited main's red
+#:     and did not create it, which is why the pin block's own rule — derive from the tree, never
+#:     from a committed figure — is the lesson here and not the +1 itself. That committed pair is
+#:     `OWN_PINS['59a08fdb']`, so the address is GRADED by the premise arm rather than trusted.
 #: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
 #: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
 SWEEP_RESIDUE = (11910, "3216395d35345904")
