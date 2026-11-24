@@ -10508,6 +10508,18 @@ ROWED_BY_THIS_FOLD = (
 )
 
 
+def _rows_missing(durations: dict, population=ROWED_BY_THIS_FOLD) -> list:
+    """The members of `population` with no `durations:` row, in population order.
+
+    ⛔ ONE implementation, because the non-vacuity arm below must exercise the
+    PIN's predicate and not a copy of it: a re-implemented comprehension stays
+    green when the pin's own predicate is blinded (`… if f not in durations and
+    False` reds nothing), which is the "green while guarding nothing" shape both
+    arms exist to refuse.
+    """
+    return [f for f in population if f not in durations]
+
+
 def test_every_fast_file_this_fold_rows_carries_a_durations_row():
     """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own.
 
@@ -10524,7 +10536,7 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
     """
     from tools.ci_selection import load_manifest
     durations = load_manifest()["durations"]
-    missing = [f for f in ROWED_BY_THIS_FOLD if f not in durations]
+    missing = _rows_missing(durations)
     assert missing == [], (
         "a test file this PR ADDS is registered in a fast surface but carries no "
         f"`durations:` row, so it packs at the flat default: {missing}. The map's "
@@ -10538,9 +10550,13 @@ def test_the_whole_set_row_pin_sees_every_member_it_guards():
 
     `missing == []` is vacuously TRUE over an empty iteration set — the exact shape
     this file refuses elsewhere (a `git`-derived set goes silently empty on a shallow
-    CI checkout, #10356). So the pin's own comprehension is driven over the LIVE map
+    CI checkout, #10356). So the pin's own predicate is driven over the LIVE map
     one member at a time: removing a member's row must leave a non-empty `missing`
-    that names it (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`).
+    that names it (`_rows_missing(holed) == [name]`).
+
+    ⛔ It calls `_rows_missing` — the pin's OWN predicate — rather than restating
+    the comprehension, so blinding the pin (e.g. `… if f not in durations and
+    False`) reds here instead of leaving both arms green.
 
     Red on the pre-fix state: empty the population (the whole-set pin stays GREEN
     while guarding nothing) or break the predicate — either way `blind` is non-empty.
@@ -10550,7 +10566,7 @@ def test_the_whole_set_row_pin_sees_every_member_it_guards():
     blind = []
     for name in ROWED_BY_THIS_FOLD:
         holed = {k: v for k, v in durations.items() if k != name}
-        if [f for f in ROWED_BY_THIS_FOLD if f not in holed] != [name]:
+        if _rows_missing(holed) != [name]:
             blind.append(name)
     assert ROWED_BY_THIS_FOLD and blind == [], (
         "the whole-set row pin is vacuous for these members — an empty population or "
@@ -11504,7 +11520,10 @@ _RUNNER_POOL_ROW_RE = re.compile(
     re.MULTILINE)
 
 #: MATRIX slots kept free for other PRs — the doc's `sum <= 12 - 3 = 9`. It reserves
-#: MATRIX headroom only, and is deliberately not a total-concurrency budget.
+#: MATRIX headroom only, and is deliberately not a total-concurrency budget. ⛔ A
+#: POLICY literal, not a read: the doc states the 3 in prose (§7, invariant 2), so
+#: this constant is the code's copy of that decision and a re-tune that changes the
+#: RESERVE needs this edit (only the POOL is read from the doc).
 _RESERVED_FOR_OTHER_PRS = 3
 
 #: The measured start stagger (4.0–23.9 m) against the measured per-shard wall
@@ -11556,12 +11575,14 @@ def test_every_matrix_bearing_job_declares_a_fan_out_cap():
        MATRIX slots only (the same PR's eligible non-matrix jobs can still take
        those runners) — see the doc's "What the cap does NOT bound: the total".
 
-    ⛔ The INVARIANTS are pinned, never the chosen number. Both the pool and the
-    reserved headroom are READ (`_measured_runner_pool()` from the doc's own dated
-    row, which is the artifact that owns the measurement), so a re-tune from a
-    fresh read needs one doc edit and reds nothing: a 4/4/4 split against a
-    16-runner pool passes. What cannot pass is a cap that is GONE, or one grown
-    past the pool.
+    ⛔ The INVARIANTS are pinned, never the chosen number. The POOL is READ
+    (`_measured_runner_pool()`, from the doc's own dated §7 row — the artifact that
+    owns the measurement), so a fresh pool reading needs one doc edit here and reds
+    nothing by itself: a 4/4/4 split against a 16-runner pool passes. The RESERVE
+    (`_RESERVED_FOR_OTHER_PRS`) is a POLICY literal, not a read — the doc states the
+    `3` in prose, so changing the reserve is a code change by design. What cannot
+    pass is a cap that is GONE, one shrunk until it invents waves, or one grown past
+    the pool.
     """
     wf = _load_python_ci()
     matrix_jobs = {

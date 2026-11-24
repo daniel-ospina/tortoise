@@ -855,10 +855,13 @@ wiring, and the arithmetic behind the caps is stated above rather than pinned:
   requires the gating line to carry `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m`
   and refuses a literal, so read the job itself for the shard's watchdog;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
-- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — presence is
-  pinned by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`; the wave and sum arithmetic
-  is stated here rather than pinned by a test. Re-derive all three from the pool before moving
-  any of the three numbers.
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — all THREE are
+  held by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: presence for every
+  matrix-bearing job (derived from the workflow, so a fourth matrix must be given a shard count and
+  a cap), the wave band against `_MAX_MEASURED_WAVES`, and the sum against
+  `pool - _RESERVED_FOR_OTHER_PRS`, where the pool is READ from THIS document's §7 row
+  (`_measured_runner_pool()` parses `runners registered / online`). Re-derive all three from the
+  pool before moving any of the three numbers.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but
@@ -866,9 +869,10 @@ NOTE that §2's command keys on `.steps[].started_at|completed_at`, so it yields
 not the within-run start stagger; the stagger (4.0–23.9 m, the 2–4 wave claim invariant 1 rests
 on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), which §2 never reads.
 
-If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool
-and re-derive the caps together (no measured-pool literal is left to edit: the wave and sum
-arithmetic was cut as durations-map arithmetic, so nothing restates the pool in the suite). If
+If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool,
+edit the §7 row to the fresh reading, and re-derive the caps together (there is no measured-pool
+literal in the suite to edit: the arm READS this row, so one edit here moves the bound and nothing
+restates the pool anywhere else). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
@@ -882,12 +886,15 @@ the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.3
 2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
-⛔ **Re-measuring the pool is a cap decision, not an edit to a pin.** The suite pins the caps'
-PRESENCE (the arm named in the bullet above); it does NOT hold
-the measured pool, the reserved-for-others headroom or `sum <= 9` any more — those went with the
-durations-map arithmetic cut — so a permitted re-tune (4/4/4 against a 16-runner pool, say)
-passes the suite and is refused by nothing. Re-derive the three numbers from the fresh pool in the
-same change and state the arithmetic here; there is no stale constant that will go red for you.
+⛔ **Re-measuring the pool is a cap decision, and the suite GRADES the decision you make.** The arm
+named in the bullet above holds all three: the caps' presence, `ceil(shards/cap) <= 4`, and
+`sum(caps) <= pool - 3` with the pool read from the §7 row above — so a cap that is GONE, one
+shrunk until it invents waves, and one grown past the pool each red it. What it deliberately does
+NOT pin is WHICH permitted split you choose: it holds the invariants, not the number, so a
+re-tune (4/4/4 against a 16-runner pool, say — measured to pass: `sum 12 <= 16 - 3`, `ceil(11/4) =
+3 <= 4`) passes and needs no test edit. What a re-tune DOES need is the §7 row edited to the fresh
+reading, because that row is now the arm's input: leave it stale and the bound grades the old pool.
+Re-derive the three numbers from the fresh pool in the same change and state the arithmetic here.
 
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95

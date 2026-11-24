@@ -9556,12 +9556,10 @@ surfaces:
   #     `tests/test_uri_requiring_selection.py`
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
-  #   * the `durations:` row → the `duration_coverage_issues()` coverage check
-  #     composed into `python3 tools/ci_selection.py --integrity`: a 0.90 RATIO
-  #     with headroom, silent over one missing row (the per-file ENTRY-RULE pin
-  #     that named it exactly went with the durations-map arithmetic cut). A
-  #     missing row costs a mis-ranked pack, not a wrong selection: the file
-  #     still runs.
+  #   * the `durations:` row → the ENTRY RULE pin
+  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
+  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
+  #     0.90 RATIO with headroom and is silent over one missing row.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
