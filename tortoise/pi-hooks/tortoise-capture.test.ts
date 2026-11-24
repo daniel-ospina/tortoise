@@ -16,7 +16,6 @@ import {
   chmodSync,
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8297,7 +8296,7 @@ test("#14350: a recorded claim-unavailable FACT is rendered on the health line",
 test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", () => {
   // ⛔ THE DISTINCTION A BOOLEAN COULD NOT MAKE, and collapsing it ran a whole pass
   // UNCLAIMED beside a live peer claim: two legs meet at a FIFO at the claim path,
-  // this one `lstat`s it, the peer `unlink`s it, and this one's `unlink` then
+  // this one looks at it, the peer removes it, and this one's removal step then
   // answers `ENOENT`. Read as "cannot be cleared", `acquireDrainClaim` returns
   // `undefined` with `state.obstruction` set and `flushSpool` runs the entire pass
   // without the exclusion — while the peer's claim sits on disk. `gone` makes the
@@ -8305,42 +8304,67 @@ test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", 
   // `test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable`
   // drives the same interleave end-to-end).
   //
-  // The `lstat` seam is the same interleave the Python test drives by
-  // monkeypatching `os.lstat`: the first call sees the FIFO, and the `unlink`
-  // answers `ENOENT` because a peer got there first.
+  // The `rename` seam is the same interleave the Python test drives by
+  // monkeypatching `os.rename` — the removal IS a rename since #14480, because
+  // `unlink` is by NAME and could delete a claim a peer installed in the window.
   //
   // MUTATION THAT REDS THIS: return `"refused"` from the `ENOENT` arms.
   const fifo = join(tmpSpool(), "drain.claim");
   execFileSync("mkfifo", [fifo]);
-  const judged = lstatSync(fifo);          // this leg looks at the FIFO …
-  unlinkSync(fifo);                        // … and the peer's removal lands first.
-  const outcome = clearUnusableClaimPath(fifo, () => judged);
+  const peerWins = (): void => {
+    const err = new Error("ENOENT") as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerWins);
   assert.equal(outcome, "gone",
     "a peer that removed the obstruction is not an unclearable path: " + outcome);
 });
 
 test("#14350: the clear NEVER deletes an object it did not judge", () => {
-  // The obstruction clear is the protocol's ONE uncompared removal: `lstat` →
-  // `unlink` is a TOCTOU with a live claim on the other side of it. Judge a FIFO,
-  // be preempted, and by the time the `unlink` lands the path can hold a peer's
-  // VALID claim — deleting it lets this process win the next `link` and hold a
-  // spool a peer is also draining, for up to `ttl/3`, silently. So the
-  // `(dev, ino)` judged is re-read immediately before the removal.
+  // The obstruction clear deletes something that is NOT ours, so it goes through
+  // the same atomic arbiter as every other removal: the object is MOVED ASIDE and
+  // the object that LANDED is what gets judged.
   //
-  // MUTATION THAT REDS THIS: drop the identity re-check (unlink on the strength of
-  // the first `lstat`) — the substituted object is then deleted.
+  // ⛔ THE PREDECESSOR OF THIS TEST DROVE AN `lstat` SEAM and asserted `refused`
+  // when the identity changed — narrowing the check-then-unlink window without
+  // closing it, and pinning the wrong answer while doing so (#14480 review, F2 and
+  // P2-4): between the re-read and the `unlink` a peer can still install its claim,
+  // and `unlink` deletes by NAME. An inode compare is not sound evidence either —
+  // ext4/xfs reuse a freed inode number, so "same dev+ino" can be a DIFFERENT live
+  // lockfile (`filelock` GHSA-fq56-3cx3-fjxp, two holders).
+  //
+  // So the interleave driven here is the REAL one: a peer replaces the FIFO with its
+  // own VALID claim in the window between this leg's look and the removal. The object
+  // that lands in the quarantine is then a regular file, i.e. a claim: it must be put
+  // BACK and reported as CONTENTION — never deleted, and never reported as an
+  // unclearable path (which ran a whole pass unclaimed beside it).
+  //
+  // MUTATION THAT REDS THIS: unlink/quarantine-delete without judging what landed
+  // (drop the `landedRaw` arm).
   const dir = tmpSpool();
   const fifo = join(dir, "drain.claim");
   execFileSync("mkfifo", [fifo]);
-  const substitute = join(dir, "live-claim.txt");
-  writeFileSync(substitute, "a live claim");
-  const judged = lstatSync(fifo);
-  const appeared = lstatSync(substitute);
-  assert.notEqual(judged.ino, appeared.ino, "the two objects must differ by identity");
-  let calls = 0;
-  const outcome = clearUnusableClaimPath(fifo, () => (calls++ === 0 ? judged : appeared));
-  assert.equal(outcome, "refused", "an object that changed identity must be JUDGED AGAIN");
-  assert.ok(existsSync(fifo), "the object this call judged was left alone");
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirst = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirst);
+  assert.ok(installed, "the test never reached the removal");
+  assert.equal(outcome, "held",
+    "a claim that appears in the window is CONTENTION, not an unclearable path: " + outcome);
+  assert.ok(existsSync(fifo), "the live claim this call did not judge was deleted");
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be restored BYTE for byte");
 });
 
 test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", async () => {

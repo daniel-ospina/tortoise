@@ -207,23 +207,20 @@ def _claim_race(processes: int) -> dict:
         # (#14423 cycle-7 review, P2). An early release makes the run NO VERDICT.
         if "RELEASED False" in out:
             bounded = False
-    # `overlapped` is the count of processes that reached the attempt line while the
-    # winner still held the claim — the population the answer is about. A run where
-    # it is below `processes` proves the winner's hold was too short, so the number
-    # is reported rather than silently trusted.
-    # `overlapped` is how many processes both ANNOUNCED and FINISHED their attempt
-    # while the winner held the claim — the population the answer is about. A run
-    # where it is below `processes` proves the barrier did not hold, so the number
-    # is reported rather than silently trusted.
-    # `overlapped` is how many processes both ANNOUNCED and FINISHED their attempt.
-    # ⛔ `min(arrivals, done + winners)` was INERT — every process writes exactly one
-    # `done` marker, so it was always `processes` and could never report the
-    # condition its own comment claimed. The honest population is `done` (each
-    # process, winner included, writes exactly one), so it is reported as that, and
-    # `bounded` carries the one thing that actually invalidates the count.
-    overlapped = len(list(done.iterdir()))
-    return {"supported": True, "winners": winners, "processes": processes,
-            "overlapped": overlapped, "bounded": bounded}
+    # ⛔ `overlapped` USED TO BE REPORTED HERE AND COULD NOT VARY, which is why it is
+    # GONE rather than redefined (#14480 review, F4). Each process — the winner
+    # included — writes exactly one `done` marker, so `len(done)` was ALWAYS
+    # `processes`; the barrier below is what makes that true, so the field could
+    # never report the condition its own comment claimed. A receipt field no mutation
+    # of this file can move reads as coverage and is none.
+    #
+    # The ONE thing that can invalidate the winner count is the winner RELEASING
+    # before a straggler has attempted — then a late starter legitimately takes a
+    # free claim and is not a second drainer. That is `bounded`, and it now GATES the
+    # verdict (`supported`, and a non-zero exit from `main`) instead of being a field
+    # a human had to remember to check.
+    return {"supported": bounded, "bounded": bounded, "winners": winners,
+            "processes": processes}
 
 
 def measure(sessions: int, drainers: int, post_seconds: float) -> dict:
@@ -317,7 +314,31 @@ def main(argv: list[str] | None = None) -> int:
         receipt = measure(args.sessions, args.drainers, args.post_seconds)
     receipt["tree"] = str(REPO_ROOT)
     print(json.dumps(receipt, indent=2 if args.pretty else None, sort_keys=True))
+    # ⛔ `bounded: false` IS "NO VERDICT", AND NOW IT SAYS SO IN THE EXIT CODE.
+    # It used to be a receipt field nothing turned into a verdict: `main` returned 0
+    # unconditionally, so an early release — the case where a straggler legitimately
+    # takes a free claim and `winners` stops measuring the protocol — printed
+    # `winners: 2` and read exactly like a real two-drainer finding (#14480 review,
+    # F4). A measurement whose invalidating condition is invisible is not a
+    # measurement.
+    if _no_verdict(receipt):
+        print(
+            "measure_drain_convergence: NO VERDICT — the claim's winner released "
+            "before every straggler had attempted, so the winner count does not "
+            "measure the one-drainer protocol. Re-run on a quieter box.",
+            file=sys.stderr)
+        return 2
     return 0
+
+
+def _no_verdict(receipt: dict) -> bool:
+    """Whether any claim-race in this receipt was left UNBOUNDED by its own barrier."""
+    races = [receipt.get("claim_race")]
+    for key in ("baseline", "saturated"):
+        nested = receipt.get(key)
+        if isinstance(nested, dict):
+            races.append(nested.get("claim_race"))
+    return any(isinstance(r, dict) and r.get("bounded") is False for r in races)
 
 
 

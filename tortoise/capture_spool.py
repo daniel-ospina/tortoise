@@ -3953,6 +3953,27 @@ def capture_health_line(
         _spool_health_line(root, api_key=api_key, bounds=bounds), root)
 
 
+def _with_claim_term(health: CaptureHealth, recorded: dict | None) -> CaptureHealth:
+    """Append the durable claim fact to WHICHEVER verdict was chosen.
+
+    ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
+    F1). The claim axis is a fact about the SPOOL ROOT — it stays true whatever the
+    queue is doing — so a `SATURATED` box whose claim path is broken must read
+    BOTH, exactly as a quota-blocked one must. Applying it only to the final
+    `DRAINING`/`OK` verdict dropped it on the four early returns, and the case the
+    durable fact was introduced for (a capacity 429 with a backlog: `state: blocked`
+    AND a broken claim path) is one of those early returns — so the fact was
+    invisible for the whole duration of the block, which for quota may be forever.
+    The PIPELINE is still the only place it is decided: this function adds a term,
+    it does not reorder `UNREADABLE > BLOCKED > SATURATED > INACTIVE > DRAINING`.
+    """
+    if recorded is not None and recorded.get("claim_unavailable"):
+        reason = recorded.get("claim_unavailable_reason")
+        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
+        return health._replace(line=f"{health.line}, NO drain exclusion{suffix}")
+    return health
+
+
 def _spool_health_line(
     root: Path,
     *,
@@ -3976,21 +3997,32 @@ def _spool_health_line(
     ``DRAINING`` > ``OK``. ``SATURATED`` outranks ``INACTIVE`` deliberately: a
     keyless box is precisely the one that saturates, and the keyless fact is
     kept in the SATURATED line rather than replacing it.
+
+    ⛔ ONE TERM IS ADDED AND IT OUTRANKS THE PRECEDENCE, because it is not a
+    verdict: the durable claim fact (``claim_unavailable`` in ``status.json``)
+    is appended to WHATEVER verdict was chosen — see :func:`_with_claim_term`.
     """
+    # ⛔ THE RECORD IS READ BEFORE THE SCAN, so the durable claim fact can reach
+    # the `UNREADABLE` return too: `status.json` sits in the spool ROOT, not in
+    # `entries/`, so a spool whose entries cannot be listed still has a readable
+    # record — and dropping the fact on the one verdict that says "I cannot even
+    # look" is precisely the wrong way round (#14480 review, F1).
+    recorded = read_capture_status(root)
+    previous = recorded
     # ONE scan for both answers (see `_health_scan`): the pending count and the
     # metas the SATURATED verdict is computed from.
     scan = _health_scan(root)
     if scan is None:
-        return CaptureHealth(
-            "unreadable", 0, None,
-            f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
+        return _with_claim_term(
+            CaptureHealth(
+                "unreadable", 0, None,
+                f"capture: UNREADABLE (cannot list {_entries_dir(root)})"),
+            recorded)
     queued, scan_metas, unreadable_bytes, unreadable_count = scan
     # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
     # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
     # carries them, and no second walk over `entries/` is needed.
     unrecorded = tuple(_unrecorded_from_metas(scan_metas))
-    recorded = read_capture_status(root)
-    previous = recorded
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
         # Never keep a stale verdict on disk that no evidence supports.
@@ -4026,11 +4058,11 @@ def _spool_health_line(
     # recorded 402 printed INACTIVE and never BLOCKED — the docstring above
     # stated an order the code did not implement (capture-loss review, #10479).
     if blocked_status is not None and queued > 0:
-        return CaptureHealth(
+        return _with_claim_term(CaptureHealth(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
             f"{_refusal_label(recorded.get('reason'))})",
-            unrecorded)
+            unrecorded), recorded)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -4039,23 +4071,23 @@ def _spool_health_line(
         # is KEPT in the line rather than replacing it: a keyless box is exactly
         # the one that saturates.
         if api_key == "":
-            return CaptureHealth(
+            return _with_claim_term(CaptureHealth(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
                 f"{queued} queued, refusing new captures)",
-                unrecorded)
-        return CaptureHealth(
+                unrecorded), recorded)
+        return _with_claim_term(CaptureHealth(
             "saturated", queued, None,
             f"capture: SATURATED ({queued} queued, refusing new captures)",
-            unrecorded)
+            unrecorded), recorded)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
         # line that explains why.
-        return CaptureHealth(
+        return _with_claim_term(CaptureHealth(
             "inactive", queued, None,
             f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
-            unrecorded)
+            unrecorded), recorded)
     verdict = (
         CaptureHealth("draining", queued, None, f"capture: DRAINING ({queued} queued)", unrecorded)
         if queued > 0
@@ -4064,12 +4096,9 @@ def _spool_health_line(
     # the record is where a pass that filed nothing can still be heard, so the line
     # every operator reads is where it must land. Wording pinned by the cross-leg
     # parity test — a divergence here is invisible to everyone except a human who
-    # ran the other leg.
-    if recorded is not None and recorded.get("claim_unavailable"):
-        reason = recorded.get("claim_unavailable_reason")
-        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
-        return verdict._replace(line=f"{verdict.line}, NO drain exclusion{suffix}")
-    return verdict
+    # ran the other leg. It goes through `_with_claim_term` like every earlier
+    # verdict: the term is an ADDED FACT, not a precedence state.
+    return _with_claim_term(verdict, recorded)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
