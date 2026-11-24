@@ -1669,6 +1669,14 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`tortoise/vector_write.py::set_embedding_clause` — the clause BUILDER "
         "itself; it renders the `<alias>.embedding = …` clause and stores no "
         "vector"),
+    "tortoise.embed_seam::_external_rows": (
+        CENSUS_EXEMPT,
+        "`tortoise/embed_seam.py::_external_rows` — a PARSER of an external "
+        "provider's answer, discovered because it RETURNS vectors and this census "
+        "is over-inclusive at the NAME level by design. Its own body issues no "
+        "store and names no graph label: every row it returns goes back to "
+        "`ExternalBacking.encode`, and from there to the seam's caller. Arrived on "
+        "`main` with `#14220` and no declaration at all — the `#14483` red"),
 }
 
 
@@ -1818,6 +1826,13 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.cache_projection::fill_missing_row_vectors": (
         ("tortoise/cache_projection.py", "fill_missing_row_vectors",
          "derived_embedding.derive_row(node.label, props, width=width)"),),
+    # `#14483` — the parser's own evidence: every row it returns is normalised by
+    # `_external_vector`, so the needle is that CALL. Delete the normalisation (or
+    # the parse) and the writer leaves the population, taking this row with it; an
+    # unrelated edit elsewhere in `embed_seam.py` cannot invalidate it.
+    "tortoise.embed_seam::_external_rows": (
+        ("tortoise/embed_seam.py", "_external_rows",
+         "rows.append(_external_vector(embedding, index, \"data\"))"),),
 }
 
 
