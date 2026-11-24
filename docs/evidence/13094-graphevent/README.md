@@ -350,6 +350,16 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 
 ## 6. What this PR changes
 
+The four rows below are this PR's **evidence bundle**. The same commit also rewires CI selection for
+its own pins — `config/ci-surfaces.yml` registers `test_13094_graphevent_home.py` as `core`, and
+`tools/ci_selection.py` adds a `CORE_ALSO` entry for `tools/graphevent_home.py` so that a tool-only
+diff selects those pins instead of collapsing to `surfaces: []` (pinned by
+`tests/test_ci_selection.py::test_a_graphevent_census_tool_only_diff_selects_its_pins`) — and touches
+`docs/00_index.md` and `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`. The checkable form of that
+sentence is `git show --name-only --format= f9f480a55ab3`, which lists all twelve files: four rows
+here cannot account for a commit on their own, and this paragraph is what makes the gap visible
+instead of leaving a reader to assume the table is exhaustive.
+
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
