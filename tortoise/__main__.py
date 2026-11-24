@@ -16440,7 +16440,7 @@ def _cmd_doctor(args):
                 #
                 # ⛔ "Hosted-shaped" is not just `_HOSTED_KEY_PREFIXES`: the
                 # `Hosted` row ALSO admits the `oat_` family as a hosted identity
-                # (`:15642` — an OAuth access token that is MCP-only by design,
+                # (`:15649` — an OAuth access token that is MCP-only by design,
                 # ADR-010). Omitting it here left the same one-screen
                 # contradiction this gate exists to remove, narrowed to `oat_`: a
                 # Graph row saying "Run `tortoise init`" beside a Hosted row
@@ -16489,7 +16489,7 @@ def _cmd_doctor(args):
                 # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches
                 # `_mask_display_target` -> `.split()` on a list and raises
                 # `AttributeError`, killing the whole verb with no report (measured,
-                # exit 1 after the banner). `_doctor_hosted_rows` (:15519) coerces for
+                # exit 1 after the banner). `_doctor_hosted_rows` (:15526) coerces for
                 # exactly this reason; this arm sits outside every guard, so it must
                 # too.
                 _display_url = _printable(_mask_display_target(
