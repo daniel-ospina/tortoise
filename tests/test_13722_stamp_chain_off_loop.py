@@ -238,6 +238,38 @@ def _stamp_calls(tree: ast.Module) -> list[ast.Call]:
     ]
 
 
+def _door_references_outside_call_position(
+    tree: ast.Module,
+) -> dict[int, str]:
+    """`line -> node type` for every `_STAMP_DOOR` reference the call resolver did NOT grade.
+
+    ⛔ A DOOR REACHED BY A SPELLING THE CALL WALK CANNOT RESOLVE IS STILL THE DOOR,
+    and this is the ONE place that decides it. `_stamp_calls` resolves a call the
+    same way every other arm in this file resolves a callable — through
+    `_callable_name`, i.e. a bare `name` OR an `obj.name` attribute — so the door
+    may appear as the `func` of a call in EITHER spelling; every other reference
+    to it (bound to a variable, passed as an argument, read as `.__call__`) is a
+    second way to reach the door that no arm above can follow and reds.
+
+    ⛔ LIFTED OUT OF THE TEST SO IT CAN BE MEASURED (the widening of
+    `_stamp_calls` to attributes was pinned by NOTHING). `c3955990` made this walk
+    resolve `hosted_api._stamp_capture_provenance(…)` as well as a bare name —
+    closing a real fail-open, since `_off_loop_submissions` already accepted an
+    attribute — but the only population it ran over was the real `hosted_api.py`,
+    which is ALL bare-name call positions. Nothing in the suite could tell the two
+    cuts apart: reverting to the pre-`c3955990` `isinstance(node.func, ast.Name)`
+    left `84 passed`, i.e. the next lane could silently re-open it.
+    `test_the_door_arm_grades_every_spelling_the_call_resolver_accepts` is the
+    population the shipped module cannot supply.
+    """
+    door_call_nodes = {id(node.func) for node in _stamp_calls(tree)}
+    return {
+        node.lineno: type(node).__name__
+        for node in ast.walk(tree)
+        if _refers_to(node, _STAMP_DOOR) and id(node) not in door_call_nodes
+    }
+
+
 def _off_loop_submissions(
     tree: ast.Module,
 ) -> list[tuple[int, str | None, str | None, bool]]:
@@ -955,18 +987,16 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # "_stamp_capture_provenance")(…)` and `_stamp_capture_provenance.__call__(…)`
     # were green too. Every ARM above keys on the chain NAME, so a door reached
     # from a name they never see is invisible to all of them. This arm closes the
-    # spelling: the door may appear ONLY as the `func` of a call, and only through
-    # a bare `ast.Name` — binding it to a variable, passing it as an argument,
-    # reading `.__call__`, or any attribute form reds. Measured cost today: zero
-    # (the four calls are all bare-name call positions).
-    door_call_nodes = {
-        id(node.func) for node in _stamp_calls(tree)
-    }
-    door_spellings = {
-        node.lineno: type(node).__name__
-        for node in ast.walk(tree)
-        if _refers_to(node, _STAMP_DOOR) and id(node) not in door_call_nodes
-    }
+    # spelling: the door may appear ONLY as the `func` of a call — resolved, as
+    # every other arm resolves a callable, through `_callable_name`, so a bare
+    # `ast.Name` AND an `obj.name` attribute are both graded (an attribute call was
+    # a measured fail-open until `c3955990`, and `_off_loop_submissions` had
+    # accepted that shape all along). Binding it to a variable, passing it as an
+    # argument, or reading `.__call__` reds. Measured cost today: zero (the four
+    # calls are all bare-name call positions; the attribute spelling is pinned on a
+    # synthetic source by `test_the_door_arm_grades_every_spelling_the_call_resolver_
+    # accepts`, because the shipped module supplies no attribute call to grade).
+    door_spellings = _door_references_outside_call_position(tree)
     # ⛔ AND NOT BY RENAMING IT AT THE IMPORT (same finding, the case the arm above
     # cannot see). `_refers_to` matches expression nodes, so `import … _stamp_
     # capture_provenance AS _prov` is invisible to it — the alias is an `ast.alias`,
@@ -1399,6 +1429,56 @@ def test_the_arms_agree_on_what_a_reference_is() -> None:
             if is_submission
         )
         assert submitted and submitted == reported
+
+
+def test_the_door_arm_grades_every_spelling_the_call_resolver_accepts() -> None:
+    """The door is graded in BOTH call spellings `_callable_name` resolves.
+
+    ⛔ THE PIN `c3955990` LACKED (measured). That commit widened `_stamp_calls` from
+    `isinstance(node.func, ast.Name)` to `_callable_name(node.func) == _STAMP_DOOR`,
+    so `hosted_api._stamp_capture_provenance(…)` is graded instead of falling out of
+    the population — a real fail-open, because `_off_loop_submissions` accepted that
+    shape all along. But its only population was the real `hosted_api.py`, whose
+    four door calls are ALL bare-name call positions, so the widening was
+    observable nowhere: reverting it left `84 passed`, i.e. the fail-open could be
+    re-opened with nothing red. These sources are the population the module cannot
+    supply (same idiom as `test_the_arms_agree_on_what_a_reference_is`).
+    """
+    graded = _tree([
+        "async def g(holder, hosted_api):",
+        f"    {_STAMP_DOOR}()",
+        f"    holder.{_STAMP_DOOR}()",
+        f"    hosted_api.{_STAMP_DOOR}()",
+    ])
+    # ONE resolver, THREE graded spellings — two are attributes, which the
+    # pre-`c3955990` walk dropped from the population entirely.
+    assert len(_stamp_calls(graded)) == 3
+    assert _door_references_outside_call_position(graded) == {}
+
+    # …and a door the resolver does NOT grade reds: bound to a variable, and read
+    # as `.__call__`. These are the shapes this arm exists for.
+    rebound = _tree([
+        "async def g():",
+        f"    _prov = {_STAMP_DOOR}",
+        "    _prov()",
+    ])
+    assert _door_references_outside_call_position(rebound) == {2: "Name"}
+    as_call_dunder = _tree([
+        "async def g():",
+        f"    {_STAMP_DOOR}.__call__()",
+    ])
+    assert _door_references_outside_call_position(as_call_dunder) == {2: "Name"}
+
+    # ⛔ THE NEGATIVE CONTROL, so the arm is not over-read: a callee built from a
+    # STRING is no Name/Attribute node at all, so it stays outside this walk by
+    # construction and is caught only by the mention count's fold (the run-time
+    # compositions are #14528's). Widening the boundary past this would red the
+    # plausible refactor, which is the defect class this PR removes.
+    string_built = _tree([
+        "async def g(mod):",
+        f'    getattr(mod, "{_STAMP_DOOR}")()',
+    ])
+    assert _door_references_outside_call_position(string_built) == {}
 
 
 def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
