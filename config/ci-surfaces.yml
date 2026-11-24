@@ -71,11 +71,12 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `e6b3cf2908b` — seven landings past the `88cd00a068` head the block last named, and a tree that
-# registers no fast file of its own) the verb packs nine shards at 837.3 s
-# (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i) — the SAME partition that reading produced,
-# re-derived here rather than carried — so
-# `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# `da4b76a5851c`, whose three landings since `e6b3cf2908ba` register no fast file of their own, so
+# `main`'s own emission is unmoved — plus this PR's `core` registration
+# `tests/test_4625_schema_reads_off_write_path.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, the ONLY
+# `fast_pool()` addition on this tree) the verb packs five shards at 837.7 s
+# (a, c, d, e, k) and six at 837.6 s (b, f, g, h, i, j) — re-derived here rather than carried — so
+# `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. The registrations this block's own reading
 # counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
@@ -85,7 +86,9 @@ version: 1
 # (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
 # already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
 # it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
-# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
+# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1, and this
+# PR's `tests/test_4625_schema_reads_off_write_path.py` is the SIXTH — the only addition this tree
+# makes on top of `main`'s count.
 # ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
 # the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
@@ -97,7 +100,8 @@ version: 1
 # #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
 # at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
 # unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
-# them back into the nine/two above.
+# them back into a nine/two split, and this PR's own `core` row re-packed them once more — into the
+# five/six above.
 # ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
 # why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
@@ -111,85 +115,6 @@ version: 1
 # bin — which is why the names are stated and graded, not only the seconds. Re-run
 # `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or
 # split.
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
-# repaired #7879's record-chain arm, and whose #14429 registered
-# `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
-# `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
-# and #14371's `tests/test_14371_offline_embed_json.py` — the last three at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two
-# at 837.2 s (f, i), so `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.01`, so the two agree by construction rather than by a hand re-read.
-#
-# ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
-# figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 → 837.3 s). So NO arithmetic on the
-# minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted.
-#
-# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
-# sides of this paragraph REDS rather than picking one: it was re-emitted for the #14371 row at a
-# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
-# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
-# single eleven-shard one, #14429's `core` registration re-split it to nine/two at 837.3 s, and
-# merging `main`'s own copy left this block stating the emission TWICE — each parent had rewritten
-# this paragraph and git kept BOTH spellings, so the guard read `<est 837.3 stated twice>` and
-# `<ceil stated 2 times>` rather than a clean claim. It is RE-EMITTED once more here, from the
-# merged tree. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's
-# minute, seconds, or split.
-#
-# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
-# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# one main fold from rounding again.
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (the #14429 branch
-# after merging `origin/main` at `f635f9e000`) the one `fast_pool()` addition that merge brought is
-# `tests/test_14350_drain_convergence.py` (#14423) — `#14220`'s `test_14186_embedder_seam_batching.py`
-# and `#14434`'s registration were already folded in at the previous derivation (`43182ac09a`) and
-# are NOT what repacked these bins — and with this PR's own `core` registration
-# `tests/test_spool_drain_rehearsal.py` below, the verb packs
-# nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i), so
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `989765162f`, plus this PR's `core`-registered row — `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — beside the two rows #14371/#14186 registered before it)
-# the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i), so
-# `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `e6b3cf2908ba`, whose pool already carries #14423's `test_14350_drain_convergence.py`, #14220's
-# `test_14186_embedder_seam_batching.py`, #14038's `test_13998_capacity_notice.py`, #14429's
-# `tests/test_spool_drain_rehearsal.py` and #14371's `test_14371_offline_embed_json.py`) this PR's
-# `core` registration — `tests/test_4625_schema_reads_off_write_path.py` below, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT` — is the ONLY `fast_pool()` addition, and the verb packs seven
-# shards at 837.5 s (a, c–e, i–k) and four at 837.4 s (b, f–h), so
-# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE, which is the
-# point of quoting the names: a carried figure and a re-derived one differ in the SET, not in the
-# minute, and the minute has stood at 28 m across every reading of this pool from 835.5 s to
-# 837.5 s while the SECONDS moved under it. So NO arithmetic on the minute can catch a carried
-# figure — only the `est_seconds` partition can, which is why the sentence is GRADED below instead
-# of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered — the
-# packer is greedy, so ONE more 2.0 s row re-packed every bin here: `main`'s own emission partitions
-# nine-at-837.3 / two-at-837.2 and this tree partitions seven-at-837.5 / four-at-837.4 — which is
-# why the names are stated and graded, not only the seconds. Re-run `--emit-push-matrix` on the
-# merged tree; never carry the last revision's minute, seconds, or split.
-#
-# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
-# sides of this paragraph REDS rather than picking one: it was re-emitted for the #14371 row at a
-# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
-# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
-# single eleven-shard one, #14429's `core` registration re-split it to nine/two at 837.3 s, and
-# merging `main`'s own copy left this block stating the emission TWICE — each parent had rewritten
-# this paragraph and git kept BOTH spellings, so the guard read `<est 837.3 stated twice>` and
-# `<ceil stated 2 times>` rather than a clean claim. It is RE-EMITTED once more here, from the
-# merged tree. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's
-# minute, seconds, or split.
-#
-# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
-# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# one main fold from rounding again.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
 # 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
