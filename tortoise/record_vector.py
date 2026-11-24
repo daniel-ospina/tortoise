@@ -1599,14 +1599,25 @@ def _fold_prefetch_select(table: str) -> str:
     OUTCOME, which is what makes this a cost fix rather than a behaviour change.
 
     ⛔ RE-DERIVED PER CALL FROM THE CENSUS, deliberately UNCACHED here.
-    `record_projection.table_columns()` is itself cached and invalidated on the
-    migrations' fingerprint (~0.5 ms per call including its own copy), and a
-    process-lifetime cache in THIS module would defeat exactly that invalidation: a
-    column added by a migration mid-process would be silently absent from the fold's
-    props, and a dropped one would render a statement that errors on every read until
-    restart (`#13466` review cycle 2, P3 — demonstrated against the cached first cut).
-    A sub-millisecond re-derivation against a leg that spends tens of milliseconds is
-    the right side of that trade.
+    `record_projection.table_columns()` answers from the process's RESIDENT
+    schema: resolved ONCE per process and memoised once that read was COMPLETE
+    (`#4625`), so a call is a fresh copy of an already-parsed map — no `stat`
+    pass, no fingerprint, and no file read once warm.
+
+    ⚠️ THE REASON THIS BLOCK USED TO GIVE IS NO LONGER TRUE, and the reason it is
+    kept uncached is a different one. It said a process-lifetime cache here would
+    "defeat exactly that invalidation: a column added by a migration mid-process
+    would be silently absent" — that was right while `table_columns()` revalidated
+    against the migration files on every call. Since `#4625` it does not: the
+    resident schema is NOT re-read per call, so a column added by a migration
+    mid-process is absent from `table_columns()` too, whether or not this module
+    caches. Edit-freshness on the resident path is now a VERB —
+    `record_projection._release_schema_cache()` — not something a caller-side
+    cache can preserve or destroy. Keeping this derived value uncached therefore
+    buys no freshness; it is kept uncached because it is ONE invalidation rule
+    fewer to keep correct, and the re-derivation is now a dict copy against a leg
+    that spends tens of milliseconds. ⛔ Do not re-instate the old paragraph: an
+    uncached reader here does not make a mid-process migration visible.
     """
     from .record_projection import table_columns
 
