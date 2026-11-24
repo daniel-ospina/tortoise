@@ -89,7 +89,17 @@ def _module() -> ast.Module:
 
 
 def _enclosing_functions(tree: ast.Module, target: ast.AST) -> list[str]:
-    """The names of the functions enclosing ``target``, innermost first."""
+    """The names of the functions enclosing ``target``, OUTERMOST first.
+
+    ⛔ THE DOCSTRING USED TO SAY "innermost first", which is the inverse of what
+    this returns (review cycle 12, P2, measured): ``walk`` appends a function's
+    name as it DESCENDS, so the list grows outside-in and ``<target>`` is appended
+    last — `['_capture_session_impl', '_report_capture', '_stamp_chain',
+    '<target>']`. The submission arm keys on ``chain[-2]``, i.e. on this being
+    outermost-first, so a reader trusting the old line would invert the invariant
+    the assertion rests on. ``hosted_api.py``'s own comment states the same
+    convention as "innermost LAST"; this docstring now agrees with it.
+    """
 
     chain: list[str] = []
 
