@@ -2800,14 +2800,24 @@ def _in_sdk_class(line: int, ranges: list[tuple[int, int, str]]) -> bool:
     return any(lo <= line <= hi and nm == "TortoiseSDK" for lo, hi, nm in ranges)
 
 
-def _def_name_span(path: Path, node: ast.AST, name: str) -> tuple[int, int] | None:
+def _def_name_span(
+    path: Path, node: ast.AST, name: str, lines: list[str] | None = None
+) -> tuple[int, int] | None:
     """The (start, end) columns of the NAME in `def <name>(`, read from the source line.
 
     ⛔ NOT `col_offset + 4`: for an `AsyncFunctionDef`, `col_offset` points at `async`, so
     offset arithmetic writes `asyn_deletedelete`, a syntax error the sweep then cannot see
     because the file no longer parses.
+
+    ⛔ `lines` is the caller's OWN source when it measured a BLOB (`edits_for(..., src=...)`). A
+    node's `lineno` belongs to the source it was parsed from, so re-reading `path` here would
+    either raise (the baseline file was deleted or renamed away) or index the WORKING TREE's line
+    — locating nothing, charging a phantom `def <name> (span not located)` row to the BASELINE,
+    and handing the ratchet one row of headroom per shifted stand-in `def`.
     """
-    line = path.read_text(encoding="utf-8").splitlines()[node.lineno - 1]
+    if lines is None:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    line = lines[node.lineno - 1]
     m = re.search(rf"\bdef\s+({re.escape(name)})\b", line[node.col_offset:])
     if not m:
         return None
@@ -2947,7 +2957,7 @@ def edits_for(path: Path, rmap: dict[str, str], src: str | None = None) -> FileE
                     isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and m.name in rmap
                 ):
-                    span = _def_name_span(path, m, m.name)
+                    span = _def_name_span(path, m, m.name, lines)
                     if span is None:
                         _residue(f"def {m.name} (span not located)", m.lineno)
                         continue
