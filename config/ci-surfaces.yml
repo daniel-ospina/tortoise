@@ -71,11 +71,11 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `8bc2c3d0643` (this head's own merge base, eight folds above the `f635f9e000` an earlier cut
-# named) plus
+# `f379299c64d` (`#14472`, this head's own merge base, after the `#14419` B7 cut took the
+# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool) plus
 # this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb packs
-# five shards at 837.7 s (a, c, d, e, k) and six at 837.6 s (b, f, g, h, i, j), so
-# `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# three shards at 837.9 s (a, c, k) and eight at 837.8 s (b, d, e, f, g, h, i, j), so
+# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
@@ -123,14 +123,13 @@ version: 1
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
 # shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
 # one main fold from rounding again.
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `e6b3cf2908b` — seven landings past the `88cd00a068` head the block last named, and a tree that
-# registers no fast file of its own) the verb packs nine shards at 837.3 s
-# (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i) — the SAME partition that reading produced,
-# re-derived here rather than carried — so
-# `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. The registrations this block's own reading
+# MERGES INTO, never carried from the branch that first wrote it. ⛔ THE EMISSION IS STATED ONCE, in
+# the paragraph above, and this one deliberately restates no partition. An earlier cut of this block
+# carried a SECOND statement right here — nine at 837.3 s / two at 837.2 s, `ceil(837.3/60 x 2)`,
+# attributed to `main` `e6b3cf2908b` — spliced in by a rebase that interleaved two re-derivations of
+# this same paragraph, which is why the guard read `<ceil stated 2 times>` over a paragraph whose
+# readable half was graded. DELETED rather than corrected: two spellings of one emission is the
+# failure, and re-pointing the duplicate would leave the shape. The registrations this block's reading
 # counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
 # `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
 # `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
