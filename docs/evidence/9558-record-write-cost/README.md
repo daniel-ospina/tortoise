@@ -202,8 +202,9 @@ revision, ≈0.68 ms of cache-consult overhead per record, in two halves this
 bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`_schema_entry`'s
-`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497` and
-`_migrations_dir` at `:1502`; the seam is cited by SYMBOL on purpose — a bare line
+`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1981` and
+`_migrations_dir` at `:1986` at the head that ships this document — re-derived
+THERE, not carried), and the seam is cited by SYMBOL on purpose — a bare line
 number re-stales under exactly the edits this PR makes, and this one has re-staled
 repeatedly inside it (most recently `1659 → 1665 → 1667 → 1669 → 1670`, and one of
 those moves landed *after* a revision of this very sentence had counted the earlier
@@ -216,11 +217,20 @@ pass in `fingerprint-cost.json`, the warm total in `runs/*.json`'s
 `table_columns_isolated_ms.median`, 0.332–0.353 ms) — i.e. the committed warm medians
 (0.332–0.353 ms) ARE those two halves summed PLUS the caller's own `dict` copy
 (the copy `table_columns()` returns), not the fingerprint alone. So the
-residual is ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms resolution + ≈0.33 ms
-fingerprint. The known fix — compute the fingerprint once per plan build — saves
-ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so #11388
-must not be read as removing the whole residual; it is filed rather than hidden in
-"the work the record is for".
+residual AT THIS MEASUREMENT was ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms
+resolution + ≈0.33 ms fingerprint. ⛔ **`#4625` REMOVES BOTH HALVES ON THE
+PROCESS'S OWN SCHEMA, so this paragraph is NOT current**: since `#4625` the
+resident map is resolved ONCE per process (`_resident_entry()`) and is NEVER
+fingerprinted (`_migrations_fingerprint`'s own docstring), so neither half is
+paid per record and the residual there is **0** — the freshness a fingerprint
+buys is a verb (`_release_schema_cache()`) instead. ⛔ **AND THE
+EXPLICITLY-NAMED-DIRECTORY PATH HAS NO RESOLUTION HALF EITHER**: `_schema_entry()`
+takes `base = migrations_dir` and calls only `_migrations_fingerprint(base)` — it
+never reaches `_migrations_dir()`/`_complete()` — so that path pays ONE
+fingerprint pass (≈**0.160–0.169 ms**), not ≈0.33 ms, and it is THAT pass the
+known fix (compute the fingerprint once per plan build) removes, taking the path
+to 0. So #11388 must not be read as leaving half a residual anywhere; it is filed
+rather than hidden in "the work the record is for".
 
 ⛔ **Earlier revisions of this bullet, and why each was wrong.** (Deliberately no COUNT
 of them: a count over an open history is stale by construction — the same hazard the
@@ -262,21 +272,43 @@ had copied the retired figure (⛔ #11388's own body still quotes the retired
 so it is corrected on the issue itself rather than here).
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
-suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
-cached. ⚠️ The CALL COUNT is unchanged (1 per record): what changed is that the
-call no longer reads and regex-parses fifteen migration files, it stats them.
-That is the substance of the indicator (`a fresh migration read per record`), and
-it is why the target's wording — *"called once per process/refresh, not once per
-record"* — is satisfied at the level of WORK rather than of call sites. Forcing
-the call count itself to 1 would require a caller-held map, which is the
-batching/lifecycle change this issue explicitly defers.
+suggests.** At the #9558 head `table_columns()` cost ~1.7 ms uncached and ~0.47 ms
+cached. ⚠️ The CALL COUNT did not change there (1 per record): what changed is
+that the call stopped reading and regex-parsing the migration files (fifteen of
+them at that head — measured `len(RECORD_MIGRATIONS) == 15` at `2efe92c5f8`, the
+commit that wrote this paragraph; twenty at the current one) and **stat-ed** them
+instead. ⛔ **#4625 then removed that stat pass
+too**, so at the CURRENT head a warm `table_columns()` performs **zero**
+filesystem operations on the migrations — it answers from the process's resident
+schema, read and parsed once per process, with `_release_schema_cache()` as the
+refresh verb. The call is still made once per record; what is once per process
+is the WORK behind it, which is the substance of the indicator (`a fresh
+migration read per record`) and why the target's wording — *"called once per
+process/refresh, not once per record"* — is satisfied at the level of WORK
+rather than of call sites. (The `~1.7 ms` / `~0.47 ms` pair above is a
+measurement at the #9558 head and is kept as the record of what that change
+bought; it is not a statement about the current head, which does no filesystem
+work here at all.)
 
 ⚠️ **`column_types()` is NOT cached** (a contract read a pin performs, not a
-per-record read) and **`jsonb_columns()` keeps its 5 s TTL** (it runs once per
-string PARAMETER, where even a stat pass would be a regression). TWO caches, two
-call frequencies, two invalidation costs — plus `column_types()`, deliberately
-uncached. The division is stated at `_JSONB_CACHE_TTL_SECONDS` and at
-`column_types`.
+per-record read). **`jsonb_columns()` no longer has a TTL** (#4625): it runs once
+per string PARAMETER, where even a stat pass would be a regression, so it now
+answers from the process's RESIDENT schema — resolved once per process, zero
+filesystem operations per call, with `_release_schema_cache()` as THE refresh
+verb. ⚠️ **THAT ZERO-OPERATION PROPERTY IS THE COMPLETE-TREE CASE.** While the
+tree is absent or PARTIAL its SQL is deliberately NOT memoised — that is how the
+entry self-heals with no TTL and no per-call `stat` — so the READ is paid per
+consult, and a consult is one per bound string PARAMETER; only the PARSE is
+cached, keyed on the SQL text it came from. A degraded tree is therefore cheaper
+than one parse per parameter and it is NOT free, and `_resident_entry` states
+that split rather than quoting this number for both. ⚠️ `_jsonb_cache_clear()` is
+NOT an interchangeable spelling of the refresh verb: it re-parses the SAME
+certified bytes, so it re-derives the encoding view but cannot see an edit (that
+is the whole difference, and it is stated at `_jsonb_cache_clear`). A bounded
+window is only cheap when the work behind it is cheap, and the work behind this
+one is a twenty-file read:
+the 5 s expiry is what #4625 caught inside `replay_plan` on the serving thread.
+The division is stated at `_resident_entry` and at `column_types`.
 
 ⚠️ **Not what this measures.** Per-record cost of ONE door's write path on a
 local loopback Postgres. It is not a capture-throughput claim (the door is one of

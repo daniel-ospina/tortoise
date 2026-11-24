@@ -3315,9 +3315,15 @@ def write_live_record(record: Mapping[str, Any], *,
     * the CONNECTION is REUSED across records (`_default_connect` returns an idle
       handle when it has one — the door's own contract is untouched: it still
       commits and disposes of the handle exactly once), and
-    * the COLUMN MAP is cached on the migration files' own fingerprint
-      (`record_projection.table_columns`), so a schema edit still invalidates it
-      and an unchanged schema costs a stat pass instead of a read+regex-parse.
+    * the COLUMN MAP is served from the process's RESIDENT schema
+      (`record_projection.table_columns`) — resolved once per process, so an
+      unchanged schema costs ZERO filesystem operations rather than a stat pass
+      (#4625). ⛔ A migration EDIT is therefore seen by the next RESOLUTION, not
+      by the next record: the refresh verb is
+      `record_projection._release_schema_cache()`, and the deployed image bakes
+      these files in, so a redeploy is the production path. A caller that names
+      an EXPLICIT migrations directory keeps the per-file fingerprint and its
+      edit-detection (#9558).
 
     Measured through THIS door against a real Postgres 16 carrying the record
     migrations, 60 records after 5 warmup, ONE instrument run four times against
