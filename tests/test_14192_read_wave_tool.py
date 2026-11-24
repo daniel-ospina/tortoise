@@ -2286,6 +2286,42 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     return builtins_names, builtins_dict_names
 
 
+def _is_dict_type_expr(node: ast.AST, names: frozenset[str],
+                       consts: dict[str, frozenset[str]],
+                       dict_names: frozenset[str],
+                       launderers: frozenset[str]) -> bool:
+    """True when `node` denotes the `dict` TYPE — the class, not a mapping instance.
+
+    ⛔ THE DISTINCTION IS THE DESCRIPTOR PROTOCOL, NOT A SPELLING LIST (#14395 round-8 review
+    P1, EACH MEASURED **and LIVE** at `11279134f0`: each stores `dict.get`, and
+    `getattr(<it>, "get")(builtins.__dict__, "exec") is exec` → True):
+
+        dict             builtins.dict            __builtins__["dict"]
+        _dc              (with `_dc = dict`)      builtins.__dict__["dict"]
+        getattr(builtins, "dict")                 vars(builtins)["dict"]
+
+    A method fetched off the CLASS is UNBOUND, so the mapping is its first argument; a method
+    fetched off a MAPPING is bound, so the key is its only one. `_builtin_lookup_name` already
+    resolves the namespace spellings for the `dict` CALLEE (see `_is_builtins_mapping`'s
+    `dict(…)` arm, which asks it with `members=frozenset({"dict"})`); this is the same
+    question one position over, so it asks the same resolver rather than spelling the forms
+    again — `builtins.dict` is the one shape that resolver does not take (it handles
+    Subscript and Call callees, never a bare Attribute), and it is written out here.
+
+    ⛔ `launderers` IS THE `dict`-ALIAS SET BY THE FILE'S EXISTING CONVENTION, with the same
+    accepted residual its own `dict(…)` arm already states: a name bound to `vars`/`getattr`
+    satisfies this test, and `getattr(_v, "get")` is an `AttributeError` — dead code, not a
+    live lever.
+    """
+    if isinstance(node, ast.Name):
+        return node.id == "dict" or node.id in launderers
+    if isinstance(node, ast.Attribute):
+        return (node.attr == "dict" and isinstance(node.value, ast.Name)
+                and node.value.id in names)
+    return _builtin_lookup_name(node, names, consts, dict_names, launderers,
+                                members=frozenset({"dict"})) == "dict"
+
+
 def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                          consts: dict[str, frozenset[str]],
                          dict_names: frozenset[str],
@@ -2388,7 +2424,26 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                 or not ((isinstance(_positions[0], ast.Name)
                          and _positions[0].id in (names | dict_names))
                         or _is_builtins_mapping(_positions[0], names, dict_names,
-                                                launderers, consts))):
+                                                launderers, consts)
+                        # ⛔ THE RECEIVER MAY BE THE `dict` TYPE, NOT A MAPPING (#14395
+                        # round-8 review P1, EACH MEASURED GREEN **and LIVE** at
+                        # `11279134f0` — `getattr(builtins.dict, "get") is dict.get` → True):
+                        #
+                        #     getattr(builtins.dict, "get")(builtins.__dict__, "exec")(<read>)
+                        #     getattr(__builtins__["dict"], "get")(__builtins__, "exec")(<read>)
+                        #
+                        # while the ATTRIBUTE twin `builtins.dict.get(m, "exec")` is RED. A
+                        # method fetched off the CLASS is the UNBOUND descriptor, which takes
+                        # the mapping as its FIRST argument (CPython's own descriptor
+                        # protocol), so it is a live route to the same read one receiver
+                        # spelling over. Scoped to `_BUILTINS_MAPPING_READS`: those are the
+                        # only members of the `dict` type this axis enumerates, so the
+                        # REGISTRY ask is untouched (and the false-red surface is
+                        # `getattr(_v, "get")` for `_v = vars`, an AttributeError).
+                        or ((_string_keys_of(_positions[1], consts)
+                             & _BUILTINS_MAPPING_READS)
+                            and _is_dict_type_expr(_positions[0], names, consts,
+                                                   dict_names, launderers)))):
             return None
         keys = _string_keys_of(_positions[1], consts) & _members
         return sorted(keys)[0] if keys else None
@@ -2464,8 +2519,30 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                                      members=_BUILTINS_MAPPING_READS,
                                      getattr_fetchers=getattr_fetchers,
                                      copies=copies) is not None):
-        keys = _string_keys_of(node.args[0], consts) & _members
-        return sorted(keys)[0] if keys else None
+        # ⛔ THE KEY IS READ BY POSITION, BECAUSE THE FETCH DECIDES THE BINDING (#14395 round-8
+        # review P1, EACH MEASURED GREEN **and LIVE** at `11279134f0`, and the first is `is
+        # exec` at runtime):
+        #
+        #     getattr(dict, "get")(builtins.__dict__, "exec")(<read>)            GREEN
+        #     getattr(builtins.dict, "get")(builtins.__dict__, "exec")(<read>)   GREEN
+        #     _g = builtins.__dict__["getattr"]; _g(dict, "get")(m, "exec")(…)   GREEN
+        #     _g = getattr(dict, "get"); _g(builtins.__dict__, "exec")(<read>)   REFUSED
+        #
+        # The BOUND fetch (`getattr(<mapping>, "get")`) returns a BOUND method, whose only
+        # position is the key; the UNBOUND fetch (`getattr(<class>, "get")`) returns the
+        # descriptor, which takes the mapping FIRST and the key SECOND. Reading `args[0]`
+        # unconditionally therefore read the MAPPING as the key and never fired — the same
+        # "position is the shape" rule the `copies` arm below already applies, and the reason
+        # binding the identical callee one statement earlier was REFUSED (this file deletes an
+        # in-file asymmetry on sight). ⛔ AND ON THE SPLICED POSITIONS, so the multi-element
+        # literal splice is read the same way as in the two arms above.
+        _positions = _spliced_positions(node.args)
+        if _positions:
+            _key_at = 1 if (len(_positions) >= 2
+                            and _is_builtins_mapping(_positions[0], names, dict_names,
+                                                     launderers, consts)) else 0
+            keys = _string_keys_of(_positions[_key_at], consts) & _members
+            return sorted(keys)[0] if keys else None
     if isinstance(node.func, ast.Name) and node.func.id in copies and node.args:
         # ⛔ NO SUBSCRIPT-CALLEE DISJUNCT HERE (#14326 fail lane, MEASURED DEAD ON THE MERGED
         # TREE): a Subscript callee naming a `_BUILTINS_MAPPING_READS` member over a `dict`/
@@ -8288,11 +8365,11 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # cycle 13: "a CALL-SITE shape, not a resolver arm"). `dict.__dict__["get"](m, "exec")
         # (<read>)` was already RED and its `getattr(dict, …)["get"]` twin too, while the same
         # callee one BIND away (`_dc = dict`) was GREEN — the receiver spelling again, not the
-        # callee-composition residual (the `.get("get")(…)` spellings, which stay GREEN for
-        # both receivers and are declared in
-        # `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` below — named
-        # rather than pointed at by direction, because "the residual table above" sent a
-        # reviewer looking for a table that is four thousand lines the other way.
+        # callee-composition residual. ⛔ THAT RESIDUAL'S READ-METHOD HALF IS NOW CLOSED TOO
+        # (#14395 round-8 review P1): the `.get("get")(…)` / `.__getitem__("get")(…)`
+        # compositions are REFUSED by the position rule and asserted in the REFUSED loop of
+        # `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` below, which now
+        # declares only the COPY-callee composition (#14449).
         "a READ METHOD subscripted out of a NAMESPACE ALIAS's `__dict__`, INLINE": (
             '    import builtins\n'
             '    _dc = dict\n'
@@ -12377,48 +12454,33 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     MAPPING READ to a literal member name (`… .get("get")` → `dict.get`) and then applying THAT
     result to the mapping. The closure resolves one hop per node, so a callee built by CALLING a
     resolved read with a literal key is the CALLEE-COMPOSITION class, not the non-enumerable one.
-    ⛔ CLOSING IT IS **NOT** "NEW MACHINERY", which is what this paragraph claimed until the
-    round-4 review MEASURED it: the census's `copies` arm already performs that two-step — which is
-    why `_g = dict.__dict__.get; _f = _g("get"); _f(builtins.__dict__, "exec")` is REFUSED today —
-    and a composed callee only has to join the `launderers` set that every `_is_builtins_mapping`
-    call consults. MEASURED, the same chain REDS once the alias is a launderer: `_f = copy.copy;
-    _d = _f(__builtins__); _d["exec"](<read>)`. That is the alias closure this PR's own
-    `_mapping_read_aliases` widening applies one member over, filed as `#14449`. It is DECLARED
-    here (rows below pin it GREEN) rather than left reading as
-    covered. Its ONE-hop twins, EACH BOUND FIRST — `_g = vars(dict).get; _g("get")`,
-    `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling OF THE MODULE
-    SPELLED `dict` — are REFUSED and pinned by rows. ⛔ THE SCOPE OF THAT WORD "EVERY" IS MEASURED,
-    and it does NOT reach the module fetched out of the builtins namespace (#14395 review, P1):
-    `_f = builtins.dict.get; _f(builtins.__dict__, "exec")(<read>)` EXECUTES the read
-    (`builtins.dict.get is dict.get` → True), and so do the four other spells that fetch the same
-    member through the namespace — `__builtins__["dict"].get`, `builtins.__dict__["dict"].get`,
-    `vars(builtins)["dict"].get` and `getattr(builtins, "dict").get`. TWO further spells read
-    GREEN but cannot RUN, and they are recorded rather than counted as liveness: `_g =
-    builtins.dict.__getitem__; _g("get")` and `_g = builtins.dict.get; _f = _g("get")` raise
-    `TypeError` (`method_descriptor` does not apply to a `str`) — the class this file already
-    records as a lever that cannot execute. ⛔ ALL SEVEN — the five that execute the read and the
-    two that raise — read GREEN on `origin/main` as well (MEASURED through `origin/main`'s OWN
-    `_pin_refuses` at `b2d1e9086a`: 7 of 7, bound-first as this paragraph spells them, and the two
-    inline twins named below are RED there too), so the class is PRE-EXISTING and is FILED rather
-    than claimed closed here (`#14449` — ⛔ **NOT** `#14315`: that issue and `#14316` are the
-    page/rank-IDENTITY axis and cannot close a callee route to `exec`, which the round-4 review
-    found when it went looking for this class's home, and this file elsewhere records `#14315` as
-    "a duplicate of the same direction" itself); the arm is a receiver the `{"dict", "copy"}`
-    union cannot supply, because the module is reached through the namespace and not named. While
-    the inline `builtins.dict.get(m, "exec")` and `builtins.dict.__dict__["get"]` are RED.
-    ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed BELOW with the
-    class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the resolved read to a
-    literal key and then applies THAT, in one expression, which is the two-step application and
-    not the receiver spelling this PR closes. Binding the callee first is what the arms reach;
-    chaining it inline is what they do not. The qualifier sits on the LIST and not on its first
-    item for that reason — carried on item one, this sentence read as covering the inline form and
-    the same function's `declared_residual` table below contradicted it (#14395 review, P3).
+    ⛔ ITS READ-METHOD HALF IS NOW **CLOSED**, and NOT by the launderer threading this paragraph
+    used to promise (#14449): the fix is one rule inside `_builtin_lookup_name` — the resolved
+    read-method arm reads the KEY BY POSITION (a builtins mapping in position 0 ⇒ the key is
+    position 1), because a fetch off a MAPPING is BOUND and a fetch off a CLASS is UNBOUND (the
+    descriptor protocol, which is also what makes `getattr(dict, "get")(m, "exec")` the read).
+    MEASURED at `11279134f0` through this file's own `_pin_refuses`: all EIGHTEEN rows that pinned
+    this class GREEN there (`vars(dict)` / `dict.__dict__` / `getattr(dict, "__dict__")` and each
+    one's `_dc = dict` alias, × `.get("get")` and `.__getitem__("get")`, plus the three
+    namespace-BOUND receivers) read REFUSED at this head and are asserted in the REFUSED loop at
+    the bottom rather than declared here. ⛔ THAT IS THIS TABLE'S OWN CONTRACT — “closing it must
+    EDIT this table” — not a new declaration.
+    ⛔ WHAT REMAINS DECLARED IS THE **COPY**-CALLEE HALF (`_g = <copy namespace>.get;
+    _f = _g("copy")`, 24 rows): its callee is a copy CONSTRUCTOR, not a mapping read, so the
+    position rule does not reach it. Closing it is the census's existing two-step plus the
+    composed name joining `launderers`, filed as `#14449`.
+    ⛔ AND THE NAMESPACE-ALIAS RECEIVER (`_f = builtins.dict.get; _f(m, "exec")`, and the two
+    spells of it that cannot run) remains FILED as `#14449`: the position rule reaches the FETCHED
+    spellings (`getattr(<class>, …)` and the getattr alias), not an attribute read off the
+    namespace's own `dict` member, whose receiver the `{"dict", "copy"}` union cannot supply.
+    Its INLINE twin `builtins.dict.get(m, "exec")` is RED, so that asymmetry is PRE-EXISTING and
+    unchanged by this PR — not a half-closure introduced here (#14395 round-4 review, which also
+    records why the class's home is `#14449` and ⛔ **NOT** `#14315`/`#14316`: those issues are
+    the page/rank-IDENTITY axis).
 
     ⛔ EACH ROW BELOW WAS MEASURED AS A LIVE LEVER at `7b1589ef9e` — a third reach executing the
     product read while the pin passed (`m=2 c=2 i=0`). They are pinned GREEN so the note cannot
-    drift: resolving one must EDIT this table, not leave it contradicting the code. A future
-    round that wants to close one should start from the callee-composition residual this file
-    already owns rather than growing another spelling list.
+    drift: resolving one must EDIT this table, not leave it contradicting the code.
     """
     read = 'sdk._tortoise_fts_query(query=q)'
 
@@ -12495,91 +12557,11 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_d = dict.copy.__call__(builtins.__dict__)`": (
             'import builtins', '_d = dict.copy.__call__(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
-        # ⛔ THE "FETCHED RECEIVER" ROW THAT USED TO BE DECLARED HERE IS NOW CLOSED (#14326
-        # review cycle 10, and the declaration was MEASURED DISHONEST before that): the class
-        # claimed a receiver that is itself an expression could not be resolved "without
-        # becoming a recursive expression resolver", but `_builtin_lookup_name` ALREADY answers
-        # the subscript / `getattr` receiver shapes — it only needed the `__builtins__` root
-        # passed as `dict_names`, the one argument the file hard-codes in the copy closure for
-        # exactly this reason. Both spellings are now asserted REFUSED below, next to the other
-        # resolved ones, so a later lane cannot re-declare them.
-        # ⛔ AND THE TWO-STEP APPLICATION (#14393, MEASURED GREEN **and LIVE** on `23c8b57adb`:
-        # `vars(dict).get("get")(m, "exec")` returns the real `exec` and the read runs). Its
-        # ONE-hop twins are all REFUSED and pinned by rows (`_f = vars(dict).get("get")`,
-        # `_g = dict.__dict__.get; _g("get")`, `vars(dict)["get"]`, `dict.get`); what escapes is
-        # a callee produced by APPLYING a resolved mapping read to a literal key and then
-        # applying that result to the mapping — a CALLEE COMPOSITION, which the closure's one-hop
-        # resolution does not follow. Statically enumerable, so it is named HERE rather than
-        # filed under the non-enumerable sentence; closing it is the census's EXISTING two-step
-        # (`copies`) plus the composed name joining `launderers`, MEASURED and filed as `#14449`
-        # — not new machinery and not another threaded set.
-        # ⛔ ONE STATEMENT, NOT THREE LINES (#14395 review P2, MEASURED at `29fa4e295245`):
-        # `body()` joins with "\n", so the three-line form was TWO statements — the resolved
-        # read was produced and DISCARDED, and the read name sat in a bare string expression.
-        # What that pinned is "an expression that cannot reach the read stays GREEN": the label,
-        # the `_indirect_reads` note above ("the read runs") and this test's docstring all claim
-        # the APPLICATION, so the row did not exercise the declared residual at all.
-        # ⛔ AND THE FIX'S GUARD IS STRUCTURAL, NOT THE `_key_at` MUTANT THE REVIEW PROPOSED —
-        # MEASURED, that mutant leaves this row GREEN: on one line the composition's INTERMEDIATE
-        # step resolves to `get`, a member of `_BUILTINS_MAPPING_READS`, never to a code-executing
-        # name, so an arm-level `_key_at` (as the `copies` arm uses) still answers `None`. Closing
-        # this residual needs the COMPOSED callee to join `launderers`, NOT new machinery: the
-        # census's `copies` arm ALREADY performs the two-step — MEASURED at this head through this
-        # file's own `_pin_refuses`, `_g = dict.__dict__.get; _f = _g("get");
-        # _f(builtins.__dict__, "exec")` is REFUSED (True) and `_f = copy.copy;
-        # _d = _f(__builtins__); _d["exec"](<read>)` REDS (True) — and the class is filed as
-        # `#14449` (#14395 round-4 P2, which falsified the "new machinery" sentence this comment
-        # carried until then). That is why the row keeps its GREEN and the assertion below pins
-        # that the read is genuinely APPLIED, so reverting the row to several lines reds the table.
-        "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
-            'import builtins',
-            'vars(dict).get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        # ⛔ THE SAME CLASS, PINNED BY EVERY RECEIVER SPELLING IT DECLARES (#14395 review P3,
-        # EACH MEASURED GREEN and live — `refused=False` — at `0ba68fcf1b1b` and re-measured at
-        # this head). The row above pinned ONE spelling of four, so a future fix that closed
-        # that spelling alone would leave the class half-closed with nothing to red it: the
-        # whole point of pinning a DECLARED residual is that closing it must EDIT this table.
-        # Each is the same two-step composition — a mapping read applied to a literal member
-        # name yields the callee (`dict.get`), and that callee applied to the mapping yields
-        # `exec` — one receiver over. They are NOT the receiver-spelling asymmetry this PR
-        # closes: `_dc.__dict__.get("get")` BOUND first is REFUSED and rowed above.
-        "`dict.__dict__.get(\"get\")(m, \"exec\")` — the same composition, `.__dict__` receiver": (
-            'import builtins',
-            'dict.__dict__.get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`getattr(dict, \"__dict__\").get(\"get\")(m, \"exec\")` — via `getattr`": (
-            'import builtins',
-            'getattr(dict, "__dict__").get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`vars(_dc).get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
-            'import builtins', '_dc = dict',
-            'vars(_dc).get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        # ⛔ AND THE ALIAS SPELLINGS OF THE OTHER TWO RECEIVERS — the gap the paragraph above
-        # USED TO CLAIM AWAY (#14395 round-2 review P2, EACH MEASURED GREEN — `refused=False`
-        # — and LIVE at this head): it said the class was pinned by EVERY receiver spelling it
-        # declares, and it was not. `vars(<alias>)` got a row while `_dc.__dict__.get("get")`
-        # and `getattr(_dc, "__dict__").get("get")` did not — the SAME bind-one-over
-        # asymmetry (`_dc = dict` against `dict`) the closure rows above exist to delete, and
-        # exactly the half-closed class that paragraph says nothing could red. The closure rows
-        # already distinguish the alias for the REFUSED spellings ("subscripted out of a
-        # NAMESPACE ALIAS's `__dict__`, INLINE", `vars(<namespace alias>)`, `getattr(<namespace
-        # alias>, …)`), so the declared residual carries the same three. ⛔ BOUNDARY: an alias
-        # of an ALIAS (`_d2 = _dc`, then `_d2.__dict__.get("get")(…)`) is this same class one
-        # bind further and is deliberately NOT rowed — the table pins the THREE levels the
-        # closure rows themselves distinguish (the module literal `dict`, the module alias
-        # `_dc = dict`, and the NAMESPACE bound to a name, `_n = dict.__dict__`), and a row per
-        # depth beyond those is the spelling list this file refuses to grow. It said "two"
-        # while the closure rows carried three and the third was unrowed (#14395 round-4 P2).
-        "`_dc.__dict__.get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
-            'import builtins', '_dc = dict',
-            '_dc.__dict__.get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`getattr(_dc, \"__dict__\").get(\"get\")(m, \"exec\")` — alias, via `getattr`": (
-            'import builtins', '_dc = dict',
-            'getattr(_dc, "__dict__").get("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
+        # ⛔ THE READ-METHOD COMPOSITION CLASS IS NO LONGER DECLARED HERE (#14395 round-8 review
+        # P1): the position rule inside `_builtin_lookup_name` closes all eighteen of its rows, so
+        # they are asserted REFUSED at the bottom of this test instead of pinned GREEN. What stays
+        # is the COPY-callee composition below, whose callee is a copy CONSTRUCTOR rather than a
+        # mapping read — the position rule does not reach it, and `#14449` owns closing it.
         # ⛔ AND THE COMPOSITION THAT RETURNS A COPY CALLEE, DECLARED RATHER THAN CLOSED (#14395
         # review P2's literal-`.get` half — MEASURED GREEN **for the literal receiver and the
         # `import … as` alias alike**, so it is the SAME callee-composition class one member
@@ -12592,34 +12574,6 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_g = <copy namespace>.get; _f = _g(\"copy\")` — a copy callee COMPOSED": (
             'import builtins, copy', '_g = copy.__dict__.get', '_f = _g("copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
-        # ⛔ THE `.__getitem__` SPELLING OF THE SAME DECLARED CLASS (#14395 review P3, MEASURED
-        # GREEN and LIVE at `7334b6ace4`: `dict.__dict__.__getitem__("get") is dict.get` → True,
-        # and applying it to the mapping yields `exec`). It is not a new hole — the class is
-        # already declared — but the table's stated guarantee is that closing the class must
-        # EDIT this table, and a spelling no row carries lets a future partial closure red the
-        # `.__getitem__` shape (or the `.get` ones) with nothing here to red it. `__getitem__`
-        # is already a member of `_BUILTINS_MAPPING_READS`, so this is the same two-step
-        # composition one receiver-member over, aliased twin included.
-        "`dict.__dict__.__getitem__(\"get\")(m, \"exec\")` — the dunder twin": (
-            'import builtins',
-            'dict.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        # ⛔ AND ITS ALIAS-RECEIVER TWINS (#14395 round-5 review P3): the row above said
-        # "aliased twin included" and carried only the literal receiver, which is the
-        # half-closed guarantee this file deletes on sight. EACH MEASURED GREEN and LIVE
-        # before it was rowed.
-        "`_dc.__dict__.__getitem__(\"get\")(m, \"exec\")` — via the module ALIAS (`_dc = dict`)": (
-            'import builtins', '_dc = dict',
-            '_dc.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`vars(_dc).__getitem__(\"get\")(m, \"exec\")` — ALIAS via `vars`": (
-            'import builtins', '_dc = dict',
-            'vars(_dc).__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`getattr(_dc, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — ALIAS via `getattr`": (
-            'import builtins', '_dc = dict',
-            'getattr(_dc, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
         # ⛔ THE SAME COMPOSITION VIA THE COPY MODULE'S `import … as` ALIAS (#14395 round-4 P2):
         # the comment above MEASURED the class GREEN "for the literal receiver and the `import …
         # as` alias alike" while the table encoded only the literal — the same claim-beyond-the-
@@ -12737,75 +12691,32 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'import builtins, copy as _z',
             '_g = getattr(_z, "__dict__").__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
-        # ⛔ AND THE NAMESPACE-BOUND RECEIVERS OF THAT SAME TWO-STEP COMPOSITION (#14395 round-4
-        # P2). The BOUNDARY sentences above named "the levels the closure rows distinguish" but
-        # counted two where those rows carry THREE, and the third — a NAMESPACE bound to a name,
-        # `_n = dict.__dict__`, the level the REFUSED rows above treat as its own receiver — was
-        # unrowed. MEASURED GREEN (`refused=False`) and LIVE (`_n.get("get")(m, "exec")` really
-        # runs) at this head, one row per receiver spelling the closure rows carry.
-        "`_n = dict.__dict__` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
-            'import builtins', '_n = dict.__dict__',
-            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
-        # ⛔ AND THE `__getitem__` MEMBER AT THE SAME THREE LEVELS (#14395 round-6 review P3).
-        # The `.get` member carries NINE rows (literal `dict`, alias `_dc`, namespace-bound
-        # `_n` x `.__dict__` / `vars` / `getattr`) and `__getitem__` carried FOUR, so five
-        # spellings below read GREEN and were LIVE with no row: the paragraph's "every
-        # receiver spelling it declares" was true of `.get` and not of this member. `.pop` /
-        # `.setdefault` on this side RAISE (`mappingproxy` has neither), so `.get` and
-        # `__getitem__` are the only two live members here — which is exactly the asymmetry.
-        # EACH MEASURED GREEN (`refused=False`) and LIVE before it was rowed.
-        "`vars(dict).__getitem__(\"get\")(m, \"exec\")` — `vars` receiver": (
-            'import builtins',
-            'vars(dict).__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`getattr(dict, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — `getattr` receiver": (
-            'import builtins',
-            'getattr(dict, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`_n = dict.__dict__` then `_n.__getitem__(\"get\")(m, \"exec\")` — namespace BOUND": (
-            'import builtins', '_n = dict.__dict__',
-            '_n.__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`_n = vars(dict)` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `vars`": (
-            'import builtins', '_n = vars(dict)',
-            '_n.__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`_n = getattr(dict, \"__dict__\")` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `getattr`": (
-            'import builtins', '_n = getattr(dict, "__dict__")',
-            '_n.__getitem__("get")(builtins.__dict__, "exec")'
-            f'("results = {read}")'),
-        "`_n = vars(dict)` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
-            'import builtins', '_n = vars(dict)',
-            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
-        "`_n = getattr(dict, \"__dict__\")` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
-            'import builtins', '_n = getattr(dict, "__dict__")',
-            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
     }
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
-            f"[{label}] is now REFUSED — this row pins it GREEN as the DECLARED callee-"
-            "composition residual, so closing it must edit this table rather than leave the "
-            "note in `_indirect_reads` contradicting the code")
+            f"[{label}] is now REFUSED — this row pins it GREEN as a DECLARED residual (the "
+            "COPY-callee composition class, #14449), so closing it must edit this table rather "
+            "than leave the note in `_indirect_reads` contradicting the code")
         # ⛔ AND EVERY ROW MUST STILL APPLY THE READ, NOT MERELY NAME IT (#14395 review P3,
         # MEASURED: a row's `not refused` verdict is the SAME for one statement and for several,
         # so a row split back over its `lines` — the read then sitting in a bare string
-        # expression, produced and DISCARDED — still passes. The stricter call-of-call arm below
-        # only covers the composition row, because a row whose callee is a Subscript
-        # (`_d["exec"](<read>)`) legitimately has no call-of-call; this one is shape-agnostic:
-        # the read literal must be the ARGUMENT of some call, in EVERY row of the table.
+        # expression, produced and DISCARDED — still passes. The call-of-call arm that used to
+        # stand below is GONE with the read-method composition rows it guarded (they are in the
+        # REFUSED loop now, where `assert refused` itself reds a split row); this arm is
+        # shape-agnostic and covers EVERY remaining row — the read literal must be the ARGUMENT
+        # of some call.
         # MEASURED both ways: 44 passed unmutated, and splitting any row into two statements reds
         # this arm naming the row. ⛔ ITS GUARANTEE IS EXACTLY THIS AND NO MORE (#14395 review P3):
         # it proves the read literal is an argument of SOME call, not that the callee of that call
         # is the resolved mapping read — a row rewritten to `_x = print` + `_x("results = …")`
         # still satisfies it. ⛔ AND THE ROW'S OWN VERDICT DOES **NOT** COVER THAT BLIND HALF,
-        # MEASURED (#14395): the same `_x = print` mutant still reads `refused=False`, so for
-        # EVERY row except the one the call-of-call guard below covers, NEITHER arm can tell a
-        # live lever from a `print` — the previous sentence here claimed the verdict covered it,
-        # and the mutation falsifies that. What a row DOES pin is that the class is not closed:
-        # `refused` going True is what reds it and forces this table to be edited. The shape is
-        # therefore a declaration a reader keeps honest, NOT a detection — a row that stops
-        # exercising the read is the same defect class as a stale figure in this docstring, and
-        # re-measuring it is the repair.
+        # MEASURED (#14395): the same `_x = print` mutant still reads `refused=False`, so NO arm
+        # here can tell a live lever from a `print` — the previous sentence here claimed the
+        # verdict covered it, and the mutation falsifies that. What a row DOES pin is that the
+        # class is not closed: `refused` going True is what reds it and forces this table to be
+        # edited. The shape is therefore a declaration a reader keeps honest, NOT a detection —
+        # a row that stops exercising the read is the same defect class as a stale figure in this
+        # docstring, and re-measuring it is the repair.
         assert [
             n for n in ast.walk(_pin_source(body(*lines)))
             if isinstance(n, ast.Call)
@@ -12816,24 +12727,14 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             "it away. `body()` joins the row's `lines` with a newline, so a row split over "
             "several entries is several STATEMENTS (#14395)")
 
-    # ⛔ AND THE CALLEE-COMPOSITION ROW MUST PIN THE SHAPE IT DECLARES (#14395 review P2).
-    # Its verdict (`not refused`) is the SAME for one statement and for three, so no mutant over
-    # the unions or the resolver can red a row that silently stops applying the read — MEASURED:
-    # the three-line form passes this test today. This is the guard for that: the declared shape
-    # is a read RESOLVED, APPLIED to the mapping, and the result APPLIED to the read, so the read
-    # literal must be the argument of a CALL whose callee is itself a CALL. It is vacuously true
-    # of the residual itself (that is the point — a row that stops applying the read is not the
-    # residual) and it reds the moment the row is split back over several `lines`.
-    _applied = [
-        n for n in ast.walk(_pin_source(body(*declared_residual[
-            "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again"])))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Call)
-        and any(isinstance(a, ast.Constant) and read in str(a.value) for a in n.args)]
-    assert len(_applied) == 1, (
-        "the callee-composition row no longer APPLIES the read: it must be ONE statement whose "
-        f"callee is a call and whose argument is the read literal — found {len(_applied)} such "
-        "call(s). `body()` joins the row's `lines` with a newline, so a row spread over several "
-        "entries is several STATEMENTS, and the read is then produced and discarded (#14395)")
+    # ⛔ THE CALLEE-COMPOSITION SHAPE GUARD THAT STOOD HERE IS GONE WITH ITS SUBJECT (#14395
+    # round-8 review P1). It required the ONE declared composition row to be ONE statement whose
+    # callee is a CALL and whose argument is the read literal, because a row's `not refused`
+    # verdict is the same for one statement and for three. The position rule now REFUSES every
+    # read-method composition row, so they live in the REFUSED loop below — where a row split over
+    # several `lines` stops being refused and `assert refused(*lines)` reds it. The guard has no
+    # remaining subject; the COPY-callee rows it could have covered are multi-statement by
+    # construction (a bound callee is produced first), which is why it never covered them.
 
     # ⛔ THE COPY-CALLEE GRID IS COMPLETE — ASSERTED, NOT HAND-COUNTED (#14395 round-4 P2). The
     # paragraph above this table claims the guarantee holds for EVERY spelling of FOUR members ×
@@ -12897,6 +12798,99 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_f = getattr(getattr(builtins, \"dict\"), \"copy\")`": (
             'import builtins', '_f = getattr(getattr(builtins, "dict"), "copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        # ⛔ THE READ-METHOD COMPOSITION CLASS, MOVED HERE FROM `declared_residual` BY THE POSITION
+        # RULE (#14395 round-8 review P1). Every one of these was MEASURED GREEN (`refused=False`)
+        # **and LIVE** (the read executes) at `11279134f0`, and each is REFUSED at this head:
+        # `vars(dict).get("get")(builtins.__dict__, "exec") is exec` → True. The mechanism is one
+        # rule, not a spelling list: the resolved read-method arm of `_builtin_lookup_name` reads
+        # the KEY BY POSITION, so a builtins mapping in position 0 means the callee is the UNBOUND
+        # descriptor and the key is position 1. The class's home is `#14449`.
+        "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
+            'import builtins',
+            'vars(dict).get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`dict.__dict__.get(\"get\")(m, \"exec\")` — the same composition, `.__dict__` receiver": (
+            'import builtins',
+            'dict.__dict__.get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(dict, \"__dict__\").get(\"get\")(m, \"exec\")` — via `getattr`": (
+            'import builtins',
+            'getattr(dict, "__dict__").get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`vars(_dc).get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
+            'import builtins', '_dc = dict',
+            'vars(_dc).get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_dc.__dict__.get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
+            'import builtins', '_dc = dict',
+            '_dc.__dict__.get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(_dc, \"__dict__\").get(\"get\")(m, \"exec\")` — alias, via `getattr`": (
+            'import builtins', '_dc = dict',
+            'getattr(_dc, "__dict__").get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`dict.__dict__.__getitem__(\"get\")(m, \"exec\")` — the dunder twin": (
+            'import builtins',
+            'dict.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`vars(dict).__getitem__(\"get\")(m, \"exec\")` — `vars` receiver": (
+            'import builtins',
+            'vars(dict).__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(dict, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — `getattr` receiver": (
+            'import builtins',
+            'getattr(dict, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_dc.__dict__.__getitem__(\"get\")(m, \"exec\")` — via the module ALIAS (`_dc = dict`)": (
+            'import builtins', '_dc = dict',
+            '_dc.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`vars(_dc).__getitem__(\"get\")(m, \"exec\")` — ALIAS via `vars`": (
+            'import builtins', '_dc = dict',
+            'vars(_dc).__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(_dc, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — ALIAS via `getattr`": (
+            'import builtins', '_dc = dict',
+            'getattr(_dc, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        # …and the same three levels with the NAMESPACE bound to a name first.
+        "`_n = dict.__dict__` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = dict.__dict__',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`_n = vars(dict)` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = vars(dict)',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`_n = getattr(dict, \"__dict__\")` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = getattr(dict, "__dict__")',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`_n = dict.__dict__` then `_n.__getitem__(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = dict.__dict__',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_n = vars(dict)` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `vars`": (
+            'import builtins', '_n = vars(dict)',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_n = getattr(dict, \"__dict__\")` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `getattr`": (
+            'import builtins', '_n = getattr(dict, "__dict__")',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        # ⛔ THE UNBOUND READ METHOD FETCHED WITH `getattr` (#14395 round-8 review P1, EACH MEASURED
+        # GREEN **and LIVE** at `11279134f0` — `getattr(dict, "get")(builtins.__dict__, "exec") is
+        # exec` → True): the fetched callee RESOLVES, and only the KEY POSITION was wrong, because
+        # the arm read position 0 as if the method were BOUND. The dotted receiver is the same read
+        # off the CLASS, and it needed the receiver test to accept the `dict` TYPE at all.
+        "`getattr(dict, \"get\")(m, \"exec\")` — the fetched UNBOUND read method": (
+            'import builtins',
+            f'getattr(dict, "get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`getattr(builtins.dict, \"get\")(m, \"exec\")` — the dotted CLASS receiver": (
+            'import builtins',
+            f'getattr(builtins.dict, "get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`getattr(__builtins__[\"dict\"], \"get\")(m, \"exec\")` — the CLASS out of the mapping": (
+            f'getattr(__builtins__["dict"], "get")(__builtins__, "exec")("results = {read}")',),
+        "`_g = builtins.__dict__[\"getattr\"]; _g(dict, \"get\")(m, \"exec\")` — fetcher LAUNDERED": (
+            'import builtins', '_g = builtins.__dict__["getattr"]',
+            f'_g(dict, "get")(builtins.__dict__, "exec")("results = {read}")'),
         # `copy.copy(m)` was declared residual here until the UNBOUND `.copy` arm closed it
         # (#14326 round 35 review cycle 5): `copy.copy(m)` and `dict.copy(m)` are the same
         # one-argument call shape, so closing one closed both. It moves to the REFUSED set.
