@@ -5468,9 +5468,15 @@ export function disposeQuarantine(
         return false;
       }
     }
-    // Falling through here means `linkSync` SUCCEEDED: the displaced claim is back at
-    // the path, so the quarantined copy is now a duplicate and is swept. Every FAILURE
-    // path above returns, which is what keeps the "PRESERVED" warning true.
+    // ⛔ FALLING THROUGH IS REACHABLE TWO WAYS, AND ONLY ONE IS A SUCCESSFUL LINK
+    // (review, cycle 16, P3 — the first version of this comment claimed otherwise):
+    //   • `linkSync` SUCCEEDED — the displaced claim is back at the path, so this copy
+    //     is a duplicate and is swept;
+    //   • `linkSync` failed EEXIST — a newer claim already holds the path, so this copy
+    //     of a SUPERSEDED claim is swept. The Python twin's `except FileExistsError`
+    //     arm does the same ("the displaced record's bytes are gone, and the only
+    //     honest thing left is to say so"), and its warning never says PRESERVED.
+    // The two PRESERVED arms above both RETURN, which is what keeps THAT warning true.
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
   }
