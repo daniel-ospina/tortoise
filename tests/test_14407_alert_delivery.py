@@ -1468,6 +1468,66 @@ def test_a_missing_incident_channel_delivers_anyway_and_names_the_reason(
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
+        monkeypatch, caplog):
+    """The operator log must not credit the episode re-arm to every kind (#14407 r6).
+
+    ``_deliver_unattributed`` is reached for EVERY member of
+    :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
+    :func:`_episode_delivery_kinds` can be re-armed at all: ``abuse_suspended`` is
+    deliberately EXCLUDED from :data:`_EPISODE_INCIDENT_KINDS` (it records an
+    operator decision, not a rule's flag window), which its own runbook row states
+    as policy (``docs/ops/registry-backup-dr.md``: *"its delivery window is never
+    re-armed early"*).
+
+    Pre-fix the same sentence claimed "RE-ARMED by a confirmed episode end … a rule
+    that FLAPS pages once per episode" for all three kinds, so an operator
+    diagnosing a suspension page that never arrived was told a re-arm had happened
+    and pointed at episode-end plumbing that never runs for that kind.
+
+    BOTH polarities are pinned: a fix that deletes the clause from every kind would
+    under-report the rule-episode kinds' real (true) re-arm and must red too.
+    """
+    import tortoise.notify as notify
+
+    captured: dict[str, str] = {}
+
+    def _emit(kind: str) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: sent.append(text))
+        monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (
+            None, "no alert channel configured (DR_ISSUES_PAT unset)"))
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        notify.reset_abuse_delivery_for_tests()
+        with caplog.at_level("WARNING", logger="tortoise.notify"):
+            notify.notify_abuse(kind, {"org_id": "org-a"},
+                                {"rule": "point_create", "count": 900})
+        captured[kind] = "\n".join(
+            r.getMessage() for r in caplog.records
+            if "with NO attributable incident" in r.getMessage())
+        caplog.clear()
+        assert len(sent) == 1, (kind, sent)  # the alert itself still goes out
+
+    _emit("abuse_suspended")
+    log = captured["abuse_suspended"]
+    assert "RE-ARMED by a confirmed episode end" not in log, (
+        "the log credits an episode re-arm to a kind that has no episode; its own "
+        f"runbook row says the window is never re-armed early: {log!r}")
+    assert "NEVER re-armed early" in log, (
+        f"the suspension shape must state the limit it actually has: {log!r}")
+    assert "NO episode" in log, log
+
+    _emit("abuse_flag")
+    log = captured["abuse_flag"]
+    assert "RE-ARMED by a confirmed episode end" in log, (
+        f"a rule-episode kind lost its (true) re-arm clause: {log!r}")
+    assert "NEVER re-armed early" not in log and "NO episode" not in log, log
+    notify.reset_abuse_delivery_for_tests()
+
+
 # ── 5. the engine owns the episode, so it must end it ───────────────────────
 
 def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
@@ -1776,6 +1836,12 @@ def test_a_failing_incident_read_never_raises_from_the_alert_path(monkeypatch):
     # removes, on the arm where the read is the thing that broke.
     assert "could not be read" in sent[0], sent[0]
     assert "no issue number on record" not in sent[0], sent[0]
+    # Round 6, P3: this is the THIRD arm the arm-conditional pointer changes, and its
+    # ABSENCE was unpinned. Mutating the condition to `if (number or not number_known)`
+    # restores the pointer on this arm — which says the number could not be read, so a
+    # comment trail on an issue it never named cannot exist — and nothing reddened.
+    assert "issue comment trail" not in sent[0], (
+        f"the raise arm points at a comment trail on an issue it never named: {sent[0]!r}")
     notify.reset_abuse_delivery_for_tests()
 
 

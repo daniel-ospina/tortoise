@@ -1123,19 +1123,38 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     chat_id = _env("TELEGRAM_CHAT_ID")
     if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
         return
+    # ⛔ The bound sentence is RENDERED from the code, never restated (round 6,
+    # P2). This helper is reached for EVERY member of
+    # :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
+    # :func:`_episode_delivery_kinds` can be re-armed: ``abuse_suspended`` is
+    # deliberately excluded from :data:`_EPISODE_INCIDENT_KINDS` (it records an
+    # operator decision, not a rule's flag window), and even for the rule-episode
+    # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
+    # gated on ``SKIPPED_WINDOW`` until ``DR_RECOVERY_STREAK`` clean observations,
+    # so an alternating rule stays inside the window there; only the
+    # no-incident-channel ledger is released on every confirmed episode end.
+    # Stating one kind's rule for all three sends an operator diagnosing a page
+    # that did not arrive to look for an episode end that never runs for that
+    # kind. Deriving both facts from the tuple and the shape means a kind added
+    # to `_EPISODE_INCIDENT_KINDS` gains the clause automatically and an excluded
+    # one can never inherit it.
+    re_arm = (
+        ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
+        " (with a store, the release is gated on its `SKIPPED_WINDOW` until the"
+        " recovery window is satisfied, so the 24h limit holds there) — a rule"
+        " that FLAPS therefore pages once per episode in that shape, one message"
+        " per crossing, which is the pre-#14407 rate (this path's gain is"
+        " attribution and the continuous-breach rate, not flapping volume),"
+        " while a continuously breaching org stays at that ceiling"
+        if kind in _episode_delivery_kinds() else
+        ", NEVER re-armed early — this kind has NO episode (it records an"
+        " operator decision, not a rule's flag window), so the window is the"
+        " hard limit and a repeat about the same subject inside it is folded")
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "
-        "per subject on the no-incident-channel path, RE-ARMED by a confirmed "
-        "episode end for the two RULE-EPISODE kinds — a continuously breaching "
-        "org stays at that ceiling, while a rule that FLAPS pages once per "
-        "episode (one message per crossing, the pre-#14407 rate: this path's "
-        "gain is attribution and the continuous-breach rate, not flapping "
-        "volume). %s is not in that re-arm set, so its window is never re-armed "
-        "early: a second suspension of the same subject inside %dh is not "
-        "delivered. Never silent (#14407).",
-        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600),
-        KIND_ABUSE_SUSPENDED, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
+        "per subject%s, and it is never silent (#14407).",
+        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600), re_arm)
     if not _send_abuse(bot_token, chat_id, _abuse_message(
             kind, org_id, details,
             attribution=(

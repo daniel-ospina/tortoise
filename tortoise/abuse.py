@@ -83,9 +83,13 @@ the episode opens, then at most one reminder per 24h while it stays open; a
 measurement (#10156's ACTIVITY register) files nothing by design and is
 DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
 incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2) of the
-#3146 recovery window, not the first clean one: the first clean window only counts
-observation 1 and `resolve_incident_state` answers SKIPPED_WINDOW, so nothing is closed
-and nothing is re-armed yet. The bound is the EPISODE — never a mute.
+#3146 recovery window, not the first clean one. ⛔ THAT GATE IS THE STORE PATH'S: with a
+store, `resolve_incident_state` answers SKIPPED_WINDOW on the first clean window, so
+nothing is closed and nothing is re-armed there yet. With NO incident channel there is
+no `SKIPPED_WINDOW` gate to hold the release, so `notify.resolve_abuse_episode`
+re-arms the local ledger on the FIRST confirmed episode end — the bound in that shape
+is the EPISODE, and the 24h window is only the ceiling for a continuously breaching
+org. The bound is the EPISODE — never a mute.
 The in-process claim below stays as the ATTEMPT bound (it self-heals a store
 failure, which an episode-scoped claim could not), so the honest ceiling across
 replicas is N replicas x 1 attempt per window and 1 delivery per episode.
