@@ -2938,3 +2938,132 @@ def test_an_UNREADABLE_regular_claim_is_a_DURABLE_stall_and_a_held_pass_clears_i
     assert after is not None and "claim_unreadable" not in after, (
         "a pass that HELD the claim proved the path readable and must clear the stall, "
         "got " + repr(after))
+
+
+def test_the_claim_policy_carries_a_stall_only_while_it_is_still_true(tmp_path):
+    """⛔ THREE DIRECTIONS FOR THE STALL FACT, and each one is a defect if it flips
+    (#14480 review, P2). The Pi twin drives the same rows
+    (`the claim policy CARRIES a stall only while it is still true`).
+
+    * a pass that HOLDS the claim proved the path READABLE, so it clears the stall;
+    * a TARGETED pass observed nothing about the claim, so it carries it;
+    * a pass that could not install a claim at all RE-MEASURED the path, so it
+      replaces the stall with its own cause instead of leaving a one-way latch;
+    * and a pass with NO prior fact must not INVENT one (the false-positive direction
+      the cycle-15 P2 fixed for the exclusion fact).
+
+    MUTATION THAT REDS THIS: drop the `claim_unreadable` fields from the
+    `held_claim` clear arm (row 1), or from the carry-forward arm (row 2), or let the
+    `claim_unavailable` arm keep the stale stall (row 3).
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    stalled = {
+        "version": 1, "state": "ok",
+        "claim_unreadable": True,
+        "claim_unreadable_reason": "could not be read",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    # (label, prior stall?, summary state, attempted, expect claim_unreadable)
+    rows = [
+        ("stalled, pass holds the claim", True, {"held": True}, 0, False),
+        ("stalled, targeted pass earns an ok record", True, {}, 3, True),
+        ("stalled, pass could not install a claim", True, {"unavailable": True}, 0,
+         False),
+        ("healthy, no prior fact, targeted pass", False, {}, 3, False),
+    ]
+    for index, (label, stalled_prior, state, attempted, expected) in enumerate(rows):
+        root = tmp_path / f"stall-row-{index}"
+        root.mkdir(parents=True)
+        if stalled_prior:
+            write_capture_status(root, dict(stalled))
+        summary = FlushSummary(attempted=attempted)
+        if state.get("unavailable"):
+            summary.claim_unavailable = True
+            summary.claim_unavailable_reason = "obstructed"
+        _record_capture_status(root, summary, held_claim=bool(state.get("held")))
+        recorded = read_capture_status(root)
+        assert recorded is not None, label + ": the record vanished"
+        assert bool(recorded.get("claim_unreadable")) is expected, (
+            label + " → " + repr(recorded))
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed on this box")
+def test_the_claim_terms_render_IDENTICALLY_on_both_legs_for_a_FOREIGN_record(
+        tmp_path):
+    """⛔ ONE LINE, ONE SHARED `status.json`, TWO RENDERERS (#14480 review, P3).
+
+    The record is the contract, not the writer: a hand-edited or foreign record can
+    hold a reason that is not a string, and the two legs used to render it differently
+    — Python dropped the suffix (`isinstance(reason, str) and reason`), the Pi leg
+    stringified whatever it found (`(5)`, `([object Object])`). This drives BOTH real
+    renderers on the SAME bytes and requires the same sentence, which is also the rule
+    this PR states for every verdict.
+
+    It also pins the SECOND term: a stall and an absent exclusion can both be recorded
+    (the exclusion was off yesterday; the claim is unreadable now), and their order is
+    fixed so the two legs cannot disagree about it.
+
+    MUTATION THAT REDS THIS: restore the Pi leg's truthiness test
+    (`reason ? … : ""`) or its `??` carry test; or drop either term arm.
+    """
+    root = tmp_path / "shared"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": 5,
+        "claim_unreadable": True,
+        "claim_unreadable_reason": {"why": "x"},
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    python_line = capture_health_line(root, api_key="present").line
+    assert python_line == (
+        "capture: OK (0 queued), NO drain exclusion, drain claim UNREADABLE"), (
+        "a NON-STRING reason is not words on the operator line: " + repr(python_line))
+
+    script = (
+        f'const m = await import({json.dumps(_TS_LEG.as_posix())});\n'
+        'const dir = process.env.SPOOL_DIR;\n'
+        'process.stdout.write(JSON.stringify({ line: '
+        'm.captureHealthLine(dir, { apiKey: "present" }).line }));\n'
+    )
+    out = subprocess.run([_NODE, "--input-type=module", "-e", script],
+                         capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "SPOOL_DIR": str(root)})
+    assert out.returncode == 0, out.stderr[-2000:]
+    pi_line = json.loads(out.stdout)["line"]
+    assert pi_line == python_line, (
+        "the two legs render the SAME record differently:\n  python: "
+        + python_line + "\n  pi:     " + pi_line)
+
+
+def test_a_JSON_NULL_reason_is_not_carried_by_either_leg(tmp_path):
+    """⛔ THE SAME CLASS ONE FIELD OVER (#14480 review, P3, Pi `:6320`).
+
+    The exclusion FLAG is carried onto the record a targeted pass earned; its REASON
+    is carried only when there is one. The Pi leg tested `!== undefined` (so a JSON
+    `null` was carried) while this leg tests `is not None` (so it was dropped), and
+    both write the same `status.json` — one leg rendered a `null` reason, the other
+    did not, on the shared operator line.
+
+    MUTATION THAT REDS THIS: carry the reason whenever the key exists.
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    root = tmp_path / "null-reason"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": None,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    _record_capture_status(root, FlushSummary(attempted=3), held_claim=False)
+    recorded = read_capture_status(root)
+    assert recorded is not None
+    assert recorded.get("claim_unavailable") is True, (
+        "the FLAG is carried: " + repr(recorded))
+    assert recorded.get("claim_unavailable_reason") is None, (
+        "a null reason must not be carried into a record that had none: "
+        + repr(recorded))

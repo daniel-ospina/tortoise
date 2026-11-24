@@ -1459,6 +1459,13 @@ export interface FlushSummary {
    *  advertised a per-pass field no pass ever writes — and left
    *  `claim_unavailable`'s own doc block attached to the wrong field. */
   claimHeld?: boolean;
+  /** ⛔ #14480: this pass found a claim it could not READ (a regular file whose
+   *  bytes were unavailable) and therefore HONOURED it — nothing attempted, never
+   *  a delete, never an unclaimed pass. The durable half: without it the drain
+   *  stalls with nothing on any surface saying so (review, P2). Mirrors
+   *  `FlushSummary.claim_unreadable` on the Python leg. */
+  claimUnreadable?: boolean;
+  claimUnreadableReason?: string;
   /** #14350: the CAPACITY refusal that ended this pass, if any. Nothing was
    *  charged to the entry's `attempts` and no backoff was armed — that is the
    *  difference between this and a per-entry deferral, and it is what keeps the
@@ -1518,9 +1525,19 @@ export interface CaptureStatus {
    *  — which the firing path discards (`nohup … >/dev/null 2>&1 &`). Without this
    *  field the box reports `capture: OK`/`DRAINING` while N drainers POST into the
    *  same ceiling (#14423 cycle-7 review, P1). Mirrors the Python leg's
-   *  `claim_unavailable` / `claim_unavailable_reason` fields exactly. */
+   *  `claim_unavailable`/`claim_unavailable_reason` exactly. */
   claim_unavailable?: boolean;
   claim_unavailable_reason?: string;
+  /** ⛔ #14480: a claim EXISTS at the claim path but its bytes could not be read,
+   *  so the pass HONOURED it and attempted nothing. Distinct from
+   *  `claim_unavailable` in the one way an operator needs: the exclusion is not
+   *  OFF here, it is STALLED — the claim belongs to somebody and no pass can run
+   *  until it is read or removed, while `holder()` cannot name it either. Without
+   *  this field the arm blocked the drain FOREVER and the health line reported a
+   *  healthy box (review, P2). Mirrors the Python leg's `claim_unreadable` /
+   *  `claim_unreadable_reason` fields exactly. */
+  claim_unreadable?: boolean;
+  claim_unreadable_reason?: string;
   updated_at: string;
 }
 
@@ -4562,6 +4579,15 @@ export async function flushSpool(
       summary.claimHolder =
         "a claim file exists at this spool but could not be read " +
         "(pid unknown) — nothing attempted";
+      // ⛔ AND IT IS A DURABLE STALL, not only a console line: without this the drain
+      // can be blocked FOREVER with no surface saying so — `holder()` cannot name the
+      // claim either, so the operator line reported a healthy box (#14480 review, P2).
+      // `recordOutcome` below runs `applyClaimPolicy`, which writes the fact onto the
+      // shared record; a later pass that HOLDS the claim clears it.
+      summary.claimUnreadable = true;
+      summary.claimUnreadableReason =
+        "a claim file exists at this spool but could not be read " +
+        "— the drain is stalled until it can be";
       return summary;
     }
     // A lost takeover race with an EMPTY path is NOT "the claim cannot be created":
@@ -6144,10 +6170,22 @@ export function countPendingEntries(dir: string): number | undefined {
 }
 
 /** Read the recorded per-box status. Absent/corrupt reads as `undefined` (the
- *  health line then falls back to what the spool itself proves). */
+ *  health line then falls back to what the spool itself proves).
+ *
+ *  ⛔ `lstatSync` FIRST — the same gate `drainClaim`'s `readRaw` puts on the CLAIM
+ *  file, for the same measured reason: `readFileSync` on a FIFO (or a socket) blocks
+ *  until a writer appears, and this accessor runs on the DRAIN path inside the claimed
+ *  section (the claim-policy carry-forward reads `status.json` after a pass's POSTs,
+ *  before `release()`) and from the health line. An object of that class there wedged
+ *  the pass while it HELD the one-drainer claim and hung `session health` too (#14480
+ *  review, P1). A non-regular object is nothing we wrote and nothing we can read: it is
+ *  "no usable record", never a crash, and the next successful write replaces it (the
+ *  write is rename-based, which replaces the object rather than blocking on it). */
 export function readCaptureStatus(dir: string): CaptureStatus | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(statusPathFor(dir), "utf8")) as CaptureStatus;
+    const path = statusPathFor(dir);
+    if (!lstatSync(path).isFile()) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as CaptureStatus;
     return parsed && typeof parsed === "object" ? parsed : undefined;
   } catch {
     return undefined;
@@ -6387,10 +6425,15 @@ function healthScan(
 export function applyClaimPolicy(
   next: CaptureStatus | null,
   previous: CaptureStatus | undefined,
-  summary: Pick<FlushSummary, "claimUnavailable" | "claimUnavailableReason" | "claimHeld">,
+  summary: Pick<
+    FlushSummary,
+    "claimUnavailable" | "claimUnavailableReason" | "claimHeld"
+    | "claimUnreadable" | "claimUnreadableReason"
+  >,
 ): CaptureStatus | null {
   const hadFact = Boolean(
-    previous?.claim_unavailable || previous?.claim_unavailable_reason);
+    previous?.claim_unavailable || previous?.claim_unavailable_reason
+    || previous?.claim_unreadable || previous?.claim_unreadable_reason);
   if (summary.claimUnavailable) {
     // ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line — a pass that
     // ran WITHOUT the one-drainer claim may have filed nothing, so every rule above
@@ -6399,11 +6442,35 @@ export function applyClaimPolicy(
     // reports `capture: OK`/`DRAINING` while N drainers POST into the same ceiling
     // (#14423 cycle-7 review, P1). Decorated rather than replacing, so a
     // quota-blocked box with a broken claim path keeps BOTH facts.
-    return {
+    const record = {
       ...(next ?? previous ?? { version: 1, state: "ok" }),
       claim_unavailable: true,
       claim_unavailable_reason: (summary.claimUnavailableReason
         || "the spool root cannot hold a claim").slice(0, 300),
+      updated_at: new Date().toISOString(),
+    } as CaptureStatus;
+    // ⛔ THIS ARM RE-MEASURED THE CLAIM PATH, so a recorded STALL does not survive
+    // it: the unreadable object it described is not what is there any more (a pass
+    // that reached this arm could not install a claim at all). Carrying it would be
+    // the one-way latch this whole policy exists to avoid, pointing the other way
+    // (#14480 review, P2) — and the Python arm pops the same two fields.
+    delete record.claim_unreadable;
+    delete record.claim_unreadable_reason;
+    return record;
+  }
+  if (summary.claimUnreadable) {
+    // ⛔ A CLAIM THAT EXISTS AND CANNOT BE READ IS A **STALLED** DRAIN, and the stall
+    // has to be durable for the same reason the exclusion fact is: this pass attempts
+    // nothing, so there is no earned record to decorate, and the pid/lease that
+    // `claimHolder` renders is exactly what cannot be read. Without it the box files
+    // nothing while the health line describes a healthy drain, and `claimIsStale(…)`
+    // reports the claim RECLAIMABLE while no reader can reach it (#14480 review, P2).
+    // Decorated onto whatever state is known, never replacing it.
+    return {
+      ...(next ?? previous ?? { version: 1, state: "ok" }),
+      claim_unreadable: true,
+      claim_unreadable_reason: (summary.claimUnreadableReason
+        || "a claim file exists at this spool but could not be read").slice(0, 300),
       updated_at: new Date().toISOString(),
     } as CaptureStatus;
   }
@@ -6420,6 +6487,12 @@ export function applyClaimPolicy(
     if (hadFact && next) {
       delete next.claim_unavailable;
       delete next.claim_unavailable_reason;
+      // ⛔ BOTH claim facts, because a pass that HOLDS the claim has PROVED the
+      // claim path readable and acquireable — the one observation that clears a
+      // stall. Clearing only the exclusion fact left `drain claim UNREADABLE` on a
+      // box that had just drained.
+      delete next.claim_unreadable;
+      delete next.claim_unreadable_reason;
       next.updated_at = new Date().toISOString();
     }
     return next;
@@ -6429,9 +6502,21 @@ export function applyClaimPolicy(
     // the exclusion as unavailable, so it has NO standing to clear the fact: carry it
     // onto the record it earned. `updated_at` stays this pass's, because the state
     // half of the record IS this pass's observation.
-    next.claim_unavailable = true;
-    if (previous?.claim_unavailable_reason !== undefined) {
-      next.claim_unavailable_reason = previous.claim_unavailable_reason;
+    //
+    // ⛔ ONE loop for BOTH claim facts, and `!= null` rather than `!== undefined`:
+    // Python's arm is `is not None`, so a JSON `null` reason must be dropped and an
+    // EMPTY-STRING (or foreign) reason must be carried, or the same `status.json`
+    // renders one way on this leg and another on the Python one (#14480 review, P3).
+    for (const [flag, reasonField] of [
+      ["claim_unavailable", "claim_unavailable_reason"],
+      ["claim_unreadable", "claim_unreadable_reason"],
+    ] as const) {
+      if (previous?.[flag] || previous?.[reasonField]) {
+        next[flag] = true;
+        if (previous?.[reasonField] != null) {
+          (next as unknown as Record<string, unknown>)[reasonField] = previous[reasonField];
+        }
+      }
     }
   }
   return next;
@@ -6453,12 +6538,27 @@ function withClaimTerm(
   health: CaptureHealth,
   recorded: CaptureStatus | undefined,
 ): CaptureHealth {
+  let line = health.line;
   if (recorded?.claim_unavailable) {
     const reason = recorded.claim_unavailable_reason;
-    const suffix = reason ? ` (${reason})` : "";
-    return { ...health, line: `${health.line}, NO drain exclusion${suffix}` };
+    // ⛔ `typeof === "string"` MATCHES THE PYTHON LEG's
+    // `isinstance(reason, str) and reason`, which drops a non-string reason rather
+    // than stringifying it: a plain truthiness test rendered `(5)` / `([object
+    // Object])` here while Python rendered nothing, on the SHARED operator line —
+    // against this PR's own "byte-identical words on both legs for every verdict"
+    // (#14480 review, P3).
+    const suffix = typeof reason === "string" && reason ? ` (${reason})` : "";
+    line = `${line}, NO drain exclusion${suffix}`;
   }
-  return health;
+  if (recorded?.claim_unreadable) {
+    // A SECOND term, in the same FIXED order as the Python leg: a stale record can
+    // carry both facts (the exclusion was off yesterday; the claim is unreadable
+    // now), and the two legs must print the same sentence in the same order.
+    const reason = recorded.claim_unreadable_reason;
+    const suffix = typeof reason === "string" && reason ? ` (${reason})` : "";
+    line = `${line}, drain claim UNREADABLE${suffix}`;
+  }
+  return line === health.line ? health : { ...health, line };
 }
 
 function spoolHealthLine(
@@ -6495,6 +6595,10 @@ function spoolHealthLine(
       ...(previous?.claim_unavailable ? { claim_unavailable: true as const } : {}),
       ...(previous?.claim_unavailable_reason
         ? { claim_unavailable_reason: previous.claim_unavailable_reason }
+        : {}),
+      ...(previous?.claim_unreadable ? { claim_unreadable: true as const } : {}),
+      ...(previous?.claim_unreadable_reason
+        ? { claim_unreadable_reason: previous.claim_unreadable_reason }
         : {}),
     };
     recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString(), ...keep };
