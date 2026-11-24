@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1953 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2010 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -323,6 +323,30 @@ def _residue_block() -> str:
     rather than inherited from either side, and that fold's pair was re-derived by RUNNING `--repin`
     on BOTH trees
     (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
+    — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
+    with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
+    walked run, so the figure above is RE-MEASURED by this walk on the folded file rather than
+    adjusted by arithmetic from either parent's reading,
+    — and `#4625`'s OWN residue re-pin block above (`SWEEP_RESIDUE` `11910` → `11908`, the two
+    `_JSONB_CACHE.update({...})` rows the 5 s `jsonb` TTL retired) appended `#:` lines to
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree rather than carried
+    forward from it — which is the defect THIS arm exists to catch, and it caught it here: the
+    figure and the walk are now graded together
+    (`test_the_extent_figure_is_the_walks_own_count`), so a prose edit that moves the run REDS
+    naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
+    moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
+    gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
+    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
+    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks once more (each side
+    had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
+    prose), and the resolution keeps both verbatim rather than trimming the run to one side's
+    reading — so the figure above is RE-MEASURED by this walk on the RESOLVED file at
+    2010, never inherited from either side's published `1953` or `1954`,
+    and the pair did NOT follow the run: `--repin` on this resolved tree prints
+    `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this fold
+    adds no row — the 11912 this branch carried sat 2 above it only while the branch still held
+    the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on this branch's pre-merge
+    tree, 0 on `origin/main`), and that pair is what adopting main's deletion removes,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

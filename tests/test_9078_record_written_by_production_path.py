@@ -807,15 +807,50 @@ def test_the_schema_resolves_without_the_repo_checkout(monkeypatch, tmp_path):
     packaged.mkdir(parents=True)
     for name in record_projection.RECORD_MIGRATIONS:
         shutil.copy(repo_dir / name, packaged / name)
+    # ⛔ THE TWO COPIES MUST DIFFER, or this pin cannot tell which one was read
+    # (#4625 review, F2). With byte-identical trees a read that silently answered
+    # from the repo checkout — or from a resident entry resolved before the
+    # monkeypatch — returns the same columns and the assertion passes for the wrong
+    # reason. A column that exists ONLY in the wheel's copy makes the resolution
+    # observable.
+    wheel_only = packaged / record_projection.RECORD_MIGRATIONS[-1]
+    wheel_only.write_text(
+        wheel_only.read_text(encoding="utf-8")
+        + "ALTER TABLE public.point ADD COLUMN wheel_probe_column text;\n",
+        encoding="utf-8")
 
     monkeypatch.setattr(record_projection, "REPO_ROOT", site)
     monkeypatch.setattr(record_projection, "PACKAGED_MIGRATIONS", packaged)
     assert record_projection._migrations_dir() == packaged
-    columns = record_projection.table_columns()
-    assert "point" in columns and "props" in columns["point"], sorted(columns)
+    # ⛔ THE RESIDENT ENTRY MUST BE DROPPED FIRST (#4625). `table_columns()` on a
+    # process whose schema was already resolved answers from `_RESIDENT_SCHEMA`,
+    # which is never revalidated by design — so without this release the monkeypatch
+    # above is INERT (the pin passes off the repo tree and stops proving that a
+    # wheel can read its own copy at all), and if this WERE the first consult the
+    # resolution would bind the resident entry to `tmp_path` and hand every later
+    # schema read in the process a directory that no longer exists. The release is
+    # what makes the read below a real resolution of the patched tree.
+    record_projection._release_schema_cache()
+    try:
+        columns = record_projection.table_columns()
+        assert "point" in columns and "props" in columns["point"], sorted(columns)
+        assert "wheel_probe_column" in columns["point"], (
+            "`table_columns()` answered without the column that exists ONLY in the "
+            "installed copy, so the parse came from somewhere else — the repo "
+            "checkout, or a resident entry resolved before this test patched the "
+            "resolver. Either way a wheel install would ship a writer that cannot "
+            "read its own schema.")
+    finally:
+        # …and the `tmp_path` resolution does not outlive this test either: the
+        # cache is process-global, and a leaked entry is a silent state leak into
+        # every later schema read in this shard.
+        record_projection._release_schema_cache()
 
-    # The CHECKOUT still wins where it is complete: a migration edit must be
-    # read as edited, never as the copy an install happens to carry.
+    # The CHECKOUT still WINS at RESOLUTION time — it is what gets read ONCE and
+    # then served for the life of the process. ⛔ It is no longer a per-call
+    # freshness guarantee: since #4625 the resident schema is not re-read, so an
+    # edit to these files is seen only after `_release_schema_cache()`. The
+    # assertion below checks the RESOLUTION ORDER, which is all it ever checked.
     monkeypatch.setattr(record_projection, "REPO_ROOT", REPO_ROOT)
     assert record_projection._migrations_dir() == repo_dir
 

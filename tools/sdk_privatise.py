@@ -2063,7 +2063,64 @@ SWEEP_NAMES = 66
 #: on `main`'s behalf (`seen.update` 101 → 102, arrived with `#14506`) is THAT commit's record of
 #: `main`'s 11910 → 11911 movement, not a claim about this diff, and it was not re-measured here.
 #: `typed references still pointing at a public name: 0` and `--check` exits 0 on the pair below.
-SWEEP_RESIDUE = (11912, "73827c80583e139f")
+#:   ⛔ THE ASSIGNMENT THAT CLOSED THAT PARAGRAPH ON ITS OWN HEAD READ
+#:   `SWEEP_RESIDUE = (11912, "73827c80583e139f")`, and it survives here as PROSE rather than as a
+#:   second assignment: a merge brings both sides' assignments in, and this file carries exactly
+#:   ONE — the LAST binds while a first-anchored walk grades only the prose above the FIRST.
+#:
+#: ⛔ `#4625`'s OWN FOLD THEN RE-PINNED IT DOWN 11910 -> **11908** — the pin's HARMLESS direction,
+#: because a residue count that FALLS cannot hide a new untyped reference. The two rows that left are
+#: the last `_JSONB_CACHE.update({...})` calls in `tortoise/record_projection.py`, deleted with the
+#: 5 s `jsonb` TTL that PR retires: the TTL was the only reason that dict was refreshed in place
+#: rather than cleared through `_release_schema_cache()` — measured `--repin` on that branch's tree
+#: printed `(11908, 'f03fb8e5f6e44a9c')`, no shape added or absorbed.
+#: ⛔ THAT PR'S MERGE WITH ITS OWN `origin/main` MOVED IT BACK UP BY ONE, to
+#: **11909 / `1f020f859e887f94`** — the OTHER direction, so it is attributed ROW BY ROW rather than
+#: accepted as a flake: `main`'s rewrite of `tests/test_collision_preflight.py` adds exactly one
+#: untyped `.update` receiver, `seen.update(kwargs)` in its new `spy()` fixture, and that merge
+#: deleted no `.update` line anywhere (`#4625`'s own -2 is still in that tree: `_JSONB_CACHE.update`
+#: is 2 rows on `origin/main` and 0 there). A rising pin is the direction the guard exists to CATCH,
+#: and there the row is main's, so the pin followed `main` — measured `--repin` on that merged tree,
+#: never arithmetic on the old number.
+#: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE,
+#: because the fold's own tree is a THIRD tree: that merge brought main's durable
+#: `claim_unavailable` self-heal, whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one
+#: new untyped `.update(` receiver, and `--repin` on THAT resolved tree printed
+#: **(11910, "3216395d35345904")**. The -3 between that and that `main`'s committed 11911 is
+#: attributed ROW BY ROW, not waved through:
+#:   * that `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1
+#:     is `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which
+#:     arrived with `#14491`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
+#:     that `main` ITSELF (the `#14062` recurrence the blocks above record a sixth time); this
+#:     branch inherits main's row set, not main's number.
+#:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
+#:     took with it — 2 rows on that `origin/main`, 0 there, and the report row sets are otherwise
+#:     IDENTICAL (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one
+#:     differing line). 11912 - 2 = 11910, and that pair was `--repin`'s own output on that tree, never
+#:     arithmetic; a pin that FALLS cannot hide a new untyped reference, the direction this arm catches.
+#:   ⛔ THAT PARAGRAPH'S ASSIGNMENT READ `SWEEP_RESIDUE = (11910, "3216395d35345904")` ON THAT HEAD,
+#:   kept as prose here for the same one-assignment reason, and ⛔ ITS PAIR IS `#4625`'S MERGE TREE,
+#:   NOT THIS ONE'S.
+#:
+#: ⛔ MERGED `origin/main` `6a02515d14ad` INTO THIS BRANCH — the PR was `CONFLICTING`, and the two
+#: conflicted files are exactly the ones this pin lives in (`tools/sdk_privatise.py` and its grading
+#: suite): each side had appended its own re-cut record above the SAME `SWEEP_RESIDUE` assignment.
+#: BOTH SIDES' BLOCKS ABOVE ARE KEPT VERBATIM, which is this block's ground rule: each is a true
+#: measurement of the tree it NAMES, so neither side is dropped to make a conflict go away — and the
+#: one line that CANNOT be kept twice is the assignment itself, because a second one binds silently
+#: while the walk still grades the first.
+#: ⛔ THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE: a merge tree is a THIRD tree, so neither
+#: parent's numeral is inherited, and `--repin` HERE is the only thing that reads it. It prints
+#: **(11910, "3216395d35345904")** with `typed references still pointing at a public name: 0`, and
+#: `--check` exits 0 on it. ⚠️ THAT IS BYTE-IDENTICAL TO THE PAIR `main` COMMITS, and the agreement
+#: is a MEASUREMENT of two trees rather than a carry: this fold adds NO row, so the matching numeral
+#: must not be read as confirmation of anything this branch contributes.
+#: ⛔ THE 2-ROW GAP BETWEEN THIS PAIR AND THE BRANCH'S OWN PRE-MERGE 11912 IS ATTRIBUTED ROW BY ROW,
+#: not waved through: the branch's pre-merge tree still carried the two `_JSONB_CACHE.update({...})`
+#: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
+#: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
+#: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
+SWEEP_RESIDUE = (11910, "3216395d35345904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
