@@ -704,6 +704,19 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
+    def discard(self, org_id: str, batch_id: str) -> None:
+        """Remove a batch's item rows (the rollback of a rejected acceptance).
+
+        ⛔ DECLARED, because `submit`'s ROLLBACK calls it (#14415 review round 14,
+        P3). It existed only on the two concrete stores, so a store written to this
+        Protocol raised `AttributeError` inside the `except Exception` that logs
+        "could not be rolled back" — and then the item rows SURVIVED, which is the
+        BLOCKING-2 defect exactly: a 503 saying "nothing was accepted; retry" over
+        rows the resume scan adopts and drains, and then the retry ingests them
+        again. A narrow contract is only narrow if every call on it is in here.
+        """
+        ...
+
     def put_items(self, org_id: str, items: Sequence[BatchItem]) -> None:
         """Create/refresh MANY item rows in ONE statement.
 
@@ -1285,7 +1298,7 @@ class GraphBatchStore:
         self._q(
             f"UNWIND $rows AS row "
             f"MERGE (i:{ITEM_LABEL} {{id:row.iid, batch_id:row.bid, "
-            "org_id:row.org}}) "
+            "org_id:row.org}) "
             "SET i.ref=row.ref, i.name=row.name, i.staged_path=row.staged, "
             "    i.state=row.state, i.reason=row.reason, "
             "    i.content_key=row.key, i.tokens_in=row.tin, "
