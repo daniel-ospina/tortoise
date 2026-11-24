@@ -63598,11 +63598,14 @@ def _clear_state_notice_keys(sink: dict) -> None:
     against the payload `missed_route_payload` builds, so a key added there without
     being added here cannot silently leave a stale notice behind.
 
-    ⛔ DEFINED AT THE FOOT OF THE MODULE ON PURPOSE: `docs/architecture/
-    CAPABILITY-PLACEMENT-AUDIT.md` pins `sdk.py:<line>` addresses by CONTENT, so an
-    insertion anywhere above them rots every one of them. The call site above is
-    therefore the same TWO lines it was, and this helper lives below the last pinned
-    address — a fix that shifts a 62k-line document's cites is its own regression.
+    ⛔ DEFINED AT THE FOOT OF THE MODULE ON PURPOSE: this is the module's footnote
+    convention (it came from the retired capability-placement audit), and it is also
+    load-bearing — `docs/architecture/CYPHER-INVENTORY.md` Appendix A carries 390
+    `tortoise/sdk.py:<line>` addresses and is graded against the tool's OWN output at
+    the head, so an insertion anywhere above them rots every one of them. The call
+    site above is therefore the same TWO lines it was, and this helper lives below
+    the last pinned address (the appendix's highest `sdk.py` row) — a fix that shifts
+    a 62k-line document's cites is its own regression.
     """
     from .state_intent import STATE_NOTICE_KEYS
 
