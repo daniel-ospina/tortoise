@@ -71,18 +71,59 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `59a08fdb8b4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
-# 838.0 s (b, c, d, e, f, g, h, i, j, k), so
-# `ceil(838.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# `2cccf90f4dd` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
+# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs ten shards at 838.2 s
+# (a, b, c, d, e, f, h, i, j, k) and one at 838.1 s (g), so
+# `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 838.1 s — so NO arithmetic on the minute can catch a carried figure;
+# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
 # only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
 # the last revision's minute, seconds, or split.
 #
+# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
+# 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
+# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
+# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
+# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
+# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
+# #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
+# own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — ⛔ THAT PATH IS HISTORY HERE, NOT A CLAIM: the emission above was
+# re-derived on THIS tree, and the figures this paragraph used to spell for the earlier
+# `59a08fdb8b40` fold are deliberately NOT restated as a partition, because a historical figure
+# spelled like a claim is a claim the guard grades (the splice that produced two of them is what
+# this block's own warning is about). What survives is the provenance: this PR's `core` row and
+# main's own registrations are in the map, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and the
+# emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree by
+# construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
+# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
+# SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
+# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
+# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
+# `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
+# nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
+# `tests/test_14350_drain_convergence.py` sits in shard e at this head. That map is the union of both parents'
+# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
+# (`--emit-push-matrix` lists it in shard j at this head) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# matters only because it sits one main fold from rounding again. #14407 registered
+# `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
+# `test_notify`), and that registration is part of the partition stated above — the minute did not
+# move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
+# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is the registration that moved
+# THIS reading's NAME SETS off the five/six split the parent map emits — `d` AND `e` left the worst
+# bin and the eight below absorbed both — while the minute stayed at 28 m, which is again why the graded
+# claim is the set and not the minute. Its `durations` row states the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
+# NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
+# bins and so moves THIS graded claim on a number no run measured, which is the deviation the
+# review round on this PR caught. Re-run
+# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
 # ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
 # this emission and left its own reading behind, so the block accumulated stacked restatements of
 # the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
@@ -3107,6 +3148,24 @@ surfaces:
   #   printf 'tortoise/commitments.py\ntortoise/state_intent.py\n' \
   #     | python tools/ci_selection.py --event pull_request --changed-files -
   - test_13557_13558_reachable_reads.py
+  # #14033 (PR #14491 review, P1): the cue-set widening's routing table — the two phrasings
+  # #14033 names that this change routes, the four content questions it says must NOT route, the
+  # phrasings that must keep the relevance read (including the deferred vague-adverb tail, held
+  # back until the `tortoise_search` HANDLER DOCSTRING moves with it — not the served
+  # `ToolDefinition.description`, which carries no state-routing sentence), and the falsifier rows for
+  # each new guard
+  # (both `is_predicate` guards and its start anchor, both `list_what` guards). `core` for the same
+  # reason the sibling above gives: the module it guards
+  # (`tortoise/state_intent.py`) is a `core` trigger, so a diff to it must actually run the pins.
+  # MEASURED before this row, on this branch: `--integrity` printed
+  #   `❌ manifest drift: ['test_14033_state_cue_gap.py']`
+  # (the required `manifest-integrity` leg, red on the reviewed head) and `select()` over
+  # `tortoise/state_intent.py` returned ~956 files containing the sibling above and NOT this one —
+  # i.e. the guard was selected by NO leg on ANY diff. Verify with:
+  #   python3 tools/ci_selection.py --integrity
+  #   printf 'tortoise/state_intent.py\n' \
+  #     | python3 tools/ci_selection.py --event pull_request --changed-files -
+  - test_14033_state_cue_gap.py
   # #13634 follow-up: the "declared priors are the open decision in #9063" claim — the refusal
   # message in `tortoise/sdk.py` and the v3.38 changelog entry (via `docs/ONTOLOGY-CHANGELOG.md`).
   # `classify_test_file` is EXACT membership over the surfaces, so an unregistered file is selected by
@@ -15807,6 +15866,12 @@ durations:
   test_13674_embedder_load_bound_and_reclaim.py: 9.5
   test_13829_cache_cap_at_fold.py: 0.8
   test_14002_record_only_journal.py: 65.8
+  # #14033 (new file, PR #14491): the ENTRY RULE applies — the value is the header's flat
+  # `DEFAULT_FAST_WEIGHT`, not a local reading (a hand-picked number is this host's wall clock, and
+  # `fast_pool()` feeds the shard balancer). `--integrity` cannot see a missing row, so this line is
+  # what records the weight. What it covers, hermetically: `detect_state_question` driven over six
+  # string tables in `tortoise/state_intent.py` — no DB, no graph, no embedder, no model.
+  test_14033_state_cue_gap.py: 2.0
   test_9559_blocked_release_conditions.py: 0.7
   test_capstone_state_value_13038.py: 0.2
   test_embedding_boundary_8419_8430.py: 5.0
