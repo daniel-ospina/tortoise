@@ -32,8 +32,9 @@ different decisions and had drifted apart:
   :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
   carries one (a placeholder or a post-close tombstone has no number, and the
   message says so instead); a release that is not an episode end (a failed close,
-  a cooldown back-off, a failed send) re-arms it, so the bound is the WINDOW's
-  and not the open episode's. The engine closes the incident and re-arms delivery
+  a cooldown back-off, a failed send) re-arms it. So a window is what a message
+  SPENDS, and where releases fire often enough the effective bound is per
+  EPISODE, not per window. The engine closes the incident and re-arms delivery
   at episode end.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
@@ -600,9 +601,12 @@ def _enforce_delivery_cap(now: float) -> None:
 def release_abuse_delivery(kind: str, subject: str) -> None:
     """Re-arm the DELIVERY window for a ``(kind, subject)`` (#14407).
 
-    The bound is the WINDOW, not the episode: a continuously breaching subject
+    A window is what a delivery SPENDS, not what bounds the episode: while no
+    release fires, a continuously breaching subject
     re-alarms at most once per ``_INCIDENT_DELIVERY_WINDOW_S``, and any release
-    ends that window so the next message goes out at once. Only the engine knows
+    ends that window so the next message goes out at once — which is why on the
+    no-incident-channel path a flapping rule's bound is per EPISODE (measured: 12
+    messages in 36 h over 24 alternating evaluations), not per window. Only the engine knows
     a rule's window went clean (``AbuseEngine._evaluate``), so without the
     episode-end release a long-lived fallback window would mute the second
     episode — the direction a security signal must never fail in (#4872).
