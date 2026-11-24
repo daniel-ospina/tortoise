@@ -470,6 +470,19 @@ surfaces:
   # FULL matrix and selects this file either way. DB-FREE: doubles and the gate's
   # own `meters=` seam.
   - test_13829_cache_cap_at_fold.py  # #13829: dual: core
+  # #13526: the ruled-dimension refusal's FACTS on the health surface — the
+  # dimension that refused, the figures the gate COMPARED, and a reason string
+  # that may not be cut mid-number. DUAL-REGISTERED with `core` for the same
+  # MEASURED reason the two rows above give: the file drives the real gate
+  # (`allowance_gate.enforce_allowances` through `meters=`) and reads
+  # `quota.org_quota_state`, and `tortoise/quota.py` is an EXACT `api`
+  # SOURCE_PATTERN that REPLACES the `core` fallback — so a `core`-only row
+  # would leave it unselected on the very diffs it guards, and an `api`-only row
+  # would leave it unselected on `tortoise/allowance_gate.py` (no named
+  # SOURCE_PATTERN → `['core']`). `tortoise/mcp_server.py` is a SHARED_MODULE,
+  # so a diff there forces the FULL matrix and selects this file either way.
+  # DB-FREE: the gate's own `meters=` seam and a double; no DSN, no graph.
+  - test_13526_quota_refusal_figures.py  # #13526: dual: core
   # #14186: the `api` arm of the TRIPLE registration (core/api/eval). Each arm
   # exists because a DIFFERENT surface owns a module this suite guards, and a
   # named SOURCE_PATTERNS match REPLACES the `core` fallback in `select()` — so a
@@ -3944,6 +3957,16 @@ surfaces:
   # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
+  # #13526: the `core` arm of the DUAL registration (see this file's `api:`
+  # block for the measured classification). `core` is what a diff to
+  # `tortoise/allowance_gate.py` resolves to — that module has no named
+  # SOURCE_PATTERN — and the gate's composed refusal (the figure, the 1.5x hard
+  # stop, the single-sample estimate arm) is exactly what this suite asserts
+  # reaches the health block intact.
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_13526_quota_refusal_figures.py`).
+  # DB-FREE: the gate's `meters=` seam, a double, no DSN and no graph.
+  - test_13526_quota_refusal_figures.py
   # #14185: the record's projection on its OWN loop — the projection worker, the
   # seven conditions under which a write may be deferred, and the lag metric.
   # ⛔ SEVEN: four correctness arms, the unimportable loop, and the two switches
