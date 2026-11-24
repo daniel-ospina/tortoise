@@ -16763,11 +16763,12 @@ def test_halves_ratio_decides_at_the_published_precision():
     RENDERED pair as well, so no message can print a value that reads as within
     tolerance.
 
-    RESTORED on `main`: this arm lived at `test_halves_ratio_decides_at_the_published_precision`
-    on `edd9c68585` and was removed with #14419's squash. Its restore landed
-    after #14419's merge window and is on this branch as `6bcc1fc7bb` (the same
-    arm was written earlier on the B7 branch as `6afb683573`, which is reachable
-    only from there) — so the subject code
+    RESTORES a `main` arm — NOT yet on `main`: this arm lived at
+    `test_halves_ratio_decides_at_the_published_precision` on `edd9c68585` and
+    was removed with #14419's squash, whose restore landed after the merge
+    window. It is on this branch as `6bcc1fc7bb` (the same arm was written
+    earlier on the B7 branch as `6afb683573`, which is reachable only from
+    there) — so the subject code
     (`ratio = float("inf") if lo <= 0 else round(hi / lo, 2)` in
     `workflow_halves_issues`) has been live on `main` with no killer since.
     """
@@ -16798,9 +16799,11 @@ def test_halves_ratio_decides_at_the_published_precision():
                 if "imbalanced" in i]
     assert messages
     # The headline above is about the MESSAGE, not only the decision, so pin the
-    # pair it renders: a render-only mutant (decision still 2 dp, message at
-    # 1 dp) prints "ratio 1.2x, tolerance 1.25x" and passes every decision-side
-    # arm above — this is the only killer of it.
+    # pair it renders. The target is a render that makes the two values equal or
+    # reversed — e.g. BOTH operands truncated to 1 dp gives "1.2x, tolerance
+    # 1.2x", which passes every decision-side arm above and reads as compliant
+    # while the check refuses. A ratio-only `.1f` render is NOT such a case
+    # (1.256 prints 1.3, still above 1.25), so it is not what this pin targets.
     rendered = re.search(r"\(ratio ([\d.]+)x, tolerance ([\d.]+)x\)", messages[0])
     assert rendered, messages[0]
     assert float(rendered[1]) > float(rendered[2]), messages[0]
