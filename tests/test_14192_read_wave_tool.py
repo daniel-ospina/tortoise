@@ -12632,9 +12632,9 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # MEASURED GREEN — `refused=False` — at this head and on `origin/main`). The two rows
         # above pinned the `.get` member for the literal namespace and for its `import … as`
         # alias, so the paragraph's guarantee (closing the class must EDIT this table) held for
-        # TEN of the class's spellings and not the other EIGHT — and ⛔ THE CLASS IS **FOUR**
+        # TEN of the class's spellings and not the other FOURTEEN — and ⛔ THE CLASS IS **FOUR**
         # MEMBERS, NOT THREE: `.get`, `.pop`, `.setdefault` AND `__getitem__`, because
-        # `_BUILTINS_MAPPING_READS` is exactly those four (§:1990). Times SIX receivers
+        # `_BUILTINS_MAPPING_READS` is exactly those four (`:2008`). Times SIX receivers
         # (literal/alias × `.__dict__`, `vars`, `getattr(…, "__dict__")`) = **24**. MEASURED by
         # DERIVING the grid from those two dimensions and diffing it against this dict's own
         # bindings, not by counting rows — the round-5 review found the six `__getitem__`
@@ -12746,6 +12746,34 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_n = dict.__dict__` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
             'import builtins', '_n = dict.__dict__',
             f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        # ⛔ AND THE `__getitem__` MEMBER AT THE SAME THREE LEVELS (#14395 round-6 review P3).
+        # The `.get` member carries NINE rows (literal `dict`, alias `_dc`, namespace-bound
+        # `_n` x `.__dict__` / `vars` / `getattr`) and `__getitem__` carried FOUR, so five
+        # spellings below read GREEN and were LIVE with no row: the paragraph's "every
+        # receiver spelling it declares" was true of `.get` and not of this member. `.pop` /
+        # `.setdefault` on this side RAISE (`mappingproxy` has neither), so `.get` and
+        # `__getitem__` are the only two live members here — which is exactly the asymmetry.
+        # EACH MEASURED GREEN (`refused=False`) and LIVE before it was rowed.
+        "`vars(dict).__getitem__(\"get\")(m, \"exec\")` — `vars` receiver": (
+            'import builtins',
+            'vars(dict).__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(dict, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — `getattr` receiver": (
+            'import builtins',
+            'getattr(dict, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_n = dict.__dict__` then `_n.__getitem__(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = dict.__dict__',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_n = vars(dict)` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `vars`": (
+            'import builtins', '_n = vars(dict)',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`_n = getattr(dict, \"__dict__\")` then `_n.__getitem__(\"get\")(m, \"exec\")` — BOUND from `getattr`": (
+            'import builtins', '_n = getattr(dict, "__dict__")',
+            '_n.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
         "`_n = vars(dict)` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
             'import builtins', '_n = vars(dict)',
             f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
