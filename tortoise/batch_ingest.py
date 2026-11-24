@@ -1115,33 +1115,38 @@ class GraphBatchStore:
         acceptance. A blind `SET` (what `put_batch` does) overwrote the ACK's
         `estimate`/`corpus_name` with an orphan snapshot's empties.
 
-        Returns True only when THIS call created the row (the `created_at` it just
-        wrote came back), so the caller knows whether it may trust its own object
-        or must re-read.
+        Returns True only when THIS call created the row, so the caller knows
+        whether it may trust its own object or must re-read.
         """
+        # ⛔ A PER-CALL TOKEN, NOT `created_at` (#14415 review cycle 2, MEDIUM).
+        # The creation test compared `b.created_at` to ours — and the caller is
+        # `_resume_batch`, which derives that stamp from
+        # `orphan_items[0].updated_at`, so two adoptions of one orphan row pass the
+        # SAME stamp and the second read as CREATED over a row it did not write.
+        # MEASURED on the live engine: a pre-existing row with an equal stamp
+        # returns it, so the old comparison answers `created: True`. A value only
+        # THIS call can produce is the only sound test of "did I create it", and it
+        # also removes the `not rows` fail-open (an empty RETURN is no evidence of
+        # creation). The token is written only by `ON CREATE SET`, so the property
+        # never appears on a reused row.
+        token = uuid.uuid4().hex
         rows = self._q(
             f"MERGE (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "ON CREATE SET b.state=$state, b.created_at=$created, "
             "    b.updated_at=$updated, b.estimate_json=$estimate, "
             "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason, "
-            "    b.corpus_name=$corpus "
-            # ⛔ RETURN WHAT TELLS CREATION FROM REUSE (#14415 review round 12,
-            # P3). It returned `b.state` and compared THAT, which is TRUE for a
-            # pre-existing row whose stored state string equals the caller's — the
-            # exact concurrent shape this is used in, where two adoptions of one
-            # orphan row both pass `RESUMING`. The caller then trusted its own
-            # object instead of re-reading. `created_at` is written only by
-            # `ON CREATE SET`, so comparing it to ours is a creation test.
-            "RETURN b.created_at",
+            "    b.corpus_name=$corpus, b.create_token=$token "
+            "RETURN b.create_token",
             {"bid": batch.batch_id, "org": batch.org_id,
              "state": str(batch.state), "created": batch.created_at,
              "updated": batch.updated_at,
              "estimate": _json_dumps(batch.estimate),
              "cancelled_at": batch.cancelled_at,
              "cancel_reason": batch.cancel_reason,
-             "corpus": batch.corpus_name},
+             "corpus": batch.corpus_name,
+             "token": token},
         )
-        return not rows or str(rows[0][0] or "") == str(batch.created_at or "")
+        return bool(rows) and str(rows[0][0] or "") == token
 
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
@@ -1423,7 +1428,14 @@ class GraphBatchStore:
             tokens_in=int(r[5] or 0), tokens_out=int(r[6] or 0),
             attempts=int(r[7] or 0), content_changed=bool(r[8]),
             updated_at=r[9] or "",
-            staged_path=(r[10] or "") if len(r) > 10 else "")
+            staged_path=(r[10] or "") if len(r) > 10 else "",
+            # ⛔ AND `duplicate_of` IS CARRIED (#14415 review cycle 2, MEDIUM).
+            # The RETURN above gained it while this constructor did not, so
+            # `get_item` answered `duplicate_of=""` on the production store and
+            # `run_item`'s twin branch was unreachable there. Behaviour was masked
+            # by the `content_key` guard below it, which is why this was MEDIUM and
+            # not a silent double-extract.
+            duplicate_of=(r[11] or "") if len(r) > 11 else "")
 
     def discard(self, org_id: str, batch_id: str) -> None:
         self._q(f"MATCH (i:{ITEM_LABEL} {{org_id:$org, batch_id:$bid}}) "
