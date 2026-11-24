@@ -3761,9 +3761,11 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           code, and the step set and order are unchanged — so the sibling-shim, shim and `_ALWAYS_RUN`
 #:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter
 #:           and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`.
-#:           (The second arm this cited, `test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
-#:           was cut in the B7 test-bureaucracy cut, 2026-11-23; the emitter-reach half it carried is
-#:           what `test_the_changes_job_carries_no_job_scope_env` still checks.)
+
+#:           (The second arm this cited was
+#:           `test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`, cut by `#14439`'s re-cut
+#:           on 2026-11-23 and RESTORED by `#14481`, so both emitter-reach arms are live again; the
+#:           job-scope half stays with the arm named just above.)
 #:   #10897 — `changes`: `Emit push matrix (#1472/#6135)` + `Tier-2 duration split (#1473)` — digest-only
 #:           movement, and like #10186 it is the `env:` block WIDENED (two keys added beside
 #:           `CI_SHARD_ROUTING`), not the `run:` script. `_code()` is byte-identical on both steps;
@@ -3776,9 +3778,10 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           `tools/ci_selection.py::resolve_fold_runner`, so the lever is unit-tested and an unusable
 #:           declaration falls back to the row's own runner rather than routing a required check onto
 #:           a label no runner carries. (The emitter-reach arm and the whole fold seam's unit
-#:           cluster this cited were cut in the B7 test-bureaucracy cut, 2026-11-23 —
-#:           `resolve_fold_runner` is UNGRADED now; what is left is the emitter-reach arm that
-#:           proves the workflow's env KEYS are the selector's constants.)
+#:           cluster this cited were cut by `#14439`'s re-cut on 2026-11-23 — NOT by the B7 cut,
+#:           which left them in place — and RESTORED by `#14481`, so `resolve_fold_runner` is
+#:           graded again; the emitter-reach arm that proves the workflow's env KEYS are the
+#:           selector's constants is live too.)
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
