@@ -82,11 +82,11 @@ version: 1
 # re-derived with `--emit-push-matrix` at its own landing, not quoted from the one before it.) That
 # scope is MEASURED, not a guess about superlatives: of the 26 landings between that refresh and
 # #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
-# at all), while `024387f5`
-# emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11" unscoped is FALSE and is
-# not what this block claims. Then #14429's re-packed them back into the nine/two above.
-# ⛔ Which is why a rebase that interleaves two sides of this paragraph REDS rather than picking
-# one, and why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
+# at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
+# unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
+# them back into the nine/two above.
+# ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
+# why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
 # branch carried its own re-cut of them, so the merge kept BOTH spellings and the guard read
 # `<est 837.3 stated twice>` / `<ceil stated 2 times>` rather than a clean claim. The sentences
