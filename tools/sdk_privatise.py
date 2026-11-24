@@ -1979,7 +1979,20 @@ SWEEP_NAMES = 66
 #: test double's count and delete — which is why they are DECLARED here rather than re-spelled to
 #: hold the count still. This branch contributes **0** rows: its only residue-bearing change is prose
 #: and a module (`tortoise/expansion_merge.py`) that opens no session. `--check` exits 0 on the pair.
-SWEEP_RESIDUE = (11902, "3a694c6f3ff4e36f")
+#: ⛔ A SEVENTH FOLD, and the mover is `main`'s spool-drain batch again — MEASURED on main's own tree,
+#: never inferred from the merge point: `--repin` in a detached worktree at `origin/main` `88cd00a068`
+#: prints the IDENTICAL `(11906, "045a9146647cdfaa")` this tree derives, so the pin `main` ships
+#: (11902) is RED on `main`'s own tree and carrying this pair repairs it; this branch contributes
+#: **0** rows (its only residue-bearing change is prose plus `tortoise/expansion_merge.py`, whose one
+#: dict-literal merge is written to avoid the `x.update` shape). ⛔ ROW-LEVEL ATTRIBUTION IS NOT CLAIMED,
+#: for the reason the blocks above already give: the pin stores a COUNT and a DIGEST, never the row
+#: set. What IS measured is the shapes `989765162f..88cd00a068` adds — `environ.update(` ×3 (two in a
+#: test that greps for `os.environ.update(_mode_knobs(`), `h.update(` ×1 and `registry.query(` ×1 — and
+#: the observed delta (+4), which the artifact cannot decompose further. All five are ordinary-word
+#: receivers on test doubles, an `os.environ` map and a hash object, so they are DECLARED here rather
+#: than re-spelled to hold a count still. The pair below is `--repin`'s own output on the tree that
+#: SHIPS.
+SWEEP_RESIDUE = (11906, "045a9146647cdfaa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

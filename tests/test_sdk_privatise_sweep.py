@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1869 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1882 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -299,7 +299,13 @@ def _residue_block() -> str:
     the `+1` row that commit added and name it) — re-derived by this walk, never inherited.
     — and `#14395`'s own fix lane re-cut this run to **1774** on ITS tree, and `main`'s re-walk of its
     merged tree read **1808** — both kept here as that side's own history and NEITHER carried: the
-    figure above is re-walked on THIS tree, and this tree merges `origin/main` `989765162fbc`.
+    figure above is re-walked on THIS tree, and this tree merges `origin/main` `989765162fbc`,
+    which re-read the resolved run at **1873** after that fold's own 15 `#:` lines (which name the
+    `+1` row `#14446` added and confirm the pair on `main`'s own tip),
+    — and the SEVENTH FOLD (`origin/main` `88cd00a068`, the spool-drain batch) kept both sides again
+    and moved the pin once more (`11902` → **11906**, `main`'s own — measured identical on `main`'s
+    own tree — so this branch contributes no row), and the figure above is re-derived rather than
+    carried: **1882** = 1873 + this fold's own 9 `#:` lines.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
