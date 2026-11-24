@@ -330,6 +330,59 @@ def content_key(text: str) -> str:
     return hashlib.sha256(normalise_text(text).encode("utf-8")).hexdigest()
 
 
+def _is_single_path_component(value: str) -> bool:
+    """True when ``value`` names ONE path component and nothing else.
+
+    Used at the API boundary to refuse a caller-supplied ``batch_id`` before any
+    row or byte is written. It is a CHEAP LEXICAL PREDICATE, not the safety
+    proof — :func:`_batch_staging_dir` is that, and it holds even for a caller
+    this check was never applied to.
+    """
+    import os
+
+    if not value or "\x00" in value or len(value) > 128:
+        return False
+    if value in (".", ".."):
+        return False
+    return not any(sep and sep in value for sep in ("\n", os.sep, os.altsep, "/", "\\"))
+
+
+def _batch_staging_dir(base: str, batch_id: str) -> str | None:
+    """Resolve ``_batches/<batch_id>`` under ``base``, or None when it ESCAPES.
+
+    ⛔ ``batch_id`` is NOT always an id this layer minted. ``BatchCoordinator
+    .submit`` accepts a caller-supplied ``batch_id`` keyword, and it is used
+    verbatim as a directory name — and ``os.path.join`` does not sanitise: a
+    ``..`` component is resolved by the kernel at syscall time, so joining it
+    produces a path OUTSIDE the tree while looking like a child of it.
+
+    Measured on the pre-fix code, from the public keyword alone (no route passes
+    it today, so this is a defect in a documented method signature, not a live
+    remote exploit):
+
+        stage_text(base, "../../victim", "ok-00000", "ATTACKER BYTES")
+        -> <base>/_batches/../../victim/ok-00000.md      # written OUTSIDE base
+        _discard_staged(base, "../../victim")
+        -> victim/ emptied: every file unlinked, then the directory removed
+
+    So the WRITE was an arbitrary-path write and the DISCARD an arbitrary-directory
+    delete — unrelated tenant data, from one keyword. Containment is decided by
+    :func:`tortoise.security.resolve_under_base` (realpath on BOTH sides, so a
+    symlink pointing out of the tree is refused too), never by a lexical check,
+    which a ``..`` component or a parent symlink defeats.
+
+    Returning ``None`` — rather than raising — lets :func:`_discard_staged` keep
+    its "best-effort, never raises" contract while still refusing to act.
+    """
+    import os
+
+    from .security import resolve_under_base
+
+    batches_root = os.path.join(os.path.realpath(base), "_batches")
+    resolved = resolve_under_base(os.path.join(batches_root, batch_id), batches_root)
+    return str(resolved) if resolved is not None else None
+
+
 def stage_text(base: str, batch_id: str, item_id: str, text: str) -> str:
     """Write an uploaded item's text under ``base`` and return its path.
 
@@ -340,16 +393,32 @@ def stage_text(base: str, batch_id: str, item_id: str, text: str) -> str:
     per-batch directory, so a crash mid-accept leaves either no file or a whole
     one, and two batches can never collide.
 
-    ⛔ Everything here is derived from ids this layer minted (``batch_…`` /
-    ``batch_…-00001``), never from caller input, so no customer-supplied path
-    component can reach the filesystem.
+    ⛔ Both path components are PROVEN to resolve inside ``base`` before anything
+    is created, and the write uses the resolved path — see
+    :func:`_batch_staging_dir` for the measurement this replaces. The previous
+    wording here claimed "no customer-supplied path component can reach the
+    filesystem"; that was FALSE for ``batch_id``, which is a documented keyword
+    of :meth:`BatchCoordinator.submit`, and a docstring that asserts a guarantee
+    the code does not provide is worse than no claim at all.
     """
     import os
     import tempfile
 
-    directory = os.path.join(os.path.realpath(base), "_batches", batch_id)
+    from .security import resolve_under_base
+
+    directory = _batch_staging_dir(base, batch_id)
+    if directory is None:
+        raise ValueError(
+            f"batch id {batch_id!r} does not resolve inside the document storage "
+            "root — refusing to stage outside it")
+    target_path = resolve_under_base(
+        os.path.join(directory, f"{item_id}.md"), directory)
+    if target_path is None:
+        raise ValueError(
+            f"item id {item_id!r} does not resolve inside batch {batch_id!r} — "
+            "refusing to stage outside it")
+    target = str(target_path)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    target = os.path.join(directory, f"{item_id}.md")
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stage-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
@@ -1950,6 +2019,16 @@ class BatchCoordinator:
         receipt for work we did not record (§2.0 — the record is truth).
         """
         bid = batch_id or new_batch_id()
+        # ⛔ A CALLER-SUPPLIED ID IS VALIDATED AT THE BOUNDARY, before any row or
+        # byte is written. `bid` is not only a store key: it is the staging
+        # directory's name, so an id carrying a path separator or `..` reached the
+        # filesystem (measured — see `_batch_staging_dir`). The sink guard is the
+        # authority and holds for every caller; this check exists so the caller is
+        # told WHICH argument is wrong and before anything has been written.
+        if batch_id is not None and not _is_single_path_component(bid):
+            raise ValueError(
+                f"batch id {bid!r} is not a single path component — a batch id may "
+                "not contain a path separator, '.'/'..' or a NUL byte")
         stamp = self._now()
         # ⛔ A PRE-EXISTING ID IS CHECKED HERE, ABOVE THE `try` — never inside it.
         # The compensating rollback below discards `bid`, and for a caller-supplied
@@ -3245,13 +3324,24 @@ def runner_result_to_outcome(per_file: Mapping[str, Any]) -> ItemOutcome:
 
 
 def _discard_staged(stage_base: str | None, batch_id: str) -> None:
-    """Remove a rejected batch's staged files. Best-effort, never raises."""
+    """Remove a rejected batch's staged files. Best-effort, never raises.
+
+    ⛔ Refuses to act at all when the id does not resolve inside the staging
+    root (:func:`_batch_staging_dir`). This is the destructive half of the
+    measurement there: with ``batch_id="../../victim"`` the old body unlinked
+    every file in an UNRELATED directory and then removed it, so a refusal path
+    (the rollback in :meth:`BatchCoordinator.submit`) could delete data it had
+    never written. A best-effort cleanup must be best-effort about ITS OWN
+    artefacts only.
+    """
     if not stage_base:
         return
     import os
 
+    target = _batch_staging_dir(stage_base, batch_id)
+    if target is None:
+        return
     with contextlib.suppress(OSError):
-        target = os.path.join(os.path.realpath(stage_base), "_batches", batch_id)
         if os.path.isdir(target):
             for child in os.listdir(target):
                 os.unlink(os.path.join(target, child))
