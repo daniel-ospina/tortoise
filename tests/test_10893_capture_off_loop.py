@@ -96,19 +96,30 @@ def _is_sync_callable(raw) -> bool:
                 or inspect.isasyncgenfunction(raw))
 
 
+#: The `record_projection` schema readers the census charges as their own legs (#4625).
+#: ⛔ ONE tuple, used by the wrap loop AND by the probe below, so a reader can never be
+#: wrapped without being driven (or driven without being wrapped). The ASSERTION names its
+#: names a second time on purpose: narrowing this tuple would otherwise shrink the wrap loop,
+#: the probe and the expectation together — reddening nothing, which is exactly the
+#: unpinned-instrument shape the #4625 review found here (F3).
+_RP_READERS = ("table_columns", "refused_props_names", "jsonb_columns")
+
+
 async def _charge_one_schema_read() -> None:
     """A `record_projection` schema read ON a running loop — in BOTH shapes.
 
     The census charges a leg only when `_on_loop()` is true, so the only way to
     prove its second surface intercepts is to call a reader from inside a
     coroutine. `asyncio.run(...)` around this gives exactly that: a real loop,
-    one DIRECT read, and one read made from INSIDE a charged SDK leg — the shape
-    a capture actually uses, and the one a SHARED re-entry guard swallows.
+    one DIRECT read of every reader, and one read made from INSIDE a charged SDK
+    leg — the shape a capture actually uses, and the one a SHARED re-entry guard
+    swallows.
 
     The scratch leg is installed on `TortoiseSDK` by the caller (so the census's
     own wrap loop instruments it) and deleted afterwards.
     """
-    rp.table_columns()
+    for name in _RP_READERS:
+        getattr(rp, name)()
     TortoiseSDK._census_scratch_read()  # type: ignore[attr-defined]
 
 
@@ -453,9 +464,10 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
 
         Installed on `TortoiseSDK` BEFORE the wrap loop, so the census's own loop
         instruments it like any other sync method; the self-check then calls it
-        on the loop and the reader it reaches must still be charged (#4625).
+        on the loop and every reader it reaches must still be charged (#4625).
         """
-        return rp.table_columns()
+        for name in _RP_READERS:
+            getattr(rp, name)()
 
     setattr(TortoiseSDK, _SCRATCH, _census_scratch_read)
     try:
@@ -500,7 +512,7 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         # under their OWN re-entry guard: sharing the SDK's `depth` makes a read
         # reached from INSIDE an SDK leg record nothing, which is the only path a
         # capture reaches them by (see `rp_depth`).
-        for name in ("table_columns", "refused_props_names", "jsonb_columns"):
+        for name in _RP_READERS:
             raw = getattr(rp, name)
             saved_rp[name] = raw
             setattr(rp, name, _wrap(f"rp.{name}", raw, guard=rp_depth))
@@ -511,14 +523,23 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         # — the shape a shared guard silently swallows, and the only shape a
         # capture ever uses. One call would pass over that bug.
         asyncio.run(_charge_one_schema_read())
-        charged = sum(1 for row in rows if row["method"] == "rp.table_columns")
-        assert charged == 2, (
-            f"the record-projection reader probe charged {charged} of 2 calls — "
+        # ⛔ EVERY wrapped reader is counted, not only `table_columns` (#4625 review
+        # F3): with one name in the expectation, dropping `refused_props_names` or
+        # `jsonb_columns` from the wrap tuple reddened NOTHING on any shard, so two
+        # of the three legs the docstring above calls "charged as their own legs"
+        # were unpinned instrument. The literal names here are what make the tuple
+        # load-bearing: a narrowed `_RP_READERS` leaves the removed reader
+        # unwrapped, so its count is 0 and this assertion reds.
+        charged = {name: sum(1 for row in rows if row["method"] == f"rp.{name}")
+                   for name in ("table_columns", "refused_props_names",
+                                "jsonb_columns")}
+        assert all(n == 2 for n in charged.values()), (
+            f"the record-projection reader probe charged {charged}, not 2 each — "
             "the DIRECT one and the one made INSIDE a charged SDK leg. A surface "
             "that sees only the direct call is blind on the only path a capture "
             "reaches it, and that blindness is what this surface exists to end "
             "(#4625): the reader probes must carry their OWN re-entry guard, not "
-            "the SDK's.")
+            "the SDK's. A reader at 0 is one the wrap loop no longer installs.")
 
         r = client.post("/v1/sessions", json={"conversation": _CONV})
     finally:
@@ -578,7 +599,7 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     # ⛔ AND NO SEPARATE LIVE-BAR FOR THE SECOND SURFACE (#4625 review — a dead
     # assertion was DELETED here). A pin `assert "rp.table_columns" in totals`
     # used to sit at this point, and it could never fail: `totals` is summed over
-    # the same `rows` the self-check above already counted, and `charged == 2`
+    # the same `rows` the self-check above already counted, and `charged`
     # requires two `rp.table_columns` rows to exist in it. No mutation could red
     # it without reddening that earlier assertion first, so it read as extra
     # coverage while adding none (mutation contract rule 3). The live-bar for
