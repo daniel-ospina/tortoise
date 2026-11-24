@@ -81,6 +81,15 @@ number is a property of `record_projection.replay`'s plan and is measured (not
 asserted) by `tests/test_9558_record_write_cost.py`'s prologue assertion and by
 #13722's own before/after figures in the PR; #13722 item 2 (batching the plan's
 per-record statements) would move it, and this file must not red when it does.
+
+Nor does it pin the submission's RUNTIME reachability: a guard that is false only
+at run time (`if _FEATURE: …`) is not statically decidable, so a chain submitted
+only under such a flag reads as reachable here. What it DOES reject is a guard the
+interpreter itself folds away — a literal-false test (`if False:`, `if True and
+False:`, `if _flag and False:`) around the only submission — because that is a
+shape a fixer writes on purpose to "disable" the offload, and the result is the
+same silent loss as the `async def` arm: no record, no `PointRevised`, no warning,
+and a green suite.
 """
 
 from __future__ import annotations
@@ -182,23 +191,18 @@ def _off_loop_submissions(
     return out
 
 
-def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
-    """Every REFERENCE to `name` in the module: (line, is_the_submitted_one).
+def _submitted_names(tree: ast.Module) -> list[ast.Name]:
+    """The `ast.Name` nodes that ARE the callable of an awaited off-loop submission.
 
-    ⛔ The legal reference is a bare `ast.Name` that IS the second positional
-    argument of an awaited `_run_off_loop(_CAPTURE_EXECUTOR, name)` — nothing else.
-    `name(…)` is an inline run on the caller's thread; `_CAPTURE_EXECUTOR.submit(
-    name)` is the same fire-and-forget defect under another helper (it skips
-    `_run_off_loop`'s `confine_context` snapshot and is never awaited). Both are
-    the #13722 wedge regardless of how many submissions also exist elsewhere in
-    the module, so this grades EVERY reference rather than only calls.
+    i.e. the second positional argument of every awaited
+    `_run_off_loop(_CAPTURE_EXECUTOR, <name>)`.
     """
     awaited = {
         id(node.value)
         for node in ast.walk(tree)
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
     }
-    submitted: set[int] = set()
+    out: list[ast.Name] = []
     for node in ast.walk(tree):
         if not (
             isinstance(node, ast.Call)
@@ -214,12 +218,78 @@ def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
             and args[0].id == _OFF_LOOP_POOL
             and isinstance(args[1], ast.Name)
         ):
-            submitted.add(id(args[1]))
+            out.append(args[1])
+    return out
+
+
+def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
+    """Every REFERENCE to `name` in the module: (line, is_the_submitted_one).
+
+    ⛔ The legal reference is a bare `ast.Name` that IS the second positional
+    argument of an awaited `_run_off_loop(_CAPTURE_EXECUTOR, name)` — nothing else.
+    `name(…)` is an inline run on the caller's thread; `_CAPTURE_EXECUTOR.submit(
+    name)` is the same fire-and-forget defect under another helper (it skips
+    `_run_off_loop`'s `confine_context` snapshot and is never awaited). Both are
+    the #13722 wedge regardless of how many submissions also exist elsewhere in
+    the module, so this grades EVERY reference rather than only calls.
+    """
+    submitted = {id(node) for node in _submitted_names(tree)}
     return sorted(
         (node.lineno, id(node) in submitted)
         for node in ast.walk(tree)
         if isinstance(node, ast.Name) and node.id == name
     )
+
+
+def _statically_false(test: ast.expr) -> bool:
+    """True when the interpreter itself would fold ``test`` to a false value.
+
+    Only the constant foldings are graded — a literal `False`, `not` of a literal
+    truth, an `and` with any false operand, an `or` whose operands are all false.
+    A run-time-constant guard (`if _FEATURE:`) is deliberately NOT modelled: it is
+    not statically decidable, and this pin says so in its header instead of
+    pretending to grade it.
+    """
+    if isinstance(test, ast.Constant):
+        return not test.value
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        operand = test.operand
+        return isinstance(operand, ast.Constant) and bool(operand.value)
+    if isinstance(test, ast.BoolOp):
+        folded = [_statically_false(v) for v in test.values]
+        return any(folded) if isinstance(test.op, ast.And) else all(folded)
+    return False
+
+
+def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
+    """`(line, source)` of every enclosing `if`/`while` that folds to false.
+
+    ⛔ `orelse` is NOT descended with the guard pushed: the else-branch of a
+    statically-false `if` is exactly the branch that RUNS, so a submission there is
+    live and must not be reported.
+    """
+    dead: list[tuple[int, str]] = []
+
+    def walk(node: ast.AST, guards: list[tuple[int, ast.expr]]) -> None:
+        if isinstance(node, (ast.If, ast.While)):
+            walk(node.test, guards)
+            for child in node.body:
+                walk(child, [*guards, (node.lineno, node.test)])
+            for child in node.orelse:
+                walk(child, guards)
+            return
+        if node is target:
+            dead.extend(
+                (line, ast.unparse(test))
+                for line, test in guards
+                if _statically_false(test)
+            )
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child, guards)
+
+    walk(tree, [])
+    return dead
 
 
 def test_every_stamp_call_runs_off_the_loop() -> None:
@@ -363,6 +433,31 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         f"removes. A surviving {_OFF_LOOP}({_OFF_LOOP_POOL}, …) submission "
         "elsewhere does not make that path off-loop: pass the function to the "
         "awaited submission and delete every other reference (#13722)")
+
+    # ⛔ A SUBMISSION UNDER A STATICALLY-FALSE GUARD IS NOT A SUBMISSION (review
+    # finding, P2, measured on `/tmp` mutants). Arms 1-4 are all satisfied by a
+    # module whose ONLY submission sits under `if True and False:` — the reference
+    # is legal, awaited, on the right pool, and the owner is a sync `def` — while
+    # the interpreter never reaches it: the chain never runs, so there is no
+    # record, no `PointRevised`, no eventId on minted points and no non-fatal
+    # warning, and every arm above stays green. That is the same silent-loss state
+    # arm 3 rejects for `async def`, reached by "disabling" the offload instead of
+    # mis-typing it. Run-time-constant guards stay ungraded (see the header).
+    dead_guards = {
+        name: guards
+        for name, guards in (
+            (node.id, _dead_guards(tree, node))
+            for node in _submitted_names(tree)
+            if node.id in owners
+        )
+        if guards
+    }
+    assert not dead_guards, (
+        f"{_STAMP_DOOR}'s chain is submitted only under a STATICALLY-FALSE guard "
+        f"at {dead_guards} (owner: [(line, test)]) — the interpreter folds that "
+        "test away, so the submission is never reached and the chain silently "
+        "does NOT run: no record, no `PointRevised`, no warning (#13722). Remove "
+        "the dead guard rather than leaving the offload unreachable")
 
 
 if __name__ == "__main__":  # pragma: no cover
