@@ -427,8 +427,11 @@ class TestCreatePointRetrySafety:
         returns 1. So the arm's own justification ("nothing has been sent") was
         unpinned until this assertion was added.
 
-        Mutation: delete the pre-flight block and this REDs on "nothing was sent"
-        (and on `urlopen` being called).
+        Mutation: delete the pre-flight block and this REDs on "nothing was sent".
+        ⚠️ NOT on `assert not urlopen.called` — measured: with the block deleted,
+        `Request(...)` still raises for the non-URL before `urlopen` is reached, so
+        that assert passes either way. It is belt-and-braces (it pins that the
+        refusal happens BEFORE the request is built), not the discriminator.
         """
         _seed_global(tmp_path)
         store = tmp_path / ".tortoise" / "credentials.json"
@@ -466,6 +469,18 @@ class TestCreatePointRetrySafety:
             assert main(["create-point", "hello world"]) == 0
         assert urlopen.called
         assert "not an http(s) URL" not in capsys.readouterr().err
+        # ⛔ AND THE VALUE MUST NOT BE REWRITTEN. The commit's central
+        # non-regression claim is that only the GUARD is normalised — otherwise a
+        # mutant that lowercases `api_url` before the check would still pass every
+        # assertion above while silently lowercasing the HOST, the PATH and a
+        # `?Token=` query (measured: that mutant left the file 46 passed). So pin
+        # the sent URL. `urllib`'s own `unwrap()` strips a leading space; that is
+        # BASE's behaviour, not this guard's.
+        sent = urlopen.call_args[0][0].full_url
+        assert sent == {
+            "HTTPS://host.example": "HTTPS://host.example/v1/points",
+            " https://host.example": "https://host.example/v1/points",
+        }[tolerated]
 
     def test_a_valueerror_after_the_send_does_not_claim_nothing_was_sent(
             self, tmp_path, capsys):
