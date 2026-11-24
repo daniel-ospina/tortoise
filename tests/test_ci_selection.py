@@ -9274,9 +9274,13 @@ _SPLICE_SHINGLE_WORDS = 10
 #: after the difference. So a divergence inside a copy's first `_SPLICE_SHINGLE_WORDS` (10) words, or
 #: within `RESYNC` (6) words of its end, is never named — and a copy of 16 words or fewer can never
 #: be named at all (band `[10, len-7]`, word index 0-based and BOTH BOUNDS INCLUSIVE — the half-open
-#: form first recorded here denied the very case its own example names, so the edges are GRADED at
-#: the end of the arm below instead of trusted). Measured on 17-word copies with one figure
-#: changed: index 1 -> `[]`, index 5 -> `[]`, index 10 -> `('2.0361', '2.0362')`, index 12 -> `[]`.
+#: form first recorded here denied the very case its own example names, so the band is GRADED at the
+#: end of the arm below instead of trusted: 16/17/18/20/24, i.e. the lower edge, the upper edge, and
+#: the `len` term that moves it. 17 words ALONE cannot grade that last one — there `len-7 == 10`, so
+#: the two bounds coincide and a reporter whose upper edge was a CONSTANT satisfies all three
+#: assertions, which is the same ungraded-bound shape this paragraph just recorded). Measured on
+#: 17-word copies with one figure changed: index 1 -> `[]`, index 5 -> `[]`, index 10 ->
+#: `('2.0361', '2.0362')`, index 12 -> `[]`.
 #: A difference of WIDTH (an insertion or a deletion) is likewise never named, because both tails are
 #: indexed with the same gap. This field is DIAGNOSTIC ONLY — the arm reds and reports the spans
 #: either way — so the board is stated instead of being closed by widening the bounds, which would
@@ -9707,6 +9711,27 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     assert not _named_at(17, 12), (
         "a divergence within `_SPLICE_DIVERGENCE_RESYNC_WORDS` of the copy's end leaves too few "
         f"agreeing words to re-agree on, so it must stay silent: {_named_at(17, 12)!r}")
+    # ⛔ …and the band's `len` TERM is graded too, which the three rows above cannot do: at 17 words
+    # `len-7 == 10`, so the lower and upper edges coincide and a CONSTANT upper edge passes all
+    # three. The remaining lengths the band was measured on are pinned the same way — a 16-word copy
+    # names nothing at all (its last shingle-feasible index leaves fewer than `RESYNC` words to
+    # re-agree on), and the upper edge MOVES with the copy: 11 at 18 words, 13 at 20, 17 at 24, with
+    # one past it silent. These are arithmetic, so the expected token is the copy's own word.
+    band = {
+        (16, 10): [],
+        (18, 11): [("w12", "Xw12")],
+        (18, 12): [],
+        (20, 13): [("w14", "Xw14")],
+        (20, 14): [],
+        (24, 17): [("w18", "Xw18")],
+        (24, 18): [],
+    }
+    assert {k: _named_at(*k) for k in band} == band, (
+        "the divergence reporter's band no longer matches the one recorded beside "
+        "`_SPLICE_DIVERGENCE_RESYNC_WORDS` — `[10, len-7]`, both bounds inclusive, and no token at "
+        "all for a copy of 16 words or fewer. Rows are (copy length, 0-based index of the changed "
+        f"word) -> the tokens reported: {{k: _named_at(*k) for k in band}} gave "
+        f"{ {k: _named_at(*k) for k in band}!r} against {band!r}")
     # …and two copies that merely END differently are NOT a divergence: this block legitimately
     # states one sentence twice, so a read that reported every first difference would send a
     # maintainer to reconcile nothing. Measured: these copies diverge at `the` / `while` and never
