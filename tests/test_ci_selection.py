@@ -9216,6 +9216,15 @@ def _emission_block_header(manifest_text: str) -> str:
 #: matching cannot either — the splice lands mid-sentence, which is what leaves a severed fragment
 #: like "…flat 2.0 s at 28 m." behind. A DOUBLE-QUOTED span is masked first, because this block
 #: legitimately quotes a clause it RETRACTED (the record of a dead claim is not a live second claim).
+#:
+#: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative. This block
+#: states ONE instruction verbatim twice ("never carry the last revision's minute, seconds, or
+#: split.", `config/ci-surfaces.yml:133` and `:152`), so a 9-word window reds on CLEAN prose (2 spans)
+#: and 10 is the smallest window on which the guard is quiet over the tree it guards (0). The cost is
+#: that a repeated span SHORTER than the window — and a header with fewer than this many words at all
+#: — is silently ungraded here, which is why the arm below asserts the real block is long enough to
+#: be gradable rather than trusting this bound. Recorded so the next reader does not lower it to
+#: "catch more" and conclude the guard is broken on a clean block.
 _SPLICE_SHINGLE_WORDS = 10
 _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
 
@@ -9230,10 +9239,19 @@ def _repeated_header_spans(header: str) -> list[str]:
     for i in range(len(words) - window + 1):
         shingle = " ".join(words[i:i + window])
         counts[shingle] = counts.get(shingle, 0) + 1
-    spans = sorted({(flat.find(s), flat.find(s) + len(s))
-                    for s, n in counts.items() if n > 1})
+    # ⛔ EVERY occurrence, not just the first — `flat.find` reports one position per repeated
+    # shingle, so a passage stated THREE times reported copy 1 whole and copy 2's first
+    # `window - 1` words, stopping short of its end. Detection was still correct, but the span this
+    # returns is what the failure message tells a maintainer to delete ("keep ONE copy"), and
+    # deleting a truncated span leaves a severed fragment behind — the artefact this arm exists to
+    # catch. Overlapping shingles within one copy merge into that copy's extent below.
+    spans: list[tuple[int, int]] = []
+    for s, n in counts.items():
+        if n > 1:
+            spans.extend((m.start(), m.start() + len(s)) for m in re.finditer(re.escape(s), flat))
     if not spans:
         return []
+    spans.sort()
     merged: list[list[int]] = []
     for start, end in spans:
         if merged and start <= merged[-1][1]:
@@ -9413,15 +9431,25 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 def test_the_fast_shards_header_block_states_no_span_twice():
     """#14481: a fold must not splice this block into a second copy of itself.
 
-    The residual the block names ("nothing grades prose") is what let THREE passages arrive
-    twice on the `45dd35ba9a` fold while every arm stayed green: a `merge=union` fold applies
-    both parents' hunks, raises no conflict marker, and the duplicated claim is prose rather
-    than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
-    reads the one graded clause and passes. The mechanical recipe the block's own residuals
-    section prescribes ("no duplicated non-trivial line in the header block") was applied by
-    hand each round and MISSED two of them, because both copies re-wrap onto different lines.
+    The block names the mechanism in its own words — a claim that is "graded by nothing" "rots",
+    and "a rule stated in prose was not enough" (the per-file shard letter, `config/ci-surfaces.yml`
+    §"NO PER-FILE SHARD LETTER") — and a `merge=union` fold is exactly a claim arriving twice.
+    Measured: THREE passages arrived twice on the `45dd35ba9a` fold while every arm stayed GREEN: the
+    fold applies both parents' hunks, raises no conflict marker, and the duplicated span is prose
+    rather than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
+    reads the one graded clause and passes. The de-splice rounds used a rule of their own — "no
+    duplicated non-trivial LINE in the header block" — and it MISSED two of the three, because both
+    copies re-wrap onto different lines; that rule is graded below instead of remembered.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
+    # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
+    # below would be decoration on the one file it exists to grade. This block is ~2,900 words; the
+    # floor is an order of magnitude below that, not a tuned value.
+    assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
+        f"the `fast_shards` header block is {len(header.split())} words — too short for a "
+        f"{_SPLICE_SHINGLE_WORDS}-word repeated-span window to grade anything, so the arm below "
+        "would pass on any content")
     repeated = _repeated_header_spans(header)
     assert not repeated, (
         "the `fast_shards` header states the same span twice, which is what a `merge=union` "
