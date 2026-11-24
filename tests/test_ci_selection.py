@@ -21947,51 +21947,37 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #
 # `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
 # above is accountable to: one entry per recurrence, the plan ledger's Step-4
-# ledger included (measured with the HELPER, not by counting prose — run
-# `python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
-# print(len(t._cut_claims()))"` — `_cut_claims()` returns 18 rows at this head, none
-# contradicting, and 5 of them sit in the ledger, the Step-4 verdicts). The other 13
-# are `tools/ci_timing.py`'s one and this file's own prose about the class (12, the
-# two fixtures below included) — a pin that reads the paragraphs it lives in, which
-# is why the figure moves with every edit here: re-derive it, never carry it.
-# ⚠️ Two earlier cuts of this comment quoted figures the helper did not return —
-# "9 rows" where a forward-only scan gave 11, and "6 rows" before the arm-shape and
-# wrapped-name reads were added — which is the same "a record quoting a figure its
-# instrument does not return" defect this PR repairs, one level up. And count the
-# ROWS the helper returns, not the verdicts a commit message enumerates:
+# ledger included. ⛔ NO ROW COUNT IS STATED HERE, on purpose. Three earlier cuts of
+# this comment carried one ("9 rows", "6 rows", "18 rows") and every one was stale by
+# the next commit — the scan reads THIS file and the two fixtures below, so any number
+# re-stales on the next edit, which is the "a record quoting a figure its instrument
+# does not return" defect this PR repairs, one level up. Re-derive it instead:
+#     python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
+#                print(len(t._cut_claims()), [c for c in t._cut_claims() if c[3]])"
+# and the pin itself asserts non-vacuity, so the number is not load-bearing.
+# ⚠️ Count the ROWS the helper returns, not the verdicts a commit message enumerates:
 # `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
-# A file added here with no verdicts is harmless; a recurrence left out is a
-# verdict with no grader, which is how each of the four defects survived a round.
-# Added at the `a2daaa9eba` review round, proved non-vacuous: deleting
-# `**RESTORED by `#14481`**` from the ledger's `test_duration_integrity` line reds
-# this pin (that arm is live), and restoring the line greens it.
-#: How far a verdict may sit from the name it judges, in EITHER direction. A
-#: record writes both shapes — "`test_x`, cut by #14439" and "CUT: `test_x`" — and
-#: a forward-only window reads the second as "no verdict", which is a false PASS
-#: in the one guard that exists to catch this class. Measured at the head that
-#: gained the backward half: still 0 contradictions, and the scan sees the
-#: records' verdicts in the inverted spelling too.
 _CUT_CLAIM_WINDOW = 200
-#: How far a restoration may sit from the name. Wider than the verdict window on
-#: purpose: a restoration is often the next sentence.
+#: How far a restoration may sit from the name, at the outside. The binding is by CLAUSE
+#: (see the clause-bounds helper), not by distance; this only bounds the block scan.
 _CUT_CLAIM_RESTORED_SPAN = 400
 #: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
-#: `#14481`" / "restored by <sha>". A bare `restored` anywhere in the span must not
-#: defuse, or the false claim this pin exists to catch passes by carrying the word
-#: in an unrelated clause of the same paragraph.
+#: `#14481`" / "restored by <sha>". A bare `restored` must not defuse, or the false claim
+#: this pin exists to catch passes by carrying the word in an unrelated clause.
 _CUT_CLAIM_RESTORED_RE = re.compile(
     r"(?:RESTORED|restored)\s+by\s+`?(?:#\d+|[0-9a-f]{7,40})")
 _CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b")
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
-#: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX blobs it hid TWO
-#: wrapped claims, and BOTH contradict the tree — the `slow_wall_projection` sentence this
-#: PR corrects (`test_slow_shards_are_duration_packed_and_meet_the_wall_target`, live at that
-#: head) and the fold-runner seam's beside it (`test_the_fold_runner_seam_is_inert_by_default`,
-#: also live). That is the false-PASS class this pin exists to forbid, one level up — and the
-#: count is measured, not quoted: a first cut of this comment said "the ONE claim of six",
-#: which is the same carried-figure defect in the note that documents the scan.
+#: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX
+#: `slow_wall_projection` docstring the wrapped read is what covers the ONE claim this PR
+#: exists to correct (`test_slow_shards_are_duration_packed_and_meet_the_wall_target`, live
+#: at that head) — without it the scan read that record CLEAN. That is the false-PASS class
+#: this pin exists to forbid, one level up. ⛔ No count of "how many the wrap hides" is
+#: stated: it changes with which arm each head defines (measured across `f379299c64`,
+#: `e6b3cf2908`, `41db40af`), and a first cut of this comment carried one — the same
+#: carried-figure defect in the note that documents the scan.
 #: The two halves are JOINED before comparison, and the pattern requires an identifier chunk
 #: immediately on each side of the break so it cannot swallow unrelated text between two
 #: distant backticks (measured: a `(?:\s*\n\s*#?\s*\w+)*` form matched whole sentences,
@@ -22077,24 +22063,51 @@ def _arm_names_in(text: str) -> set[str]:
     return {n for n in names if _CUT_CLAIM_ARM_RE.match(n)}
 
 
-def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -> bool:
-    """Is THIS name's restoration recorded in the passage around its verdict?
+def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
+    """The CLAUSE holding `pos`: its bullet/paragraph, narrowed at sentence ends.
 
-    ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT. A distance-only window (±`_CUT_CLAIM_RESTORED_SPAN`)
-    let ONE `RESTORED by #14481` defuse EVERY CUT verdict in the window: measured on the
-    plan ledger, a false "CUT" on a live arm stayed green only because another arm's
-    restoration label sat 325 characters away — the false-PASS class this pin exists to
-    forbid, one level down. So the rule is positional AND attributive: between the
-    verdict's name and the restoration marker there may be no OTHER arm name, or the
-    marker is read as belonging to that other arm and does not defuse this one.
+    A bullet or paragraph is the unit a reader sees; a sentence is the unit a verdict
+    is WRITTEN in. Splitting at both is what makes the restoration test attributive:
+    a marker in the next bullet, or after a full stop, is a different statement.
     """
-    lo = max(0, start - _CUT_CLAIM_RESTORED_SPAN)
-    hi = end + _CUT_CLAIM_RESTORED_SPAN
-    for marker in _CUT_CLAIM_RESTORED_RE.finditer(text[lo:hi]):
-        marker_start = lo + marker.start()
-        between = (text[end:marker_start] if marker_start >= end
-                   else text[lo + marker.end():start])
-        if not (_arm_names_in(between) - {name}):
+    lo, hi = _claim_block_bounds(text, pos)
+    clause = text[lo:hi]
+    rel = pos - lo
+    for sep in (". ", "; "):
+        cut = clause.rfind(sep, 0, rel)
+        if cut != -1:
+            lo = max(lo, lo + cut + len(sep))
+    for sep in (". ", "; "):
+        cut = clause.find(sep, rel)
+        if cut != -1:
+            hi = min(hi, lo + cut + 1)
+    return lo, hi
+
+
+def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -> bool:
+    """Does a restoration in THIS NAME'S OWN CLAUSE defuse its verdict?
+
+    ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT — and not to a distance at all. Two measured
+    false passes came from weaker rules: a ±`_CUT_CLAIM_RESTORED_SPAN` window let ONE
+    `RESTORED by #14481` defuse EVERY verdict near it (a live arm's false verdict spared
+    by a label 325 characters away in another bullet), and a "no other arm name between"
+    rule still let a PRECEDING marker defuse a name that followed a full stop.
+
+    The rule that survives both directions is attributive in the only way prose supports:
+    a marker defuses `name` when the marker's OWN CLAUSE names `name`, or names no arm at
+    all (a collective "these arms were restored" is read as applying to its list). That
+    also keeps the shape the pin's own message prescribes GREEN: one marker over a list
+    of names restores every name in the list, and charging the furthest one would red a
+    correct record.
+    """
+    clause_lo, clause_hi = _claim_clause_bounds(text, start)
+    clause = text[clause_lo:clause_hi]
+    for marker in _CUT_CLAIM_RESTORED_RE.finditer(clause):
+        marker_clause_lo, marker_clause_hi = _claim_clause_bounds(
+            text, clause_lo + marker.start())
+        marker_clause = text[marker_clause_lo:marker_clause_hi]
+        subjects = _arm_names_in(marker_clause)
+        if not subjects or name in subjects:
             return True
     return False
 
@@ -22210,6 +22223,30 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     got = {n: c for _o, n, c in _cut_claims_in(bullets, {"test_c_arm", "test_d_arm"})}
     assert got == {"test_c_arm": True}, (
         f"a verdict must not leak into the next bullet: {got!r}")
+
+    # ⛔ BOTH DIRECTIONS OF THE MARKER, and a marker over a LIST. Each shape below was a
+    # measured false PASS or false RED in an earlier cut of this binding: a PRECEDING
+    # marker in the next bullet or after a full stop defused a later arm's verdict, and a
+    # joint record (one marker, several arms) charged the arm furthest from it.
+    live2 = {"test_live", "test_other"}
+    for passage in (
+        "`test_other` was RESTORED by `#14481`. `test_live` was CUT by #14439.",
+        "Forty-two arms were RESTORED by `#14481`. `test_live` was CUT by #14419.",
+        "- `test_other` — CUT (B7) and RESTORED by `#14481`.\n- `test_live` — CUT (B7).\n",
+    ):
+        got = {n: c for _o, n, c in _cut_claims_in(passage, live2)}
+        assert got.get("test_live") is True, (
+            "a preceding or separated restoration must not defuse another arm's verdict: "
+            f"{passage!r} -> {got!r}")
+    for passage in (
+        "- `test_live` and `test_other` were CUT (B7) and RESTORED by `#14481`.\n",
+        "- `test_live` was CUT (B7) and, unlike `test_other`, RESTORED by `#14481`.\n",
+        "- CUT (B7), RESTORED by `#14481`: `test_live` and `test_other`.\n",
+    ):
+        got = {n: c for _o, n, c in _cut_claims_in(passage, live2)}
+        assert got and not any(got.values()), (
+            "a restoration stated over a LIST must defuse every arm in it, or the pin "
+            f"reds the record shape its own message prescribes: {passage!r} -> {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
