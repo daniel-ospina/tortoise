@@ -727,7 +727,7 @@ def test_dense_composer_bounds_and_no_op_guard():
 
 
 def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
-        dense_seeded_sdk, _dense_encoder):
+        dense_seeded_sdk, _dense_encoder, monkeypatch):
     """The merge contract, at the pass boundary: the two passes are FUSED
     (`expansion_merge.fuse_expansion_pass`, #14344), so the union is kept, no
     id is duplicated, a pass-1 id that is not in the graph at all still
@@ -739,6 +739,21 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     pass1 = [("pass1-only-sentinel", 0.42),
              (DENSE_SEED_ID, 0.31),
              ("pass1-second-sentinel", 0.11)]
+    # Capture the expansion's OWN rows: `ids[0]` below is a discriminator against
+    # the removed concatenation only while the expansion does NOT rank the seed
+    # first — so the precondition is asserted instead of assumed (assertion after
+    # the call, which is where the rows exist).
+    import tortoise.search_engine as _se
+    expansion_rows: list[list[tuple[str, float]]] = []
+    _real_run_vector_query = _se.run_vector_query
+
+    def _recording_run_vector_query(*args, **kwargs):
+        rows = _real_run_vector_query(*args, **kwargs)
+        expansion_rows.append(list(rows or []))
+        return rows
+
+    monkeypatch.setattr(_se, "run_vector_query",
+                        _recording_run_vector_query)
     assert enc.calls == []  # nothing embedded yet
     merged = sdk._entity_key_dense_pass(
         QUESTION, list(pass1),
@@ -762,12 +777,28 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     # ``tests/test_expansion_fusion_14344.py``; this fixture's distances cannot
     # express every discriminator, so assert only what it CAN show). The seed is
     # carried by BOTH passes, so it earns both reciprocal-rank terms and, ON THIS
-    # FIXTURE's ranks, leads the leg. That is fixture luck, NOT an invariant: two
-    # terms beat a single-list rank only inside the <=61-in-both bound, so the
+    # FIXTURE's ranks, leads the leg. That is fixture geometry, NOT an invariant:
+    # two terms beat a single-list rank only inside the <=61-in-both bound, so the
     # assertion below is about this fixture's distances and not about membership.
     # Session B (expansion-only) still joins: the fusion adds, it does not filter.
     assert ids[0] == DENSE_SEED_ID, (
         "ON THIS FIXTURE the id BOTH passes carry earns two terms and leads")
+    # ⚠️ …and that is only a discriminator WHILE the expansion ranks a NEW id
+    # first, so the precondition is pinned rather than left to luck (review round
+    # 17 named this). The composed query sits at L2 **1.0** from BOTH the seed and
+    # session B, so their expansion ORDER is decided by ``recency_tie_key`` (DESC,
+    # #10121) and not by the fusion: the newer session's ``DENSE_JOIN_ID`` is rank
+    # 0 here, measured. A fixture edit that put the SEED at rank 0 would make the
+    # removed concatenation produce this same ``ids[0]`` — the row above would go
+    # GREEN on the pre-fix code and the protection would be silently gone.
+    assert expansion_rows, (
+        "the dense harness must reach run_vector_query or nothing below is about "
+        "the expansion's own ranks")
+    assert expansion_rows[0][0][0] != DENSE_SEED_ID, (
+        "the fixture must keep a NEW id at the expansion's rank 0 (measured: "
+        f"{DENSE_JOIN_ID}) — with the seed there the concatenation mutant would "
+        f"pass `ids[0] == DENSE_SEED_ID` too, disarming this row; got "
+        f"{expansion_rows[0][0][0]}")
     pass1_only = [p for p, _s in pass1 if p != DENSE_SEED_ID]
     assert [p for p in ids if p in set(pass1_only)] == pass1_only, (
         "pass-1-only ids keep their ORIGINAL relative order through the fusion")
