@@ -945,10 +945,14 @@ the base, not the AFTER tree's own parent `a4d1a358e2`, against which the same c
 controlled. ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL counts are unchanged at 1/record each (the WORK
 dropped, not the calls — a caller-held map is the deferred lifecycle change), and 0.68 ms/record of cache-consult
-overhead remains in two halves: ≈0.33 ms resolving the base (`_migrations_dir()` → `_complete()`, fifteen
-`Path.exists()` per consult) and ≈0.33 ms of fingerprint passes, because `replay_plan` drives both cached
-readers and each consult pays both — the filed fix (#11388) saves ONE fingerprint pass (0.160–0.169 ms) and
-leaves the resolution half in place. (An earlier revision of this line said "0.32–0.34 ms of pure stat",
+overhead remained AT THAT MEASUREMENT in two halves: ≈0.33 ms resolving the base (`_migrations_dir()` → `_complete()`, fifteen
+`Path.exists()` per consult) and ≈0.33 ms of fingerprint passes, because `replay_plan` drove both cached
+readers and each consult paid both — the filed fix (#11388) saves ONE fingerprint pass (0.160–0.169 ms).
+⛔ **`#4625` has since made this claim false on BOTH paths, so do not re-derive it as current:** the resident
+map is resolved once per process and never fingerprinted (residual **0** there), and the explicitly-named-directory
+path never resolves either — `_schema_entry()` takes `base = migrations_dir` and calls only `_migrations_fingerprint`,
+so its whole residual is that ONE pass, which is what #11388 removes; nothing on either path leaves a
+"resolution half" behind. (An earlier revision of this line said "0.32–0.34 ms of pure stat",
 which was the whole warm call attributed to the fingerprint; the RESOLUTION half it now rests on (median 0.169 ms, measured on one box at that
 PR's head) is item 6 of the artifact's SEVEN "items that are neither" — printed not committed, because a wall-clock file
 must name the tree it was taken on, re-takeable by `fingerprint_cost.py --column-consult` — while its siblings ARE committed

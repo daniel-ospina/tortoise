@@ -222,12 +222,14 @@ PROCESS'S OWN SCHEMA, so this paragraph is NOT current**: since `#4625` the
 resident map is resolved ONCE per process (`_resident_entry()`) and is NEVER
 fingerprinted (`_migrations_fingerprint`'s own docstring), so neither half is
 paid per record and the residual there is **0** — the freshness a fingerprint
-buys is a verb (`_release_schema_cache()`) instead. What this bullet still
-prices is the EXPLICITLY-NAMED-DIRECTORY path, which keeps the two-pass
-consult; the known fix there — compute the fingerprint once per plan build —
-saves ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**,
-so #11388 must not be read as removing the whole residual on either path; it is
-filed rather than hidden in "the work the record is for".
+buys is a verb (`_release_schema_cache()`) instead. ⛔ **AND THE
+EXPLICITLY-NAMED-DIRECTORY PATH HAS NO RESOLUTION HALF EITHER**: `_schema_entry()`
+takes `base = migrations_dir` and calls only `_migrations_fingerprint(base)` — it
+never reaches `_migrations_dir()`/`_complete()` — so that path pays ONE
+fingerprint pass (≈**0.160–0.169 ms**), not ≈0.33 ms, and it is THAT pass the
+known fix (compute the fingerprint once per plan build) removes, taking the path
+to 0. So #11388 must not be read as leaving half a residual anywhere; it is filed
+rather than hidden in "the work the record is for".
 
 ⛔ **Earlier revisions of this bullet, and why each was wrong.** (Deliberately no COUNT
 of them: a count over an open history is stale by construction — the same hazard the
