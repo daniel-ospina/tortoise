@@ -2361,7 +2361,49 @@ class BatchCoordinator:
                       created_at=stamp, updated_at=stamp,
                       corpus_name=str(corpus_name or ""),
                       estimate=dict(estimate or {}))
-        if not self._store.put_batch_if_absent(batch):
+        # ⛔ THE CREATE ITSELF MUST NOT RAISE INTO THE ROLLBACK EITHER (round 24, P1 —
+        # measured). This is the ONE post-`put_items` store call that was still
+        # unguarded, and by the time it runs the RECOVERY SCAN can already have
+        # published this batch: `pending_batches()` UNIONs the item arm, so an
+        # adoption can write the row and a drain can claim an item `extracting`.
+        # A fault here used to reach `except Exception` -> `discard(org_id, bid)`,
+        # deleting the row and every item row of a batch that was VISIBLE and being
+        # processed: measured, the drain's settlement then landed False and its
+        # 4 200/900 tokens were dropped, while the route answered 503 "nothing was
+        # accepted; retry" — so the retry opened a SECOND batch over the same
+        # content and charged for it again.
+        #
+        # Retried once (a statement timeout is transient by nature). If it fails
+        # twice the fault cannot say whether OUR write landed, so the row is
+        # re-read: a row present (or unreadable) is NEVER deleted, and only a read
+        # that positively proves there is no row lets the rollback clear the item
+        # rows this call wrote.
+        created = None
+        for _attempt in (1, 2):
+            try:
+                created = self._store.put_batch_if_absent(batch)
+                break
+            except Exception as exc:
+                if _attempt < 2:
+                    _logger.warning(
+                        "batch %s: the create write faulted (attempt %d of 2) — "
+                        "retrying before deciding whether it landed", bid, _attempt,
+                        exc_info=True)
+                    continue
+                _logger.warning(
+                    "batch %s: the create write faulted twice — re-reading the row "
+                    "rather than discarding a batch that may be live", bid,
+                    exc_info=True)
+                try:
+                    present = self._store.get_batch(org_id, bid) is not None
+                except Exception:
+                    present = True          # unknown is NOT permission to delete
+                if present:
+                    raise _BatchStoreFault(
+                        f"batch {bid!r}: the create write failed and the row may "
+                        "be live") from exc
+                raise
+        if not created:
             # Lost the create. Do not pretend it is ours — and do NOT discard:
             # `discard(org_id, bid)` removes the batch row AND its item rows, and
             # `bid` belongs to the WRITER THAT WON. Deleting the winner's batch to

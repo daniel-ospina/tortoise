@@ -17720,7 +17720,7 @@ async def create_batch(body: BatchRequest,
                         org_id, exc_info=True)
         raise HTTPException(status_code=503,
                             detail="Batch could not be recorded — nothing was "
-                                   "accepted; retry.") from exc
+                                   "accepted; retry shortly.") from exc
     except ValueError as exc:
         # The one refusal raised by the layer at acceptance: inline text with
         # nowhere durable to put it. 503, because that is a SERVER missing its
