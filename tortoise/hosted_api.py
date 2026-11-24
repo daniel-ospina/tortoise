@@ -22010,9 +22010,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ⛔ THE COUNT IS SIX HERE, NOT SEVEN, because the stamp emits
             # `PointRevised` and its plan is TWO statements (`UPDATE public.point`
             # + the `journal_event` row); SEVEN is the `PointAdded` shape the
-            # diagnosis measured for the turn/mint writes, whose third plan
-            # statement is the `node_identity` insert. Measured through
-            # `record_projection.replay_plan` at this head:
+            # diagnosis measured for the turn/mint writes, whose EXTRA plan
+            # statement is the `node_identity` insert — the FIRST of that
+            # shape's three (identity row, point row, `journal_event`), because
+            # `node_identity` is the composite-FK parent of the node row.
+            # Measured through `record_projection.replay_plan` at this head:
             # `PointRevised` -> 2 statements, `PointAdded` -> 3 (2 without the
             # position row). So a stamp write is 2 + 1 + 2 executes + 1 commit
             # = 6 round trips; the turn write is 7.

@@ -12,8 +12,10 @@ statements, the cursor-presence read, the plan's statements, one commit), and th
 capture handler's provenance stamp chain emits one record per stamped id. ⛔ THE
 COUNT IS PER RECORD TYPE and the stamp's type is `PointRevised`, whose plan is TWO
 statements (`UPDATE public.point` + the `journal_event` row) — SIX round trips,
-not the SEVEN of the `PointAdded` shape, whose third plan statement is the
-`node_identity` insert (measured through `record_projection.replay_plan` at this
+not the SEVEN of the `PointAdded` shape, whose EXTRA plan statement is the
+`node_identity` insert — the FIRST of that shape's three (identity row, point
+row, `journal_event`), because `node_identity` is the composite-FK parent
+(measured through `record_projection.replay_plan` at this
 head: `PointRevised` -> 2, `PointAdded` -> 3). At N = 6: 53.041 s / (6 x
 round-trip latency) = 1921 / 58 / 36.7 records at the 4.6 / 152.5 / 240.7 ms
 latencies measured on the live box (1647 / 49.7 / 31.5 at N = 7);

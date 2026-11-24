@@ -149,9 +149,8 @@ version: 1
 #
 # That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `j` at this head) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# shard `j` at this head) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# one main fold from rounding again.
+# shard `j` at this head) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
+# because it sits one main fold from rounding again.
 # The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
 # a measurement, never an inference from a neighbouring row): #14409's
