@@ -2041,7 +2041,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
-             # ⛔ RETIRED — and the retirement is a COST, not a cleanup, so it is
+             # ⛔ RETIRED — the entry this note replaces is
+             # `"tools/dod_5090_probe.py"` (NOT the live entry below it:
+             # `tools/dense_leg_probe_13108.py` still has its own pin), and the
+             # retirement is a COST, not a cleanup, so it is
              # not recorded as one. This entry was LOAD-BEARING while the probe's
              # test file held a `core` row: with that row in place,
              # `select(["tools/dod_5090_probe.py"])` -> ['core'], 960 files,

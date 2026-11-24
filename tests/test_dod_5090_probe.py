@@ -1799,3 +1799,45 @@ def test_every_aliasable_name_has_a_canonical_order_entry() -> None:
         "`SEAM_MODULE` is no longer LAST — both it and `SEAM_CALL` are rank 0, so moving it ahead "
         "silently changes which `callee` name the census PUBLISHES (no obligation moves, but "
         "`recognised_producer` route claims are re-derived from that name — `#11444`)")
+
+
+#: The width probe's own discriminating power — the arm that keeps `_CensusGraph`'s
+#: mixed-width machinery and its `LIMIT` slice REACHABLE (review P3: with the case gone they
+#: were dead code, so the fake could no longer model the shape `WIDTH_PROBE_SAMPLES` exists to
+#: refuse). Restored verbatim from `origin/main`; hermetic, in-process, no DB.
+def test_the_mixed_width_refusal_needs_MORE_THAN_ONE_sample(monkeypatch):
+    """The width fix's own discriminating power (#11088 review round 9, P2).
+
+    With `WIDTH_PROBE_SAMPLES = 1` the single-row bug returns: the first sampled
+    row's width is multiplied across the label and the figure reads as measured.
+    Pinning BOTH directions is what makes the refusal attributable to the
+    multi-row probe rather than to the fixture.
+    """
+    vectors = {"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)}
+    graph = _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors)
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+
+    # ⚠️ THE DECLARED RESIDUAL: a sample window that misses the minority width
+    # cannot refuse (5 of 6, minority last). The figure then stands, and `how`
+    # must say how many rows it came from — the sample size is what keeps it an
+    # observation rather than an implied exhaustive check.
+    late = {"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])}
+    residual = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=late),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert residual["payload"]["derived_payload_B"] == 6 * 1024 * 4, residual
+    assert "5 sampled row(s)" in residual["payload"]["how"], residual["payload"]
+    assert "minority" in residual["payload"]["how"], residual["payload"]
+
+    # …and with a SINGLE sample the same fixture reports a measured-looking
+    # figure from one row: the regression this test must be able to see.
+    monkeypatch.setattr(probe, "WIDTH_PROBE_SAMPLES", 1)
+    one = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert one["payload"]["derived_payload_B"] == 6 * 384 * 4, (
+        "with a single sample the first row's width is multiplied across the "
+        f"label — that is the regression this test must be able to see: {one}")
+
