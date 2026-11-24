@@ -1098,8 +1098,9 @@ def _check_stamp_chain_off_loop(
     # ⛔ THE DOOR UNDER ANOTHER NAME IS STILL THE DOOR (review finding, P2,
     # measured). `_stamp_calls` resolves its callee through `_callable_name`, so a
     # bare `ast.Name` AND an `obj.name` attribute in call position are both in the
-    # graded population (`:1078-1081` says why: the attribute spelling was a
-    # measured fail-open until `c3955990`). What this arm rejects is a reference to
+    # graded population (`_stamp_calls`' own docstring, `:263-268`, records why:
+    # the attribute spelling was a measured fail-open until `c3955990`). What this
+    # arm rejects is a reference to
     # the door OUTSIDE a call: `_prov = _stamp_capture_provenance; _prov(…)` inline
     # in the handler put the per-id record writes back on the loop with this pin
     # GREEN (`1 passed`, 4 of the 5 invocations seen); `getattr(mod,
