@@ -74,17 +74,18 @@ version: 1
 # `2cccf90f4dd4` (this head's own fold, on top of the `#14472` merge base after the `#14419` B7 cut
 # took the durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool)
 # plus this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb
-# packs six shards at 838.6 s (a, b, c, i, j, k) and five shards at 838.5 s (d, e, f, g, h), so
-# `ceil(838.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
+# packs nine shards at 825.4 s (a, c, d, e, f, h, i, j, k) and two shards at 825.5 s (b, g), so
+# `ceil(825.5/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
-# Three lanes have now re-derived it on the same tree and reached the SAME reading, and each fold
-# spliced a second spelling in; the guard then reads it as a `<est stated twice>` /
-# `<ceil stated 3 times>` marker — a red that no reader of the prose could see. The repair is the one
-# stated here: re-derive at the merged tree, then keep ONE sentence. ⛔ This branch's own `core` rows
-# are what moved the partition, which is why the shard NAMES are stated and graded, not only the
-# seconds.
+# Every fold of this block has spliced a second spelling in, and the readings DISAGREED with each
+# other as well as with the tree (two were carried at the last cut: six/five at 838.6/838.5 and
+# six/five at 825.1/825.0, while the tree emitted nine/two at 825.4/825.5); the guard then reads it
+# as a `<est stated twice>` / `<ceil stated N times>` marker — a red that no reader of the prose
+# could see. The repair is the one stated here: re-derive at the merged tree, then keep ONE
+# sentence. ⛔ This branch's own `core` rows are what moved the partition, which is why the shard
+# NAMES are stated and graded, not only the seconds.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool while the SECONDS moved under it,
 # so NO arithmetic on the minute can catch a carried figure — only the `est_seconds` partition can,
 # which is why the sentence is GRADED below instead of trusted. The registration map behind those rows
@@ -143,14 +144,14 @@ version: 1
 # of this spot stated its own partition attributed to `main` `2cccf90f4dd4`; it is DELETED rather
 # than re-pointed, because two spellings of one emission is the failure and re-pointing a duplicate
 # leaves the shape.)
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a02515d14ad` folded in, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the
-# `core` surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) the verb packs six shards at 825.1 s
-# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
-# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28`, so the two agree by construction rather than
-# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.1/825.0.
+# MERGES INTO, never carried from the branch that first wrote it. This parent's own fold (`main` at
+# `6a02515d14ad`, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the `core`
+# surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's weight
+# out of the pool and re-packs every bin) stated a partition of its own HERE, and so did the cut
+# above it; both are DELETED rather than re-pointed, on the rule this block states: the emission is
+# ONE fact and it is stated ONCE, at the top of this block, re-derived on the tree this PR merges
+# into. Re-derive it there after the next fold; never carry the last revision's minute, seconds, or
+# split.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
 # this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
@@ -169,9 +170,6 @@ version: 1
 # (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
 # describing a run that had already moved — nothing in this file grades an extent, so a figure here
 # can only be history and is spelled as history) — rather than accepting the
-# and re-measures the graded extent on the resolved tree, 1915 → 1921 at that fold and **1977** at
-# this one (the resolved run is the UNION of the two sides' `#:` blocks, never one side's figure),
-# rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
