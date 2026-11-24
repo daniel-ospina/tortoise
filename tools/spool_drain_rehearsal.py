@@ -798,9 +798,15 @@ def _one_mode(mode: str, *, spool_src: Path, out_dir: Path,
         # drain returns can legitimately still show sessions in flight. Polling to
         # quiescence is what makes "terminal on its own" an observation instead of
         # a race, and its duration is the runbook's own number.
-        # The pre-split path is EXPECTED to leave sessions stuck (the request
-        # is abandoned at the bound), so it is polled briefly and reported as
-        # `reached_zero: false` rather than waited out for five minutes.
+        # The pre-split path gets a SHORT bound (20 s, not five minutes) because
+        # the abandoned request was expected to leave its sessions stuck. It does
+        # not: the `504` arrives AFTER the record landed, so the client's confirm
+        # path files the entry and the run settles — measured in the committed
+        # `pre-14261.json`, `settle.reached_zero = True` in 4.1 s, `filed_key 3/3`,
+        # `attempts_max 0`. The short bound is a guard against a slow wait, not a
+        # prediction of `reached_zero: false` (an earlier version of this comment
+        # said otherwise, contradicting both this artefact and the runbook's
+        # `pre-14261` row, which was corrected alongside it).
         settle = _wait_quiescent(
             org, timeout_s=20.0 if mode == "pre-14261" else 300.0)
         graph_settled = _graph_state(org)
