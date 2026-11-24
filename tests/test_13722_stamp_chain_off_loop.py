@@ -294,19 +294,37 @@ def _submitted_callables(tree: ast.Module) -> list[ast.AST]:
 def _literal_truth(node: ast.expr) -> bool | None:
     """The statically decidable truth of a literal-ish expression, or None.
 
-    ⛔ `None` means "not statically decidable" — the caller must NOT read it as
-    false. An UNPACKING element is not an item: `{*()}` and `{**{}}` are EMPTY, and
-    the first cut of this helper counted the `ast.Starred` node and the `**`'s
-    `None` key as items, so `{*()}` read as truthy — it then redded `not {*()}`
-    (a guard whose body RUNS) and greened `if {*()}:` (a guard whose body never
-    runs). Both are the false report this arm exists to avoid.
+    ⛔ `None` means "not statically decidable" and the caller must NOT read it as a
+    polarity. ⛔ AN UNPACK IS NOT "NO ITEM": `{*()}` is empty because the OPERAND is
+    empty, `{*{1}}` is NOT empty, and `{*PAYLOAD}` is undecidable — so a starred
+    element (and a dict's `**`, whose key is `None`) is decided by recursing on its
+    value. Deciding it from the node's shape alone got both directions wrong in
+    earlier cuts: `{*()}` read as truthy (so `not {*()}` redded although its body
+    runs) and `{*{1}}` read as empty (so `if not {*{1}}:` greened although nothing
+    runs there).
     """
     if isinstance(node, ast.Constant):
         return bool(node.value)
     if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return any(not isinstance(e, ast.Starred) for e in node.elts)
+        # ⛔ AN UNPACK CAN MAKE A COLLECTION NON-EMPTY, so `any(not Starred)` is
+        # wrong in BOTH directions: `{*{1}}` is non-empty (the operand is), and
+        # `{*PAYLOAD}` is not decidable at all. Decide from the operand: any
+        # plain element makes it non-empty; otherwise every unpack must be
+        # statically EMPTY for the whole collection to be.
+        members = [(_literal_truth(e.value) if isinstance(e, ast.Starred) else True)
+                   for e in node.elts]
+        if any(m is True for m in members):
+            return True
+        return False if all(m is False for m in members) else None
     if isinstance(node, ast.Dict):
-        return any(k is not None for k in node.keys)
+        spreads = [_literal_truth(value)
+                   for key, value in zip(node.keys, node.values, strict=True)
+                   if key is None]
+        if any(key is not None for key in node.keys):
+            return True
+        if any(s is True for s in spreads):
+            return True
+        return False if all(s is False for s in spreads) else None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         operand = _literal_truth(node.operand)
         return None if operand is None else not operand
