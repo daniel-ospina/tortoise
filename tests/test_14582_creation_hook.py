@@ -428,6 +428,12 @@ def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
 
     Red before this change: `ok` stayed False and `reasons` still named 33
     graphs while `armed_but_uncut` said 0.
+
+    ⛔ What must NOT be the mechanism: retracting the OVERFLOW counter on the
+    heal that restores room. That fires on the first tracked graph healed, before
+    anything is known about the graphs it counts, and erases the only evidence
+    that `armed_but_uncut` is a lower bound — see
+    `test_the_overflow_evidence_survives_the_heal_of_every_tracked_graph`.
     """
     rw.reset_uncut_graphs()
     try:
@@ -446,24 +452,71 @@ def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
 
         block = _health(monkeypatch, dsn=dsn)
         assert block["armed_but_uncut"] == 0
-        assert block["armed_but_uncut_untracked_observations"] == 0, (
-            "the overflow backlog must be RETRACTED by the heal that restores "
-            "room — from then on any graph still uncut is tracked again, so a "
-            "kept count is a latch that pins `ok: false` forever")
+        assert block["armed_but_uncut_untracked_observations"] == 1, (
+            "the overflow count is LIFETIME and is deliberately NOT retracted: "
+            "it counts observations the full map could not track, so a heal of a "
+            "TRACKED graph knows nothing about them. What `ok` reads is the "
+            "tracked map alone")
         assert block["armed_but_uncut_reasons"] == {}, (
             "a payload that says `armed_but_uncut: 0` beside "
             "`{'no_cursor_row': 33}` contradicts itself and has no repair path")
         assert block["ok"] is True, (
-            "NOTHING is uncut any more: the deployment is healthy, and the only "
-            "way out of `ok: false` must not be a restart")
+            "NOTHING tracked is uncut any more: the deployment is healthy, and "
+            "the only way out of `ok: false` must not be a restart")
         # The lifetime diagnostic is retained — it is simply not part of `ok`.
         assert block["armed_but_uncut_observations"] == over
     finally:
         rw.reset_uncut_graphs()
 
 
+def test_the_overflow_evidence_survives_the_heal_of_every_tracked_graph(
+        monkeypatch):
+    """⛔ #14587 review P1 — RETRACTING THE OVERFLOW IS THE LATCH INVERTED.
+
+    The first fix for P1 zeroed `armed_but_uncut_untracked_observations` inside
+    `clear_uncut_graph` as soon as a pop restored room. That fires on the FIRST
+    tracked graph healed — with `UNCUT_GRAPH_CAP + 1` uncut graphs, healing the 32
+    TRACKED ones zeroes the count while graph 33 is still uncut and untouched.
+    The count of uncut graphs is then honestly 0, `ok` is true, and the payload
+    carries no evidence at all that the cap was ever exceeded, so nothing sends
+    the operator to `sweep`. Measured on that code:
+
+        33 uncut        : uncut=32 untracked=1
+        heal the 32     : uncut=0  untracked=0   <- evidence erased, graph 33
+                                                  still uncut
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        cap = rw.UNCUT_GRAPH_CAP
+        for i in range(cap + 1):
+            rw.note_uncut_graph("org-14582", f"graph-{i}", reason="no_cursor_row")
+        # Heal ONLY the tracked ones. graph-<cap> is the untracked one and stays
+        # uncut — exactly the state in which the erased count lied.
+        for i in range(cap):
+            rw.clear_uncut_graph("org-14582", f"graph-{i}")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_uncut"] == 0
+        assert block["armed_but_uncut_untracked_observations"] == 1, (
+            "this is the ONLY signal that `armed_but_uncut: 0` is a LOWER BOUND "
+            "— erasing it turns the payload into a false pass over a graph that "
+            "is still uncut")
+        assert block["armed_but_uncut_untracked_observations"] > 0, (
+            "an operator must be able to tell a capped count from a complete one")
+        # …and the untracked graph is not lost forever: the room the heal made
+        # means its next observation is TRACKED again, so it reds again.
+        rw.note_uncut_graph("org-14582", f"graph-{cap}", reason="no_cursor_row")
+        again = _health(monkeypatch, dsn=dsn)
+        assert again["armed_but_uncut"] == 1
+        assert again["ok"] is False, (
+            "a graph still uncut must red the deployment again as soon as it is "
+            "observable — the heal only cleared the graphs it could not name")
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_a_partial_heal_of_an_overflowing_registry_stays_red(monkeypatch):
-    """The other direction: retracting the backlog must not clear a real gap."""
+    """The other direction: retracting what was healed must not clear a real gap."""
     rw.reset_uncut_graphs()
     try:
         dsn = "postgresql://u:p@127.0.0.1:1/record"
@@ -472,9 +525,9 @@ def test_a_partial_heal_of_an_overflowing_registry_stays_red(monkeypatch):
         rw.clear_uncut_graph("org-14582", "graph-0")
         block = _health(monkeypatch, dsn=dsn)
         assert block["armed_but_uncut"] == rw.UNCUT_GRAPH_CAP - 1
-        assert block["armed_but_uncut_untracked_observations"] == 0
+        assert block["armed_but_uncut_untracked_observations"] == 1
         assert block["ok"] is False, (
-            "32 graphs are still uncut — the overflow retraction must never be "
+            "32 graphs are still uncut — retracting the healed one must never be "
             "read as `the gap is gone`")
     finally:
         rw.reset_uncut_graphs()

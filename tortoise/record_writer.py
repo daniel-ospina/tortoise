@@ -2949,18 +2949,36 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
 UNCUT_GRAPH_CAP = 32
 
 _UNCUT_GRAPHS: dict[str, str] = {}
-#: Observations that could NOT be tracked because the map was full. ⛔ IT IS NOT A
-#: LIFETIME COUNTER: it is retracted to 0 as soon as a :func:`clear_uncut_graph`
-#: makes room, because from that moment any graph still uncut is tracked again on
-#: its next observation. Without the retraction this counter is the same LATCH
-#: :func:`clear_uncut_graph` exists to prevent — a deployment the operator FULLY
-#: healed still sums to > 0 and reads `ok: false` for the life of the process
-#: (#14587 review P1).
+#: Observations that could NOT be tracked because the map was full. ⛔ IT IS A
+#: LIFETIME DIAGNOSTIC AND IT IS NEVER FOLDED INTO `ok` (#14587 review P1).
+#:
+#: Both ways of making it safe to fold are wrong, which is why it is not folded at
+#: all. Leaving it monotone AND folded is a LATCH: a deployment every graph of
+#: which was healed still sums to > 0 and reads `ok: false` until a restart, which
+#: then reads `ok: true` regardless of the real state.
+#:
+#: Retracting it on the heal that restores room (the first fix attempted here) is
+#: the SAME defect inverted, and it is worse because it is silent: the retraction
+#: fires on the FIRST tracked graph healed, before anything is known about the
+#: graphs it was counting. With `UNCUT_GRAPH_CAP + 1` uncut graphs and only the 32
+#: TRACKED ones healed, the counter drops to 0, `armed_but_uncut` is honestly 0,
+#: the remaining graph is still uncut — and the payload has no longer ANY signal
+#: that the cap was ever exceeded. `ok` is then a false PASS over a real gap and
+#: the overflow evidence that would have prompted a `sweep` is gone.
+#:
+#: So `ok` follows ONLY :data:`_UNCUT_GRAPHS`, which is retractable PER GRAPH by
+#: the observation that repairs it (:func:`clear_uncut_graph`), and this counter
+#: is published beside it for the one thing it can honestly say: that the tracked
+#: count is a LOWER BOUND, because at least this many observations could not be
+#: distinguished. The authoritative population is a QUERY — `sweep` / `backfill`.
 _UNCUT_UNTRACKED = 0
 #: The same count for the halted population, which has its own bounded map. Past
 #: the cap a halted graph would otherwise stop being PUBLISHED with nothing
 #: saying how many were dropped (#14587 review P2), contradicting
-#: `armed_but_halted`'s own "still published, on its own key" contract.
+#: `armed_but_halted`'s own "still published, on its own key" contract. LIFETIME
+#: for the same reason as `_UNCUT_UNTRACKED` above — nothing here is ever folded
+#: into `ok`, so a retained count cannot pin the deployment red, and retracting it
+#: would erase the only evidence that the cap was exceeded.
 _UNCUT_HALTED_UNTRACKED = 0
 #: LIFETIME observation count — a DIAGNOSTIC, never folded into `ok` (the same
 #: division `record_write_failures` (lifetime) vs `record_refusing` (window) uses).
@@ -3042,25 +3060,24 @@ def clear_uncut_graph(org_id: str, graph_id: str) -> None:
     module's health contract names for cumulative counters, and it would turn the
     compensation for best-effort provisioning into a permanent false red.
 
-    ⛔ IT RETRACTS THE OVERFLOW COUNTS TOO, and that is not housekeeping — it is
-    the other half of the same rule (#14587 review P1). `_UNCUT_UNTRACKED` counts
-    observations the FULL map could not track; once a heal makes room, any graph
-    that is still uncut is tracked again on its next observation, so the backlog
-    no longer describes a distinctness loss and keeping it would pin `ok: false`
-    over a deployment where every graph was healed. `_UNCUT_OBSERVATIONS` is NOT
-    retracted: it is published as a LIFETIME diagnostic and is never folded into
-    `ok` (the `record_write_failures` / `record_refusing` division).
+    ⛔ IT RETRACTS THE ENTRY FOR THIS GRAPH AND NOTHING ELSE (#14587 review P1).
+    It must NOT retract `_UNCUT_UNTRACKED` / `_UNCUT_HALTED_UNTRACKED`: those
+    count observations the FULL map could not track, so this call knows nothing
+    about the graphs behind them — the graph it is healing may not be one of
+    theirs. Zeroing them here fires on the FIRST tracked graph healed and erases
+    the only evidence that the cap was ever exceeded, which turns `ok` into a
+    false PASS over the untracked graphs still uncut (measured: 33 uncut, heal
+    the 32 tracked, overflow evidence 0, graph 33 still uncut). Those counters
+    are therefore LIFETIME and are never folded into `ok`; `ok` follows only the
+    tracked map, which this method retracts per graph. `_UNCUT_OBSERVATIONS` is
+    retained on the same footing (the `record_write_failures` lifetime vs
+    `record_refusing` window division).
     """
-    global _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
         with _UNCUT_GUARD:
-            if _UNCUT_GRAPHS.pop(key, None) is not None \
-                    and len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
-                _UNCUT_UNTRACKED = 0
-            if _UNCUT_HALTED.pop(key, None) is not None \
-                    and len(_UNCUT_HALTED) < UNCUT_GRAPH_CAP:
-                _UNCUT_HALTED_UNTRACKED = 0
+            _UNCUT_GRAPHS.pop(key, None)
+            _UNCUT_HALTED.pop(key, None)
     except Exception:  # noqa: BLE001, RUF100 - observability must not fail a write
         pass
 
@@ -3079,12 +3096,15 @@ def armed_but_uncut() -> dict[str, int]:
     `tools/record_allocator_cli.py sweep|backfill`.
 
     `armed_but_uncut` is exact up to :data:`UNCUT_GRAPH_CAP` distinct graphs;
-    `armed_but_uncut_untracked_observations` counts the OBSERVATIONS past that cap
-    — ⛔ observations, not graphs, which is what its name says: it increments once
-    per write to an untracked graph, so reading it as a graph count would size an
-    incident wrongly. The two together can never read as "none" while there are
-    some, and the overflow half is RETRACTED when a heal restores room, so the
-    pair is state a repair can clear rather than a latch (#14587 review P1).
+    `armed_but_uncut_untracked_observations` counts the LIFETIME OBSERVATIONS
+    past that cap — ⛔ observations, not graphs, which is what its name says: it
+    increments once per write to an untracked graph, so reading it as a graph
+    count would size an incident wrongly. It is NOT retracted and NOT folded into
+    `ok`: a retraction would fire before anything is known about the graphs it
+    counts and would erase the only evidence that `armed_but_uncut` is a LOWER
+    BOUND. `ok` therefore follows only the tracked count, which a repair retracts
+    graph by graph — so a healed deployment goes green without a restart, and a
+    counter that no repair can shrink cannot pin it red (#14587 review P1).
 
     `armed_but_uncut_observations` is the LIFETIME total — a diagnostic on its own
     key, ⛔ NEVER folded into `ok`: a cumulative counter must not pin a deployment
@@ -3093,8 +3113,9 @@ def armed_but_uncut() -> dict[str, int]:
     `armed_but_halted` is a SEPARATE population and is NOT part of
     `armed_but_uncut`: a `halted` row is an operator's decision and that graph
     keeps its JSONL append (`record_owns_position` → False), so it loses nothing.
-    `armed_but_halted_untracked_observations` is its overflow count, so a
-    population past the cap is still COUNTED even where it cannot be named.
+    `armed_but_halted_untracked_observations` is its overflow count (lifetime, not
+    folded, for the reasons above), so a population past the cap is still COUNTED
+    even where it cannot be named.
     """
     with _UNCUT_GUARD:
         return {

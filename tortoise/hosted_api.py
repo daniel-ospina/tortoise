@@ -8920,19 +8920,27 @@ def _record_health() -> dict:
     # permanently, and a halt does not clear on its own, so that red would be
     # indistinguishable from a real one. It is still PUBLISHED, on its own key.
     #
-    # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE (#14587 review P1). Both halves of the
-    # sum below are cleared by the same observation that clears the graph
-    # (`clear_uncut_graph`): the tracked count directly, and the overflow count
-    # because a heal that restores room re-tracks any graph still uncut. A fold
-    # over a LIFETIME counter would read `ok: false` on a deployment every graph
-    # of which was healed, until the process restarted — the inverted signal this
-    # field exists to prevent. `armed_but_uncut_observations` is that lifetime
-    # counter and is deliberately NOT summed in.
+    # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE PER ITEM (#14587 review P1). `ok`
+    # therefore follows ONLY `armed_but_uncut` — the tracked map, which every
+    # repair retracts graph by graph (`clear_uncut_graph`). It must NOT sum the
+    # overflow counter:
+    #
+    #   · a LIFETIME overflow count would pin `ok: false` on a deployment every
+    #     graph of which was healed, until a restart that then reads `ok: true`
+    #     regardless of the real state (the latch the review measured);
+    #   · RETRACTING it on a heal is the same defect inverted and is silent: the
+    #     retraction fires on the FIRST tracked graph healed, before anything is
+    #     known about the graphs behind the count. Measured with
+    #     `UNCUT_GRAPH_CAP + 1` uncut graphs and only the 32 tracked ones healed:
+    #     overflow 0, `armed_but_uncut` 0, the 33rd still uncut, and the payload
+    #     carrying no evidence it was ever capped — a false PASS over a real gap.
+    #
+    # So the overflow counters are published BESIDE this fold, never in it, for
+    # the one thing they can honestly say: that `armed_but_uncut` is a LOWER
+    # BOUND. `armed_but_uncut_observations` is the lifetime total on the same
+    # footing. The authoritative population is a QUERY (`sweep` / `backfill`).
     uncut_count = block.get("armed_but_uncut")
-    uncut_untracked = block.get("armed_but_uncut_untracked_observations")
-    if (block["armed"] and isinstance(uncut_count, int)
-            and isinstance(uncut_untracked, int)
-            and (uncut_count + uncut_untracked) > 0):
+    if block["armed"] and isinstance(uncut_count, int) and uncut_count > 0:
         block["ok"] = False
     return block
 
