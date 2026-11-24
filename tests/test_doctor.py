@@ -4336,8 +4336,9 @@ class TestDoctorPreInit:
         `oat_`: a Graph row saying "Run `tortoise init`" beside a Hosted row
         naming an OAuth identity.
 
-        The row defers (`the Hosted row below says whether that will work`),
-        which is what makes it correct for a REST-only verb like create-point.
+        The row defers to the COMMAND (`tortoise doctor` without `--offline`
+        checks whether that will work), which is what makes it correct for a
+        REST-only verb like create-point.
 
         Mutation: check only `_HOSTED_KEY_PREFIXES` and this REDs — the row
         flips back to "Run `tortoise init`".

@@ -183,7 +183,7 @@ sees instead.
 |---|---|---|---|
 | **D1** | The **published** CLI (`tortoise-graph==0.2.0`, 2026-08-08) has no `signup`/`config`/`recover`/`install`/`hooks` — the first command `docs/quickstart-cloud.md` gives. `tortoise --help` → `invalid choice: 'signup'` | **next action** (argparse lists choices, not the fix) | **DECLARED** — releasing is a release decision, not a lane edit. The doc now names the gap and the source-install workaround. What the user sees instead: install from source, or use the dashboard/MCP door |
 | **D2** | `tortoise create-point` on `504`: drops the `Retry-After` header the refusal refers to as *"the advertised delay"*, and says nothing that makes the instructed retry safe — **4 attempts → 4 duplicate Points** | **next action** *and* **override** | **FIXED** (this PR) — the hint prints the advertised delay, says the write may have landed, names the duplicate cost, and names the override: re-run with `--dedup` (server-side content-hash fold, `CreatePointRequest.dedup`, #1643) |
-| **D3** | `tortoise doctor` on a hosted-only box printed *"no Tortoise DB at ~/.tortoise/tortoise.db … Run `tortoise init` to create it"* — a self-hosted action, for a user whose memory lives at `api.premiselabs.co` | **next action** (present but wrong) | **FIXED** (this PR) — with a hosted credential on the default target the row now says the local graph is not this setup, names `tortoise create-point "…"` as the next step, points at the `Hosted` row for whether it will work, and keeps `tortoise init` as the named override |
+| **D3** | `tortoise doctor` on a hosted-only box printed *"no Tortoise DB at ~/.tortoise/tortoise.db … Run `tortoise init` to create it"* — a self-hosted action, for a user whose memory lives at `api.premiselabs.co` | **next action** (present but wrong) | **FIXED** (this PR) — with a hosted credential on the default target the row now says the local graph is not this setup, names `tortoise create-point "…"` as the next step, points at the COMMAND (`tortoise doctor` without `--offline`) for whether it will work, and keeps `tortoise init` as the named override |
 | **D4** | Hosted **write**, **read**, **search** and MCP **initialize** all `504` inside the 10 s bound in the first window; every failed write committed; later, the same calls return `200` at 8.7–12.9 s — so the first-run path is **flaky, not broken** | — (not a message defect) | **DECLARED** — a **deploy** gap, not a code gap: prod is 68 commits behind `main`, and two merged performance fixes are undeployed (`8fa0662249` `perf(14185)` *"a write acks, the projection follows"*; `94d75667dc` `perf(14192)` *"post-fusion reads run as one wave"*). ⛔ The 10 s bound is **not** raised (`#3834`) — this is a defect to fix, not a timeout to extend. What the user sees instead: a 504 that now names the delay, the duplicate risk and the safe retry (D2), plus a search door that answers the same query four seconds later |
 | **D5** | **No CLI verb reads back or searches.** `create-point` ends at `Created point: <id>`; verifying it or finding it again requires the REST/MCP doors | **next action** | **DECLARED** — a new CLI verb is a surface decision, not a dead-end patch. The SDK and MCP doors answer the question today and the pair above is recorded through them |
 | **D6** | `docs/quickstart-cloud.md` said `tortoise signup` "saves it to `.tortoise` in the current directory" — it writes `~/.tortoise/credentials.json` (`#1708`). A user following the doc goes looking for a file that is not there, and the wrong claim advertises exactly the working-tree credential `#10656` forbids | **what changed** (wrong location) | **FIXED** (this PR) — the block now shows the measured output, including the recovery token, which the doc omitted entirely |
@@ -217,6 +217,15 @@ Re-running is safe with this attempt's --dedup: the server folds identical conte
         wall 10.9 s
 ```
 
+⚠️ **The two blocks above are the capture taken against the live server at `74b4d326c5`.**
+The refusal wording was TIGHTENED afterwards: the no-`--dedup` warning now reads *"…on the
+HOSTED API, where dedup defaults off (measured: 4 attempts, 4 Points) … On a self-hosted
+server dedup already defaults ON, so the flag is a no-op there"*, because
+`tortoise/selfhost_api.py:35` declares `dedup = True` against hosted's `False` — the old
+sentence was untrue on a self-host target. The observed behaviour in these blocks (a `504`
+that may still commit; `wall` 11.5 s / 10.9 s) is unchanged. Only the wording moved, and
+this note is here so a reproducer is not surprised by text that differs from the record.
+
 **One of those two attempts landed; the other did not.** The org read back 7 Points at
 22:02 UTC — the original 4, the 2 from the hosted probe, and exactly **one** of the two
 above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
@@ -228,22 +237,23 @@ is host-verified separately in §1.2, by the `createdAt`/`updatedAt` differentia
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
   ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
      https://api.premiselabs.co), so your memory lives there and a local graph is not required.
-     Your next step is `tortoise create-point "…"` — the `Hosted` row below shows whether that
-     will work, or why it could not be checked. Override: run `tortoise init` only if you ALSO
-     want a local graph.
+     Your next step is `tortoise create-point "…"` — `tortoise doctor` without `--offline`
+     checks whether that will work. Override: run `tortoise init` only if you ALSO want a
+     local graph.
   ✅ Credentials: …/.tortoise/credentials.json — tt_…436f (fingerprint fa5dbb0654f2), …
   ⚠️ Hosted: … not probed (`--offline`); hosted reachability and key validity were NOT tested
 5 pass, 7 warn, 0 fail
 ```
 
-⛔ **The pair above is the point, not an aside.** Read the two rows together: the Graph row
-points at the Hosted row for a verdict, and the Hosted row — in the very mode this bundle
-runs — declines to give one (`not probed … NOT tested`). An earlier cut of the Graph row
-claimed the Hosted row "says whether that will work", which resolves to nothing here; it
-now says *shows whether that will work, or why it could not be checked*, which is true in
-all three states (probed, `--offline`, ungraded). Re-captured after this commit's wording
-change, with a fresh `HOME` holding only `credentials.json`, `--offline` so no request
-leaves the box.
+⛔ **Why the row names the COMMAND and not a row.** Read the two rows together: the Hosted
+row, in the very mode this bundle runs, declines to give a verdict (`not probed … NOT
+tested`). Two earlier cuts pointed the reader at it anyway — first *"says whether that will
+work"* (false here), then *"shows whether that will work, or why it could not be checked"*,
+which is STILL false in one admitted state: `_doctor_hosted_rows` returns immediately after
+its `Credentials` ❌ arm for an unsendable key, so in that state no `Hosted` row is printed
+at all and the pointer resolves to nothing. Naming the command is true in every state.
+Re-captured from the merged tree with a fresh `HOME` holding only `credentials.json`,
+`--offline` so no request leaves the box.
 
 ---
 

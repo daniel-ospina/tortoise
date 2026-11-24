@@ -352,6 +352,32 @@ class TestCreatePointRetrySafety:
         assert "sup3rsecretpw" not in out
         assert "/v1/search?q=" in out
 
+    def test_a_non_string_api_url_refuses_cleanly_instead_of_crashing(
+            self, tmp_path, capsys):
+        """A repo-controllable store must not crash the WRITE verb.
+
+        `_resolve_config_path` validates `api_key` is a `str` but passes
+        `api_url` through VERBATIM, and `./.tortoise` is attacker-controllable.
+        The `rstrip("/")` this PR added to normalise the base then raised
+        `AttributeError: 'list' object has no attribute 'rstrip'` — a raw
+        traceback where BASE answered `Cannot reach API at [...]` and returned 1
+        (measured on `4993fa083f`).
+
+        Mutation: drop the `isinstance` coercion above the `rstrip` and this
+        REDs with the traceback escaping instead of the refusal.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": ["https://a.example.test"],
+        }))
+        store.chmod(0o600)
+        assert main(["create-point", "hello world"]) == 1
+        captured = capsys.readouterr()
+        assert "Cannot reach API" in captured.err
+        assert "AttributeError" not in captured.err
+
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):
         _seed_global(tmp_path)

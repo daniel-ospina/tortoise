@@ -6055,6 +6055,15 @@ def _cmd_create_point(args) -> int:
     # success hint) -> 404. Normalize once, here, so both the request and the hint agree — the
     # same `rstrip("/")` the rest of this module applies (e.g. `endpoint` above,
     # `_doctor_hosted_rows`).
+    # ⛔ COERCE BEFORE `rstrip`. `_resolve_config_path` validates `api_key` is a
+    # `str` but passes `api_url` through VERBATIM, and `./.tortoise` is
+    # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches `.rstrip()`
+    # on a list and raises `AttributeError` with a raw traceback, replacing the
+    # clean refusal BASE shipped (measured on 4993fa083f: the `URLError` arm
+    # answered "Cannot reach API at ['https://a.example.test']: unknown url
+    # type" and returned 1). A repository must not be able to crash the WRITE
+    # verb — the same coercion `_doctor_hosted_rows` applies belongs here.
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     api_url = (api_url or "https://api.premiselabs.co").rstrip("/")
 
     payload = {
