@@ -82,6 +82,29 @@ ISSUE = 3061
 #: as the board's `repo`, so a cached board matches the queried slug by default.
 SLUG = "test-owner/test-repo"
 
+
+#: ⛔ `fakebin/pi` must RESOLVE TO A PYTHON — it must not be a copy of a real binary (#14493).
+#:
+#: Several fixtures below pass `argv[0]` as the bare name `pi`, because that basename is
+#: what `fleet_state.pi_processes` matches. CPython resolves `sys.executable` by SEARCHING
+#: `PATH` for an `argv[0]` that carries no slash — so a non-Python file named `pi` becomes
+#: the fake lane's own `sys.executable`, and its prefix resolution then anchors on something
+#: that is not a Python installation. Measured on the interpreter that ran this fixture:
+#: the child reports `sys.executable=<tmp>/fakebin/pi` and prints
+#: `Could not find platform dependent libraries <exec_prefix>` on stderr. Where the
+#: compiled-in prefix fallback does not exist — the CI runner — CPython aborts during init
+#: and exits 1, so the fake lane is dead before the census can sample it and the test reads
+#: `EXITED with rc=1` instead of a census verdict (#9983, #12039).
+#:
+#: A symlink makes that same resolution land on a real installation, and it drops the
+#: `/bin/sleep` host dependency the copies carried. Nothing executes this file — every
+#: `Popen` below passes `executable=PYTHON` — so its only job is to EXIST under the name `pi`.
+def _fake_pi_binary(binary: Path) -> Path:
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    if not binary.exists():
+        os.symlink(PYTHON, binary)
+    return binary
+
 GH_STUB = r"""#!/usr/bin/env bash
 set -u
 d="${GH_STUB_DIR:?GH_STUB_DIR unset}"
@@ -8793,13 +8816,12 @@ class CollisionPreflightTest(unittest.TestCase):
         # `ubuntu-latest` resolves to) `/bin/sleep` is a symlink into the uutils
         # MULTI-CALL binary, which dispatches on `basename(argv[0])` and dies with
         # `coreutils: unknown program 'pi'` — before this census takes its first
-        # sample. The copy below is inert setup: nothing reads that path any more
-        # (the interpreter is what `execve`s, and the census stub rows are literal
-        # text while `/proc` supplies only the cwd). It is retained so this change
-        # stays on the failure mode it fixes; deleting the now-dead copies — and the
-        # `/bin/sleep` host dependency they carry — is separate work (#12039).
-        pi = fake_bin / "pi"
-        shutil.copy("/bin/sleep", pi)
+        # sample. The binary below is never executed — the interpreter is what
+        # `execve`s, and the census stub rows are literal text while `/proc` supplies
+        # only the cwd — but `argv[0]` here is a path whose basename is `pi`, and the
+        # child derives its own `sys.executable` from it, so it must resolve to a
+        # Python (see `_fake_pi_binary`).
+        pi = _fake_pi_binary(fake_bin / "pi")
         proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(wt),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The census the TOOL reads is the STUBBED table (`_write_ps_stub`), so the
@@ -9629,14 +9651,13 @@ class CollisionPreflightTest(unittest.TestCase):
         argv[0] is the bare name `pi` — short, so no `ps` column width can truncate it, and
         `basename(argv[0])` is exactly what the matcher reads. A `#!` script would instead
         carry the interpreter as argv[0]. ⛔ The interpreter itself runs (`executable=PYTHON`);
-        the copied binary is inert — see the warning at
+        the binary is never executed — but it must RESOLVE to a Python, because
+        `argv[0]` is the bare name `pi` and the child derives `sys.executable` from it
+        by searching `PATH`; see `_fake_pi_binary` and the warning at
         `test_a_live_process_in_the_worktree_still_blocks`.
         """
         fake_bin = self.tmp / "fakebin-empty"
-        fake_bin.mkdir(exist_ok=True)
-        pi = fake_bin / "pi"
-        if not pi.exists():
-            shutil.copy("/bin/sleep", pi)
+        _fake_pi_binary(fake_bin / "pi")
         env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
         proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(cwd), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -10555,10 +10576,7 @@ exec {real} "$@"
                             "-b", branch, str(path), "HEAD"],
                            cwd=self.repo, check=True, capture_output=True, text=True)
         pi = peer_wt.parent / "fakebin-pi"
-        pi.mkdir(exist_ok=True)
-        binary = pi / "pi"
-        if not binary.exists():
-            shutil.copy("/bin/sleep", binary)
+        _fake_pi_binary(pi / "pi")
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(peer_wt),
             env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
@@ -11009,10 +11027,7 @@ exec {real} "$@"
                         "-b", "fix/3061-lane", str(lane_wt), "HEAD"],
                        cwd=self.repo, check=True, capture_output=True, text=True)
         fakebin = worktrees / "fakebin-subagent"
-        fakebin.mkdir(exist_ok=True)
-        binary = fakebin / "pi"
-        if not binary.exists():
-            shutil.copy("/bin/sleep", binary)
+        _fake_pi_binary(fakebin / "pi")
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
@@ -11053,10 +11068,7 @@ exec {real} "$@"
                         "-b", "fix/3061-samecwd", str(lane_wt), "HEAD"],
                        cwd=self.repo, check=True, capture_output=True, text=True)
         fakebin = worktrees / "fakebin-samecwd"
-        fakebin.mkdir(exist_ok=True)
-        binary = fakebin / "pi"
-        if not binary.exists():
-            shutil.copy("/bin/sleep", binary)
+        _fake_pi_binary(fakebin / "pi")
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
@@ -11095,10 +11107,7 @@ exec {real} "$@"
                             "-b", branch, str(path), "HEAD"],
                            cwd=self.repo, check=True, capture_output=True, text=True)
         fakebin = worktrees / "fakebin-dispatched"
-        fakebin.mkdir(exist_ok=True)
-        binary = fakebin / "pi"
-        if not binary.exists():
-            shutil.copy("/bin/sleep", binary)
+        _fake_pi_binary(fakebin / "pi")
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
