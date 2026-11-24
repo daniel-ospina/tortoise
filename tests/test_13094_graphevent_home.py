@@ -22,7 +22,7 @@ WHAT THIS FILE PINS, and what each pin would be FALSE without:
    * a payload-only emit writes a `:GraphEvent` row and **no journal row at all**
      (`_emit_event` returns before the JSONL half when it has no ``point``/``id``/
      ``turns``), so the record's stream is short by construction for the
-     hard-delete lane — the shape `#13083` §6.3 named and this test EXECUTES,
+     hard-delete lane — the shape the `#13083` census named and this test EXECUTES,
      with a POSITIVE CONTROL beside it (an emit that carries a point DOES journal)
      so the empty half cannot pass for a fixture that never bound a journal;
    * the two stores' `seq`s are different coordinates (`:GraphEvent.seq` is the
@@ -74,7 +74,7 @@ MEASURE = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent"
            / "measure_graphevent_residency.py")
 
 #: Capability words a reader would have to need for the shape to stay resident.
-#: The vocabulary is the audit's own (`#13083` §2): the four capabilities only a
+#: The vocabulary is the audit's own (the `#13083` census): the four capabilities only a
 #: graph engine provides, plus EP state. The PREDICATE lives in the tool, not
 #: here — a check whose vocabulary the checked module does not own is a second
 #: definition that drifts. This tuple is the EXPECTED set, pinned against the
@@ -134,15 +134,14 @@ CAPABILITY_CONTROLS = (
     # literal expectation here fixes arm PRECEDENCE, not just detection.
     ("re-spaced directed adjacency",
      "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
-    # the live EP / belief walk CAPABILITY-PLACEMENT-AUDIT.md quotes in its §2.1 `:Point` table's
-    # EP-walk row (sourced from `ep.py:1620-1632`), with its `{label}` placeholder FILLED BY
-    # `GraphEvent` — a label the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
+    # the live EP / belief walk, with its `{label}` placeholder FILLED BY `GraphEvent` — a label
+    # the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
     # Point/Subject/Object/Event), so this row pins the SHAPE the capability arms must catch, not a
-    # placement claim. ⛔ Named by SECTION and row, never as a `:NNNN` address into that document:
-    # the audit is a file this very PR grows, so a bare line number here went stale by this diff's
-    # own insertions (the EP-walk row is `:410` on `main` and `:433` here — re-measured by
-    # `grep -n 'ep.py:1620-1632'`, and the delta is this PR's own header rows; #14183 review
-    # P3) and a lane re-deriving from it lands on a blank line. The document's own §2.1 anchors it.
+    # placement claim. The walk itself is `tortoise/ep.py:1620-1632` (`epistemic_label_queries`); it
+    # used to be quoted through the `#13083` census's `:Point` table, whose document was deleted on
+    # 2026-11-23 (`#11081` audit row B2) — read the shape from the source
+    # (`sed -n '1620,1632p' tortoise/ep.py`, or grep for `epistemic_label_queries`), never from a
+    # prose document's row address.
     ("EP walk",
      "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",
      "cypher:-["),
@@ -531,7 +530,7 @@ def test_a_payload_only_emit_writes_the_store_and_no_journal_record(tmp_path):
 
     A re-point onto `journal_event` would therefore drop this event from every
     subscriber while the stream still looked complete. That is not an off-by-one
-    cursor; it is a missing event type, which is why `#13083` §6.3 refused to
+    cursor; it is a missing event type, which is why the `#13083` census refused to
     call the move a "feed re-pointing".
 
     ⛔ THE POSITIVE CONTROL IS PART OF THE PIN. Without it, `journal_rows == []`
@@ -598,7 +597,7 @@ def test_the_two_stores_seq_coordinates_are_deliberately_different():
 def test_the_change_feed_has_no_record_home_in_the_projection_registries():
     """`NODE_TABLES`/`KEY_PROPERTY` do not name the shape — and must not start.
 
-    Adding it is the route `#13083` §5.2 prescribes ("give it a `NODE_TABLES`
+    Adding it is the route the `#13083` census prescribes ("give it a `NODE_TABLES`
     record home with a tier column"), so this pin exists to make that route
     REFUSE with its reason instead of looking like unfinished work.
     """
@@ -686,7 +685,7 @@ def test_the_superset_verdict_names_a_missing_type_and_a_missing_row():
     Two deficits, deliberately different, because they carry different remedies:
 
     * a TYPE the record never carries (a subscriber sees a complete-looking,
-      silently SHORT stream — the failure `#13083` §6.3 calls the worse one);
+      silently SHORT stream — the failure the `#13083` census calls the worse one);
     * a ROW inside a type the record does carry (a lost event, not a lost
       vocabulary).
     """
@@ -1469,6 +1468,119 @@ def test_the_committed_census_is_the_verbs_own_output():
         "`readers.json` no longer matches the verb — regenerate it with "
         "`uv run python tools/graphevent_home.py readers > "
         "docs/evidence/13094-graphevent/readers.json` rather than hand-editing")
+
+
+def test_the_export_scan_cites_open_on_the_statements_they_name():
+    """The README's `_export_graph_snapshot` cites must open on what they claim.
+
+    ⛔ WHY THIS EXISTS (PR #14428 review round 6, P2 — and it is the defect that PR
+    was ABOUT, surviving inside its own fix). Those three addresses had been
+    re-pointed by an OFFSET rather than re-derived, and landed 105 lines above the
+    function — on the membership-role endpoint — with every gate green: the
+    `readers.json == the verb's bytes` arm compares ARTIFACT to TOOL (both carried
+    the same wrong numbers, because the numbers are prose), and
+    `test_docs_citation_refs.py` is presence-and-blank-line only, so "a shift onto a
+    DIFFERENT non-blank line stays green". A cite is a claim about a line; only
+    opening the line grades it.
+
+    DERIVED from the README, never hardcoded: the addresses are read out of the
+    sentence that makes the claim, so a legitimate re-derivation of all three
+    together keeps this arm true, while moving one by a delta reds it.
+    """
+    readme = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent" / "README.md"
+              ).read_text(encoding="utf-8")
+    # The sentence WRAPS in the markdown, so it is read off the flattened paragraph —
+    # a per-LINE search sees the def and none of the two continuations (measured while
+    # writing this arm).
+    flat = re.sub(r"\s+", " ", readme)
+    start = flat.find("whole-graph scan is `hosted_api.py:")
+    assert start >= 0, (
+        "the README's export-scan sentence is gone or reworded past recognition — "
+        "re-word this arm deliberately, do not delete it: it is the only thing that "
+        "opens these addresses")
+    addresses = [int(n) for n in re.findall(r":(\d+)", flat[start:start + 260])]
+    assert len(addresses) == 3, (
+        f"the export-scan sentence must name THREE addresses (the def, the "
+        f"`:GraphEvent` branch and the append), found {addresses}")
+    lines = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text(
+        encoding="utf-8").splitlines()
+    for address, expected in zip(
+        addresses,
+        ("def _export_graph_snapshot", '"GraphEvent" in labels', "events.append(d)"),
+        strict=True,
+    ):
+        assert 0 < address <= len(lines), (
+            f"`hosted_api.py:{address}` is out of range ({len(lines)} lines) — the "
+            "file shrank under the cite")
+        actual = lines[address - 1]
+        assert expected in actual, (
+            f"the README cites `hosted_api.py:{address}` for {expected!r}, but that "
+            f"line reads {actual.strip()[:100]!r}. RE-DERIVE BY CONTENT, never by "
+            "delta: grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py, then "
+            "the branch and the append inside its body")
+    # ⛔ EVERY carrier in the README, not only the graded sentence (round 7, P2). The same
+    # address is named in three places — §1's exclusion paragraph, the sentence above, and §5's
+    # step 4, which is the ACTIONABLE one ("a re-point driven by this census alone would leave
+    # the export endpoint reading the old home"). Re-pointing only `:75` or only `:393` leaves
+    # every other gate green: `hosted_api_cite_census.py --check` moves only when the bad number
+    # is a NEW distinct target (so a re-point onto an address cited elsewhere in the tree is
+    # invisible to it), and `test_docs_citation_refs.py` is presence-only. Asserted as the
+    # population it is, so a carrier cannot be dropped silently either.
+    all_cites = [int(n) for n in re.findall(r"hosted_api\.py:(\d+)", readme)]
+    assert len(all_cites) == 3, (
+        f"the README names `hosted_api.py:<n>` {len(all_cites)}x ({all_cites}), not 3x — "
+        "either a carrier was dropped or one was added. Both are fine, but this arm scopes the "
+        "export-scan claim to the carriers that exist: re-word it deliberately.")
+    # ⛔ POSITIONAL, not `any()` (round 8, P2). Every standalone `hosted_api.py:<n>` carrier
+    # in this README names the SCAN — the `def`. The branch and the append are named by bare
+    # `:NNNN` inside the sentence block 1 grades positionally, so an `any(...)` test here
+    # accepts a carrier re-pointed to a SIBLING statement of the same function (`:34346`, the
+    # append) while it still claims the scan: measured, that mutation left
+    # `test_docs_citation_refs.py` (40 passed) and `hosted_api_cite_census.py --check` (exit 0)
+    # green, because `34346` is cited elsewhere so the distinct-target set does not move.
+    assert set(all_cites) == {addresses[0]}, (
+        f"the README's standalone `hosted_api.py:<n>` carriers are {sorted(set(all_cites))}, "
+        f"but the scan they all name is `:{addresses[0]}` (block 1 grades the branch "
+        f"`:{addresses[1]}` and the append `:{addresses[2]}` positionally, as bare `:NNNN`). "
+        "A carrier pointing at a different statement of the same function is the same defect "
+        "as one pointing at another endpoint: re-derive it by content.")
+    for address in all_cites:
+        assert 0 < address <= len(lines), (
+            f"`hosted_api.py:{address}` is out of range ({len(lines)} lines)")
+        assert "def _export_graph_snapshot" in lines[address - 1], (
+            f"the README names `hosted_api.py:{address}` as the export scan, but that line "
+            f"reads {lines[address - 1].strip()[:100]!r} — not the `def`. Re-derive by "
+            "content with `grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py`.")
+
+    # ⛔ AND THE OTHER CARRIER: `readers.json` is generated from `tools/graphevent_home.py`,
+    # which carries the same three numbers as PROSE. A re-point applied to one carrier and
+    # not the other is the split-carrier failure this PR's own body names, and the
+    # `readers.json == the verb's bytes` arm above cannot see it — both sides are the tool.
+    # So the two carriers are compared to each other here, on addresses this arm derived
+    # from the README rather than from either of them.
+    verb = _tool().readers_report()
+    why = next(
+        (row["why"] for row in verb["readers"] if "_export_graph_snapshot" in row.get("why", "")),
+        None,
+    )
+    assert why is not None, (
+        "no `readers` row's `why` names `_export_graph_snapshot` any more — the export "
+        "hole the README describes is now censused (good) or the prose dropped it "
+        "(re-word this arm deliberately)")
+    # Same flatten-and-window read as the README, because the `why` string names other
+    # files' addresses (hosted_backup.py's) BEFORE this sentence.
+    tool_start = why.find("whole-graph scan is `hosted_api.py:")
+    assert tool_start >= 0, (
+        "`readers.json`'s `why` no longer carries the export-scan sentence this README "
+        "mirrors — re-word BOTH carriers rather than deleting the comparison")
+    tool_addresses = [
+        int(n) for n in re.findall(r":(\d+)", why[tool_start:tool_start + 260])
+    ]
+    assert tool_addresses == addresses, (
+        f"the README cites {addresses} for the export scan but `readers.json`'s own "
+        f"`why` (emitted by `tools/graphevent_home.py`) cites {tool_addresses}. One "
+        "carrier was re-pointed and the other left behind: re-derive BOTH from "
+        "`tortoise/hosted_api.py` in the same change.")
 
 
 def test_the_evidence_docs_pin_count_is_this_files_own_count():
