@@ -9778,7 +9778,16 @@ def _durations_row_comment(name: str) -> str:
 #: its internals, and because the two assertions below grade this spelling itself.
 _ADOPTED_SWEEP_BASIS_RE = re.compile(
     r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} \(run [^)]*\)"
-    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?)?[ \t]*$")
+    # ⛔ TWO TAIL SHAPES, because a refresh has TWO outcomes: it ADOPTS the reading
+    # (`; was N`) or, when the reading is a lower bound or the row is not provable,
+    # it HOLDS the previous value and writes `: <why>; kept N` (`tools/ci_timing.py`
+    # ~:3189-3193, appended as the tail). Matching only the first made the escape
+    # refuse a CORRECT refresh of a held row (measured: `test_worker_topology.py`'s
+    # committed tail `… ; kept 5.6` did not match), and this pin's own row is
+    # reachable by it — one test means `declared == 1`, so it is never `provable`
+    # and a LOWER reading is HELD (#13722 review cycle 7, P2).
+    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?"
+    r"|:.*;[ \t]*kept [0-9]+(?:\.[0-9]+)?)?[ \t]*$")
 
 
 def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
@@ -9848,9 +9857,20 @@ def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
         "hand-picked weight can ride behind the promise — the defect this pin exists for")
     assert _ADOPTED_SWEEP_BASIS_RE.search(
         "ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0"), (
-        "the adopted-sweep escape rejects the refresher's OWN basis tail, so a correctly "
-        "refreshed reading would red this pin and the cheapest green is an unmeasured "
-        "`DEFAULT_FAST_WEIGHT`")
+        "the adopted-sweep escape rejects the refresher's OWN adopted-basis tail, so a "
+        "correctly refreshed reading would red this pin and the cheapest green is an "
+        "unmeasured `DEFAULT_FAST_WEIGHT`")
+    # ⛔ …AND ITS OTHER OUTCOME, the HELD tail (`: <why>; kept N`), graded against a
+    # REAL committed row rather than a hand-typed string: a refresh that HOLDS a
+    # value writes this shape, and refusing it would red a correct refresh of a row
+    # that can never be `provable` (#13722 review cycle 7, P2).
+    held = _durations_row_comment("test_worker_topology.py")
+    assert held, (
+        "`test_worker_topology.py` carries no `durations:` row any more, so the "
+        "held-tail arm below grades nothing — re-point it at another HELD row")
+    assert _ADOPTED_SWEEP_BASIS_RE.search(held), (
+        "the adopted-sweep escape does not recognise this map's own HELD tail "
+        f"({held[-120:]!r}), so a correct `kept` refresh would red this pin")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
         "dropping THIS row from the live map must name exactly this file as rowless; "

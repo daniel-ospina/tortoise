@@ -101,8 +101,8 @@ version: 1
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
 # move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
 # `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is the registration that moved
-# THIS reading's NAME SETS off the five/six split the parent map emits — `d` left the worst bin
-# and the eight below absorbed it — while the minute stayed at 28 m, which is again why the graded
+# THIS reading's NAME SETS off the five/six split the parent map emits — `d` AND `e` left the worst
+# bin and the eight below absorbed both — while the minute stayed at 28 m, which is again why the graded
 # claim is the set and not the minute. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
 # NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the

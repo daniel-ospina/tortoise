@@ -58,6 +58,7 @@ per-record statements) would move it, and this file must not red when it does.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -190,6 +191,27 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     submissions = _off_loop_submissions(tree)
     submitted = {(pool, fn) for _line, pool, fn, _aw in submissions}
     awaited = {(pool, fn) for _line, pool, fn, aw in submissions if aw}
+
+    # ⛔ THE NAME MUST RESOLVE TO ONE DEFINITION (#13722 review cycle 7, P2). The
+    # match above is on the function NAME, so a SECOND def with the same name — the
+    # natural thing when a handler is cloned — is graded by the FIRST one's
+    # submission. Measured on a `/tmp` copy: a module-level `def _stamp_chain()`
+    # carrying an inline, never-submitted stamp left this pin GREEN, i.e. a copy of
+    # the chain could run its per-id record writes on the loop with no gate
+    # noticing. Uniqueness is what makes the name a key at all; the deeper fix
+    # (keying on the definition node) needs a submission identifier the AST does not
+    # carry, so this asserts the precondition instead of pretending to check it.
+    def_counts = Counter(
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    ambiguous = sorted(name for name in owners if def_counts[name] != 1)
+    assert not ambiguous, (
+        f"{_STAMP_DOOR} is called from {ambiguous}, whose name(s) resolve to "
+        f"{ {name: def_counts[name] for name in ambiguous} } definitions in "
+        f"{HOSTED_API.name} — a submission matches by NAME, so the other "
+        "definition's submission would be accepted for this one and a second copy "
+        "of the chain could run on the event loop unseen. Rename it, or re-derive "
+        "this pin to key on the definition node (#13722)")
 
     # ⛔ SYNC, NOT `async def` (review finding 3): `_run_off_loop` hands `fn` to
     # `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
