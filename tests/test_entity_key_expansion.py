@@ -761,11 +761,15 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     # ── #14344: the merge is a FUSION now (the pure rule is pinned in
     # ``tests/test_expansion_fusion_14344.py``; this fixture's distances cannot
     # express every discriminator, so assert only what it CAN show). The seed is
-    # carried by BOTH passes, so it earns both reciprocal-rank terms and leads
-    # the leg — no expansion-only row is placed above it by membership. Session B
-    # (expansion-only) still joins: the fusion adds, it does not filter.
+    # carried by BOTH passes and — ON THIS FIXTURE — sits inside the two-term
+    # bound, so it leads the leg. ⛔ That is fixture geometry, NOT an invariant:
+    # ``rrf_fusion``'s two terms only beat a better single-list rank up to 1-based
+    # 61 in both lists (see ``test_the_shared_id_advantage_is_bounded_at_1based_61``
+    # for the crossover), so "the shared id leads" is not a rule the fusion gives.
+    # Session B (expansion-only) still joins: the fusion adds, it does not filter.
     assert ids[0] == DENSE_SEED_ID, (
-        "the id BOTH passes carry earns two fusion terms and leads the leg")
+        "on this fixture the seed's ranks in both passes are inside the "
+        "two-term bound, so it leads the leg")
     pass1_only = [p for p, _s in pass1 if p != DENSE_SEED_ID]
     assert [p for p in ids if p in set(pass1_only)] == pass1_only, (
         "pass-1-only ids keep their ORIGINAL relative order through the fusion")

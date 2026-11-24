@@ -49833,13 +49833,13 @@ class TortoiseSDK:
         ⛔ The ORDER, stated because "additive" is read as more than it means:
         the merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this
         module's own `rrf_fusion` over the two passes, not the rank
-        concatenation (`expanded + pass-1-only`) it used to be. An id BOTH
-        passes carry outranks either pass alone (it earns both terms — the entity
-        context AGREEING with the query is the signal the expansion exists to
-        supply); a pass-1 id can move down only when a candidate out-ranks it in
-        the composed run, when one ties it and wins the id tiebreak (#2952), or
-        when an id BOTH passes carry earns two terms. Never because the
-        expansion run had more rows. What is NOT claimed: order preservation — a
+        concatenation (`expanded + pass-1-only`) it used to be. Displacement is
+        by RANK now, never by the expansion run's LENGTH. An id BOTH passes
+        carry earns TWO terms (the entity context AGREEING with the query, the
+        signal this pass exists to supply) — strong, but BOUNDED: with k = 60
+        it beats a single-list rank-0 candidate up to 1-based 61 in both lists;
+        at 62 they tie and the (-score, id) tiebreak (#2952) decides; beyond
+        that a better single-list rank wins. What is NOT claimed: order preservation — a
         re-ranked dense leg is the mechanism, not a side effect, and on a lever
         that ships OFF it stays a decision to be measured, not asserted.
 

@@ -95,6 +95,57 @@ def test_agreement_between_the_two_passes_outranks_being_new():
         "outrank one only the expansion ranked")
 
 
+def test_the_shared_id_advantage_is_bounded_at_1based_61():
+    """(b), BOUNDED — and the bound is the claim the prose must keep.
+
+    ⛔ Review round 15, P2-1: "an id both passes carry outranks either pass
+    alone" is FALSE as a guarantee. ``rrf_fusion`` sums ``w / (k + rank + 1)``
+    with 0-based ``rank`` and ``k = 60`` (``search_engine.py:5075``), so a
+    shared id at 0-based rank ``h`` in BOTH lists scores ``2/(61+h)`` against a
+    single-term rank-0 candidate's ``1/61``: it WINS for ``h <= 60`` (1-based
+    <= 61), TIES at ``h == 61`` (1-based 62) where ``(-score, id)`` decides on
+    the id's spelling, and LOSES beyond that.
+
+    Non-vacuous: the ``h >= 62`` row reds on any implementation that made
+    membership dominate, and the ``h == 61`` row reds on one that let the tie
+    fall to insertion order instead of the ``(-score, id)`` tiebreak. The ranks
+    are reachable in the shipping default — the legs are pool-depth
+    (``DEFAULT_POOL_SIZE`` = 120 rows), not short pages — which is why this is
+    a bound and not a footnote."""
+    def _pair(h):
+        # ``shared`` sits at 0-based rank ``h`` in BOTH lists; ``newcomer`` at
+        # rank 0 of the expansion and nowhere else, so it earns exactly ONE term.
+        pass1 = [(f"a{i}", 1.0 - i / 1000) for i in range(h)] + [("shared", 0.5)]
+        expanded = ([("newcomer", 9.0)]
+                    + [(f"b{i}", 1.0 - i / 1000) for i in range(h - 1)]
+                    + [("shared", 0.4)])
+        return pass1, expanded
+
+    # h = 60 (1-based 61): the two terms still win.
+    pass1, expanded = _pair(60)
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("shared") < ids.index("newcomer"), (
+        "at 1-based 61 in both lists the two-term id must still lead")
+
+    # h = 61 (1-based 62): an EXACT tie — the id decides, not the evidence.
+    pass1, expanded = _pair(61)
+    fused = rrf_fusion([pass1, expanded], 60)
+    assert fused["shared"] == fused["newcomer"], (
+        "at 1-based 62 the two scores must TIE exactly — the prose says so: "
+        f"shared={fused['shared']!r} newcomer={fused['newcomer']!r}")
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("newcomer") < ids.index("shared"), (
+        "a tie is broken by (-score, id) — the id's own spelling ('newcomer' "
+        f"< 'shared'), never the evidence — got {ids}")
+
+    # h = 62: the single-list rank-0 candidate wins — membership is NOT dominant.
+    pass1, expanded = _pair(62)
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("newcomer") < ids.index("shared"), (
+        "beyond 1-based 62 the better single-list rank must win: an id both "
+        "passes carry does NOT outrank either pass alone")
+
+
 def test_scores_are_carried_from_origin_not_the_rrf_score():
     """The single-strategy path in ``_tortoise_fts_query`` filters on the raw
     leg score (``score >= threshold``). Replacing those with RRF values
@@ -257,3 +308,51 @@ def test_both_halves_describe_the_fusion_never_the_removed_concatenation():
         assert "fuse_expansion_pass" in doc, f"{name} does not name the fusion"
         for phrase in stale:
             assert phrase not in doc, f"{name} still states the removed merge: {phrase!r}"
+
+
+def test_no_home_states_membership_dominance_without_its_bound():
+    """⛔ Review round 15, P2-1: the agreement claim is a BOUNDED one, and it
+    lives in more than one home. Every home that states the two-pass agreement
+    mechanism must carry the crossover, and no home may state the blanket
+    version — "an id both passes carry outranks either pass alone" — which
+    ``rrf_fusion`` does not give (``test_the_shared_id_advantage_is_bounded_at_
+    1based_61`` is the arithmetic that disproves it).
+
+    Non-vacuous: pre-fix, all three homes stated the blanket claim and none
+    carried the crossover, so this reds on the tree it was written for. It also
+    reds if a home drops the mechanism sentence entirely to escape the rule —
+    the count pin below requires the sentence to still be somewhere."""
+    homes = {
+        # :57/:72 of the module are this FUNCTION's docstring, not the module's.
+        "expansion_merge.fuse_expansion_pass": fuse_expansion_pass.__doc__ or "",
+        "evidence README": (
+            Path(__file__).resolve().parent.parent
+            / "docs" / "evidence" / "14344-expansion-fusion" / "README.md"
+        ).read_text(),
+    }
+    # A dict-literal merge, not ``dict.update``: ``tools/sdk_privatise.py`` counts ordinary-word
+    # receivers (``x.update`` / ``x.query`` / ``x.delete``) as a pinned residue SHAPE, and
+    # ``homes.update(...)`` would add one for a reason that has nothing to do with this test.
+    homes = {**homes, **_half_docstrings()}
+
+    blanket = "outranks either pass alone"
+    stating = 0
+    for name, text in homes.items():
+        flat = " ".join(text.split())
+        assert blanket not in flat, (
+            f"{name} states membership dominance as a guarantee the fusion "
+            "does not give — it needs the 1-based-61 crossover")
+        if "both passes" not in flat.lower():
+            continue
+        stating += 1
+        assert "1-based 61" in flat, (
+            f"{name} states the two-pass agreement mechanism WITHOUT its "
+            "crossover (wins up to 1-based 61 in both lists)")
+        assert "at 62 they tie" in flat, (
+            f"{name} does not state the tie at 1-based 62, where the "
+            "(-score, id) tiebreak decides on the id and not the evidence")
+
+    assert stating >= 3, (
+        "the mechanism must still be stated in at least the merge helper's "
+        "docstring, the dense half and the evidence README — got "
+        f"{stating} home(s): {sorted(homes)}")
