@@ -4933,9 +4933,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: ⚠️ HOW MANY TIMES THIS FILE'S BYTES MOVED — MEASURED, not estimated, because THIS note
 #: is what a later re-pinner reads before judging whether reusing a number is safe:
 #: `for c in $(git rev-list --reverse <base>..HEAD); do git show "$c:tortoise/pi-hooks/tortoise-capture.ts" | sha256sum; done | sort -u | wc -l`
-#: returns **22 distinct forms over 56 commits** from `origin/main`'s merge base
-#: `6a72cfd661` to the head this note ships with, including `main`'s shipped form at
-#: generation 33 and this head's at generation 34.
+#: returns **22 distinct forms over 57 commits** for the range `6a72cfd661..1474ec7bf58d`
+#: (`git rev-list --count 6a72cfd661..1474ec7bf58d`), including `main`'s shipped form at
+#: generation 33 and that head's at generation 34. ⛔ `6a72cfd661` is NOT the merge base —
+#: `git merge-base origin/main HEAD` is one commit later (`2f380536`), and the two ranges give
+#: different counts (21 forms over 56 commits), so the range is spelled out rather than
+#: described, and both figures are quoted AT A HEAD (`1474ec7b`), never against `..HEAD`.
 #: ⛔ THE NUMBER IS RE-DERIVED, NEVER CARRIED. An earlier version of this note claimed
 #: "ELEVEN re-cuts / TWELVE distinct forms / this branch's 25 commits" and listed eleven
 #: digests, NONE of which occurs in that range at all — a figure nobody could reproduce
@@ -5000,7 +5003,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: silenced the Python leg's reader too. The clearing/carrying rule is now ONE
 #: exported function (`applyClaimPolicy`) rather than a property of four write sites,
 #: and it carries the fact forward on every write that did not hold the claim.
-#: ⛔ GENERATION 34, NOT A RE-CUT OF 33 (#14480 cycle-19 review, P1). Every earlier
+#: ⛔ GENERATION 34, NOT A RE-CUT OF 33 (#14480 cycle-20 review, P1). Every earlier
 #: re-cut of this tuple argued "33 has never shipped" — that was FALSE. Generation 33
 #: SHIPPED on `main` in #14423 (`da82ece4226`: marker 33, capture digest
 #: `746075470aab…`), and `main`'s own entry below records exactly that. Re-cutting 33
@@ -6427,6 +6430,14 @@ def test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why():
     MUTATION THAT REDS THIS: set `_GENERATION_DIGESTS[33]` (or
     `_READ_SEAM_GENERATION_DIGESTS[33]`) to this branch's digest instead of the
     shipped one, or move either artifact marker back to 33.
+
+    ⛔ AND THE FULL REVERT IS FOUR SITES, not two (review at `2f380536`'s descendant head):
+    both markers → 33, both pins → the marker-33 files' digests, PLUS
+    `_EXPECTED_INSTALL_CONTRACT["pi"]` → 33 and the `== 34` in
+    `test_pi_seam_carries_exactly_one_canonical_marker` → 33. Applying only the first two
+    leaves `2 failed` — this row AND a row that would then be red for a reason of its own —
+    which reads as if this row were not the gate. With all four, `306 passed, 1 failed`:
+    this row is the only one, which is the claim the Residuals bullet makes.
     """
     # 33 is `main`'s, not this branch's: the markers moved past it and the entry is
     # the digest `main` ships. Both halves are asserted because either one alone is

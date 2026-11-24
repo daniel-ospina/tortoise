@@ -19,7 +19,7 @@ Two independent mechanisms, both measured:
 | **A stated ceiling** | `DRAIN_MAX_IN_FLIGHT = 1` POST in flight, *per box*. It is a cap on how much of the shared 8-slot budget the drain may hold (7 stay available to live captures), not a throughput knob, and no configuration raises it. |
 | **Capacity charges nobody** | `capacity_refusal()` + `_flush_one`'s early return: no `attempts` increment, no backoff armed, and the **pass stops**. It then yields, honouring the server's own `retry_after`, bounded at `DRAIN_CAPACITY_YIELDS = 3`, and retries **the same** entry — so a busy box starves nothing and a head never rises. |
 | **Named, durably** | The refusal is recorded as `blocked` + 429 + the code, so the health line reads `capture: BLOCKED (n queued, 429 capture capacity)` instead of a box that cannot file looking healthy. Self-healing on both ends. |
-| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33 in #14423, and **34** here (a byte change at an already-shipped generation must move the number — see the P1 in cycle 19). A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
+| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33 in #14423, and **34** here (a byte change at an already-shipped generation must move the number — see the P1 in cycle 20). A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
 
 ### Why a lease and not a lockfile or a config promise
 
@@ -414,17 +414,33 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
 | **P3** record counts stale at the head they claimed (`71`/`320` vs `74`/`321`) | **already fixed, confirmed** — `21a2c5e9b0` (`74`/`773`/`321`), and re-derived again here because this round adds cases: `84`/`783`/`327` (the merged tree: the peer lane's own cases moved the Pi count from the `326` this lane measured alone). |
 
 **Cycle 20** (a fresh-context reviewer posted against `bcb52e1d` — 1 **P1** + 5 **P3**, and the
-round that moved shipped BYTES). ⚠️ It had no row until now, and the delta's own citations said
-"cycle 19", which is a DIFFERENT round (exported at `23ac4a97d1fd`): that is why the table below
-exists, and why the code comments now cite it by head.
+round that moved shipped BYTES). ⚠️ It had no row until now, and an earlier version of this table
+named that head while listing the NEXT round's findings — which made both rounds unverifiable
+(the class this record polices). The two rounds are now separate, and every citation names the
+head it belongs to.
 
 | finding | disposition |
 |---|---|
-| **P1** generation 33 had ALREADY SHIPPED on `main`, so this PR's in-place re-cut of 33 would have graded every Pi install made from `main` as a BLOCKING `modified-artifact` ("local edit") — for a change the user never made | **fixed by shipping generation 34** on both halves, with 33's entries frozen at `main`'s digests, and **pinned by a new row** (`test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`) after the reviewer MEASURED that reverting the whole fix left every suite green. |
-| **P3** the seam-digest sweep: the same stale generation appeared in four places | **fixed**, and the fifth (`pr-body.md`'s Tests block label) with it. |
-| **P3** "cycle 19" was cited for findings owned by this round, which had no row | **fixed**: this table, plus head-dated citations in the code. |
+| **P1** generation 33 had ALREADY SHIPPED on `main`, so this PR's in-place re-cut of 33 would have graded every Pi install made from `main` as a BLOCKING `modified-artifact` ("local edit") — for a change the user never made | **fixed by shipping generation 34** on both halves, with 33's entries frozen at `main`'s digests. |
+| **P3** the `state.raced` Residual row's third report | folded into the Residual row it names; no code change owed (already closed at the round it cites). |
+| **P3** an orphaned third copy of `withClaimTerm`'s doc block after the merge | **fixed**: the stranded block is deleted; the function keeps the expanded one, the constant its own. |
+| **P3** `tools/sdk_privatise.py:1655` citing `capture_spool.py:4037` | **fixed**: the citation is the line the sweep actually counts. |
+| **P3** two Summary rows naming work `origin/main` already holds | **fixed**: the rows are removed rather than reworded. |
+| **P3** R6's "everything else … is the same on both sides" | **fixed**: the sentence now names the shared-format writer the cross-leg matrix grades, instead of asserting sameness. |
+
+**Cycle 21** (a fresh-context reviewer at `2b36e643` — 5 **P3**, and one measurement that was not on
+its list): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
+`306 passed` and `327 pass / 0 fail`, because every other row asserts only that the LIVE number and
+the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
+them all. That is the shape that reads green everywhere and blocks installs everywhere.
+
+| finding | disposition |
+|---|---|
+| **P3 (measured, not listed)** the generation-34 bump had NO discriminating row | **fixed**: `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why` pins both markers at 34 AND pins `_GENERATION_DIGESTS[33]` / `_READ_SEAM_GENERATION_DIGESTS[33]` as something other than this branch's pair. Verified RED under each of those four edits, and it is the ONLY row that reds under a full revert of `f69c2113` (which also reverts `_EXPECTED_INSTALL_CONTRACT["pi"]` and the `== 34` marker assertion — a revert built from the shorter enumeration beside this row reds those two as well, which is why the enumeration now names all four sites). |
+| **P3** "cycle 19" was cited for findings owned by the `bcb52e1d` round | **fixed**: the citations name cycle 20 (or the head). |
 | **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
-| **P3** an installed-artifact paragraph claimed "ELEVEN re-cuts / TWELVE distinct forms" against a command that yields neither | **fixed by RUNNING it**: 22 distinct forms over 56 commits from `6a72cfd661`, and the note now says the figure is re-derived. |
+| **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
+| **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
 ## Residuals, stated
 
@@ -437,8 +453,11 @@ exists, and why the code comments now cite it by head.
   `main`'s digests and this PR ships **34** on both halves (a marker change on one half
   alone makes `contract_version_for("pi")` answer `None`).
   ⛔ AND THE FREEZE IS A CONVENTION PLUS ONE NEW ROW, NOT AN EXISTING GATE — stated because it
-  was measured, not assumed (review at `bcb52e1d`, P3): reverting the whole fix (both markers
-  back to 33, both pins back to the branch's re-cut pair) left `306 passed` and
+  was measured, not assumed (review at `bcb52e1d`, P3): reverting the whole fix at `f69c2113` (both markers
+  back to 33, both pins back to the branch's re-cut pair, `_EXPECTED_INSTALL_CONTRACT["pi"]` back to
+  33, and the `== 34` in `test_pi_seam_carries_exactly_one_canonical_marker` back to 33 — all four,
+  because the shorter enumeration reds those two sites as well and would read as if the new row were
+  not the gate) left `306 passed` and
   `327 pass / 0 fail`, because every other row asserts only that the LIVE number and the LIVE
   digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
   all of them. That is why this PR adds
