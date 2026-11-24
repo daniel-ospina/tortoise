@@ -2031,7 +2031,24 @@ SWEEP_NAMES = 66
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S — the
 #: pair below is `--repin`'s output HERE **(11913, "ab0b517099c3c9d9")**; `--check` exits 0 on it.
-SWEEP_RESIDUE = (11913, "ab0b517099c3c9d9")
+#: ⛔ RE-CUT ON THIS PR'S OWN MERGE OF `origin/main` `59a08fdb8b40` → **(11914, "e8a2f670ec313ac5")**,
+#: and the delta is THIS PR'S, not the base's — measured, not inferred. Both trees were walked with
+#: this file's own `py_files()` → `edits_for()` → `residue` and the row multisets diffed:
+#: `origin/main` `59a08fdb` on its OWN tree (a pristine detached worktree) derives
+#: **(11911, "4ed42694957a174d")**, so `--check` is RED there against `(11913, …)` — the `#14308`
+#: recurrence this file's blocks above keep recording, repaired here because `surface-guard` is not
+#: deferrable. EXACTLY TWO rows differ between that tree and this merged one, and all three added
+#: rows are the #14033/#14140 state-cue work this PR carries:
+#:   `_state_route_out.update` **0 → 2**  — `tortoise/sdk.py` (the notice writer) and its double in
+#:                                          `tests/test_13557_13558_reachable_reads.py`
+#:   `_truncation_out.update`   **1 → 2**  — the same double, which mirrors a sink it already stubbed
+#: `_state_route_out` is the same class as `read_status_out` / `_truncation_out`: a private
+#: `dict | None` OUT-PARAMETER the caller owns, carried on the sinks rather than on a row (#14033
+#: forbids a visibility field), so `.update(...)` is the only meaning it has and there is no typed
+#: spelling to re-point it at. The test-double rows stand in for that sink, the
+#: `declared_markers.update` precedent above, not someone else's code edited to suit a counter. No
+#: typed reference is added: `typed references still pointing at a public name: 0` on this tree.
+SWEEP_RESIDUE = (11914, "e8a2f670ec313ac5")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

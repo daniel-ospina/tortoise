@@ -4317,6 +4317,53 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
         f"so the text and the guard now disagree (#14033 round-13 review, P3)")
 
 
+@_docker_only
+def test_the_private_order_ownership_flags_do_not_silence_the_route(sdk):
+    """The two PRIVATE order flags are OUTSIDE `_retrieval_knobs()`, and that is graded.
+
+    `_tortoise_fts_query`'s comment states that `_valid_time_rerank` and
+    `_rerank_candidates` — private, leading-underscore, passed `False` by the
+    internal call sites that own a pool's ORDER — are deliberately outside the
+    knob list "so the state-question router still fires where the user's own
+    question arrives through those seams" (#14140 re-cut review, P3).
+
+    ⛔ NOTHING GRADED THAT CLAIM AT THE REVIEWED HEAD. The only other hits on
+    those two names are flag CENSUSES in `test_extractor_v2.py` /
+    `test_window_quality_m2.py` / `test_miss_rate_m5.py`, and the sibling
+    `test_a_retrieval_knob_suppresses_the_notice_too` above drives only DECLARED
+    members of the list — so adding `("_valid_time_rerank", True)` to
+    `_retrieval_knobs()` shipped green while silencing the route at exactly the
+    call sites this feature exists to serve. This arm reds on that mutation, and
+    on the symmetric one that makes the ENDED arm refuse the flag.
+
+    Pinned on the SINK (as the sibling arm states), because the rows are the
+    relevance rows either way with the guard intact.
+    """
+    for flag in ("_valid_time_rerank", "_rerank_candidates"):
+        sink: dict = {}
+        sdk._tortoise_fts_query("which claims were retracted by legal",
+                                entity_type="point", limit=5,
+                                _state_route_out=sink, read_status_out={},
+                                **{flag: False})
+        assert sink.get("reason") == "shape", (
+            f"`{flag}=` silenced the cue report ({sink!r}) — the private order "
+            f"flags are OUTSIDE `_retrieval_knobs()` by construction, so a "
+            f"caller whose page composition is owned downstream still gets the "
+            f"notice (#14140 re-cut review, P3)")
+
+        # The SAME list's second reader: the ended arm REFUSES every name on it
+        # beside an explicit `ended_scope=`. A name added above is refused here.
+        try:
+            sdk._tortoise_fts_query("claims", ended_scope=True,
+                                    entity_type="point", limit=5,
+                                    **{flag: False})
+        except ValueError as exc:  # pragma: no cover - the mutation's own red
+            assert flag not in str(exc), (
+                f"the ended arm REFUSED `{flag}=` ({exc}) — a private "
+                f"order-ownership flag is not caller retrieval vocabulary, so "
+                f"#13558's refusal must not name it (#14140 re-cut review, P3)")
+
+
 def test_the_missed_route_hint_states_only_what_the_read_did():
     """The served notice's REMEDY is content-pinned, not identity-pinned.
 
