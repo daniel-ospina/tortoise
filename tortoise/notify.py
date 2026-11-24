@@ -215,7 +215,11 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: That is over-folding, never a mute, and the folded SOURCES are carried into
 #: the digest and named there (bounded by `_MAX_FOLDED_IDENTITIES`) instead of
 #: the key being per-client — per-client keying would page once per IP under a
-#: distributed burst, which is the storm, not the bound.
+#: distributed burst, which is the storm, not the bound. The source a class
+#: carries is whatever its own payload identifies the client BY: the refused IP
+#: (R8/R4-429), the breaching key id (R3), or the new country (R4) — all three are
+#: read, because only reading the IP left the highest-volume class (R3) folding
+#: with no source named at all (#14407 round 3, P2).
 _INCIDENT_DELIVERY_WINDOW_S = 86400.0
 _ACTIVITY_DELIVERY_WINDOW_S = 21600.0
 
@@ -1135,8 +1139,18 @@ def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
     # client in a window collapses into ONE anonymous message and the other IPs
     # are in no alert record anywhere — the bound would have deleted the evidence
     # rather than bounding it (#14407 round 5).
-    identity = details.get("ip")
-    identity = identity if isinstance(identity, str) and identity else None
+    #
+    # ⛔ NOT EVERY CLASS CARRIES AN IP, and reading only `ip` left the
+    # highest-volume class folding with no source named (round 3, P2): R3 passes
+    # `{"scope", "id", ...}` with `id` = the breaching KEY id and no IP at all,
+    # and R4's geo path passes the new COUNTRY. So the source is read in the order
+    # the payloads actually use, and each is a real client identity for its class.
+    identity = None
+    for _key in ("ip", "id", "country"):
+        _candidate = details.get(_key)
+        if isinstance(_candidate, str) and _candidate.strip():
+            identity = _candidate.strip()
+            break
     deliver, folded, identities, overflow = _claim_delivery(
         kind, org_id, _ACTIVITY_DELIVERY_WINDOW_S, identity=identity)
     if not deliver:
@@ -1150,7 +1164,15 @@ def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
             attribution=("Activity, not an incident (#10156): a detector measured a "
                          "rate. Nothing was disabled or restricted, and this class "
                          "files no incident by design — "
-                         + ("the rows are on the dashboard's activity register."
+                         # ⛔ NO REGISTER IS NAMED HERE, and no row is promised
+                         # (round 3, P2): the dashboard row is written best-effort
+                         # (every `record_*` caller logs the failure and continues),
+                         # and the register is the FACT's, not this module's to
+                         # restate — `abuse.ALERT_REGISTER_OF` puts an R4 new-country
+                         # AUTH event on the ALERT register, so naming the activity
+                         # register told a human to look in the wrong list.
+                         + ("the rows are on the dashboard (best-effort: a failed "
+                            "row write is logged, never retried)."
                             if org_id and org_id != "_" else
                             "the detection carried no org scope, so NO dashboard "
                             "row was written for it.")),
