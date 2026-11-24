@@ -4156,7 +4156,7 @@ class TestDoctorPreInit:
         # earlier cut said "the `Hosted` row below shows whether that will work,
         # or why it could not be checked", but `_doctor_hosted_rows` returns
         # immediately after its `Credentials` \(❌\) arm for an unsendable key
-        # (`__main__.py:15406-15414`), so in that admitted state NO `Hosted` row is
+        # (`__main__.py:15528-15535`), so in that admitted state NO `Hosted` row is
         # appended at all (measured: report holds `Graph: health` + `Credentials`
         # only) and the pointer resolves to nothing. Naming the COMMAND instead is
         # true in every state, including that one.
@@ -4330,7 +4330,7 @@ class TestDoctorPreInit:
     def test_an_oauth_token_counts_as_hosted_too(
             self, monkeypatch, clear_db_env, tmp_path, capsys):
         """`oat_` is the THIRD admitted Bearer family, and the `Hosted` row
-        already treats it as a hosted identity (`:15490`: an OAuth access token,
+        already treats it as a hosted identity (`:15620`: an OAuth access token,
         MCP-only by design — ADR-010). Omitting it from this row's gate left the
         same one-screen contradiction the gate exists to remove, narrowed to
         `oat_`: a Graph row saying "Run `tortoise init`" beside a Hosted row
