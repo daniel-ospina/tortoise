@@ -1233,10 +1233,14 @@ class TestNotifyAbuse:
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
         notify._skip_logged.clear()
 
-        # every org shape (email set / NULL / absent) must behave identically
+        # every org shape (email set / NULL / absent) must behave identically.
+        # #14407: three DIFFERENT subjects, because the delivery is now bounded
+        # to one message per (kind, subject) per episode — three calls for ONE
+        # org would (correctly) be one message, so distinct orgs are what this
+        # test needs to prove the Resend-free property over three deliveries.
         for org in ({"org_id": "t1", "email": "owner@x.co"},
-                    {"org_id": "t1", "email": None},
-                    {"org_id": "t1"}):
+                    {"org_id": "t2", "email": None},
+                    {"org_id": "t3"}):
             notify.notify_abuse("abuse_flag", org,
                                 {"rule": "point_create", "count": 2826,
                                  "threshold": 500, "window_s": 3600})

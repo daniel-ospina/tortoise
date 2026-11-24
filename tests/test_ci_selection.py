@@ -12876,14 +12876,16 @@ def test_the_cache_family_citation_lands_on_the_setup_python_input_it_names():
 
     The comment enumerates the ways a cache save can be armed and cites the ONE live
     instance in this workflow — `setup-python`'s `cache:` input, in `test-track-b`. That
-    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at this
-    head `3226` is `- uses: actions/checkout@v4`, `3227` the `setup-python` step, `3228`
-    its `with:` — the `cache:` input itself is `3230`. So a reader following the citation
-    landed one line ABOVE the offending input and saw no `cache:` key at all, which is
-    exactly the "resolves, but to the wrong construct" shape the window's other citation
+    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at the
+    #11602 head `3226` was `- uses: actions/checkout@v4`, `3227` the `setup-python` step,
+    `3228` its `with:` — the `cache:` input itself was `3230`. So a reader following the
+    citation landed one line ABOVE the offending input and saw no `cache:` key at all, which
+    is exactly the "resolves, but to the wrong construct" shape the window's other citation
     pins exist to prevent (`tests/test_ci_runner_x64_install.py::_WALL_CLOCK_CITATION_ANCHORS`
-    pins `python-ci.yml:3230`, so one construct had two locations in the tree and only one
-    of them was under a pin).
+    pins the same `cache:` line, so one construct had two locations in the tree and only one
+    of them was under a pin). At THIS head that construct is `3239-3242`, and the citation in
+    the comment below was re-cut to `3239-3242` for it — the span was re-derived from the
+    workflow, not shifted by hand.
 
     Three arms, because the sentence makes three claims:
 
@@ -13050,7 +13052,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3227-3230`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3239-3242`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
