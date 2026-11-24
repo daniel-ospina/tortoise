@@ -2441,7 +2441,14 @@ def _is_own_base(rev: str) -> bool:
     and the recorded pin is still printed as a NON-BLOCKING delta beside it.
     """
     try:
-        return _git("rev-parse", "HEAD").strip() == rev
+        # ⛔ RESOLVE BOTH SIDES. `rev-parse HEAD` yields a full sha, so comparing it against the
+        # caller's SPELLING (`--baseline origin/main`, `HEAD`, an abbreviated sha) answers False
+        # for the very invocations the flag invites — and the disclosure this function gates would
+        # then be skipped exactly when it matters, on a self-comparison that still prints "equal
+        # to the baseline, nothing was added".
+        return _git("rev-parse", "--verify", f"{rev}^{{commit}}").strip() == (
+            _git("rev-parse", "HEAD").strip()
+        )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
