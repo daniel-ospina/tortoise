@@ -1,0 +1,108 @@
+{
+  "base_sha": "a7baa98d053dcfe0bc1265fb6c988fb7521b4282",
+  "branch": "fix/12039-witness-budget",
+  "head_at_write": "f7d0103b4ed718e1525e084d0517b4a26fad3c5f",
+  "issue": "14394",
+  "not_done": [
+    "ai-review-gate stays red until the HARNESS reviewer (merge-one.sh) mints the attestation at this head; not a code finding, and this lane does not merge.",
+    "ai-review-gate is red on this PR by design: the harness (merge-one.sh) mints the review attestation at the final head; this lane does not merge and does not attest its own review.",
+    "nothing blocked: lint failure was an inherited main breakage at the stale PR base, cleared by a forward-merge of origin/main"
+  ],
+  "started_at": "2026-11-23T16:30:33Z",
+  "suites": [
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_fleet_state.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 186
+      },
+      "duration_s": 11.8,
+      "exit": 0,
+      "finished_at": "2026-11-23T16:30:48Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/01-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "fb46cd73476c396e2ed86aa7c9cdd6fb1c0c8389c849500e73cc1c5953e103f5",
+      "n": 1,
+      "started_at": "2026-11-23T16:30:36Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python tools/ci_selection.py --integrity",
+      "counts": null,
+      "duration_s": 2.0,
+      "exit": 0,
+      "finished_at": "2026-11-23T16:30:53Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/02-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "5d274774daf8fef61525ed0327aa6b531948beea7f5c04e5440636a3a935c2d1",
+      "n": 2,
+      "started_at": "2026-11-23T16:30:51Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_fleet_state.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 187
+      },
+      "duration_s": 14.9,
+      "exit": 0,
+      "finished_at": "2026-11-23T17:12:38Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/03-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "c8375f3dae2431055e4a0fcff157a4766a712536a62a23b2ad047e53b6ea8766",
+      "n": 3,
+      "started_at": "2026-11-23T17:12:23Z"
+    },
+    {
+      "command": "uvx --from ruff==0.16.4 ruff check tests/test_fleet_state.py --no-cache",
+      "counts": null,
+      "duration_s": 0.1,
+      "exit": 0,
+      "finished_at": "2026-11-23T17:12:39Z",
+      "label": "uvx-from-ruff-0-16-4-ruff-check-tests-te",
+      "log": ".worktree-report/logs/04-uvx-from-ruff-0-16-4-ruff-check-tests-te.log",
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "n": 4,
+      "started_at": "2026-11-23T17:12:39Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python tools/ci_selection.py --integrity",
+      "counts": null,
+      "duration_s": 2.5,
+      "exit": 0,
+      "finished_at": "2026-11-23T17:12:46Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/05-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "5d274774daf8fef61525ed0327aa6b531948beea7f5c04e5440636a3a935c2d1",
+      "n": 5,
+      "started_at": "2026-11-23T17:12:43Z"
+    },
+    {
+      "command": "uv run python tools/test_lane.py run -- tests/test_fleet_state.py -q",
+      "counts": {
+        "passed": 191
+      },
+      "duration_s": 48.0,
+      "exit": 0,
+      "finished_at": "2026-11-23T22:48:39Z",
+      "label": "uv-run-python-tools-test-lane-py-run-tes",
+      "log": ".worktree-report/logs/06-uv-run-python-tools-test-lane-py-run-tes.log",
+      "log_sha256": "6cc85019f718a214b782fa49c283b45af9e62ee0475b4ef8faa7b51efbe94136",
+      "n": 6,
+      "started_at": "2026-11-23T22:47:51Z"
+    },
+    {
+      "command": "uv run python tools/test_lane.py run -- tests/test_sdk_privatise_sweep.py -q",
+      "counts": {
+        "passed": 36
+      },
+      "duration_s": 77.7,
+      "exit": 0,
+      "finished_at": "2026-11-23T22:50:00Z",
+      "label": "uv-run-python-tools-test-lane-py-run-tes",
+      "log": ".worktree-report/logs/07-uv-run-python-tools-test-lane-py-run-tes.log",
+      "log_sha256": "e61df2071de22f12adb79dbcd5ad41140725cc6cb823f0096a7d2db1cf9aa272",
+      "n": 7,
+      "started_at": "2026-11-23T22:48:42Z"
+    }
+  ],
+  "version": 1,
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-14394"
+}
