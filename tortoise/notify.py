@@ -31,10 +31,12 @@ different decisions and had drifted apart:
   window HOLDS it re-alarms at most once per
   :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
   carries one (a placeholder or a post-close tombstone has no number, and the
-  message says so instead); the episode-end release re-arms it — including a
-  close that RAISES or is backing off, unless the sibling episode kind answers
-  ``SKIPPED_WINDOW`` in the same call (the flag is per CALL and not per kind) —
-  and so does a failed send, kind-agnostically. So a window is what a message
+  message says so instead); the episode-end release re-arms it for the RULE-episode
+  kinds — including a close that RAISES or is backing off, unless the sibling
+  episode kind answers ``SKIPPED_WINDOW`` in the same call (the flag is per CALL
+  and not per kind) — and a failed send re-arms ANY kind, kind-agnostically.
+  ``abuse_suspended`` has no rule episode, so no episode end ever re-arms its
+  window. So a window is what a message
   SPENDS, and where releases fire often enough the effective bound is per
   EPISODE, not per window. The engine closes the incident and re-arms delivery
   at episode end.
@@ -106,15 +108,18 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
 #: ``_INCIDENT_DELIVERY_WINDOW_S`` **while the delivery window holds** — re-armed
-#: by the episode-end release (including a close that RAISES or is backing off,
-#: unless the sibling episode kind answers ``SKIPPED_WINDOW`` in the same call,
-#: the flag being per CALL and not per kind) and kind-agnostically by a failed
-#: send, so a flapping rule can page once per crossing — and the reminder
+#: for the RULE-episode kinds by the episode-end release (including a close that
+#: RAISES or is backing off, unless the sibling episode kind answers
+#: ``SKIPPED_WINDOW`` in the same call, the flag being per CALL and not per kind),
+#: and for ANY kind kind-agnostically by a failed send — ``abuse_suspended`` is
+#: excluded from ``_EPISODE_INCIDENT_KINDS``, so no episode end ever re-arms its
+#: window — so a flapping rule can page once per crossing — and the reminder
 #: names the
 #: issue when the sentinel carries one, says `an open incident with no issue
 #: number on record` when it does not, and says the number `could not be read
-#: just now` when the read itself raised — and one ✅ close at episode end,
-#: never one message per detection.
+#: just now` when the read itself raised — and one ✅ close at episode end for the
+#: RULE-episode kinds (``abuse_suspended`` has no rule episode, so it gets no
+#: close), never one message per detection.
 #: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
 #: nothing at all, which is how an alert arriving in the owner's chat could be
 #: attributed by no issue, no runbook and no search.
@@ -920,11 +925,13 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     live: repeats inside the delivery window are folded (the store records them
     on the ISSUE, agent-visible, bounded to one a day by #12243), and at most one
     RE-ALARM per window is sent while those folds hold so a persistent
-    breach cannot go silent. The window is the LEDGER's, not the episode's: the
-    episode-end release re-arms it — including a close that RAISES or is backing
-    off, unless the sibling episode kind answers ``SKIPPED_WINDOW`` in the same
-    call (the flag is per CALL and not per kind) — and so does a failed send,
-    kind-agnostically, so a rule that flaps can page once per crossing.
+    breach cannot go silent. The window is the LEDGER's, not the episode's: for
+    the RULE-episode kinds the episode-end release re-arms it — including a close
+    that RAISES or is backing off, unless the sibling episode kind answers
+    ``SKIPPED_WINDOW`` in the same call (the flag is per CALL and not per kind) —
+    and a failed send re-arms ANY kind, kind-agnostically (``abuse_suspended``
+    has no rule episode, so no episode end ever re-arms its window), so a rule
+    that flaps can page once per crossing.
     ``SUPPRESSED`` means an operator paused the kind in
     ``ops/suppression.json`` — an explicit decision, which is honoured.
 
@@ -1045,11 +1052,12 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # and the message NAMES the incident so the human can see it is
                 # the same one — the pre-fix code pushed every window with no
                 # reference at all. The window is the LEDGER's, not the episode's:
-                # the episode-end release re-arms it — including a close that
-                # RAISES or is backing off, unless the sibling episode kind
-                # answers `SKIPPED_WINDOW` in the same call (the flag is per CALL
-                # and not per kind) — and so does a failed send, kind-agnostically,
-                # so a flapping rule can page once per crossing.
+                # for the RULE-episode kinds the episode-end release re-arms it —
+                # including a close that RAISES or is backing off, unless the
+                # sibling episode kind answers `SKIPPED_WINDOW` in the same call
+                # (the flag is per CALL and not per kind) — and a failed send
+                # re-arms ANY kind, kind-agnostically (`abuse_suspended` has no
+                # rule episode), so a flapping rule can page once per crossing.
                 ref = (f"issue #{number}" if number
                        else ("an open incident whose issue number could not be "
                              "read just now" if not number_known
