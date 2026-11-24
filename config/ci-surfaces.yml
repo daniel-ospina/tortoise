@@ -58,7 +58,7 @@ version: 1
 # 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `14b8322eb2`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `b665cbd619`, and the pool it emits is the union of BOTH parents' registrations —
 # `main`'s rows plus THIS PR's own two: `tests/test_14219_batch_ingest.py` and
 # `tests/test_14219_batches_api.py`, registered on `api` + `core`, each carrying its own `durations:`
 # row at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (this PR's other two `durations` edits are comment
@@ -73,7 +73,7 @@ version: 1
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
-# On THIS merged tree (`origin/main` at `14b8322eb2` folded in, plus this PR's `api` + `core`
+# On THIS merged tree (`origin/main` at `b665cbd619` folded in, plus this PR's `api` + `core`
 # registration of the two batch suites at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs nine
 # shards at 825.4 s (a, c, d, e, f, h, i, j, k) and two at 825.5 s (b, g), so
 # `ceil(825.5/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
@@ -110,7 +110,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `14b8322eb2` and
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `b665cbd619` and
 # DOES add two fast-file registrations of its own (`test_14219_batch_ingest.py` and
 # `test_14219_batches_api.py`, `api` + `core`, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`), so the
 # split stated above is THIS tree's. `main` alone emits a DIFFERENT one, re-emitted on this tree
@@ -148,7 +148,6 @@ version: 1
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
 # and `2.04` at this head's 825.5 s (1680 / 825.5 = 2.0351). A carried ratio in a graded sentence is
-# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
