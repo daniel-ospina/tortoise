@@ -1,0 +1,620 @@
+name: test-graph-reaper
+
+# The CADENCED caller of tools/reap_empty_test_graphs.py (#14559).
+#
+# WHY THIS EXISTS. The leak is #13205's: test/agent signups provision a REAL
+# graph on the production instance, and their teardown deletes the control-plane
+# row without deprovisioning the data plane (`public.graphs` cascades; a FalkorDB
+# graph does not). #13218 fixed the org-delete cascade and the `team_team_`
+# double prefix — the SOURCE still mints graphs, and nothing reaped what the test
+# orgs leave behind. Measured 2026-11-24: **29 -> 138 graphs in ~90 minutes**, and
+# every reclaim since has been a hand-run of the reaper (150 graphs / 142 MB,
+# then 109 / 108 MB). A cleaner that only runs when a human remembers is the
+# tool's docstring with a warning sign attached. This workflow is the schedule.
+#
+# THE TOOL IS UNCHANGED BY THE SCHEDULE, AND ITS GATES ARE NOT NEGOTIABLE.
+# `tools/reap_empty_test_graphs.py` refuses a graph whose owning org does not
+# resolve (`refused-unresolved`), whose owner carries no test/agent marker
+# (`kept-not-test-org`), that holds any node at all (`kept-not-empty`), whose
+# emptiness could not be read (`refused-unreadable`), or whose per-graph ACL user
+# cannot be attributed/dropped. ⛔ THIS WORKFLOW PASSES NO `--test-org`, NO
+# `--force`, AND ADDS NO FLAG THAT COULD WIDEN ANY OF THAT — the widener is the
+# one thing the tool's docstring says must never exist, and a schedule is exactly
+# where someone would be tempted to add it "just for the noisy ones". A graph the
+# tool refuses stays refused, and is REPORTED (see DURABLE LOG).
+#
+# CADENCE — every 15 minutes (`*/15 * * * *`), and the arithmetic is the leak's:
+# the measured burst was 109 graphs / 90 min ≈ 1.2 graphs/min, so a 96-run day
+# bounds a burst's resident cost at ~18 graphs ≈ 26 MB between sweeps (1.46 MB per
+# graph, measured by DELETE — the create-probe's 346 KiB is a false negative, see
+# the tool's docstring). Hourly would let a burst bank ~70 graphs ≈ 100 MB against
+# a 1 GB instance that already carried 138. GitHub does not guarantee a scheduled
+# run's punctuality (it may be delayed, and a run may be skipped under load), so
+# the cadence is a bound the sweep needs, not a promise: a DELAYED run only means
+# a larger next batch, which is why the band below is checked on the count and not
+# on the clock.
+#
+# THE RESIDENT BAND (stated, checked every run):
+#   * `reapable` after the run = 0 — the sweep's own invariant, measured by a
+#     SECOND dry run after `--execute` (see the verify pass).
+#   * total graphs <= REAPER_TOTAL_BAND (default 200). Derivation: every observed
+#     leak peak is 138-150; at the measured marginal cost of 1.46 MB/graph, 200
+#     graphs is ~292 MB, i.e. ~29 % of the 1 GB instance even if EVERY one of them
+#     were empty, leaving ~700 MB for tenant data. Above the band the sweep is no
+#     longer keeping up with the leak RATE, which is a #13218-shaped question
+#     (the test orgs themselves), not a cleaning one — so the run goes red and
+#     files. Override with the repo variable `REAPER_TOTAL_BAND` only after
+#     re-measuring; it narrows or widens the FINDING threshold, never the gates.
+#
+# THREE PASSES, ONE ARTIFACT EACH (the durable log):
+#   plan    `--json`            → retained dry-run report. It is a REAL rehearsal:
+#                                 the tool's classification is identical in both
+#                                 modes, and the flag changes only the last step.
+#   execute `--execute --json`  → deletions + `used_memory` before/after (bytes
+#                                 freed). The MB figure is an INSTANCE-WIDE delta,
+#                                 so it carries concurrent tenant writes; it is
+#                                 reported as measured, never as a per-graph cost.
+#   verify  `--json`            → the post-run dry run. Its `reapable` count is
+#                                 the invariant above: 0 means the deletions took.
+# All three JSON documents are uploaded as a per-run artifact (90-day retention),
+# and the SAME numbers are written into the job summary. That is what makes a
+# `refused-unresolved` an entry in a record instead of a line someone had to be
+# watching for — with a stated residual: an artifact expires, so a finding is
+# ALSO filed as an issue (one deduped key, closed again when a run is clean —
+# #8841, so a recovered condition does not leave a stale incident open).
+#
+# WHAT FAILS THE RUN (fail-closed; a dead sweep must never look green):
+#   * a missing prod credential, or a URI that is not a FalkorDB scheme. ⛔ Without
+#     this guard an empty `FALKORDB_CLOUD_URI` sends the tool down its EMBEDDED
+#     fallback — a fresh runner's empty local DB reports "0 graphs, nothing to
+#     reap, exit 0", i.e. a clean sweep of a database that is not production. That
+#     is the #2140 deaf-monitor class and the reason the guard is a step, not a
+#     comment.
+#   * `total == 0` from the plan pass — same class, one layer down: a wrong target
+#     that answers is indistinguishable from an empty one.
+#   * a control plane that ANSWERS but resolves NONE of the graphs AND at least one
+#     of them is ORPHAN-SHAPED (`refused-unresolved` with `reserved: false`). This
+#     is the `total == 0` guard's mirror image: a restored/empty project or a key
+#     scoped elsewhere turns every graph into an unresolved orphan, so `reapable`
+#     is 0 and the total is healthy while the sweep deletes nothing forever —
+#     green, every 15 minutes. A CLUSTER of orphans (some, not all) is the tool
+#     working as designed. ⛔ ALL of them being unresolved is NOT on its own a
+#     fault: the reserved control-plane graphs (`tortoise`, `registry_*`) are
+#     `refused-unresolved` BY DESIGN — `classify_graph` refuses them before any
+#     owner lookup — so once the test orgs are deprovisioned (#13218) the estate
+#     is legitimately reserved-only, and an arm that counted reserved rows as
+#     evidence of a fault would red every tick, forever. That is the deaf monitor
+#     from the other side. The row's `reserved` flag is the discriminator; a row
+#     that carries none counts as NON-reserved (fail closed).
+#   * the plan or verify pass returning 2 (REFUSED: control plane or graph list
+#     unreadable) — a partial view is never a clean one. The verify pass's own health
+#     is checked on EVERY path, rehearsal included; only its RESIDUE invariant is
+#     gated on a reap having run.
+#   * any failed deletion (the tool's exit 1), an execute pass that produced no
+#     report at all, or an execute exit outside {0, 1} (124/137/2 — a killed or
+#     refused reap is not a sweep, and its deletion count would be a guess), or any
+#     `reapable` residue in the verify pass (an ACL user that survived its drop
+#     leaves the graph in place on purpose: a live credential must not outlive the
+#     graph that explains it).
+#   * `refused-unreadable` > 0 — the sweep is partly BLIND, which is a defect in
+#     the sweep. `refused-unresolved` is DELIBERATELY NOT a failure: it is the
+#     tool working as designed on an orphan that needs adjudication, so it is
+#     counted, named and warned on, not red. (The issue says exactly this:
+#     "a refusal is visible rather than silent".) The one exception is the
+#     ALL-unresolved case above, which is a control-plane fault wearing the same
+#     bucket — and only while an orphan-shaped row is among them.
+#
+# WHO RUNS IT. GitHub Actions, not a box timer and not an in-process thread: the
+# fleet's own scheduling doctrine (billing-reconcile-cron, registry-backup-cron)
+# is that an external driver has an INDEPENDENT failure domain — a timer inside
+# the app dies exactly when the app is crash-looping, which is when graphs pile
+# up. Nothing here touches the app's deploy path; it is a client of the same
+# production FalkorDB the app serves, using the same `FALKORDB_CLOUD_URI` secret
+# the deploy consumes.
+#
+# THE ACL LEG IS A DECLARED NO-OP HERE, DELIBERATELY. `fly.toml` sets
+# `TORTOISE_ACL_LAYER=off` for the hosted lane (#8617: no credential the app may
+# hold carries `+ACL` on FalkorDB Cloud), so no per-graph `tenant_<gid>` user
+# exists on this instance and the reaper's drop-then-verify leg has nothing to
+# drop. This workflow does NOT set the variable: on a self-hosted server where
+# the layer IS live the default (`strict`) keeps the drop real, and pinning `off`
+# here would be a silent credential-orphaning skip on that target. On the cloud
+# instance the ACL commands are refused and `acl_user_exists` answers False, which
+# is the correct semantics for a layer that is off.
+#
+# RESIDUAL (stated, not implied): nothing here notices a schedule that stops
+# running. GitHub disables schedules on a repo inactive for ~60 days, and a
+# disabled schedule makes no request, fails nothing and pages nobody — the same
+# residual `billing-reconcile-cron` records, and it needs a run-stamp plus an
+# out-of-band staleness check to close. Until then the graph count grows again,
+# silently, exactly as it did before this workflow existed.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      execute:
+        type: boolean
+        description: "Reap (--execute). false = rehearsal: plan + verify only, deletes nothing."
+        default: true
+
+permissions:
+  contents: read
+  issues: write          # the deduped adjudication issue is this job's durable ledger
+
+concurrency:
+  group: test-graph-reaper
+  # Never cancel a pass mid-reap: a cancelled run reports nothing while having
+  # deleted something, and the next run's `used_memory` delta would absorb it.
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Secrets are bound HERE and read QUOTED in the shell — never interpolated
+    # into a `run:` body (#4361).
+    env:
+      TORTOISE_DB_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      # Explicit, not inferred: with `supabase` forced, a missing credential makes
+      # `get_control_plane()` RAISE (Refusal → exit 2) instead of silently
+      # resolving zero orgs and reading as "no owner anywhere".
+      TORTOISE_CONTROL_PLANE: supabase
+      REAPER_TOTAL_BAND: ${{ vars.REAPER_TOTAL_BAND || '200' }}
+      # Scheduled runs always execute; a manual dispatch may rehearse.
+      REAPER_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ⛔ NOT here: `REAPER_WORKDIR` is populated by the step below, because the
+      # `runner` context is illegal in a job-level `env:` block (see that step).
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # ⛔ WHY THIS IS A STEP AND NOT A JOB-LEVEL `env:` LINE. Every report this
+      # job writes goes into `runner.temp` — one directory the artifact step can
+      # name, and a seam a test can point at its own tmp dir instead of racing a
+      # shared /tmp. But `runner` is NOT a legal context in
+      # `jobs.<job_id>.env`: the permitted set there is github/inputs/matrix/
+      # needs/secrets/strategy/vars, so `REAPER_WORKDIR: ${{ runner.temp }}` is
+      # refused when the run is SET UP (actions/runner#2204; actionlint says
+      # `context "runner" is not allowed here`) — every tick would die BEFORE the
+      # plan pass, so the schedule would exist and never once run. `RUNNER_TEMP`
+      # IS a real environment variable on every step, so the seam is populated at
+      # the step level, where its value exists, and inherited by every step below
+      # through `GITHUB_ENV`.
+      - name: Report directory (the seam, populated where its value exists)
+        run: |
+          set -euo pipefail
+          # Fail closed instead of writing `/reaper-plan.json` at the root of the
+          # runner's filesystem: an unset workdir is never a clean sweep either.
+          [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is unset — refusing to run with an unset report directory"; exit 1; }
+          echo "REAPER_WORKDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # `.github/scripts/auto-file-issue.sh` files the adjudication issue through
+      # `gh`. A pool runner without it dies `exit 127` and reads as a reaper fault
+      # rather than a runner fault.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the package (the reaper imports tortoise)
+        # `pip install -e .` is the repo's documented install path (python-ci.yml).
+        # No extras: the reaper reads graph names, node counts and ACL users — it
+        # never embeds, so an embeddings/keyword-only install difference cannot
+        # change its verdict.
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e .
+
+      - name: Guard the target (fail closed)
+        # ⛔ THIS STEP IS THE REASON AN EMPTY SECRET CANNOT READ AS A CLEAN SWEEP.
+        # An unset `TORTOISE_DB_URI` sends `_read_handle()` down its EMBEDDED
+        # branch, and a runner's empty local database answers `list_graphs() == []`
+        # — "0 graphs, nothing to reap, exit 0". That is a green run over a
+        # database that is not production, on the one workflow whose whole job is
+        # to touch production.
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${TORTOISE_DB_URI:-}" ] || missing="$missing FALKORDB_CLOUD_URI"
+          [ -n "${SUPABASE_URL:-}" ] || missing="$missing SUPABASE_URL"
+          [ -n "${SUPABASE_SERVICE_KEY:-}" ] || missing="$missing SUPABASE_SERVICE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::missing credential(s):$missing — refusing to run. Without TORTOISE_DB_URI the reaper falls back to an EMBEDDED database and would report '0 graphs, nothing to reap' as a clean sweep of a store that is not production."
+            exit 1
+          fi
+          # The scheme decides whether this even dials a server: `_validate_uri_scheme`
+          # accepts docker://, redis://, rediss:// and nothing else.
+          case "${TORTOISE_DB_URI%%://*}" in
+            redis|rediss|docker) ;;
+            *) echo "::error::TORTOISE_DB_URI is not a FalkorDB server URI (scheme '${TORTOISE_DB_URI%%://*}'); expected redis://, rediss:// or docker://"; exit 1 ;;
+          esac
+          # Print the TARGET, never the credential: host/port/graph only.
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          u = urlparse(os.environ["TORTOISE_DB_URI"])
+          print(f"target: {u.scheme}://{u.hostname}:{u.port or 16379}/{u.path.lstrip('/') or 'tortoise'}")
+          print(f"control plane: {os.environ['SUPABASE_URL']}")
+          print(f"execute: {os.environ.get('REAPER_EXECUTE')}")
+          print(f"total band: {os.environ.get('REAPER_TOTAL_BAND')}")
+          PY
+
+      - name: Plan (dry run — the retained rehearsal)
+        id: plan
+        run: |
+          set +e
+          python tools/reap_empty_test_graphs.py --json > "$REAPER_WORKDIR"/reaper-plan.json 2>"$REAPER_WORKDIR"/reaper-plan.err
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -s "$REAPER_WORKDIR"/reaper-plan.err ]; then
+            cat "$REAPER_WORKDIR"/reaper-plan.err >&2
+          fi
+          if [ "$rc" -ne 0 ]; then
+            # 2 = REFUSED (the report could not be produced). 0 is the only pass
+            # for a dry run.
+            echo "::error::the plan pass did not produce a report (exit ${rc}) — see REFUSED on stderr. A partial view is never a clean one, so the execute and verify passes are skipped."
+          fi
+
+      - name: Execute (GRAPH.DELETE on the reapable set only)
+        id: execute
+        if: steps.plan.outputs.rc == '0' && env.REAPER_EXECUTE == 'true'
+        run: |
+          set +e
+          python tools/reap_empty_test_graphs.py --execute --json > "$REAPER_WORKDIR"/reaper-execute.json 2>"$REAPER_WORKDIR"/reaper-execute.err
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -s "$REAPER_WORKDIR"/reaper-execute.err ]; then
+            cat "$REAPER_WORKDIR"/reaper-execute.err >&2
+          fi
+          # rc 0 = every deletion took; 1 = at least one did NOT — both are read
+          # by the verdict step. ⛔ 2 IS reachable on this path: `--execute` calls
+          # `build_report()` again in its own process, so a control plane or graph
+          # list that went unreadable between the plan pass and this one refuses
+          # here and writes NO document. The verdict step treats any rc outside
+          # {0, 1} — and a missing document — as a failure; a killed pass (124/137)
+          # writes no document either, so it cannot read as a clean sweep.
+
+      - name: Verify (post-run dry run — the sweep's invariant)
+        id: verify
+        if: steps.plan.outputs.rc == '0'
+        run: |
+          set +e
+          python tools/reap_empty_test_graphs.py --json > "$REAPER_WORKDIR"/reaper-verify.json 2>"$REAPER_WORKDIR"/reaper-verify.err
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -s "$REAPER_WORKDIR"/reaper-verify.err ]; then
+            cat "$REAPER_WORKDIR"/reaper-verify.err >&2
+          fi
+
+      - name: Verdict — band, residue, refusals (fails closed)
+        id: verdict
+        # `always()` on purpose: a plan/execute crash is exactly when the ledger
+        # matters most, and the script writes a FALLBACK verdict first so this step
+        # leaves a record even when it cannot finish.
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          WORK = Path(os.environ.get("REAPER_WORKDIR") or "/tmp")
+
+          # A FALLBACK verdict is written FIRST, so a crash anywhere below still
+          # leaves an adjudication record behind instead of a red run that files
+          # nothing (the ledger must not depend on this script reaching its end).
+          (WORK / "reaper-verdict.json").write_text(json.dumps({
+              "verdict": "adjudicate",
+              "reasons": ["the verdict step did not complete — see the step log"],
+              "notes": [], "counts": {}, "total": None, "band": None,
+              "plan_reapable": None, "deleted": None, "bytes_freed": None,
+              "execute_ran": False,
+          }))
+
+          def load(path):
+              p = Path(path)
+              try:
+                  return json.loads(p.read_text()), None
+              except Exception as exc:
+                  return None, f"{p.name} unreadable ({exc.__class__.__name__})"
+
+          plan, plan_err = load(WORK / "reaper-plan.json")
+          verify, verify_err = load(WORK / "reaper-verify.json")
+
+          def _int(name, default):
+              try:
+                  return int(str(os.environ.get(name) or default))
+              except (TypeError, ValueError):
+                  return default
+
+          plan_rc = _int("PLAN_RC", -1)
+          execute_rc = os.environ.get("EXECUTE_RC") or ""
+          verify_rc = _int("VERIFY_RC", -1)
+          band = _int("REAPER_TOTAL_BAND", 200)
+          execute_ran = execute_rc != ""
+          # Read ONLY when the pass ran: a rehearsal deleted nothing, so a
+          # leftover document must not be able to report deletions.
+          execute = load(WORK / "reaper-execute.json")[0] if execute_ran else None
+
+          reasons: list[str] = []
+          notes: list[str] = []
+
+          if plan is None:
+              reasons.append(f"the plan pass produced no report (exit {plan_rc}): {plan_err} — a refused plan is never a clean sweep")
+              plan = {"graphs": [], "counts": {}, "total": 0}
+          else:
+              # A wrong target that ANSWERS looks exactly like an empty one.
+              if plan.get("total", 0) == 0:
+                  reasons.append("the data plane returned 0 graphs — that is not this tenant instance: wrong target, or a store that cannot be read")
+
+          counts = plan.get("counts") or {}
+          reapable = counts.get("reapable", 0)
+          unresolved = counts.get("refused-unresolved", 0)
+          unreadable = counts.get("refused-unreadable", 0)
+          total = plan.get("total", 0)
+
+          # ⛔ THE MIRROR OF THE `total == 0` GUARD, one layer over — WITH A
+          # DISCRIMINATOR. Reserved control-plane graphs (`tortoise`, `registry_*`)
+          # are `refused-unresolved` BY DESIGN (`classify_graph` refuses them
+          # before any owner lookup), so they can never resolve. Counting them as
+          # evidence of a control-plane fault means an estate that is
+          # legitimately reserved-only — the CONVERGED state, once the test orgs
+          # are deprovisioned (#13218) — reds on every tick forever, filing on a
+          # dedupe key the resolve step can never close (resolve needs green). A
+          # permanently-red schedule is a schedule nobody reads: the #2140 deaf
+          # monitor, arriving from the other side.
+          #
+          # So the arm fires only when an UNRESOLVED row is ORPHAN-SHAPED, which
+          # is the case it was written for (a restored/empty project, a key
+          # scoped elsewhere, namespace drift: tenant-shaped graphs, HTTP 200,
+          # zero owners). A row that carries no `reserved` key counts as
+          # NON-reserved — fail closed, never fail open.
+          orphan_unresolved = [
+              row for row in (plan.get("graphs") or [])
+              if not row.get("reserved")
+              and row.get("bucket") == "refused-unresolved"
+          ]
+          if total > 0 and unresolved == total and orphan_unresolved:
+              reasons.append(
+                  f"the control plane ANSWERED but resolved none of the {total} "
+                  f"graph(s): {len(orphan_unresolved)} of them are orphan-shaped "
+                  f"(`refused-unresolved` and not reserved), so `reapable` is 0 "
+                  f"without a single owner being consulted. That is a control-plane "
+                  f"fault, not a clean sweep")
+
+          if execute_ran and execute is None:
+              # A crashed or refused reap writes no document at all, so there is
+              # nothing to read a deletion count from — and the tool had ALREADY
+              # built its report, so this is reachable (exit 2 re-runs
+              # `build_report`, and a killed pass writes nothing).
+              reasons.append(f"the execute pass produced no report (exit {execute_rc}) — a crashed or refused reap cannot be read as a sweep")
+          if execute_ran and execute_rc not in ("0", "1"):
+              reasons.append(f"the execute pass exited {execute_rc} — not a reap verdict (0 = every deletion took, 1 = at least one failed)")
+          if execute:
+              failed = execute.get("failed", 0)
+              if failed:
+                  reasons.append(f"{failed} deletion(s) FAILED (see outcome in the execute artifact)")
+
+          # The verify pass's OWN health is checked on every path (a refusal there
+          # is never a clean sweep, rehearsal or not). Only the RESIDUE invariant
+          # is gated on a reap having run: a rehearsal deleted nothing, so a
+          # non-zero residue there is expected, not a finding.
+          verify_checked = plan_rc == 0
+          if verify_checked:
+              if verify is None:
+                  reasons.append(f"the verify pass produced no report (exit {verify_rc}): {verify_err}")
+              else:
+                  if verify_rc != 0:
+                      reasons.append(f"the verify pass exited {verify_rc} — a partial view is never a clean one")
+                  if execute_ran:
+                      vcounts = verify.get("counts") or {}
+                      residue = vcounts.get("reapable", 0)
+                      if residue:
+                          reasons.append(f"{residue} graph(s) are still reapable AFTER the execute pass — the sweep did not converge (an ACL user that survived its drop keeps its graph in place on purpose)")
+
+          if unreadable:
+              reasons.append(f"{unreadable} graph(s) could not be READ for emptiness (`refused-unreadable`) — the sweep is partly blind, which is a defect in the sweep, not a data question")
+          if unresolved:
+              # NOT a failure: the tool refusing an orphan is it working as
+              # designed. Counted, named and warned on so it is visible — and
+              # SPLIT, so the warning cannot contradict the reason above it about
+              # the same rows (a reserved graph is not an orphan).
+              reserved_unresolved = unresolved - len(orphan_unresolved)
+              detail = []
+              if orphan_unresolved:
+                  detail.append(f"{len(orphan_unresolved)} orphan-shaped — no owning org")
+              if reserved_unresolved:
+                  detail.append(f"{reserved_unresolved} reserved control-plane")
+              notes.append(f"{unresolved} graph(s) REFUSED as unresolved "
+                           f"({'; '.join(detail)}) — adjudication, not cleaning")
+          if total > band:
+              reasons.append(f"resident total {total} is above the stated band {band} — the sweep is not keeping up with the leak RATE; that is a test-org question (#13218), not a cleaning one")
+
+          memory = (execute or {}).get("memory") or {}
+          freed = memory.get("bytes_freed")
+          deleted = len([o for o in (execute or {}).get("outcome", []) if o.get("deleted")])
+          # ⛔ `used_memory` is an INSTANCE-WIDE reading, so this delta carries
+          # concurrent tenant writes and is NOT a reclaim unless THIS sweep
+          # deleted something AND the instance actually shrank. At the steady
+          # state (`deleted == 0`, the common case every 15 min) it is tenant
+          # churn, and a busy window makes it NEGATIVE — so "freed" is claimed
+          # only when it IS one. The summary below and the adjudication issue are
+          # the DURABLE record; a label asserting a reclaim the sweep did not
+          # perform is a false PASS in the only place a human reads it.
+          if freed is None:
+              memory_label, memory_value = "used_memory freed", "unmeasured"
+          elif deleted and freed > 0:
+              memory_label = "used_memory freed"
+              memory_value = f"{freed / 1048576:.1f} MB"
+          else:
+              why = ("the instance grew" if freed < 0
+                     else "no shrink measured" if deleted else "nothing deleted")
+              memory_label = ("used_memory delta (NOT a reclaim — "
+                              "concurrent tenant writes included)")
+              memory_value = f"{freed / 1048576:+.1f} MB ({why})"
+
+          verdict = "adjudicate" if reasons else "green"
+          (WORK / "reaper-verdict.json").write_text(json.dumps({
+              "verdict": verdict, "reasons": reasons, "notes": notes,
+              "total": total, "band": band, "plan_reapable": reapable,
+              "deleted": deleted, "bytes_freed": freed,
+              "memory_label": memory_label, "memory_value": memory_value,
+              "counts": counts, "execute_ran": execute_ran,
+          }, indent=2))
+          # The durable record: the same numbers the artifact carries.
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("### test-graph-reaper (#14559)\n\n")
+              out.write(f"- verdict: **{verdict}**\n")
+              if not execute_ran:
+                  out.write("- mode: **REHEARSAL** (`execute: false`) — plan + verify only, nothing was reaped\n")
+              out.write(f"- resident total: {total} (band {band})\n")
+              out.write(f"- reapable before: {reapable}\n")
+              out.write(f"- deleted: {deleted}\n")
+              out.write(f"- {memory_label}: {memory_value}\n")
+              for bucket in sorted(counts):
+                  out.write(f"- {bucket}: {counts[bucket]}\n")
+              out.write("\n")
+              for r in reasons:
+                  out.write(f"- ⛔ {r}\n")
+              for n in notes:
+                  out.write(f"- ⚠️ {n}\n")
+              refused = [g for g in plan.get("graphs", [])
+                         if str(g.get("bucket", "")).startswith("refused")]
+              if refused:
+                  out.write("\n<details><summary>refused graphs (adjudicate; never reaped)</summary>\n\n")
+                  for g in refused:
+                      out.write(f"- `{g.get('graph')}` — {g.get('reason')}\n")
+                  out.write("\n</details>\n")
+
+          for r in reasons:
+              print(f"::error::{r}")
+          for n in notes:
+              print(f"::warning::{n}")
+          print(f"verdict={verdict} total={total} band={band} deleted={deleted} {memory_label}={memory_value}")
+          raise SystemExit(1 if reasons else 0)
+          PY
+        env:
+          PLAN_RC: ${{ steps.plan.outputs.rc }}
+          EXECUTE_RC: ${{ steps.execute.outputs.rc }}
+          VERIFY_RC: ${{ steps.verify.outputs.rc }}
+
+      - name: Upload the three reports (the durable log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-graph-reaper-${{ github.run_id }}-${{ github.run_attempt }}
+          # 90 days is the maximum this repo's plan allows; a finding that
+          # outlives it is filed as an issue by the step below, so nothing that
+          # needs a human depends on the retention window.
+          retention-days: 90
+          # ⛔ `error`, never `warn`: the artifact IS the durable log, so a green run
+          # that uploaded nothing is the fail-open shape this step exists to close.
+          # The verdict reds anyway when no pass ran, so the two agree.
+          if-no-files-found: error
+          # ONE source for the directory: the seam the steps populate, never a second
+          # spelling of it. A re-pointed seam must move the artifact with it.
+          path: |
+            ${{ env.REAPER_WORKDIR }}/reaper-plan.json
+            ${{ env.REAPER_WORKDIR }}/reaper-plan.err
+            ${{ env.REAPER_WORKDIR }}/reaper-execute.json
+            ${{ env.REAPER_WORKDIR }}/reaper-execute.err
+            ${{ env.REAPER_WORKDIR }}/reaper-verify.json
+            ${{ env.REAPER_WORKDIR }}/reaper-verify.err
+            ${{ env.REAPER_WORKDIR }}/reaper-verdict.json
+
+      # ── The durable, deduped ledger (#3907 / #8841) ─────────────────
+      # ONE stable title: the FINDING ("a run needs adjudication"), never the
+      # occurrence. A repeat run comments `Recurrence #N` instead of filing a
+      # second issue, and a clean run CLOSES it — otherwise a recovered condition
+      # leaves an open incident that claims something no longer true.
+      - name: File or update the adjudication issue
+        if: always()
+        run: |
+          set -euo pipefail
+          verdict="$(python3 -c 'import json,os;from pathlib import Path;print(json.load(open(Path(os.environ.get("REAPER_WORKDIR") or "/tmp")/"reaper-verdict.json"))["verdict"])' 2>/dev/null || echo adjudicate)"
+          if [ "$verdict" != "adjudicate" ]; then
+            echo "verdict is ${verdict} — nothing to file"
+            exit 0
+          fi
+          python3 - > "$REAPER_WORKDIR"/reaper-issue.md <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          WORK = Path(os.environ.get("REAPER_WORKDIR") or "/tmp")
+          d = json.load(open(WORK / "reaper-verdict.json"))
+          counts = d.get("counts") or {}
+          lines = [
+              "The scheduled test-graph reaper (#14559, `.github/workflows/test-graph-reaper.yml`)",
+              "needs a human on this run. The sweep itself keeps "
+              "the tool's four gates: it never reaps a graph whose owning org does",
+              "not resolve, never a non-test owner, never a non-empty graph, and never",
+              "one whose ACL user cannot be dropped. What follows is what it REFUSED",
+              "or could not do.",
+              "",
+              f"Latest run: {os.environ.get('RUN_URL', '(no run url)')}",
+              "",
+              "| metric | value |",
+              "|---|---|",
+              f"| resident total | {d.get('total')} (band {d.get('band')}) |",
+              f"| reapable before | {d.get('plan_reapable')} |",
+              f"| deleted | {d.get('deleted')} |",
+              f"| {d.get('memory_label', 'used_memory')} | {d.get('memory_value', 'unmeasured')} |",
+          ]
+          for bucket in sorted(counts):
+              lines.append(f"| {bucket} | {counts[bucket]} |")
+          lines += ["", "Reasons:", ""]
+          lines += [f"- {r}" for r in d.get("reasons") or []]
+          for n in d.get("notes") or []:
+              lines.append(f"- (not a failure) {n}")
+          lines += [
+              "",
+              "The per-run plan / execute / verify JSON reports are attached to the",
+              "workflow run (artifact, 90-day retention).",
+              "",
+              "Remediation: `docs/runbook/14559-test-graph-reaper.md`.",
+              "",
+              "This issue closes itself on the next clean run (#8841) — do not close it",
+              "to silence a recurrence; fix the named condition.",
+          ]
+          print("\n".join(lines))
+          PY
+          bash .github/scripts/auto-file-issue.sh file \
+            --title 'test-graph-reaper: a run needs adjudication (#14559)' \
+            --body-file "$REAPER_WORKDIR"/reaper-issue.md \
+            --label bug
+
+      - name: Resolve the adjudication issue when a REAL sweep was clean
+        # ⛔ Requires `execute_ran`, not just a green verdict. A REHEARSAL
+        # (`workflow_dispatch` with execute=false) is green by construction — it
+        # deleted nothing and the residue invariant is not applicable — so gating
+        # on the verdict alone let a manual rehearsal CLOSE a live incident while
+        # the condition persisted, and comment "a clean scheduled run" about a run
+        # that neither ran on a schedule nor swept anything. Closing an incident is
+        # a claim about reality; only a run that actually reaped may make it.
+        if: always()
+        run: |
+          set -euo pipefail
+          read -r verdict ran <<< "$(python3 -c 'import json,os;from pathlib import Path;d=json.load(open(Path(os.environ.get("REAPER_WORKDIR") or "/tmp")/"reaper-verdict.json"));print(d["verdict"], d["execute_ran"])' 2>/dev/null || echo 'adjudicate False')"
+          if [ "$verdict" != "green" ] || [ "$ran" != "True" ]; then
+            echo "verdict=${verdict} execute_ran=${ran} — leaving the issue open"
+            exit 0
+          fi
+          bash .github/scripts/auto-file-issue.sh resolve \
+            --title 'test-graph-reaper: a run needs adjudication (#14559)' \
+            --why "A clean scheduled run (#14559) after an actual reap: reapable=0 after the sweep, resident total inside the band, no failed deletions. ${RUN_URL}"

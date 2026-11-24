@@ -1928,6 +1928,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this file's suite (the same #1349/#3332/#3616 silent-drop class as
              # queue_resweep/batch_open above).
              "tools/next_work.py",
+             # #14559: `tools/reap_empty_test_graphs.py` owns
+             # `tests/test_14559_reaper_schedule.py` (registered `core`, its
+             # scheduled driver) and `tests/test_13205_graph_provision_leak.py`
+             # (`api`, its four refusals), and `tools/` is in
+             # NON_PYTHON_PREFIXES — so a reap-tool-only change was filtered out
+             # BEFORE the "not matched -> core" fallback and took the docs-only
+             # early return. MEASURED on PR #14565 before this entry:
+             # `--changed-files tools/reap_empty_test_graphs.py` ->
+             # `surfaces: []`, so the PR's own `used_memory` delta change ran on
+             # nothing. It is the fail-OPEN direction for this tool in particular:
+             # the workflow hands it a production FalkorDB instance with delete
+             # authority, so the diff most worth guarding is an edit to the code
+             # that decides what gets deleted. The entry makes
+             # `_selection_relevant()` keep the path so `core` — and the schedule
+             # guard — is selected. Pinned by
+             # tests/test_14559_reaper_schedule.py::test_a_reap_tool_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/reap_empty_test_graphs.py"])` returns
+             # `core` AND this file's suite (the same #1349/#3332/#3616
+             # silent-drop class as queue_resweep/batch_open/next_work above).
+             "tools/reap_empty_test_graphs.py",
              # #13099: `tools/text_gate_13099.py` is the text-index quality gate's
              # harness (the measurement `SEARCH-ARCHITECTURE.md` §6.2's stop
              # condition rests on), and `tests/test_text_gate_13099.py` — the pins
