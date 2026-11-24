@@ -2944,14 +2944,27 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
 #: state fed from the write path, so it must be bounded: a per-graph label is
 #: unbounded cardinality (the same rule `cache_leg.cache_write_targets` states for
 #: the same reason). Past the cap the observation is still COUNTED
-#: (`armed_but_uncut_untracked_observations`), so nothing is lost — only the
-#: distinctness is.
+#: (`armed_but_uncut_untracked_observations`, and `armed_but_halted_untracked_observations`
+#: for the halted population), so nothing is lost — only the distinctness is.
 UNCUT_GRAPH_CAP = 32
 
 _UNCUT_GRAPHS: dict[str, str] = {}
-_UNCUT_REASONS: dict[str, int] = {}
-_UNCUT_OBSERVATIONS = 0
+#: Observations that could NOT be tracked because the map was full. ⛔ IT IS NOT A
+#: LIFETIME COUNTER: it is retracted to 0 as soon as a :func:`clear_uncut_graph`
+#: makes room, because from that moment any graph still uncut is tracked again on
+#: its next observation. Without the retraction this counter is the same LATCH
+#: :func:`clear_uncut_graph` exists to prevent — a deployment the operator FULLY
+#: healed still sums to > 0 and reads `ok: false` for the life of the process
+#: (#14587 review P1).
 _UNCUT_UNTRACKED = 0
+#: The same count for the halted population, which has its own bounded map. Past
+#: the cap a halted graph would otherwise stop being PUBLISHED with nothing
+#: saying how many were dropped (#14587 review P2), contradicting
+#: `armed_but_halted`'s own "still published, on its own key" contract.
+_UNCUT_HALTED_UNTRACKED = 0
+#: LIFETIME observation count — a DIAGNOSTIC, never folded into `ok` (the same
+#: division `record_write_failures` (lifetime) vs `record_refusing` (window) uses).
+_UNCUT_OBSERVATIONS = 0
 #: Graphs whose row exists but is `halted` — SEEN, reported, and deliberately NOT
 #: folded into `armed_but_uncut`. ⛔ The two are different populations and the
 #: difference decides whether a graph is losing anything: `halted` is the state an
@@ -2983,7 +2996,7 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     keeps its JSONL append and is an operator's decision, so it is published on
     its own key instead of being reported as an uncut graph.
     """
-    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
+    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
         if reason == f"mode_{record_projection.MODE_HALTED}":
@@ -2991,10 +3004,14 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
                 _UNCUT_HALTED[key] = reason
                 if len(_UNCUT_HALTED) > UNCUT_GRAPH_CAP:
                     _UNCUT_HALTED.pop(next(iter(_UNCUT_HALTED)))
+                    # ⛔ COUNT THE DROP. The uncut arm below has always done this;
+                    # a bound that evicts silently is a bound that hides its own
+                    # overflow, and the contract on `armed_but_halted` is that the
+                    # population is still published on its own key.
+                    _UNCUT_HALTED_UNTRACKED += 1
             return
         with _UNCUT_GUARD:
             _UNCUT_OBSERVATIONS += 1
-            _UNCUT_REASONS[reason] = _UNCUT_REASONS.get(reason, 0) + 1
             if key in _UNCUT_GRAPHS or len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
                 _UNCUT_GRAPHS[key] = reason
             else:
@@ -3015,12 +3032,26 @@ def clear_uncut_graph(org_id: str, graph_id: str) -> None:
     process over a graph that was fixed an hour ago — the failure mode this
     module's health contract names for cumulative counters, and it would turn the
     compensation for best-effort provisioning into a permanent false red.
+
+    ⛔ IT RETRACTS THE OVERFLOW COUNTS TOO, and that is not housekeeping — it is
+    the other half of the same rule (#14587 review P1). `_UNCUT_UNTRACKED` counts
+    observations the FULL map could not track; once a heal makes room, any graph
+    that is still uncut is tracked again on its next observation, so the backlog
+    no longer describes a distinctness loss and keeping it would pin `ok: false`
+    over a deployment where every graph was healed. `_UNCUT_OBSERVATIONS` is NOT
+    retracted: it is published as a LIFETIME diagnostic and is never folded into
+    `ok` (the `record_write_failures` / `record_refusing` division).
     """
+    global _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
         with _UNCUT_GUARD:
-            _UNCUT_GRAPHS.pop(key, None)
-            _UNCUT_HALTED.pop(key, None)
+            if _UNCUT_GRAPHS.pop(key, None) is not None \
+                    and len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
+                _UNCUT_UNTRACKED = 0
+            if _UNCUT_HALTED.pop(key, None) is not None \
+                    and len(_UNCUT_HALTED) < UNCUT_GRAPH_CAP:
+                _UNCUT_HALTED_UNTRACKED = 0
     except Exception:  # noqa: BLE001, RUF100 - observability must not fail a write
         pass
 
@@ -3042,12 +3073,19 @@ def armed_but_uncut() -> dict[str, int]:
     `armed_but_uncut_untracked_observations` counts the OBSERVATIONS past that cap
     — ⛔ observations, not graphs, which is what its name says: it increments once
     per write to an untracked graph, so reading it as a graph count would size an
-    incident wrongly. The two together can never read as "none" when there are
-    some.
+    incident wrongly. The two together can never read as "none" while there are
+    some, and the overflow half is RETRACTED when a heal restores room, so the
+    pair is state a repair can clear rather than a latch (#14587 review P1).
+
+    `armed_but_uncut_observations` is the LIFETIME total — a diagnostic on its own
+    key, ⛔ NEVER folded into `ok`: a cumulative counter must not pin a deployment
+    degraded for the life of the process over a graph that was fixed an hour ago.
 
     `armed_but_halted` is a SEPARATE population and is NOT part of
     `armed_but_uncut`: a `halted` row is an operator's decision and that graph
     keeps its JSONL append (`record_owns_position` → False), so it loses nothing.
+    `armed_but_halted_untracked_observations` is its overflow count, so a
+    population past the cap is still COUNTED even where it cannot be named.
     """
     with _UNCUT_GUARD:
         return {
@@ -3055,24 +3093,39 @@ def armed_but_uncut() -> dict[str, int]:
             "armed_but_uncut_untracked_observations": _UNCUT_UNTRACKED,
             "armed_but_uncut_observations": _UNCUT_OBSERVATIONS,
             "armed_but_halted": len(_UNCUT_HALTED),
+            "armed_but_halted_untracked_observations": _UNCUT_HALTED_UNTRACKED,
         }
 
 
 def armed_but_uncut_reasons() -> dict[str, int]:
-    """`{reason: count}` behind :func:`armed_but_uncut`, for `/health`."""
+    """`{reason: count}` BEHIND :func:`armed_but_uncut`, for `/health`.
+
+    ⛔ DERIVED FROM THE TRACKED MAP, NOT ACCUMULATED (#14587 review P2). A dict
+    incremented per observation can never be retracted: after every graph was
+    healed it still published `{"no_cursor_row": 33}` beside a count of 0, so the
+    two keys of the same payload contradicted each other with no repair path for
+    this one. Deriving it makes the retraction automatic and gives the invariant
+    an operator can check: `sum(reasons.values()) == armed_but_uncut`.
+
+    The reason breakdown is therefore DISTINCT GRAPHS per reason; the lifetime
+    observation total is `armed_but_uncut_observations`.
+    """
     with _UNCUT_GUARD:
-        return dict(_UNCUT_REASONS)
+        reasons: dict[str, int] = {}
+        for reason in _UNCUT_GRAPHS.values():
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return reasons
 
 
 def reset_uncut_graphs() -> None:
     """Zero the registry. For tests, and for a process that re-arms."""
-    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
+    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     with _UNCUT_GUARD:
         _UNCUT_GRAPHS.clear()
         _UNCUT_HALTED.clear()
-        _UNCUT_REASONS.clear()
         _UNCUT_OBSERVATIONS = 0
         _UNCUT_UNTRACKED = 0
+        _UNCUT_HALTED_UNTRACKED = 0
 
 
 #: How often the "this graph has no usable cursor" WARNING may repeat, in

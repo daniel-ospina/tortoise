@@ -8605,7 +8605,9 @@ def _record_health() -> dict:
                 # — a missing key must not read as "no uncut graphs".
                 "armed_but_uncut": None,
                 "armed_but_uncut_untracked_observations": None,
+                "armed_but_uncut_observations": None,
                 "armed_but_halted": None,
+                "armed_but_halted_untracked_observations": None,
                 "armed_but_uncut_reasons": None,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
@@ -8670,7 +8672,9 @@ def _record_health() -> dict:
         # states the same rule). Counts and reasons only.
         "armed_but_uncut": None,
         "armed_but_uncut_untracked_observations": None,
+        "armed_but_uncut_observations": None,
         "armed_but_halted": None,
+        "armed_but_halted_untracked_observations": None,
         "armed_but_uncut_reasons": None,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
@@ -8761,7 +8765,11 @@ def _record_health() -> dict:
         block["armed_but_uncut"] = uncut["armed_but_uncut"]
         block["armed_but_uncut_untracked_observations"] = uncut[
             "armed_but_uncut_untracked_observations"]
+        block["armed_but_uncut_observations"] = uncut[
+            "armed_but_uncut_observations"]
         block["armed_but_halted"] = uncut["armed_but_halted"]
+        block["armed_but_halted_untracked_observations"] = uncut[
+            "armed_but_halted_untracked_observations"]
         block["armed_but_uncut_reasons"] = uncut_reasons
         block["cache_leg_failures"] = cache_leg
         block["cache_write_targets"] = cache_targets
@@ -8911,6 +8919,15 @@ def _record_health() -> dict:
     # nothing is lost. Folding it in would let a sanctioned halt red the deployment
     # permanently, and a halt does not clear on its own, so that red would be
     # indistinguishable from a real one. It is still PUBLISHED, on its own key.
+    #
+    # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE (#14587 review P1). Both halves of the
+    # sum below are cleared by the same observation that clears the graph
+    # (`clear_uncut_graph`): the tracked count directly, and the overflow count
+    # because a heal that restores room re-tracks any graph still uncut. A fold
+    # over a LIFETIME counter would read `ok: false` on a deployment every graph
+    # of which was healed, until the process restarted — the inverted signal this
+    # field exists to prevent. `armed_but_uncut_observations` is that lifetime
+    # counter and is deliberately NOT summed in.
     uncut_count = block.get("armed_but_uncut")
     uncut_untracked = block.get("armed_but_uncut_untracked_observations")
     if (block["armed"] and isinstance(uncut_count, int)

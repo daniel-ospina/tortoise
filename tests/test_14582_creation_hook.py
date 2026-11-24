@@ -246,7 +246,11 @@ def test_the_uncut_registry_is_bounded_and_counts_past_the_cap(monkeypatch):
         assert report["armed_but_uncut_untracked_observations"] == 8, (
             "past the cap the observation must still be COUNTED — a bounded map "
             "that silently stops counting is a bound that hides the overflow")
-        assert rw.armed_but_uncut_reasons() == {"no_cursor_row": 32 + 8}
+        assert rw.armed_but_uncut_reasons() == {"no_cursor_row": rw.UNCUT_GRAPH_CAP}, (
+            "the reasons key is DISTINCT GRAPHS behind `armed_but_uncut` — it must "
+            "sum to that count, so a graph healed out of it retracts its reason "
+            "too. The lifetime observation total is "
+            "`armed_but_uncut_observations`.")
     finally:
         rw.reset_uncut_graphs()
 
@@ -405,6 +409,129 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
         assert block["ok"] is True, (
             "a halted graph keeps its journal append, so an `ok: false` here "
             "would punish the operator for following the documented remedy")
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
+        monkeypatch):
+    """⛔ #14587 review P1 — THE OVERFLOW COUNTER WAS A LATCH IN THE `ok` FOLD.
+
+    `armed_but_uncut_untracked_observations` was monotone: past
+    `UNCUT_GRAPH_CAP` it only ever grew, `clear_uncut_graph` never touched it, and
+    `reset_uncut_graphs` has no runtime caller. `_record_health` sums it into
+    `ok`, so a deployment whose operator healed EVERY uncut graph — exactly what
+    `record_allocator_cli.py backfill` does — still read `ok: false` until a
+    process restart, and the restart then reported `ok: true` regardless of the
+    real state. The signal was inverted at the one moment an operator would
+    trust it.
+
+    Red before this change: `ok` stayed False and `reasons` still named 33
+    graphs while `armed_but_uncut` said 0.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        over = rw.UNCUT_GRAPH_CAP + 1
+        for i in range(over):
+            rw.note_uncut_graph("org-14582", f"graph-{i}", reason="no_cursor_row")
+        before = _health(monkeypatch, dsn=dsn)
+        assert before["armed_but_uncut"] == rw.UNCUT_GRAPH_CAP
+        assert before["armed_but_uncut_untracked_observations"] == 1
+        assert before["ok"] is False, "the control: the gap is real right now"
+
+        # The operator runs the remedy: every graph is healed.
+        for i in range(over):
+            rw.clear_uncut_graph("org-14582", f"graph-{i}")
+
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_uncut"] == 0
+        assert block["armed_but_uncut_untracked_observations"] == 0, (
+            "the overflow backlog must be RETRACTED by the heal that restores "
+            "room — from then on any graph still uncut is tracked again, so a "
+            "kept count is a latch that pins `ok: false` forever")
+        assert block["armed_but_uncut_reasons"] == {}, (
+            "a payload that says `armed_but_uncut: 0` beside "
+            "`{'no_cursor_row': 33}` contradicts itself and has no repair path")
+        assert block["ok"] is True, (
+            "NOTHING is uncut any more: the deployment is healthy, and the only "
+            "way out of `ok: false` must not be a restart")
+        # The lifetime diagnostic is retained — it is simply not part of `ok`.
+        assert block["armed_but_uncut_observations"] == over
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_a_partial_heal_of_an_overflowing_registry_stays_red(monkeypatch):
+    """The other direction: retracting the backlog must not clear a real gap."""
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        for i in range(rw.UNCUT_GRAPH_CAP + 1):
+            rw.note_uncut_graph("org-14582", f"graph-{i}", reason="no_cursor_row")
+        rw.clear_uncut_graph("org-14582", "graph-0")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_uncut"] == rw.UNCUT_GRAPH_CAP - 1
+        assert block["armed_but_uncut_untracked_observations"] == 0
+        assert block["ok"] is False, (
+            "32 graphs are still uncut — the overflow retraction must never be "
+            "read as `the gap is gone`")
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_the_uncut_reasons_always_sum_to_the_uncut_count():
+    """The invariant an operator can check on the payload (#14587 review P2)."""
+    rw.reset_uncut_graphs()
+    try:
+        rw.note_uncut_graph("org-14582", "graph-a", reason="no_cursor_row")
+        rw.note_uncut_graph("org-14582", "graph-b", reason="provision_failed")
+        # Re-observing an already-tracked graph REPLACES its reason; it must not
+        # inflate the breakdown, which is per GRAPH and not per observation.
+        rw.note_uncut_graph("org-14582", "graph-b", reason="commit_failed")
+        report = rw.armed_but_uncut()
+        reasons = rw.armed_but_uncut_reasons()
+        assert reasons == {"no_cursor_row": 1, "commit_failed": 1}
+        assert sum(reasons.values()) == report["armed_but_uncut"] == 2
+        rw.clear_uncut_graph("org-14582", "graph-a")
+        assert rw.armed_but_uncut_reasons() == {"commit_failed": 1}
+        assert sum(rw.armed_but_uncut_reasons().values()) \
+            == rw.armed_but_uncut()["armed_but_uncut"]
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_a_halted_overflow_is_counted_not_silently_dropped(monkeypatch):
+    """⛔ #14587 review P2 — the halted arm evicted with no counter.
+
+    `armed_but_halted`'s contract (and the registry comment above
+    `UNCUT_GRAPH_CAP`) is that past the cap the observation is still COUNTED —
+    "nothing is lost, only the distinctness". The uncut arm honoured that; the
+    halted arm popped the oldest with no record, so past 32 halted graphs the
+    population silently shrank to the cap on `/health`.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        over = rw.UNCUT_GRAPH_CAP + 5
+        for i in range(over):
+            rw.note_uncut_graph("org-14582", f"halted-{i}", reason="mode_halted")
+        report = rw.armed_but_uncut()
+        assert report["armed_but_halted"] == rw.UNCUT_GRAPH_CAP
+        assert report["armed_but_halted_untracked_observations"] == 5, (
+            "each evicted halted graph must be COUNTED — a bound that drops "
+            "observations silently hides exactly the population it claims to "
+            "publish")
+        block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
+        assert block["armed_but_halted_untracked_observations"] == 5, (
+            "the overflow must reach `/health`, or an operator reading the "
+            "payload sees a capped number and no hint it was capped")
+        assert block["ok"] is True, (
+            "a halted population still keeps its journal append — counting it "
+            "must not smuggle it into the `ok` fold")
+        # Re-observing an already-tracked halted graph is not an eviction.
+        rw.note_uncut_graph("org-14582", f"halted-{over - 1}", reason="mode_halted")
+        assert rw.armed_but_uncut()[
+            "armed_but_halted_untracked_observations"] == 5
     finally:
         rw.reset_uncut_graphs()
 
