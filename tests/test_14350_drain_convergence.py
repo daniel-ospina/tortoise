@@ -2941,11 +2941,13 @@ def test_a_FAILED_restore_does_not_delete_the_only_copy(tmp_path, monkeypatch):
     assert outcome == drain_claim._CLEAR_HELD, (
         "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
     # The INVARIANT, not one mechanism: the peer's bytes must still exist on disk
-    # after a restore that could not be done with `link`. This row's `link` refuses
-    # with ENOSPC while the path is FREE, so `_restore_quarantine` renames the object
-    # back — the filelock fallback, and strictly stronger than leaving it aside,
-    # because the holder keeps holding instead of being swept up minutes later. The
-    # quarantined copy is the fallback arm and has its own row below.
+    # after a restore that could not be done with `link`. This row drives
+    # `_DISPOSE_QUARANTINE` (its peer claim is READABLE, so the clear takes the
+    # `landed is not None` arm), and its `link` refuses with ENOSPC while the path is
+    # FREE, so `_dispose_quarantine` RENAMES the object back — the filelock fallback,
+    # strictly stronger than leaving it aside, because the holder keeps holding instead
+    # of being swept up minutes later. `_restore_quarantine`'s own arms have their own
+    # rows (`…_RESTORE_FAILS…`, `…_DISPLACED_claim_is_PRESERVED…`).
     survivors = [path for path in (fifo, *root.glob("*.tmp-clear-*")) if path.exists()]
     assert survivors, (
         "the only copy of the peer's claim was DELETED when the restore failed")

@@ -5429,7 +5429,7 @@ export function disposeQuarantine(
             `(${code}); its holder keeps draining until its next refresh (up to ttl/3)`,
         );
       } else {
-        // ⛔ THE ONLY OTHER COPY (review, P3): the rename vacated `path`, so on a
+        // ⛔ THE ONLY OTHER COPY (review, cycle 16, P1): the rename vacated `path`, so on a
         // non-EEXIST failure this quarantined file is all that is left of a live
         // holder's claim. Deleting it turns "restore failed" into "claim destroyed"
         // and frees the path for the next `linkSync`. It is not merely spared: while
@@ -5459,8 +5459,24 @@ export function disposeQuarantine(
             `PRESERVED at ${quarantine}; its holder keeps draining until its next ` +
             "refresh (up to ttl/3)",
         );
+        // ⛔ AND THE WARNING MUST BE TRUE: this arm used to warn `PRESERVED` and then
+        // FALL THROUGH to the `unlinkSync` below, destroying the only copy of the
+        // displaced holder's claim — the code contradicting its own sentence, which is
+        // this PR's subject. The Python twin returns inside the same arm
+        // (`_dispose_quarantine`), so the fall-through was also a leg divergence
+        // (review, cycle 16, P1).
+        return false;
       }
     }
+    // ⛔ FALLING THROUGH IS REACHABLE TWO WAYS, AND ONLY ONE IS A SUCCESSFUL LINK
+    // (review, cycle 16, P3 — the first version of this comment claimed otherwise):
+    //   • `linkSync` SUCCEEDED — the displaced claim is back at the path, so this copy
+    //     is a duplicate and is swept;
+    //   • `linkSync` failed EEXIST — a newer claim already holds the path, so this copy
+    //     of a SUPERSEDED claim is swept. The Python twin's `except FileExistsError`
+    //     arm does the same ("the displaced record's bytes are gone, and the only
+    //     honest thing left is to say so"), and its warning never says PRESERVED.
+    // The two PRESERVED arms above both RETURN, which is what keeps THAT warning true.
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
   }
@@ -5519,7 +5535,7 @@ export function restoreQuarantine(
     // NOT be put back — and since the rename already vacated `path`, the quarantined
     // file is then the ONLY copy of a live holder's claim.
     //
-    // ⛔ SO IT IS NOT DELETED (review, P3). This used to warn and then `unlinkSync`
+    // ⛔ SO IT IS NOT DELETED (review, cycle 16, P1). This used to warn and then `unlinkSync`
     // unconditionally, which destroyed that only copy and answered `held` over an
     // EMPTY path: the next `linkSync` wins and two holders coexist for up to
     // `ttl/3`, silently — the window the quarantine rule exists to close, with the
@@ -5847,7 +5863,7 @@ export function acquireDrainClaim(
           // an obstruction ran the pass UNCLAIMED beside a live claim.
           //
           // ⛔ "HELD" WITH NOTHING AT THE PATH IS A FAILED RESTORE (review, cycle 16,
-          // P3): the object is the only copy and now sits in the quarantine, so the
+          // P1): the object is the only copy and now sits in the quarantine, so the
           // caller's `readDrainClaim` arm finds no record and would fall through to
           // its UNCLAIMED arm. Mark the lost race instead, so the caller fails CLOSED
           // and does not name a holder it cannot see.

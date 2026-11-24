@@ -4999,7 +4999,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: never carried. Generation stays 33 for the same reason the earlier re-cuts did:
 #: **33 has never shipped**, so it freezes when this reaches `main`, not before.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "49a2c0a8e1bac3cf65362647b4ec65af86484a0a884f38bd15b3a0229d0e5918")
+    33, "0679f26f23e3f8ce4ee7839382e3d25a99db18338d45c1c4dbe0ac5da5174744")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5198,8 +5198,10 @@ _GENERATION_DIGESTS = {
     #   * the operator line gained a SECOND claim-axis term (`drain claim UNREADABLE`)
     #     for the one arm that blocks permanently, and the two legs now render every
     #     claim reason identically for non-string values.
-    # 33 still has never shipped, and freezes the moment it reaches `main`.
-    33: "49a2c0a8e1bac3cf65362647b4ec65af86484a0a884f38bd15b3a0229d0e5918",
+    # ⛔ AND THIS DIGEST IS DERIVED FROM THE MERGED TREE, never from either side: the
+    # peer lane re-cut it to `6652dd6b…` on its head and this lane re-cut it to
+    # `49a2c0a8…` on its own, and a merge is a byte set NEITHER side hashed.
+    33: "0679f26f23e3f8ce4ee7839382e3d25a99db18338d45c1c4dbe0ac5da5174744",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
