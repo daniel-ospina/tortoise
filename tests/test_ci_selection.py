@@ -21747,3 +21747,72 @@ def test_the_committed_map_still_declares_its_three_caps():
         # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
         assert floors[name].pinned is True, name
 
+
+# ── carried forward from `8c373f59a1` (the #14439 merge) ──────────────────────
+# Two arms that merge ADDED to this file and the restore to pre-merge content dropped.
+# Neither was replaced by anything the pre-merge file carries:
+#   * `test_duration_coverage_guard_fires_below_the_floor_and_not_at_it` also pins
+#     `DURATION_COVERAGE_MIN == 0.90` itself and the documented ABSENT-map pass state,
+#     which the pre-merge variant (asserting only 89/90/95 and the live map) does not;
+#   * `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard` is the only arm
+#     reading the required `test` job's own `strategy.matrix` — its siblings build their
+#     own fixture YAML, so a literal `include:` in that matrix reds nothing else.
+# Both pass unmodified against this tree.
+
+def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
+    """#3400: the coverage floor FIRES, and it is INCLUSIVE.
+
+    ⛔ RESTORED ON REVIEW (2026-11-23). The B7 cut deleted this arm with the rest of
+    the durations arithmetic, which left `duration_coverage_issues` with NO falsifier:
+    every surviving caller only asserts that it COMPOSES (tests/test_ci_selection.py
+    `integrity(...) + ... + duration_coverage_issues(m)`), and
+    `tests/test_ci_timing.py` only names it in a validator tuple — so a floor that
+    returned `[]` unconditionally would keep the required `manifest-integrity` leg
+    green. That is the no-op-gate class this batch is not allowed to create, and the
+    only test is whether the deleted arm was the SOLE pin on a live gate. It was.
+    """
+    from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
+
+    assert DURATION_COVERAGE_MIN == 0.90, DURATION_COVERAGE_MIN
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+
+    def _manifest(covered: int) -> dict:
+        return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+                "durations": {f: 2.0 for f in files[:covered]}}
+
+    assert duration_coverage_issues(_manifest(89)) != [], "89% must fire"
+    assert duration_coverage_issues(_manifest(90)) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(_manifest(95)) == [], "95% must be silent"
+    # The documented PASS state: a repo that has not adopted durations at all.
+    assert duration_coverage_issues({"surfaces": {"core": files}, "tier1": [],
+                                     "slow_files": []}) == [], (
+        "an ABSENT map is not a coverage failure (#3400's fail-closed-once-populated rule)")
+    # And the real map is above its own floor, so this arm is not asserting a red tree.
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
+    """#6135: the `test` job must expand the selector's matrix (no hand-written
+    shard count), and the pytest watchdog must be the shard's own budget.
+
+    These are the two workflow-level claims the unit tests above cannot see:
+    a literal `half: [a, b]` is exactly the drift the issue exists to end, and
+    a literal `55m` watchdog is the per-leg correctness bug it names.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    matrix = job["strategy"]["matrix"]
+    assert "fromJSON(needs.changes.outputs.fast_matrix)" in str(matrix), matrix
+    assert "include" not in str(matrix), \
+        "the shard set must come from the selector, not a workflow literal"
+    run = next(s for s in job["steps"]
+               if s.get("name", "").startswith("Run fast test suite"))["run"]
+    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in run, \
+        "the pytest watchdog must be the per-shard budget, not a literal"
+    assert "timeout -s INT -k 10 55m" not in run
+    # the canary artifact the separate job downloads must be the fixed
+    # producer name, never a per-shard one (no shard name survives S changes)
+    dl = next(s for s in wf["jobs"]["canary-streak"]["steps"]
+              if s.get("name", "").startswith("Download producer-shard"))
+    assert dl["with"]["name"] == "pytest-canary-producer"
+
