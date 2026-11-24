@@ -365,31 +365,51 @@ class TestCreatePointRetrySafety:
         assert "sup3rsecretpw" not in out
         assert "/v1/search?q=" in out
 
+    @pytest.mark.parametrize("bad_api_url", [
+        ["https://a.example.test"],          # list  -> AttributeError on .rstrip
+        {"https://a.example.test": True},    # dict  -> AttributeError on .rstrip
+        42,                                   # int   -> ValueError: unknown url type
+        True,                                 # bool  -> ValueError: unknown url type
+        "notaurl",                            # str   -> ValueError: unknown url type
+    ])
     def test_a_non_string_api_url_refuses_cleanly_instead_of_crashing(
-            self, tmp_path, capsys):
+            self, tmp_path, capsys, bad_api_url):
         """A repo-controllable store must not crash the WRITE verb.
 
         `_resolve_config_path` validates `api_key` is a `str` but passes
         `api_url` through VERBATIM, and `./.tortoise` is attacker-controllable.
-        The `rstrip("/")` this PR added to normalise the base then raised
-        `AttributeError: 'list' object has no attribute 'rstrip'` — a raw
-        traceback where BASE answered `Cannot reach API at [...]` and returned 1
-        (measured on `4993fa083f`).
+        Two DIFFERENT crash shapes reach this verb, and each had its own arm:
 
-        Mutation: drop the `isinstance` coercion above the `rstrip` and this
-        REDs with the traceback escaping instead of the refusal.
+        * `rstrip("/")` on a list/dict → `AttributeError: 'list' object has no
+          attribute 'rstrip'` — closed by coercing to `str` first;
+        * a value that IS a `str` but not a URL (an int/bool coerced to `"42"`,
+          or a literal `"notaurl"`) → `ValueError: unknown url type: '42/…'`
+          raised by `Request(...)`, which no `except` arm caught, so it escaped
+          `main()` as a raw traceback.
+
+        ⛔ The coercion alone was NOT enough — it converts a non-string into a
+        string that is not a URL. Both arms are required, which is why this test
+        is parametrized over both shapes rather than pinning the list case that
+        was the first one measured. On BASE (`4993fa083f`) every row above except
+        list/dict already tracebacked.
+
+        Mutation: drop the `isinstance` coercion → the list/dict rows RED with
+        `AttributeError`; drop the `except ValueError` arm → the int/bool/str rows
+        RED with `ValueError` escaping.
         """
         _seed_global(tmp_path)
         store = tmp_path / ".tortoise" / "credentials.json"
         store.write_text(json.dumps({
             **GLOBAL_CFG,
-            "api_url": ["https://a.example.test"],
+            "api_url": bad_api_url,
         }))
         store.chmod(0o600)
         assert main(["create-point", "hello world"]) == 1
         captured = capsys.readouterr()
         assert "Cannot reach API" in captured.err
+        # No traceback may escape, whichever arm answered.
         assert "AttributeError" not in captured.err
+        assert "ValueError" not in captured.err
 
     def test_the_unreachable_arm_never_prints_a_url_credential(
             self, tmp_path, capsys):
