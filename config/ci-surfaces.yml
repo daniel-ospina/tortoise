@@ -134,8 +134,7 @@ version: 1
 # The 1.25x balance band is enforced by `--integrity`'s
 # `workflow_halves_issues()`, which recomputes the ratio from the committed map;
 # the `test_real_workflow_halves_are_consistent` arm that used to sit beside it
-# went with the durations-map arithmetic cut (#14419, and CUT again in #14439's
-# re-cut). The old
+# went with the durations-map arithmetic cut (#14419) and has not returned. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
@@ -208,8 +207,8 @@ carve_shards: 3
 # the 10m target, so removing the key redded it
 # (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`,
 # which CALLS `slow_wall_projection()` and asserts the projection against
-# `SLOW_LEG_WALL_TARGET_MIN` — cut by #14419's B7 cut and again by #14439's
-# re-cut, and RESTORED by #14481, so it grades this again). A real
+# `SLOW_LEG_WALL_TARGET_MIN` — live since #9542 and present on `main` too, so
+# nothing here was cut that graded this). A real
 # rollback therefore moves the target/guard too — which
 # is what makes a growing slow file red HERE rather than silently restoring the
 # ceiling the key was added to raise.

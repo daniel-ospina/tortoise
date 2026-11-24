@@ -5809,12 +5809,11 @@ def slow_wall_projection(manifest: dict,
     `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This IS
     the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`:
     `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
-    calls it and asserts `proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN`,
-    plus the capped form below. That arm was CUT by the B7 cut (#14419) and cut
-    again by #14439's re-cut, and #14481 RESTORED it — so this function has a
-    caller AND a grader again, and must not be retired. It is also the documented
-    re-derivation for the two targets below. It is a PROJECTION from the map
-    (never a measurement), which is
+    (live since #9542, and present on `main` as well) calls it and asserts
+    `proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN`, plus the capped
+    form below — so this function has a caller AND a grader, and must not be
+    retired. It is also the documented re-derivation for the two targets below.
+    It is a PROJECTION from the map (never a measurement), which is
     why the setup allowance is a measured constant rather than an assumption
     inside it.
 
