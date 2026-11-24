@@ -362,7 +362,12 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 `tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
 a `#` comment. That is MEASURED, not restated, because the line counts move with every rebase:
 `git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
-prints `0` at this head, so no changed body line is anything but a comment. Each block carries a
+prints `0` at this PR's own head (`#13094`'s), so no changed body line in ITS diff is anything but a
+comment. ⛔ THAT IS A CLAIM ABOUT THIS PR, NOT ABOUT THE TREE: the command diffs against whatever
+`origin/main` is NOW, so a LATER PR's own product change to `tortoise/hosted_api.py` legitimately
+makes it print a non-zero count here — `#13722`'s stamp-chain move prints `4`, which is that PR's
+behavioural fix and not a drift in this record — and the graded figures below are re-derived by
+`--refresh` rather than by this sentence. Each block carries a
 count this PR re-derived
 (`160` distinct cite targets above the pivot from `726` in all, over `208` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and

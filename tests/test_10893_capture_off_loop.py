@@ -442,21 +442,28 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
 def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     """The bar is a MAGNITUDE, pinned here WITHOUT a wall clock.
 
-    `_ON_LOOP_BAR_MS` used to be 1 ms, which put the largest UNDECLARED leg on
-    this path (`_emit_event`, inside the provenance stamp) 0.1-0.5 ms inside it:
-    measured here at 0.51-0.92 ms, and at 1.20 ms under coverage, where this test
-    went FAILED on a leg the residual deliberately does not require. Loosening a
+    `_ON_LOOP_BAR_MS` used to be 1 ms. In the #10893 reading — while the
+    provenance stamp was still inline and its journal `_emit_event` therefore
+    still ran on the loop, which #13722 has since changed — the largest
+    UNDECLARED leg sat 0.1-0.5 ms inside that bar: measured here at 0.51-0.92 ms,
+    and at 1.20 ms under coverage, where this test went FAILED on a leg the
+    residual deliberately does not require. Loosening a
     bar must not become a blind spot, so both ends are pinned on synthetic
     totals: the measured probe-overhead band is NOT reported, and a leg of the
     size the census exists to catch still is.
 
     Verified non-vacuous: restoring the bar to 1.0 reds the FIRST assertion
-    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking) AND the
-    census row above, whose verdict is `_undeclared_blocking` — that row is the
-    one the change exists for, since it flipped at 1 ms under coverage.
+    below (`_emit_event` at 1.2 ms comes back as unreported-but-blocking). ⛔ THE
+    SECOND HALF OF THIS PROOF IS HISTORY, NOT A LIVE ARM: restoring the bar also
+    red the CENSUS row once, because that leg was live on the loop then; #13722
+    moved the stamp chain to the capture worker, so `_emit_event` writes no census
+    row at all and no bar can flip the census over it. The live non-vacuity proof
+    for the census itself is the instrument-liveness assert (`_get_registry` must
+    appear in `totals`) plus the deleted-entry pin at the bottom of this test.
     """
     # The measured overhead band, including the coverage run that flipped the
-    # real census — noise, not work.
+    # real census in the #10893 reading (that leg has since left the loop,
+    # #13722) — noise, not work.
     assert _undeclared_blocking({"_emit_event": 1.2}) == {}
     # The bar itself is inclusive-and-reporting: anything AT it is reported.
     assert _undeclared_blocking({"a_leg_at_the_bar": _ON_LOOP_BAR_MS}) != {}
