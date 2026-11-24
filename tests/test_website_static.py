@@ -4099,6 +4099,68 @@ def _element_carrying_class(markup: str, cls: str,
     return parser.element
 
 
+#: The elements that never take a closing tag, so the depth stack must not wait
+#: for one. Only the card's own markup is parsed here (h3/div/p/a/span), but a
+#: `<br>` or an `<img>` added to a card must not desync the walk into thinking
+#: every later element is one level deeper.
+_VOID_TAGS = frozenset(["area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track",
+                       "wbr"])
+
+
+class _CardChildren(HTMLParser):
+    """The DIRECT children of every `.pricing-card` element, in document order.
+
+    The `order` property only reorders SIBLINGS, so "the CTA is the last item
+    `margin-top: auto` aligns" is a statement about the card's own children:
+    `order: -1` on the CTA, or `order: 1` on `.features`, both move the button
+    relative to its siblings. A class-only reader sees the first (the CTA's
+    class is the subject of the row) and is blind to the second, which is why
+    the subject set comes from the MARKUP's containment rather than from a
+    hand-written list of class names (#14406 review round 12).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._inside_card: list[bool] = []
+        self.children: list[tuple[str, dict[str, str]]] = []
+
+    def _enter(self, tag: str, attrs: list[tuple[str, str | None]],
+               self_closing: bool) -> None:
+        found = {name.lower(): (value or "") for name, value in attrs}
+        if self._inside_card and self._inside_card[-1]:
+            self.children.append((tag.lower(), found))
+        if not self_closing:
+            self._inside_card.append(
+                "pricing-card" in found.get("class", "").split())
+
+    def handle_starttag(self, tag, attrs):
+        self._enter(tag, attrs, tag.lower() in _VOID_TAGS)
+
+    def handle_startendtag(self, tag, attrs):
+        self._enter(tag, attrs, True)
+
+    def handle_endtag(self, tag):
+        if self._inside_card:
+            self._inside_card.pop()
+
+
+def _card_direct_children(markup: str) -> list[tuple[str, dict[str, str]]]:
+    """Every direct child of every `.pricing-card` in `markup`, as elements.
+
+    `(tag, attributes)` — the same identity `_css_compound_matches_element`
+    takes — so a rule that reaches a child by its TAG (`div { order: 1 }`) is
+    read exactly like one that reaches it by a class. The static grid and
+    `renderPricing()`'s template build the same children (the row that pins the
+    CTA-last invariant cross-checks both paths), so one parse of the served
+    markup covers the selector space a rule can use.
+    """
+    parser = _CardChildren()
+    parser.feed(markup)
+    parser.close()
+    return parser.children
+
+
 def _css_compound_matches_element(compound: str,
                                   element: tuple[str, dict[str, str]]) -> bool:
     """Can this RIGHTMOST compound select `element` (the subject's identity)?
@@ -4174,7 +4236,16 @@ def _css_compound_matches_element(compound: str,
         # A class-named compound is `_css_rightmost_selects`'s question, and it
         # is already asked. Returning False here keeps ONE owner per question.
         return False
+    # ⛔ THE ID IS CONSUMED ABOVE, and the duplicate strip that stood here is
+    # gone: one owner per fix. Round 10's id test `continue`d and left the `#id`
+    # text in `core`, so the remainder comparison asked whether the TAG
+    # literally reads `#pricing-grid` and answered False — an id-ONLY rightmost
+    # compound matched the subject's id and was discarded one line later. Round
+    # 10's own mutants all put the id in an ANCESTOR position (`#pricing-grid
+    # a`, `#pricing-grid div`), where the rightmost compound is the bare tag and
+    # the bug cannot show (measured, #14406 review round 12).
     remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", core).strip()
+    remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", remainder).strip()
     if remainder and remainder != "*":
         return remainder.lower() == tag.lower()
     # Nothing but pseudo-classes (`:hover`, `:first-child`, `:root` above): a
@@ -4190,6 +4261,16 @@ def _css_compound_matches_element(compound: str,
 #: win (the cascade's 2nd criterion), so including it would only false-RED a
 #: correct page — which is why this floor exists on the AGREEMENT reader and
 #: not on the cascade one, which sorts instead (#14406 review round 10).
+#: ⛔ A SUBJECT WITH NO ENTRY HERE HAS NO ELEMENT REACH AT ALL, and that is a
+#: silent loss of the round-10 fix rather than a tolerant default:
+#: `#pricing-grid { align-items: center }` (1,0,0) is applied by a browser at
+#: ANY source order and left every row of
+#: `TestProductTeamsPricingCardCtaBaseline` GREEN, because `.pricing-grid` was
+#: missing from this map — so `_css_reaching_decls` computed `floor = None` and
+#: skipped the bare-element branch entirely (#14406 review round 12, measured).
+#: Every subject a row pins must be listed; the `None`-floor path stays for the
+#: subjects that are only ASKED about (`.features`, `.price`, …), where the
+#: caller wants the fact, not a verdict.
 PINNED_OWNER_SELECTOR = {".pricing-card": ".pricing-card",
                          ".btn": ".pricing-card .btn",
                          # ⛔ AND THE GRID ITSELF (#14406 review round 12). The
@@ -11981,6 +12062,23 @@ class TestProductTeamsPricingCardCtaBaseline:
         trusted. `normal` is allowed beside `stretch` because it behaves as
         `stretch` on a flex container; anything else, and any value this reader
         cannot classify, reds.
+
+        ⛔ THE LAYOUT MODE IS PART OF THE PRECONDITION, and the align family
+        alone does not pin it (#14406 review round 12, measured). `align-items:
+        stretch` only stretches the items of a FLEX ROW: on a non-flex container
+        the declared value is inert, and in a flex COLUMN it stretches the CROSS
+        axis — which is horizontal — so every card keeps its own content height.
+        Both restore the exact #13645 item 6 signature with ALL NINE rows of this
+        class GREEN:
+
+            .pricing-grid { display: block }                       3 baselines
+            .pricing-grid { display: flex; flex-direction: column } 3 baselines
+            #pricing-grid { display: block }    (the bare-element reach — see
+                                                 PINNED_OWNER_SELECTOR)
+
+        So the grid's `display` and its direction are read as AGREEMENT
+        invariants beside the align family, `flex-flow` included because it is
+        the shorthand that resets the direction.
         """
         css = _product_teams_html()
         for compound, prop, allowed in (
@@ -12007,6 +12105,31 @@ class TestProductTeamsPricingCardCtaBaseline:
                 "each CTA to its OWN card's bottom — three baselines 70.2px "
                 "apart at 1440x900 (#13645 item 6), with every other row in "
                 "this class still GREEN")
+
+        # The layout MODE — `display` and the direction — beside the align
+        # family. Without it `display: block` and `flex-direction: column` both
+        # restore the defect with every row green (measured, #14406 review
+        # round 12); `align-items: stretch` is inert on the first and applies to
+        # the CROSS axis on the second.
+        for prop, allowed in (("display", {"flex", "inline-flex"}),
+                              ("flex-direction", {"row", "row-reverse"}),
+                              ("flex-flow", {"row", "row-reverse"})):
+            bad = [(prelude, value)
+                   for prelude, value
+                   in _css_reaching_decls(css, prop, ".pricing-grid")
+                   if _css_flex_direction(prop, value) not in allowed]
+            where = repr(bad[0][0]) if bad else ""
+            assert bad == [], (
+                f"a rule that can select `.pricing-grid` declares "
+                f"`{prop}: {bad[0][1] if bad else ''}` ({where}), "
+                "so the four pricing cards stop sharing one ROW and one height: "
+                "`align-items: stretch` only stretches a flex row's items — a "
+                "block grid leaves every card at its own content height, and a "
+                "flex COLUMN stretches the cross axis (horizontal) — so "
+                "`margin-top: auto` aligns each CTA to its own card's bottom and "
+                "the three-baseline / 70.2px split of #13645 item 6 is back with "
+                "every other row in this class GREEN (#14406 review round 12, "
+                "measured)")
 
     def test_no_rule_gives_the_cta_a_block_end_margin(self):
         """The CTA's block-END margin must stay 0 — `auto` there SHARES the slack.
@@ -12237,6 +12360,26 @@ class TestProductTeamsPricingCardCtaBaseline:
         `order`'s initial value is `0`, so the invariant is "every reaching rule
         either does not declare it or declares `0`" — the same AGREEMENT shape
         the slack row uses.
+
+        ⛔ THE SUBJECT IS EVERY DIRECT CHILD OF THE CARD, NOT THE CTA ALONE
+        (#14406 review round 12, measured). `order` reorders SIBLINGS, so the
+        button stops being the item `margin-top: auto` aligns just as surely
+        when a SIBLING is pushed past it — and those rules name a selector this
+        row never asked about. Each of these restored the three-baseline split
+        with ALL NINE rows of this class GREEN:
+
+            .pricing-card .features { order: 1 }   the CTA is no longer last
+            .pricing-card .price    { order: 1 }   same, one child up
+            .pricing-card div       { order: 1 }   the same, by TAG
+            .pricing-card > div     { order: 1 }   the same, child combinator
+            #pricing-grid div       { order: 1 }   the same, from the grid
+
+        The subject set therefore comes from the MARKUP's containment
+        (`_card_direct_children`), and each child is matched both by every class
+        it carries and by its ELEMENT — which is what makes the two TAG-selector
+        mutants above visible. A rule that reorders a grandchild (`.feature`
+        inside `.features`) cannot move the CTA and is not red here, which is
+        why the set is the card's DIRECT children and not its whole subtree.
         """
         css = _product_teams_html()
         reordering = [(p, v) for p, v in _css_reaching_decls(css, "order", ".btn")
@@ -12248,6 +12391,37 @@ class TestProductTeamsPricingCardCtaBaseline:
             "reads the DOM and stays GREEN while the rendered CTA is no longer "
             "the item `margin-top: auto` aligns (#14406 review round 8, "
             "measured: `order: -1` passed every row)")
+
+        children = _card_direct_children(
+            _static_pricing_grid(_served(_product_teams_html())))
+        assert len(children) >= 8, (
+            f"only {len(children)} direct children were read out of the four "
+            "pricing cards — `_card_direct_children` has lost the markup shape "
+            "it parses, and the sibling sweep below would pass over nothing")
+        moved = []
+        for prelude, body, _condition in _css_desktop_rules(css):
+            order = _effective_decl(body, "order")
+            if order is None or order.strip().lower() in ("0", ""):
+                continue
+            for part in (candidate.strip() for candidate in prelude.split(",")):
+                rightmost = _css_rightmost_compound(part)
+                if any(
+                        _css_rightmost_selects(rightmost, f".{name}")
+                        for _tag, attrs in children
+                        for name in attrs.get("class", "").split()) or any(
+                        _css_compound_matches_element(rightmost, child)
+                        for child in children):
+                    moved.append((part, order))
+                    break
+        assert moved == [], (
+            f"a rule declares `order: {moved[0][1]}` ({moved[0][0]!r}) on a "
+            "child of a pricing card, so the CTA is no longer the LAST item its "
+            "card's flex column lays out — `margin-top: auto` then aligns the "
+            "button against a taller sibling instead of the card's bottom edge, "
+            "and the four baselines split to three, 70.2px apart (#13645 item "
+            "6) with every other row in this class GREEN (#14406 review round "
+            "12, measured with `.pricing-card .features { order: 1 }` and with "
+            "the same rule written as a TAG selector)")
 
     def test_no_card_carries_an_inline_style(self):
         """An inline `style` out-ranks every rule in the sheet, and no reader sees it.
@@ -12776,6 +12950,67 @@ class TestCssDesktopReachAndSpecificity:
             "(0,2,0) compensation, so a browser applies its `padding-bottom: "
             "1.75rem` and the popular CTA drops 1px; the cascade reader's "
             "winner must be that declaration (#14406 review round 10)")
+
+    def test_an_id_only_compound_reaches_the_element_it_names(self):
+        """`#pricing-grid` is a compound, not a tag called "#pricing-grid".
+
+        `_css_compound_matches_element` checks the ids on the way in and then
+        compared the REMAINDER — with the `#id` text still in it — against the
+        tag, so an id-ONLY rightmost compound matched the subject's id and was
+        discarded one line later. Round 10's mutants all put the id in an
+        ANCESTOR position (`#pricing-grid a`, `#pricing-grid div`), where the
+        rightmost compound is the bare tag and the bug cannot show, so the
+        guard-of-the-guard row added by that round could not see it.
+
+        Measured (#14406 review round 12) — each left ALL NINE rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN:
+
+            #pricing-grid { display: block }        3 baselines
+            #pricing-grid { align-items: center }   boxes to content height
+            #pricing-grid { place-items: center }   the same, via the shorthand
+
+        Both directions are pinned: the id must MATCH, and a wrong id must still
+        be refused — otherwise "strip the remainder" would be a blanket True.
+        """
+        page = _product_teams_html()
+        grid = _element_carrying_class(page, "pricing-grid")
+        assert grid and grid[0] == "div" and grid[1].get("id") == "pricing-grid", (
+            f"the `.pricing-grid` element is {grid!r} — this row's subject moved")
+        for compound in ("#pricing-grid", "div#pricing-grid"):
+            assert _css_compound_matches_element(compound, grid), (
+                f"`{compound}` selects the `.pricing-grid` element by its own "
+                "id, so a rule written that way out-ranks `.pricing-grid` "
+                "(1,0,0 vs 0,1,0) at ANY source order — and the reader says it "
+                "does not reach (#14406 review round 12, measured)")
+        for compound in ("#pricing-section", "#nope", "span#pricing-grid"):
+            assert not _css_compound_matches_element(compound, grid), (
+                f"`{compound}` does NOT select the `.pricing-grid` element, so "
+                "counting it reds a correct page")
+
+        # ...and the whole reader, end to end: each mutant must be REACHED, and
+        # the same declarations with the pinned values must stay silent.
+        for mutant in ("#pricing-grid { align-items: center }",
+                       "#pricing-grid { place-items: center }",
+                       "#pricing-grid { display: block }"):
+            prop = ("align-items" if "align-items" in mutant else "place-items")
+            if "display" in mutant:
+                prop = "display"
+            reached = _css_reaching_decls(self._page_with(mutant), prop,
+                                          ".pricing-grid")
+            assert any("#pricing-grid" in prelude for prelude, _v in reached), (
+                f"`{mutant}` is (1,0,0) and a browser applies it at 1440x900, "
+                "but `_css_reaching_decls` does not reach it — the grid's "
+                "equal-height pin is blind to the id spelling of its own "
+                f"subject. Reached: {reached!r}")
+        for control in ("#pricing-grid { align-items: stretch }",
+                        "#pricing-grid { display: flex }"):
+            prop = "display" if "display" in control else "align-items"
+            bad = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(control), prop, ".pricing-grid")
+                if v.strip().lower() not in ("stretch", "flex", "normal")]
+            assert bad == [], (
+                f"`{control}` declares the PINNED value from a stronger "
+                f"selector, so it must not count as a disagreement: {bad!r}")
 
     def test_the_inline_style_reader_sees_every_quoting_spelling(self):
         """An inline `style` attribute has FOUR legal spellings, not one.
