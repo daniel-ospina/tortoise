@@ -1792,7 +1792,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class as the rows above, and MEASURED before this entry: `--changed-files
              # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, and only the tier-1
              # smoke set selected, with `test_sdk_privatise_sweep.py` ABSENT. (No count is
-             # quoted: that population is `len(manifest["tier1"])`, it moves with every
+             # quoted: that set is `tier1 - slow - uri_requiring - on_demand`, whose size today
+             # equals `len(manifest["tier1"])` but is NOT that population — it moves with every
              # registration, and the `tier1:` block's own comment forbids typing it.) `tools/` is a flat `NON_PYTHON_PREFIXES`
              # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
              # the residue pin runs none of the arms that grade this file's pins — the pinned
