@@ -533,6 +533,12 @@ def estimate_batch(
 ACCEPT_COPY = (
     "batch processed, completion expected in {hours} {unit}, cancel any time")
 
+#: The same sentence when the record carries NO duration (round 23, P1). Naming a
+#: window that the record does not hold is the lie: `customer_copy(0.0)` used to
+#: promise "1 hour" for a 12.5-hour batch whose estimate never reached the record.
+ACCEPT_COPY_NO_WINDOW = (
+    "batch processed; the completion estimate is not available yet, cancel any time")
+
 #: Vocabulary that would leak provider pricing mechanics into customer copy
 #: (owner ruling (d)). Kept as data so :func:`customer_copy` is testable rather
 #: than merely reviewed.
@@ -553,6 +559,21 @@ def customer_copy(hours: float) -> str:
     whole = max(1, math.ceil(hours))
     return ACCEPT_COPY.format(hours=whole,
                               unit="hour" if whole == 1 else "hours")
+
+
+def customer_copy_for(hours: float) -> str:
+    """The acceptance sentence when the duration may be UNKNOWN (``hours <= 0``).
+
+    ⛔ `customer_copy(0.0)` used to promise "completion expected in 1 hour" for a
+    batch of ANY size (round 23, P1 — measured): a batch whose estimate never
+    landed on the record (the takeover's identity write faulted, so the record kept
+    the recovery scan's blank adoption) was told it would finish in an hour while
+    its caller had sent ``estimated_hours: 12.5``. A duration the record does not
+    carry is not promised here at all — the honest copy names no window.
+    """
+    if hours <= 0:
+        return ACCEPT_COPY_NO_WINDOW
+    return customer_copy(hours)
 
 
 # ── records ────────────────────────────────────────────────────────────────
@@ -724,6 +745,18 @@ class ItemOutcome:
 #: and here that id belongs to a batch this call did not create.
 class _BatchIdConflict(ValueError):
     """The batch id is already taken; nothing this call wrote should be removed."""
+
+
+class _BatchStoreFault(RuntimeError):
+    """The store failed while accepting — a SERVER fault, not a caller error.
+
+    Its own type for two reasons (round 23, P2 — measured). ``submit``'s
+    compensating rollback must not run for it when nothing of ours is at stake, and
+    the route must not render it as ``_BatchIdConflict`` does: that copy tells the
+    customer to restructure a valid body ("send items as paths under the configured
+    document storage"), when the only useful action is to RETRY a transient graph
+    fault.
+    """
 
 
 # ── storage: durable rows in the tenant graph ──────────────────────────────
@@ -2083,6 +2116,17 @@ class BatchCoordinator:
         # written, and the exception type below is exempted from the rollback.
         if batch_id is not None and self._store.get_batch(org_id, bid) is not None:
             raise ValueError(f"batch id {bid!r} already exists for this org")
+        # ⛔ THE STORAGE PRECONDITION IS CHECKED HERE TOO, ALSO ABOVE THE `try`
+        # (round 23, P2 — measured). It used to be raised from inside the item loop,
+        # where `except Exception` rolled back — `discard(org_id, bid)` against a
+        # rival's row for a caller-supplied id. It is a pure precondition: nothing
+        # is staged yet, so refusing costs nothing and deleting costs everything.
+        if stage_base is None and contents is not None and any(
+                c is not None for c in contents):
+            raise ValueError(
+                "this item carries inline text but the server has no "
+                "document storage configured (TORTOISE_INGEST_BASE_DIR) "
+                "— send it as a path under that base instead")
         try:
             return self._submit_rows(org_id, bid, stamp, refs, names=names,
                                      contents=contents, stage_base=stage_base,
@@ -2104,6 +2148,13 @@ class BatchCoordinator:
             # and resumable), but this path is a KNOWN HAZARD, not a safe one: the
             # real fix is an insert-if-absent item write plus per-attempt staging,
             # tracked as #14498 rather than smuggled into this PR.
+            raise
+        except _BatchStoreFault:
+            # ⛔ A FAULT WITH NOTHING OF OURS AT STAKE IS NOT A ROLLBACK (round 23,
+            # P2 — measured). The staging loop raises this BEFORE any item row is
+            # written, and it has already unlinked the documents it staged; the
+            # rollback would `discard(org_id, bid)` — deleting a rival's row — and
+            # `_discard_staged` would unlink every child of the shared directory.
             raise
         except Exception:
             # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,
@@ -2135,33 +2186,51 @@ class BatchCoordinator:
                      ) -> tuple[Batch, list[BatchItem]]:
         items = []
         first_by_key: dict[str, str] = {}
-        for idx, ref in enumerate(refs):
-            name = (names[idx] if names and idx < len(names) else "") or ""
-            text = contents[idx] if contents and idx < len(contents) else None
-            key = content_key(text) if text is not None else ""
-            staged = ""
-            if text is not None:
-                # ⛔ The bytes are written BEFORE the row (the order is the
-                # promise): an ACK must never name a document we cannot read back.
-                if stage_base is None:
-                    raise ValueError(
-                        "this item carries inline text but the server has no "
-                        "document storage configured (TORTOISE_INGEST_BASE_DIR) "
-                        "— send it as a path under that base instead")
-                staged = stage_text(stage_base, bid, f"{bid}-{idx:05d}", text)
-            item = BatchItem(batch_id=bid, item_id=f"{bid}-{idx:05d}",
-                             ref=str(ref), name=str(name),
-                             state=BatchItemState.QUEUED, updated_at=stamp,
-                             staged_path=staged, content_key=key,
-                             duplicate_of=first_by_key.get(key, "") if key else "")
-            if key and key not in first_by_key:
-                first_by_key[key] = item.item_id
-            # An in-batch repeat is MARKED here (free — the text was supplied)
-            # but settled in `run_item`, once the first copy is known to have
-            # landed: skipping it now would lose the document if that copy
-            # fails. Cross-batch dedup needs the text too, and happens in the
-            # same place for the same reason.
-            items.append(item)
+        # ⛔ THE STAGING LOOP IS GUARDED (round 23, P2 — measured). It runs BEFORE
+        # any ownership is known, so a fault here used to reach `submit`'s rollback,
+        # which `discard`s an id a RIVAL may hold (row, items, bytes) — and, on the
+        # refusal arm below, left the bytes it had already written on disk for ever
+        # (no sweeper exists for `_batches/`). It now unlinks exactly its own files
+        # and raises a fault type the rollback is exempt from.
+        staged_paths: list[str] = []
+        try:
+            for idx, ref in enumerate(refs):
+                name = (names[idx] if names and idx < len(names) else "") or ""
+                text = contents[idx] if contents and idx < len(contents) else None
+                key = content_key(text) if text is not None else ""
+                staged = ""
+                if text is not None:
+                    # ⛔ The bytes are written BEFORE the row (the order is the
+                    # promise): an ACK must never name a document we cannot read back.
+                    if stage_base is None:
+                        raise ValueError(
+                            "this item carries inline text but the server has no "
+                            "document storage configured (TORTOISE_INGEST_BASE_DIR) "
+                            "— send it as a path under that base instead")
+                    staged = stage_text(stage_base, bid, f"{bid}-{idx:05d}", text)
+                    staged_paths.append(staged)
+                item = BatchItem(batch_id=bid, item_id=f"{bid}-{idx:05d}",
+                                 ref=str(ref), name=str(name),
+                                 state=BatchItemState.QUEUED, updated_at=stamp,
+                                 staged_path=staged, content_key=key,
+                                 duplicate_of=first_by_key.get(key, "") if key else "")
+                if key and key not in first_by_key:
+                    first_by_key[key] = item.item_id
+                # An in-batch repeat is MARKED here (free — the text was supplied)
+                # but settled in `run_item`, once the first copy is known to have
+                # landed: skipping it now would lose the document if that copy
+                # fails. Cross-batch dedup needs the text too, and happens in the
+                # same place for the same reason.
+                items.append(item)
+        except ValueError:
+            # A CALLER error (misuse), not a fault: keep its type and its copy, but
+            # still leave no bytes of ours behind.
+            _unlink_staged_paths(staged_paths)
+            raise
+        except Exception as exc:
+            _unlink_staged_paths(staged_paths)
+            raise _BatchStoreFault(
+                f"batch {bid!r} could not be staged: {type(exc).__name__}") from exc
         # ⛔ THE WHOLE SET IN ONE STATEMENT (#14415 review round 13, P2), and it
         # still lands BEFORE the batch row below, so an orphaned acceptance is the
         # case `_resume_batch` adopts rather than a row pointing at nothing.
@@ -2181,14 +2250,21 @@ class BatchCoordinator:
         # exists to compensate for, so a refusal is free and a deletion is not.
         try:
             existing = self._store.get_batch(org_id, bid)
-        except Exception:
+        except Exception as exc:
             _logger.warning(
                 "batch %s: the row could not be read before the item write — "
                 "refusing rather than discarding a batch this call does not own",
                 bid, exc_info=True)
-            raise _BatchIdConflict(
-                f"batch id {bid!r} could not be shown to be free") from None
+            # …and the bytes it already staged go with it: this refusal skips the
+            # rollback by design, so nothing else would ever unlink them.
+            _unlink_staged_paths(staged_paths)
+            raise _BatchStoreFault(
+                f"batch id {bid!r} could not be shown to be free") from exc
         if existing is not None:
+            # ⛔ AND THE BYTES STAGED FOR THIS REFUSAL GO WITH IT (round 23, P2 —
+            # measured): this arm skips the rollback by design, so nothing else
+            # would ever unlink them. Only OUR files, never the shared directory.
+            _unlink_staged_paths(staged_paths)
             raise _BatchIdConflict(f"batch id {bid!r} already exists for this org")
         self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
@@ -2257,12 +2333,15 @@ class BatchCoordinator:
             # A fault is "not provably ours", so it REFUSES.
             try:
                 current = self._store.get_batch(org_id, bid)
-            except Exception:
+            except Exception as exc:
                 _logger.warning(
                     "batch %s: the row could not be read while deciding who owns "
                     "the id — refusing rather than discarding a batch this call "
                     "may not own", bid, exc_info=True)
-                current = None
+                # ⛔ a SERVER fault, so the route answers "retry" — not the
+                # storage-misconfiguration copy a `_BatchIdConflict` renders as.
+                raise _BatchStoreFault(
+                    f"batch {bid!r}: the ownership read failed") from exc
             adopted = False
             if current is not None and current.created_at == stamp:
                 # ⛔ AND THE CAS FAULT TOO (round 22 follow-up, P1 — measured). A
@@ -2272,16 +2351,31 @@ class BatchCoordinator:
                 # live (a drain can be working it), so a delete here turns the
                 # `503 … retry` this fault invites into an ingested-twice,
                 # charged-twice document.
-                try:
-                    adopted = self._store.put_batch_if_state(
-                        batch, (BatchState.RESUMING, BatchState.RUNNING),
-                        write_identity=True)
-                except Exception:
-                    _logger.warning(
-                        "batch %s: the takeover could not be written — refusing "
-                        "rather than discarding a batch this call may not own",
-                        bid, exc_info=True)
-                    adopted = False
+                #
+                # ⛔ AND IT IS RETRIED ONCE (round 23, P1 — measured). The identity
+                # (`estimate`, `corpus_name`) is written by THIS call only, because
+                # every other writer preserves the stored identity — so giving up on
+                # the first fault left the record blank for the batch's whole life
+                # and the ACK unpriced (`estimate: {}`), beside the caller's own
+                # `estimated_hours: 12.5`. The documented fault class here is a
+                # statement timeout: transient by nature, so one immediate retry is
+                # the cheap correct bound. A second fault falls through to the record.
+                for _attempt in (1, 2):
+                    if _attempt > 1:
+                        _logger.warning(
+                            "batch %s: retrying the takeover write after a fault "
+                            "(attempt %d of 2)", bid, _attempt)
+                    try:
+                        adopted = self._store.put_batch_if_state(
+                            batch, (BatchState.RESUMING, BatchState.RUNNING),
+                            write_identity=True)
+                        break
+                    except Exception:
+                        adopted = False
+                        _logger.warning(
+                            "batch %s: the takeover could not be written (attempt "
+                            "%d of 2) — refusing to discard a batch this call may "
+                            "not own", bid, _attempt, exc_info=True)
             if adopted:
                 return batch, items
             if current is not None and current.created_at == stamp:
@@ -3517,8 +3611,9 @@ def acceptance_receipt(batch: Batch, items: Sequence[BatchItem], *,
         "status_url": status_url,
         "items_total": len(items),
         "estimate": est,
-        # ⛔ decision (d): batch-processed wording, never provider mechanics.
-        "message": copy or customer_copy(hours),
+        # ⛔ decision (d): batch-processed wording, never provider mechanics. A
+        # record with no duration names no window — see `customer_copy_for`.
+        "message": copy or customer_copy_for(hours),
     }
 
 
@@ -3594,6 +3689,25 @@ def runner_result_to_outcome(per_file: Mapping[str, Any]) -> ItemOutcome:
                     or "the indexer reported a retryable failure"))
     return ItemOutcome(BatchItemState.FAILED,
                        reason=reason or "the indexer reported a failure")
+
+
+def _unlink_staged_paths(staged_paths: Sequence[str]) -> None:
+    """Unlink ONLY the staged documents this call itself wrote. Never raises.
+
+    ⛔ Never `_discard_staged` here (round 23, P2 — measured): that unlinks every
+    child of `<base>/_batches/<bid>/`, and the directory is shared with any rival
+    writing the same caller-supplied id (#14498). An acceptance that refuses after
+    staging its own bytes must remove its own files and nothing else — otherwise a
+    persistent store fault plus a client that retries leaks one full payload per
+    attempt, permanently (no sweeper exists for `_batches/`).
+    """
+    import os
+
+    for path in staged_paths:
+        if not path:
+            continue
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def _discard_staged(stage_base: str | None, batch_id: str) -> None:

@@ -17694,6 +17694,18 @@ async def create_batch(body: BatchRequest,
 
     try:
         batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
+    except _batch_ingest._BatchStoreFault as exc:
+        # ⛔ A STORE FAULT IS A RETRY, NOT A MISCONFIGURATION (round 23, P2 —
+        # measured). These used to reach the `ValueError` arm below and tell a
+        # customer with a perfectly valid body to "send items as paths under the
+        # configured document storage" — advice that cannot fix a graph timeout and
+        # never says retry. Same class as the round-13 P2 in this file (a metering
+        # blip whose copy talked about SIGN-IN).
+        _logger.warning("batch acceptance hit a store fault for team %s",
+                        org_id, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Batch could not be recorded — nothing was "
+                                   "accepted; retry.") from exc
     except ValueError as exc:
         # The one refusal raised by the layer at acceptance: inline text with
         # nowhere durable to put it. 503, because that is a SERVER missing its
@@ -53748,7 +53760,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (728 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
