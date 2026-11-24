@@ -3345,6 +3345,13 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
     # by its own `continue` terminator (`56538`) — never by the start text alone, which would
     # admit either occurrence.
+    # ⛔ RE-DERIVED AGAIN at `3e9278e39349` (`#14220`'s embedder seam moved `sdk.py` and no
+    # landing re-derived these four rows — tracked as `#13937`, whose own "suggested scope"
+    # item 1 is exactly this: re-derive every address at the current tree). Two deltas, not
+    # one — `+53` for the `update_knowledge` pair and `+117` for the NOT-MONOTONE block —
+    # which is why each row was re-found by its own pinned text rather than by adding a
+    # constant. Every row's SPAN is unchanged (176, 3 and 10 lines), so the addresses moved
+    # with the statements rather than being re-pointed at neighbouring code.
     ("sdk.py", 56377, 56379): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56529, 56538): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

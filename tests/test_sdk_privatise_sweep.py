@@ -253,25 +253,27 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2059 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2209 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
     the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
     `2cccf90` walked 1930, each measured by THIS function on its own file, and the resolved run is
     their UNION plus this lane's fold note, never a sum of them. ⛔ AND RE-WALKED AGAIN on THIS LATER
-    FOLD of `origin/main` `e66997b8`, which re-cut the pin 11920 → **11913** (the −7 is `#14544`'s
-    DoD-probe cut deleting the receivers that test carried) and added its own record above the pin:
-    the run reads **2059** here, measured by THIS function on the RESOLVED file, so the 2047 named
-    above is the PREVIOUS fold's reading (`60db4d7`) and is kept because every fold's record stays —
-    it is not this head's figure. ⛔ THOSE NUMBERS ARE A
+    FOLD of `origin/main` `af40c97c`, which re-cut the pin 11920 → **11913** (the −7 is `#14544`'s
+    DoD-probe cut deleting the receivers that test carried) and RESTORED the 146 distinct `#:` lines
+    of `main`'s own records from `e66997b8` that the branch's resolution did not already carry — so
+    the run reads **2209** here, measured by THIS function on the RESOLVED file. The 2047 named
+    above is the PREVIOUS fold's reading (`60db4d7`), and the 2059 this head read before `main`'s
+    block was restored; both are kept because every fold's record stays — neither is this head's
+    figure. ⛔ THOSE NUMBERS ARE A
     MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
     <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
     re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as
     the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
     ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
     defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
-    penultimate branch reading as the resolved one. Only 2059 is graded
+    penultimate branch reading as the resolved one. Only 2209 is graded
     (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
     lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
     the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
