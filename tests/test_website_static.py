@@ -4735,6 +4735,22 @@ def _css_length_px(value: str, root: float | None) -> float | None:
     return None if root is None else number * root
 
 
+def _css_block_start(prop: str, value: str) -> str:
+    """The value `prop` gives the BLOCK-START (top) side of the box.
+
+    The mirror of `_css_block_end` for the START side, and the ONE reader both
+    slack rows use — the positive pin (`margin-top: auto`) and the negative one
+    (no `auto` on the block-END side) — so the two cannot drift apart. The
+    START side is always the FIRST token: `margin`/`margin-block` with one value
+    set both sides and with two are `(start, end)` (MDN, "margin"). Any other
+    property already names its side, so its value is returned unchanged.
+    """
+    if prop not in ("margin", "margin-block"):
+        return value
+    tokens = _css_tokens(_without_important(value))
+    return tokens[0] if tokens else value
+
+
 def _css_align_keyword(prop: str, value: str) -> str:
     """The `align-items`/`align-self` keyword `prop` sets on the subject.
 
@@ -12207,6 +12223,58 @@ def _popular_border_extra_px(css: str) -> float:
             - _border_px_of(base_card, ".pricing-card"))
 
 
+#: Every property that can set a box's BLOCK-END inset, in one place so the
+#: base-inset reader and the CTA padding rows cannot drift apart.
+BASE_PAD_PROPS = ("padding", "padding-block", "padding-bottom",
+                  "padding-block-end")
+
+
+def _base_block_end_pad(css: str) -> str | None:
+    """The BASE card's block-END inset, resolved by the CASCADE.
+
+    ⛔ ONE reader (#14406 review round 16): `_expected_popular_block_end_pad`
+    and the popular-card cascade row both call this, because the row read the
+    `padding` shorthand itself and so red a `padding-block`/`padding-inline`
+    split whose geometry is identical (CTA tops unchanged at 745.78 x4,
+    measured) with "declares `padding`" — while this helper sat above it saying
+    there was "no fifth copy to pin".
+
+    ⛔ AND THE ORDER IS THE CASCADE, not "longhand before shorthand" (#14406
+    review round 16, measured). The first version walked
+    `padding-block-end`/`padding-bottom` before `padding-block`/`padding`, so a
+    base rule declaring the LONGHAND hid a LATER rule declaring the shorthand:
+    with `padding-block: 1.75rem` on `.pricing-card` and the existing
+    `@media (min-width: 1200px) { .pricing-card { padding: 2rem } }` probe, it
+    derived `calc(1.75rem - 1px)` where a browser applies 2rem — the same
+    stale-expectation fail-open round 16 closed in `_css_last_declaring_body`,
+    one function over. CSS resolves by `!important`, then specificity, then
+    SOURCE ORDER; "longhand beats shorthand" is not a cascade axis at all.
+    Every rule read here names `.pricing-card` ITSELF, so specificity ties by
+    construction and what remains is `!important` over source order — the
+    author-origin cascade in full.
+
+    Reach is `_css_last_declaring_body`'s: this selector, at a DESKTOP-applicable
+    media condition (a narrow hatch is the cards stacking by design). Nothing
+    wider is claimed — an ancestor-selector override is not read here.
+    """
+    best_plain: str | None = None
+    best_important: str | None = None
+    for prelude, body, _condition in _css_desktop_rules(css):
+        if ".pricing-card" not in {p.strip() for p in prelude.split(",")}:
+            continue
+        for decl in _css_blanked(body).split(";"):
+            name, sep, value = decl.partition(":")
+            prop = name.strip().lower()
+            if not sep or prop not in BASE_PAD_PROPS:
+                continue
+            inset = _css_block_end(prop, value.strip())
+            if _CSS_IMPORTANT.search(value.strip()):
+                best_important = inset
+            else:
+                best_plain = inset
+    return best_important if best_important is not None else best_plain
+
+
 def _expected_popular_block_end_pad(css: str) -> str:
     """The popular card's bottom inset as a RELATION, never a remembered constant.
 
@@ -12219,25 +12287,7 @@ def _expected_popular_block_end_pad(css: str) -> str:
     fixed the one row it was looking at; the reviewer then measured the same
     false RED three more times. One helper, so there is no fifth copy to pin.
     """
-    # A base card may declare its block-end inset as a LONGHAND rather than the
-    # `padding` shorthand; reading only the shorthand made this helper assert —
-    # a false RED on a page whose geometry is unchanged (#14406 review round
-    # 12). Every property is still read through the OWNING rule, so the
-    # round-13 shadowing fix is preserved; the most specific spelling wins, in
-    # the order the CSS grammar makes them override each other.
-    base_pad = None
-    for prop in ("padding-block-end", "padding-bottom"):
-        owner = _css_last_declaring_body(css, ".pricing-card", prop)
-        if owner is not None:
-            base_pad = _without_important(_effective_decl(owner, prop) or "")
-            break
-    if base_pad is None:
-        for prop in ("padding-block", "padding"):
-            owner = _css_last_declaring_body(css, ".pricing-card", prop)
-            if owner is not None:
-                base_pad = _css_block_end(
-                    prop, _effective_decl(owner, prop) or "")
-                break
+    base_pad = _base_block_end_pad(css)
     assert base_pad, (
         "no rule naming `.pricing-card` declares a block-END padding as "
         "`padding`, `padding-block`, `padding-bottom` or `padding-block-end`, "
@@ -12359,16 +12409,34 @@ class TestProductTeamsPricingCardCtaBaseline:
             "its CTA has no free space to absorb and the four buttons go back "
             "to their content-length heights (three baselines, 70.2px apart at "
             "1440x900 — #13645 item 6)")
+        # ⛔ THE FAMILY, NOT THE LITERAL LONGHAND (#14406 review round 16).
+        # `flex-flow: column nowrap` IS this pin's intent written as the
+        # shorthand: it renders the card pixel-identically (measured at
+        # 1440x900 — all four CTA tops 745.78, cards 304.33 -> 815.72), and
+        # reading only `flex-direction` red it with "declares `flex-direction` …"
+        # — a message naming a property the page does not have. One reader, not
+        # two: `FLEX_DIRECTION_PROPS` is the family the disagreement loop below,
+        # the grid row and `_css_flex_direction` already resolve. It adds no
+        # fail-open, because that loop separately requires every `flex-flow`
+        # that REACHES the card to resolve to `column` — so a declared shorthand
+        # can never be the row layout and still pass here.
         card_direction = _css_last_declaring_body(
             css, ".pricing-card", "flex-direction")
-        assert card_direction is not None, (
-            "no rule naming `.pricing-card` declares `flex-direction`, so the "
-            "children stack along the browser default `row` (#13645 item 6)")
-        assert _without_important(
-            _effective_decl(card_direction, "flex-direction") or "") == "column", (
-            "`.pricing-card` is a flex ROW, so its children sit side by side "
-            "instead of stacking — the card renders as one line of text "
-            "(#13645 item 6)")
+        card_shorthand = _css_last_declaring_body(
+            css, ".pricing-card", "flex-flow")
+        assert card_direction is not None or card_shorthand is not None, (
+            "no rule naming `.pricing-card` declares `flex-direction` or its "
+            "`flex-flow` shorthand, so the children stack along the browser "
+            "default `row` (#13645 item 6)")
+        for owner, prop in ((card_direction, "flex-direction"),
+                            (card_shorthand, "flex-flow")):
+            if owner is None:
+                continue
+            declared = _effective_decl(owner, prop) or ""
+            assert _css_flex_direction(prop, declared) == "column", (
+                f"`.pricing-card` sets `{prop}: {declared}`, a flex ROW — its "
+                "children sit side by side instead of stacking, so the card "
+                "renders as one line of text (#13645 item 6)")
         # ⛔ THE BLOCK-START SIDE, read as the FAMILY it is (#14406 review round
         # 15). Reading only `margin-top` reded a page that spells the same thing
         # `margin-block-start: auto` — which renders IDENTICALLY (measured: all
@@ -12780,9 +12848,9 @@ class TestProductTeamsPricingCardCtaBaseline:
                 # `margin-top: auto !important` is the PINNED intent, stronger,
                 # and reading it as a competitor reded a correct page.
                 bare = _without_important(value)
-                # The block-start side is the first token for the shorthands.
-                start_side = (bare.split()[0] if prop in ("margin", "margin-block")
-                              else bare)
+                # The block-start side is the first token for the shorthands,
+                # read by the SAME helper the positive rows use.
+                start_side = _css_block_start(prop, bare)
                 if start_side == "auto":
                     continue
                 competing.append((prelude, prop, value))
@@ -12880,12 +12948,17 @@ class TestProductTeamsPricingCardCtaBaseline:
         assert popular_border is not None, (
             "`.pricing-card.popular` declares no `border`, so its thicker "
             "border — the reason the compensation exists — is gone")
-        base_card = _css_last_declaring_body(css, ".pricing-card", "padding")
-        assert base_card is not None, (
-            "no rule naming `.pricing-card` declares `padding`, so the base "
-            "inset the compensation is derived from is gone")
-        base_pad = _css_block_end(
-            "padding", _effective_decl(base_card, "padding") or "")
+        # ⛔ THE WHOLE `padding` FAMILY, through the ONE helper
+        # (#14406 review round 16). Reading only the shorthand here red a
+        # `padding-block`/`padding-inline` split whose geometry is identical —
+        # the exact false RED `_expected_popular_block_end_pad` was fixed for,
+        # left behind as a fifth copy of the derivation it documents.
+        base_pad = _base_block_end_pad(css)
+        assert base_pad is not None, (
+            "no rule naming `.pricing-card` declares a block-END padding as "
+            "`padding`, `padding-block`, `padding-bottom` or "
+            "`padding-block-end`, so the base inset the compensation is "
+            "derived from is gone")
         extra_px = _popular_border_extra_px(css)
         assert extra_px > 0, (
             "the popular card's bottom border is not WIDER than its siblings', "
@@ -13189,17 +13262,26 @@ class TestCssDesktopReachAndSpecificity:
         block }` still becomes the owner — so the override shape the rows exist
         for is untouched.
         """
-        pairs = ((".pricing-card", "display"),
-                 (".pricing-card", "flex-direction"),
-                 (".pricing-card .btn", "margin-top"),
-                 (".pricing-card", "border"))
+        pairs = ((".pricing-card", ("display",)),
+                 (".pricing-card", FLEX_DIRECTION_PROPS),
+                 (".pricing-card .btn", ("margin-top", "margin-block-start")),
+                 (".pricing-card", ("border",)))
 
-        def owner(css: str, selector: str, prop: str):
-            body = _css_last_declaring_body(css, selector, prop)
-            return _effective_decl(body, prop) if body is not None else None
+        def owner(css: str, selector: str, props: tuple[str, ...]):
+            # ⛔ THE FAMILY (#14406 review round 16): `flex-direction` and
+            # `margin-top` are each ONE spelling of the thing this row makes
+            # non-vacuous, so requiring the longhand made the whole row red on
+            # a page written with `flex-flow: column nowrap` or
+            # `margin-block-start: auto` — both pixel-identical (measured at
+            # 1440x900: CTA tops 745.78 x4).
+            for prop in props:
+                body = _css_last_declaring_body(css, selector, prop)
+                if body is not None:
+                    return _effective_decl(body, prop)
+            return None
 
-        pristine = {(sel, prop): owner(_product_teams_html(), sel, prop)
-                    for sel, prop in pairs}
+        pristine = {(sel, props): owner(_product_teams_html(), sel, props)
+                    for sel, props in pairs}
         missing = [k for k, v in pristine.items() if v is None]
         assert missing == [], (
             f"the unmutated page declares nothing for {missing!r}, so the rows "
@@ -13208,18 +13290,19 @@ class TestCssDesktopReachAndSpecificity:
 
         for mutant, shadow_selector, hidden in (
                 (".pricing-card { align-self: stretch }",
-                 ".pricing-card", "display"),
+                 ".pricing-card", ("display",)),
                 (".pricing-card { border-color: #fff }",
-                 ".pricing-card", "display"),
+                 ".pricing-card", ("display",)),
                 (".pricing-card .btn { border-radius: 2rem }",
-                 ".pricing-card .btn", "margin-top")):
+                 ".pricing-card .btn", ("margin-top", "margin-block-start"))):
             mutated = self._page_with(mutant)
             # The mutant really does shadow the pre-fix `[-1]` read — otherwise
             # this arm would pass on the reader it exists to replace.
             shadow = [body for body, inside_media
                       in _css_rules_with_scope(mutated, shadow_selector)
                       if not inside_media][-1]
-            assert _effective_decl(shadow, hidden) is None, (
+            assert all(_effective_decl(shadow, prop) is None
+                       for prop in hidden), (
                 f"`{mutant}` does not shadow the last-selector read for "
                 f"`{hidden}` (its body still declares it), so this arm is "
                 "VACUOUS — pick a mutant that actually hides the pinned "
@@ -13238,13 +13321,13 @@ class TestCssDesktopReachAndSpecificity:
         # Non-vacuity: an appended rule that DOES declare the property is still
         # its owner, so the override shape the pinned rows exist for still reds.
         assert owner(self._page_with(".pricing-card { display: block }"),
-                     ".pricing-card", "display") == "block", (
+                     ".pricing-card", ("display",)) == "block", (
             "an appended `.pricing-card { display: block }` is no longer read "
             "as the owner of `display`, so the row that pins the card's flex "
             "container is blind to the ordinary override (measured RED before "
             "and after this reader)")
         assert owner(self._page_with(".pricing-card { border: 2px solid #f00 }"),
-                     ".pricing-card", "border") == "2px solid #f00", (
+                     ".pricing-card", ("border",)) == "2px solid #f00", (
             "an appended `.pricing-card { border: … }` is no longer read as the "
             "owner of `border`, so the popular card's compensation relation "
             "would be derived from the border the page no longer has")
@@ -13364,7 +13447,19 @@ class TestCssDesktopReachAndSpecificity:
             f"{_popular_border_extra_px(desktop_media):g}. Before this fix it "
             "derived 1px and every row stayed GREEN over a page whose CTA was "
             "off the baseline (#14406 review round 16, measured)")
-        assert _expected_popular_block_end_pad(desktop_media) == "calc(1.75rem - 2px)", (
+        # ⛔ THE BASE INSET IS DERIVED FROM THE PAGE UNDER TEST, never spelled
+        # as a literal (#14406 review round 16, measured): this expectation read
+        # `calc(1.75rem - 2px)`, so the relation-preserving edit
+        # (`padding: 2rem` together with `padding-bottom: calc(2rem - 1px)` —
+        # the same CTA y values) red it with "the relation the row pins is
+        # stale" about a page whose relation is exactly right. Same class as
+        # the four literals round 12 removed from its sibling rows.
+        base_inset = _base_block_end_pad(_product_teams_html())
+        assert base_inset is not None, (
+            "the shipped page declares no block-END base inset, so this row "
+            "has no operand to derive its expectation from")
+        assert _expected_popular_block_end_pad(desktop_media) == (
+                f"calc({base_inset} - 2px)"), (
             "the derived inset still subtracts the base 1px while the browser "
             "applies a 3px border, so the relation the row pins is stale: "
             f"{_expected_popular_block_end_pad(desktop_media)!r}")
