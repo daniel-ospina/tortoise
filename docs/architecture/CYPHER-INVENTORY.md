@@ -2362,4 +2362,3 @@ one.
 | `tortoise/why_snapshot.py:147` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/why_snapshot.py:151` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/why_snapshot.py:563` | `precompute_for_dream` | plain | read | candidate:SQL-shaped | `MATCH (s:ContextSubscription) WHERE s.disabled_at IS NULL RETURN cou…` |
-
