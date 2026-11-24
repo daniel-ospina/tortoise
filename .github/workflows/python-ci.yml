@@ -2647,9 +2647,9 @@ jobs:
           # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
           # pair is deliberately NOT derived from the leg weight — tightening it
           # belongs with the per-leg `matrix.watchdog_minutes` follow-up. Re-deriving
-          # the budget when the leg set moves is UNGRADED now: the arm that
-          # redded it (`test_slow_leg_bounds_..._committed_work`) was CUT with
-          # the B7 arithmetic (2026-11-23); the cap/watchdog ORDER survives.
+          # the budget when the leg set moves IS graded: the arm that reds it
+          # (`test_slow_leg_bounds_..._committed_work`) was cut with the B7
+          # arithmetic (2026-11-23) and restored by #14481; the cap/watchdog ORDER survives.
           # #3719: pytest's own start stamp — see the fast-shard site above.
           PYTEST_T0=$SECONDS
           timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
@@ -3427,7 +3427,9 @@ jobs:
     # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
     # watchdog` asserts cap > the LARGEST emitted shard watchdog, and
     # `test_every_bounded_pytest_job_caps_above_its_watchdog` also asserts cap
-    # <= `_CAP_CEILING_FACTOR` (3x) that watchdog (the `_shard_bounds_*` arm CUT).
+    # <= `_CAP_CEILING_FACTOR` (3x) that watchdog (the `_shard_bounds_*` arm the B7
+    # cut took and #14481 restored:
+    # `test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it`).
     timeout-minutes: 30
     env:
       TORTOISE_TEST_CARVE_OUT: "1"

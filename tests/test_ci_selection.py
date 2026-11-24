@@ -8787,6 +8787,37 @@ def test_halves_duplicate_entry_flagged():
     assert any("test_api" in i and "MORE THAN ONE shard" in i for i in issues), issues
 
 
+def test_halves_guard_reports_single_sided_pack_without_crashing():
+    # #3407 review P2: the branch written to CATCH a zero-weight half died with
+    # ZeroDivisionError while formatting its own diagnosis — `hi / lo` was
+    # evaluated inside the f-string after `lo <= 0` had short-circuited the
+    # comparison. A single-sided pack is reachable (a 1-file pool, or an
+    # all-zero measured map), and this is the only check that catches it:
+    # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
+    # when one half is empty.
+    # Restored by #14481 with the rest of this file: the #14439 merge cut it, and
+    # nothing else at that head reached the `lo <= 0` branch (the durations-free
+    # `_halves_manifest()` fixtures take the count path, and every real-manifest
+    # caller weighs all shards above zero), so removing it left the branch
+    # ungraded — a mutation to `ratio = round(hi / lo, 2)` redded nothing.
+    from tools.ci_selection import workflow_halves_issues
+    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_only.py": 5.0}}
+    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_guard_reports_all_zero_map_without_crashing():
+    # Restored by #14481 — see the single-sided arm above for the mutation it
+    # grades (`lo <= 0` with every weight zero rather than with an empty half).
+    from tools.ci_selection import workflow_halves_issues
+    files = ["test_a.py", "test_b.py", "test_c.py"]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
 def test_fast_files_absent_from_halves_reports_coverage_hole():
     from tools.ci_selection import fast_files_absent_from_halves
     halves = {"a": ["test_api"], "b": ["test_crypto"]}

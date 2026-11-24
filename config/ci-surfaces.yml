@@ -101,7 +101,8 @@ version: 1
 # #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
 # at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
 # unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
-# them back into the nine/two above.
+# them into the seven/four at 837.5 s and 837.4 s stated above (this sentence read "nine/two" —
+# #14429's reading — until #14481 re-cited it against the block it sits under).
 # ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
 # why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
@@ -12324,17 +12325,13 @@ tier1:
 # 18.95m to 7.58m.
 # `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
 # headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (5.3x
-# at the 7.58m heavier leg of the pre-#10194 pool, and higher today on a lighter
-# leg — the ratio is DERIVED, so it moves with the pool and is not restated as a
-# fixed number here), and the workflow's drift guard pins the union of the EXPANDED legs to
-# `test_slow_leg_bounds_clear_the_committed_work` re-derived the 40m watchdog's
-# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (CUT in
-# the B7 test cut, 2026-11-23: re-derive by hand; 5.3x
 # at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
 # ratio is DERIVED, so it moves with the pool and is not restated as a fixed
 # number), and the workflow's drift guard pins the union of the EXPANDED legs to
 # `slow_gating_files()`. Read the live shape with `python3
 # tools/ci_selection.py --non-gating-report` rather than from a figure here.
+# (The arm was among those the #14439 merge cut on 2026-11-23; #14481 restored it,
+# so at this head the floor and the drift guard are graded by a failing test.)
 # NOTHING was deleted, moved off the pre-merge gate, or
 # re-marked: all 65 files still run on a PR, with the same nodeids.
 # ⚠️ #10194 exception to that sentence: the FIVE eval files in this list are no
@@ -12587,8 +12584,9 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (recomputed from the
-# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`, an arm
-# CUT on 2026-11-23 — by hand now) is what absorbs a ranking error; the durable fix is the scheduled refresh
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work` — an
+# arm the #14439 merge cut on 2026-11-23 and #14481 restored) is what absorbs a
+# ranking error; the durable fix is the scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
@@ -12603,8 +12601,8 @@ slow_files:
 # rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
 # kept the literals honest was
-# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work (CUT in
-# the B7 test cut, 2026-11-23; recompute it by hand before moving a literal).
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work (cut by
+# the #14439 merge on 2026-11-23, restored by #14481 — move a literal and it reds).
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py
