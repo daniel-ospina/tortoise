@@ -5195,7 +5195,7 @@ _GENERATION_DIGESTS = {
     # before it moves anything. ⛔ THIS REASON NO LONGER APPLIES TO 33: generation 33
     # DID reach `main` (in #14423), so the "no installed copy carries it" premise that
     # justified these in-place rewrites was FALSE — which is why this PR now ships
-    # generation 34 and 33's entry is frozen at `main`'s digest (#14480 cycle-19
+    # generation 34 and 33's entry is frozen at `main`'s digest (#14480 cycle-20
     # review, P1). The rewrites themselves are the record of what 33's bytes became
     # before it shipped.
     # ⛔ AND ONE MORE, from the cycle-7 review: `acquireDrainClaim` gained an
@@ -6431,14 +6431,15 @@ def test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why():
     `_READ_SEAM_GENERATION_DIGESTS[33]`) to this branch's digest instead of the
     shipped one, or move either artifact marker back to 33.
 
-    ⛔ AND THE FULL REVERT IS SIX SITES, MEASURED RATHER THAN ENUMERATED BY MEMORY (review at
-    `e1ee7674`): (1) both artifact markers → 33; (2) both `_PINNED_*` pairs → the marker-33
+    ⛔ AND THE FULL REVERT IS FIVE STEPS COVERING EIGHT LITERAL 34s, MEASURED RATHER THAN
+    ENUMERATED BY MEMORY (review at `e1ee7674`): (1) both artifact markers → 33; (2) both `_PINNED_*` pairs → the marker-33
     files' digests; (3) both `_GENERATION_DIGESTS` maps (the two `34:` entries removed, the
     `33:` entries set to those digests); (4) `_EXPECTED_INSTALL_CONTRACT["pi"]` → 33; (5) the
     `== 34` in `test_pi_seam_carries_exactly_one_canonical_marker` → 33. Partial reverts red
     rows that are not this one — 4 failed with only (1)+(2), 3 failed once (3) is added — which
-    reads as if this row were not the gate. With (1)-(5): `306 passed, 1 failed`, and the
-    failure is THIS row. That is the claim the Residuals bullet makes, and it is why the
+    reads as if this row were not the gate. With all FIVE steps (eight literal `34`s: two
+    markers, two pin pairs, two digest maps, `_EXPECTED_INSTALL_CONTRACT`, the marker
+    assertion): `306 passed, 1 failed`, and the failure is THIS row. That is the claim the Residuals bullet makes, and it is why the
     enumeration is spelled out instead of summarised.
     """
     # 33 is `main`'s, not this branch's: the markers moved past it and the entry is

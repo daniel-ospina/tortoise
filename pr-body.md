@@ -436,11 +436,11 @@ them all. That is the shape that reads green everywhere and blocks installs ever
 
 | finding | disposition |
 |---|---|
-| **P3 (measured, not listed)** the generation-34 bump had NO discriminating row | **fixed**: `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why` pins both markers at 34 AND pins `_GENERATION_DIGESTS[33]` / `_READ_SEAM_GENERATION_DIGESTS[33]` as something other than this branch's pair. Verified RED under each of those four edits, and it is the ONLY row that reds under a full revert of `f69c2113` (which also reverts `_EXPECTED_INSTALL_CONTRACT["pi"]` and the `== 34` marker assertion — a revert built from the shorter enumeration beside this row reds those two as well, which is why the enumeration now names all four sites). |
+| **P3 (measured, not listed)** the generation-34 bump had NO discriminating row | **fixed**: `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why` pins both markers at 34 AND pins `_GENERATION_DIGESTS[33]` / `_READ_SEAM_GENERATION_DIGESTS[33]` as something other than this branch's pair. Verified RED under each of those four edits, and it is the ONLY row that reds under a full revert of `f69c2113` (which also reverts `_EXPECTED_INSTALL_CONTRACT["pi"]` and the `== 34` marker assertion — a revert built from the shorter enumeration beside this row reds those two as well, which is why the enumeration now names all five steps (eight literal `34`s)). |
 | **P3** "cycle 19" was cited for findings owned by the `bcb52e1d` round | **fixed**: the citations name cycle 20 (or the head). |
 | **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
 | **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
-| **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts four plus the measured one. |
+| **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts five plus the measured one. |
 | **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
 ## Residuals, stated
@@ -458,7 +458,7 @@ them all. That is the shape that reads green everywhere and blocks installs ever
   caught the re-cut concedes it cannot). Before the new row: reverting the whole fix at `f69c2113`
   left `306 passed` and `327 pass / 0 fail`, because every other row asserted only that the LIVE
   number and the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped
-  number satisfies all of them. Since the new row: that same revert — six sites, listed in the
+  number satisfies all of them. Since the new row: that same revert — five steps, listed in the
   row's docstring — leaves `306 passed, 1 failed`, and the failure is that row. The node pair is
   unchanged at `327 pass / 0 fail` either way (the Pi suites never ran the ship-frozen assertion). That is why this PR adds
   `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`: it pins the artifacts at 34 AND
