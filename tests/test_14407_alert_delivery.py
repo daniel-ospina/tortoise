@@ -1611,6 +1611,16 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
         f"{log!r}")
     assert "per-outcome releases" in log, (
         f"the suspension shape must name what CAN re-arm it: {log!r}")
+    # Round-9 (P2, F5): the "only" set was still incomplete — ``_enforce_delivery_cap``
+    # drops the soonest-to-expire LIVE keys once the ledger passes
+    # ``_MAX_DELIVERY_KEYS`` (its own docstring records a live population of 4596
+    # over a 4096 cap), which ends an armed window with NO release firing at all.
+    # An operator reading "only ... a lifted suppression, a deferred filing, a FAILED
+    # SEND" would not look at the ledger's own eviction for a page they were not
+    # expecting. Deleting the clause reddens.
+    assert "cap eviction" in log, (
+        "the 'only' set omitted the ledger's own cap eviction, which can end a "
+        f"live window with no release firing: {log!r}")
     # F2 (#14487): the list was an "only" that omitted a release site in the SAME
     # function — a send that does not land releases the window for EVERY kind (the
     # DEDUP arm's `release_abuse_delivery`, and the `_deliver_unattributed` tail's).

@@ -89,9 +89,14 @@ incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2
 store, `resolve_incident_state` NORMALLY answers SKIPPED_WINDOW on the first clean
 window, so nothing is closed and nothing is re-armed there yet. That is the default
 path, not a universal: a resolve leg that raises or answers `CloseCooldown` leaves
-`skipped_window` false and the ledger IS popped at every episode end (measured 6
-crossings = 6 messages), and `ALERT_RECOVERY_STREAK=1` closes and re-arms per
-crossing (measured 6 issues / 12 pushes). With NO incident channel there is
+`skipped_window` false and the ledger IS popped at that episode end (measured 6
+crossings = 6 messages, with ONE incident kind on record), and
+`ALERT_RECOVERY_STREAK=1` closes and re-arms per crossing (measured 6 issues / 12
+pushes). ⛔ `skipped_window` is ONE flag for the whole CALL, not per kind, so that
+pop is conditional a second way: a raise on one episode kind does NOT release the
+ledger when ANOTHER episode kind answers `SKIPPED_WINDOW` in the same call
+(reproduced: raise for one, `SKIPPED_WINDOW` for the other — the ledger stays
+armed). With NO incident channel there is
 no `SKIPPED_WINDOW` gate to hold the release, so `notify.resolve_abuse_episode`
 re-arms the local ledger on the FIRST confirmed episode end — the bound in that shape
 is the EPISODE, and the 24h window is only the ceiling for a continuously breaching
@@ -1890,11 +1895,14 @@ class AbuseEngine:
         a caller cannot get one without the other:
 
         * the DELIVERY window is re-armed, because a NEW episode must page at
-          once — the episode end is the RELEASE, and the window is the ceiling
-          only for a CONTINUOUSLY breaching subject (no-channel shape: a flapping
-          rule pages once per episode end, so the window is not its ceiling —
-          the module docstring carries the scopes), and only the engine knows the
-          rule's window went clean;
+          once — the episode end is the RELEASE. Which BOUND that window is
+          depends on the shape: on the NO-INCIDENT-CHANNEL path it is the
+          ceiling only for a CONTINUOUSLY breaching subject, because there a
+          flapping rule pages once per episode end (no `SKIPPED_WINDOW` gate
+          holds that release); WITH a store the gate normally holds an
+          alternating rule inside the window, so the 24h ceiling applies there
+          too — the module docstring in `notify` carries the scopes. And only
+          the engine knows the rule's window went clean;
         * the incidents are closed + deleted-to-resolve, because nothing else ever
           resolved an abuse incident: the sentinel outlived the condition and its
           issue stayed OPEN for the rest of time, so the tracker reported a

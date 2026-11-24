@@ -199,13 +199,20 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: inside the window and the 24h bound holds (measured, default config: 24
 #: alternating evaluations over 36h = 2 pushes store-side, 12 no-channel). It is
 #: not a universal: a resolve leg that raises or answers ``CloseCooldown`` leaves
-#: ``skipped_window`` false and pops the ledger at every episode end (measured: 6
-#: crossings = 6 messages), and ``ALERT_RECOVERY_STREAK=1`` does the same.
+#: ``skipped_window`` false and pops the ledger at that episode end (measured: 6
+#: crossings = 6 messages, with ONE incident kind on record), and
+#: ``ALERT_RECOVERY_STREAK=1`` does the same. ⛔ ``skipped_window`` is ONE flag for
+#: the whole CALL, not per kind, so that pop is conditional a second way: a raise
+#: on one episode kind does NOT pop the ledger when ANOTHER episode kind answers
+#: ``SKIPPED_WINDOW`` in the same call (reproduced: raise for one kind,
+#: ``SKIPPED_WINDOW`` for the other — the ledger stays armed).
 #: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
 #: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
 #: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing, a
-#: failed send), so a second suspension of the same subject inside 24h is folded
-#: UNLESS one of those releases fires in between, and then it IS delivered (the
+#: failed send) and by the ledger's own cap eviction (``_enforce_delivery_cap``
+#: drops the soonest-to-expire LIVE keys once the population passes
+#: ``_MAX_DELIVERY_KEYS``), so a second suspension of the same subject inside 24h
+#: is normally folded — but it IS delivered when one of those fires in between (the
 #: lifted-suppression arm: two messages inside one window, no episode end).
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
@@ -612,10 +619,13 @@ def release_abuse_delivery(kind: str, subject: str) -> None:
     episode — the direction a security signal must never fail in (#4872).
 
     Released on the episode end the engine OBSERVES (the clean window that
-    persisted ``flag_clear``, plus its bounded retry) — and, kind-agnostically, by
-    the per-outcome releases (a failed close, a deferred filing, a lifted
-    suppression, a failed send), which is why a flapping rule can page once per
-    crossing. An episode cleared out of
+    persisted ``flag_clear``, plus its bounded retry, and equally a close that
+    RAISES or is backing off — that leaves ``skipped_window`` false, so the gate
+    does not hold) — and, kind-agnostically, by the per-outcome releases (a
+    deferred filing, a lifted suppression, a failed send), which is why a
+    flapping rule can page once per crossing. The failed-close release is NOT in
+    that kind-agnostic set: it loops ``_episode_delivery_kinds()``, which excludes
+    ``abuse_suspended``. An episode cleared out of
     band — the ``abuse_unsuspend`` SQL function, a manual ``flag_clear`` — is not
     observed, so its window stays armed and a new episode inside it is folded;
     the reminder at the window's end still fires and names the open issue. That
@@ -1165,8 +1175,10 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     # operator decision, not a rule's flag window), and even for the rule-episode
     # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
     # gated on ``SKIPPED_WINDOW`` while that gate applies (a resolve leg that raises
-    # or answers ``CloseCooldown`` leaves it false and pops the ledger at every
-    # episode end; ``ALERT_RECOVERY_STREAK=1`` closes per crossing), so an
+    # or answers ``CloseCooldown`` leaves it false and pops the ledger at that
+    # episode end — unless ANOTHER episode kind reports ``SKIPPED_WINDOW`` in the
+    # same call, since the flag is per CALL, not per kind; and
+    # ``ALERT_RECOVERY_STREAK=1`` closes per crossing), so an
     # alternating rule normally stays inside the window there; only the
     # no-incident-channel ledger is released on every confirmed episode end.
     # Stating one kind's rule for all three sends an operator diagnosing a page
@@ -1188,10 +1200,12 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         if kind in _episode_delivery_kinds() else
         ", NOT re-armed by an episode end — this kind has NO rule episode (it"
         " records an operator decision), so no episode end ever re-arms it; it"
-        " is bounded by that window like every other outcome, and is re-armed"
-        " only by the generic per-outcome releases (a LIFTED suppression, a"
-        " deferred filing, a FAILED SEND), so a repeat about the same subject"
-        " inside the window is normally folded")
+        " is bounded by that window like every other outcome, and the generic"
+        " per-outcome releases (a LIFTED suppression, a deferred filing, a"
+        " FAILED SEND) end the window early — as does the ledger's own cap"
+        " eviction, which drops the soonest-to-expire live keys past its maximum"
+        " — so a repeat about the same subject inside the window is normally"
+        " folded")
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "
