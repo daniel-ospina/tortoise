@@ -797,6 +797,49 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
             proc.wait(timeout=10)
 
 
+def _peek_child_status(proc: subprocess.Popen) -> int | None:
+    """The child's exit status, read WITHOUT reaping it — or `None` if still running.
+
+    ⛔ `Popen.poll()` REAPS, and a reaped lane frees its pid, so a caller's later
+    `_stop_fake_lane` cannot kill the process group and the lane's `sleep` is orphaned
+    (#14506 review, cycle 4). `WNOWAIT` reads the status and leaves the zombie in place, so
+    the pid — and the group it leads — is still ours at teardown.
+
+    Falls back to `poll()` where `os.waitid`/`os.WNOWAIT` does not exist; that platform
+    keeps the pre-existing behaviour (the status is reported, and the teardown's guard then
+    declines to signal a group it no longer owns).
+    """
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        try:
+            info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:  # pragma: no cover — already reaped elsewhere
+            return proc.returncode
+        if info is None:
+            return None
+        return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+    return proc.poll()  # pragma: no cover — no `waitid` on this platform
+
+
+def _wait_for_grandchild(pid: int, timeout: float = 5.0) -> bool:
+    """True once the lane's shell has FORKED its `sleep` child (Linux `/proc`).
+
+    ⛔ THE STATE A TEARDOWN ARM NAMES HAS TO BE CONSTRUCTED (#14506 review, cycle 4).
+    Terminating the shell before it forks leaves NO member in the group (measured 0/120,
+    against 60/60 with a 2 ms delay), so an arm that assumes the grandchild exists asserts
+    about a group that is already empty — and its cleanup is dead code.
+    """
+    path = Path(f"/proc/{pid}/task/{pid}/children")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if path.read_text().split():
+                return True
+        except OSError:  # pragma: no cover — not Linux, or the shell is already gone
+            return False
+        time.sleep(0.01)
+    return False
+
+
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
     """Block until `/proc/<pid>/cwd` reads back with the ` (deleted)` suffix."""
     deadline = time.monotonic() + timeout
@@ -9919,7 +9962,15 @@ class CollisionPreflightTest(unittest.TestCase):
                     return
             time.sleep(0.1)
         fatal = ""
-        rc = proc.poll() if proc is not None else None
+        # ⛔ READ THE CHILD'S STATUS WITHOUT REAPING IT (#14506 review, cycle 4). `poll()`
+        # reaps, which frees the pid; `_stop_fake_lane` in every caller's `finally` then sees
+        # `returncode` set and returns WITHOUT killing the group — leaving the lane's
+        # `sleep` orphaned into the temp dir `tearDown` deletes, which is the leak that
+        # helper exists to prevent. `WNOWAIT` reads the status and leaves the zombie in
+        # place, so the pid — and therefore the process group — is still ours when the
+        # teardown runs. Falls back to `poll()` where `waitid`/`WNOWAIT` is unavailable; on
+        # that platform the guard's early return applies and the residual is the orphan.
+        rc = _peek_child_status(proc) if proc is not None else None
         if last_err:
             # A CENSUS THAT NEVER ANSWERED IS NOT A GAP IN A CENSUS THAT DID.
             fatal = (
@@ -10339,13 +10390,22 @@ class CollisionPreflightTest(unittest.TestCase):
         left the whole suite green, which is the "claimed and pinned by nothing" class this
         commit opened for the group reap.
 
+        ⛔ THE STATE IS CONSTRUCTED, NOT ASSUMED (#14506 review, cycle 4). Terminating the
+        shell before it has forked `sleep` leaves NO member in the group (measured 0/120,
+        against 60/60 with a 2 ms delay), so the premise is waited for explicitly — and the
+        `finally` cleanup is then provably ours, since a group cannot lose its pgid while a
+        member holds it.
+
         Mutation: remove `if proc.returncode is not None: return` and this reddens.
         """
         proc = _fake_lane(self.tmp)
         try:
-            # ⛔ The SHELL alone (no group), so it actually EXITS and can be reaped — the
-            # pre-#14506 teardown shape, and the state `_wait_for_pi_cwd` leaves behind
-            # when it polls a dead lane. `returncode` is set only once we have reaped it.
+            self.assertTrue(
+                _wait_for_grandchild(proc.pid),
+                "the lane's shell never forked its `sleep` — the state this arm names was "
+                "not constructed, so the teardown assertion below would prove nothing")
+            # The SHELL alone (no group), so it actually EXITS and can be reaped — the
+            # pre-#14506 teardown shape. `returncode` is set only once we have reaped it.
             with suppress(OSError):
                 proc.terminate()
             proc.wait(timeout=10)
@@ -10354,8 +10414,8 @@ class CollisionPreflightTest(unittest.TestCase):
             killpg.assert_not_called()
         finally:
             _FAKE_LANE_STDERR.pop(proc.pid, None)
-            # The lane's group still holds the orphaned sleeper; reap it so this arm
-            # leaves nothing behind (the same way `_stop_fake_lane` would).
+            # The orphaned `sleep` is still in the group (it is what keeps the pgid from
+            # being recycled) — reap it, or this arm leaves the very orphan it forbids.
             with suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
 
