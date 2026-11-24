@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14438-1795482318-p3419634-f819d1a0",
+  "_sha": "4df93c0230271c7cc1aca6c0f2d7053b85aea4be",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14438.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14424-construction-phase-hedge"
+    },
+    {
+      "kind": "sha",
+      "value": "b526bf711f365a848153d584511c2f9f484c52ab"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14424-onboarding"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 6697,
+  "ended_at": 1795489015,
+  "exit_code": 0,
+  "heartbeat_at": 1795489015,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14438-1795482318-p3419634-f819d1a0",
+  "lease_until": 1795525615,
+  "pid": 3419634,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795482318,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14438",
+  "worktree": "/home/cmux/tortoise/.worktrees/14424-onboarding"
+}
