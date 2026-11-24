@@ -5999,7 +5999,7 @@ class _ManifestShapeError(RuntimeError):
 #: `_bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)` in
 #: `test_the_bundles_cites_resolve_where_the_bundle_says_they_do`); the second was
 #: ORPHANED by the B4 test-volume cut (2026-11-23, #14439 — that diff deleted its
-#: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED a day later by
+#: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED the next day by
 #: #14482's orphan sweep (2026-11-24, "delete the 81 names the volume cut
 #: orphaned"). ⚠️ Two events, two dates: dating the CUT alone points a reader at
 #: `8c373f59a1`, where the table is still DEFINED — the same
