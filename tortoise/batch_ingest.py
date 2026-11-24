@@ -2182,7 +2182,25 @@ class BatchCoordinator:
                 reason=f"{type(exc).__name__}: {exc}"[:500])
         # A cancel that landed while the runner was working wins: the item is
         # already terminal and must not be resurrected (the customer stopped it).
-        latest = self._fresh(org_id, fresh)
+        #
+        # ⛔ THE READ IS PROTECTED TOO (#14415 review round 10, P1). It sat
+        # outside every `try`, and it runs AFTER the runner has spent: one graph
+        # read failure here (this module's own measured 1,505 ms probe / the 10 s
+        # statement timeout) raised out of `run_item`, `_drain_batch` only logged
+        # it, no charge record was set, so `record_item_spend` was never called and
+        # `_bill` was never reached. Measured: `run_item` raises
+        # `RuntimeError: graph probe timeout`, the row stays `extracting 0 0`, the
+        # meter is never called — and the claim then goes stale, so a reclaim runs
+        # the runner AGAIN. The arms below promise the opposite; this one read was
+        # simply not covered by them.
+        try:
+            latest = self._fresh(org_id, fresh)
+        except Exception:
+            _logger.warning("batch item %s: the post-runner read failed, billing "
+                            "the spend that was made", fresh.item_id,
+                            exc_info=True)
+            return self._bill(org_id, fresh, outcome.tokens_in,
+                              outcome.tokens_out)
         if latest.terminal:
             # ⛔ OUR CALL STILL SPENT, AND THE ROW MUST SAY SO TOO (#14415 review
             # rounds 7 and 8, N1 then BLOCKING 2). Reaching here means the runner
@@ -2210,7 +2228,7 @@ class BatchCoordinator:
             # record NOTHING, so tokens that really were spent appeared on neither
             # surface — the same situation as the terminal arm above, one branch
             # away, decided the other way.
-            return self._bill(org_id, self._fresh(org_id, fresh),
+            return self._bill(org_id, self._row_or(org_id, fresh),
                               outcome.tokens_in, outcome.tokens_out)
         except Exception:
             # ⛔ A BOOKKEEPING FAILURE IS NOT A LOST SPEND (#14415 review round 7,
@@ -2226,7 +2244,7 @@ class BatchCoordinator:
             # it is billed here, exactly as the two arms above do.
             _logger.warning("batch item %s: settle write failed, billing the "
                             "spend that was made", fresh.item_id, exc_info=True)
-            return self._bill(org_id, self._fresh(org_id, fresh),
+            return self._bill(org_id, self._row_or(org_id, fresh),
                               outcome.tokens_in, outcome.tokens_out)
         if landed:
             # ⛔ THE CHARGE RECORD (#14415 review round 4, BLOCKING 4 / round 5,
@@ -2288,6 +2306,20 @@ class BatchCoordinator:
                             "ledger is charged, the row's total is short",
                             item.item_id, org_id, exc_info=True)
         return item
+
+    def _row_or(self, org_id: str, item: BatchItem) -> BatchItem:
+        """Read the row; fall back to `item` if the read itself fails.
+
+        ⛔ A FAILED READ MUST NOT LOSE THE SPEND (#14415 review round 10, P1).
+        `_bill` needs SOME row to bill against, and the caller's copy is a
+        perfectly good one: the alternative — letting the read raise after the
+        runner already spent — is what dropped a real spend from the ledger and
+        left the row claimable again.
+        """
+        try:
+            return self._fresh(org_id, item)
+        except Exception:  # pragma: no cover - the fallback IS the point
+            return item
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
@@ -2414,7 +2446,15 @@ class BatchCoordinator:
             # lie B3 forbade, reached through a narrower window: the customer
             # would read "work stopped, not charged" over rows that are
             # `indexed` and charged. Derive the truth from the rows instead.
-            return self.settle(org_id, batch_id), items
+            # ⛔ THE ROWS, RE-READ (#14415 review round 10, P1). `items` is the
+            # snapshot taken BEFORE the set-based write, so returning it reported a
+            # row as `queued` after a drain had settled it `indexed` with 60 000
+            # tokens: measured `status: completed`, `complete: true`,
+            # `tokens_spent: 0`, `items[0].status: "queued"` and `counts.pending:
+            # 1` — payload and route copy both asserting nothing was charged, over a
+            # charged document, with `complete` beside `pending`.
+            return self.settle(org_id, batch_id), self._store.items(org_id,
+                                                                     batch_id)
         batch.state = BatchState.CANCELLED
         batch.updated_at = stamp
         batch.cancelled_at = stamp
