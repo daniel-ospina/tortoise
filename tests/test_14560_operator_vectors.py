@@ -425,4 +425,6 @@ def test_the_sdk_UPDATE_door_holds_the_Point_vector_too(sdk, monkeypatch):
     after = sdk._get_point(pid).get("embedding")
     assert after and abs(float(after[5]) - 1.0) < 1e-9, (
         "with the hold lifted the pop did not happen, so this arm grades nothing — the "
-        "conjunct `not _derived_mirror_required('operator')` must still be consulted")
+        "hold must be the ONLY thing keeping this vector (this arm stubs both counters at "
+        "stop, so it grades the hold; which counters are ASKED is graded in "
+        "`tests/test_13826_write_gate.py::test_update_entity_asks_the_gate_per_label`)")

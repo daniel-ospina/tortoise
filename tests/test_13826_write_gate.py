@@ -455,6 +455,16 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     # index (so nothing READS the property) and `#13971` gated the writers on the same
     # measured predicate, so `#5004`'s "a Point vector is RECORD TRUTH" is now the reason
     # the RECORD holds it — never a reason to re-write the mirror after a strip.
+    # ⛔ THE WHOLE `:Point` BLOCK RUNS WITH THE HOLD LIFTED (`#14560` review, P2). `:Point`'s
+    # drop is HELD (`hosted_backup._RESTORE_DROP_HELD`, `#13971`'s per-ID ask is outstanding) on
+    # BOTH doors now, so with the real set NO `:Point` write can pop at all — and the two
+    # one-half arms below would then pass under a mutant that drops EITHER conjunct (or the
+    # whole gate block), which is exactly what they exist to catch. Lifting the hold for the
+    # block restores their discrimination; the hold itself is re-asserted at the end, on the
+    # REAL set, so it is graded rather than assumed.
+    import tortoise.hosted_backup as _hb
+    _hold = _hb._RESTORE_DROP_HELD
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     g.query("CREATE (p:Point {id: 'pt-13826', content: 'a claim'})")
     _gate_map(monkeypatch, {"point"})
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
@@ -473,14 +483,6 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
         "alone, exactly as for `:Source`'s two halves")
     g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
     _gate_map(monkeypatch, set())
-    # ⛔ THE POP IS DRIVEN WITH THE HOLD LIFTED (`#14560` review, P1). `:Point`'s drop is HELD
-    # (`hosted_backup._RESTORE_DROP_HELD`, `#13971`'s per-ID ask is outstanding) on BOTH doors
-    # now, so with the real set this arm would keep the vector for the WRONG reason and grade
-    # nothing. Lifting it here keeps the conjunction graded; the hold itself is asserted below,
-    # on the real set.
-    import tortoise.hosted_backup as _hb
-    _hold = _hb._RESTORE_DROP_HELD
-    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is None, (
         "a `:Point` write kept the graph vector with BOTH halves answering stop and the "
