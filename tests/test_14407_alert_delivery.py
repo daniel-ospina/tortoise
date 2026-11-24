@@ -1275,14 +1275,61 @@ def test_a_scoped_detection_digest_still_names_the_dashboard_row(delivered):
 
     Without this, a mutant that always emitted the anonymous sentence would stay
     green — the conditional would be pinned on one side only.
+
+    ⛔ It asserts that a row is CLAIMED, and that the claim is caveated as
+    best-effort — NOT which register the row lands in (round 3, P2). Naming the
+    activity register here was a FALSE statement for this very class:
+    `abuse.ALERT_REGISTER_OF[EVENT_AUTH_IP]` is `alert` ("a credential event:
+    new-country auth"), so the digest sent a human to the wrong list — and every
+    `record_*` write is debug-swallowed, so an unqualified promise can also be
+    false on a control-plane outage.
     """
     import tortoise.notify as notify
 
     notify.notify_abuse("abuse_new_ip", {"org_id": "org-a"}, {"country": "ES"})
 
     assert len(delivered.pushes) == 1
-    assert "the rows are on the dashboard's activity register" in delivered.pushes[0], \
+    assert "the rows are on the dashboard" in delivered.pushes[0], \
         delivered.pushes[0]
+    assert "best-effort" in delivered.pushes[0], delivered.pushes[0]
+    assert "activity register" not in delivered.pushes[0], (
+        "the digest named a register: for an R4 new-country auth event the row is "
+        "on the ALERT register, so naming the activity one points a human at the "
+        "wrong list")
+
+
+def test_a_folded_read_velocity_digest_names_the_breaching_key(delivered,
+                                                              monkeypatch):
+    """R3 carries `id` (the key), NOT `ip` — and its folded sources must be named.
+
+    Round 3, P2: `identity = details["ip"]` left the HIGHEST-volume class (R3
+    re-arms every 5 min, 288 detections/day) folding with no source line at all,
+    while the module docstring promises the folded sources are named. The sibling
+    above only drove `abuse_signup_velocity`, which does carry an IP, so the
+    contract was pinned on the one class that happens to satisfy it.
+    """
+    import tortoise.notify as notify
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: now[0])
+    for key in ("k1", "k2", "k3"):
+        notify.notify_abuse(
+            "abuse_read_velocity", {"org_id": "org-a"},
+            {"scope": "key", "id": key, "threshold": 100, "window_s": 300},
+        )
+    assert len(delivered.pushes) == 1, delivered.pushes
+
+    now[0] += notify._ACTIVITY_DELIVERY_WINDOW_S + 1
+    notify.notify_abuse(
+        "abuse_read_velocity", {"org_id": "org-a"},
+        {"scope": "key", "id": "k4", "threshold": 100, "window_s": 300},
+    )
+
+    assert len(delivered.pushes) == 2, delivered.pushes
+    digest = delivered.pushes[-1]
+    assert "Folded sources:" in digest, digest
+    for key in ("k2", "k3"):
+        assert key in digest, (key, digest)
 
 
 def test_activity_detections_collapse_into_one_message(delivered):
