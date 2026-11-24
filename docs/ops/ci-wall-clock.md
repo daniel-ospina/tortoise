@@ -751,8 +751,10 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 
 ⛔ **The `2 / 2 / 2` row is the one candidate this section's own invariant rejects.** `ceil(10 / 2)` = 5
 waves exceeds the `max_waves = 4` ceiling of invariant 1, so a re-derivation from a fresh measurement
-that picks the row with the most pool headroom (`8 / 9`) is rejected by the arithmetic shipped in this
-same section rather than by a test. The two rows that fail the other side are the
+that picks the row with the most pool headroom (`8 / 9`) is rejected by invariant 1 — and by the arm
+that holds it, `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: measured, `max-parallel: 2`
+reds it with `test: cap 2 over 11 shards needs 6 waves, past the measured 4-wave ceiling`. The two
+rows that fail the other side are the
 mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3 = 9`, so they fail
 invariant 2.
 
@@ -845,7 +847,8 @@ start delayed by the cap cannot consume a shard's budget. The matrix itself is u
 shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
 on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
 cannot conclude before a shard it needs has run. Both halves are backed by the workflow's own
-wiring, and the arithmetic behind the caps is stated above rather than pinned:
+wiring, and the arithmetic behind the caps is stated above AND held by the arm the third bullet
+names — the invariants are pinned there, the NUMBER is not:
 
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
   than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
