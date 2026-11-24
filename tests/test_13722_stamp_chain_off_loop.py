@@ -42,7 +42,11 @@ this one would also need a real Postgres). It asserts, for EVERY
 4. the containing function is referenced **only as that submission's callable**
    — any other reference (an inline `_stamp_chain()`, a
    `_CAPTURE_EXECUTOR.submit(_stamp_chain)`) is a second way to run the chain
-   and reds, however many submissions also exist elsewhere in the module.
+   and reds, however many submissions also exist elsewhere in the module; and
+5. every submission of that function is REACHABLE — when ALL of them sit under an
+   `if`/`while` the interpreter folds to a false constant, no submission is ever
+   reached and the chain runs nowhere. A dead-guarded duplicate beside a live
+   submission is inert (it runs nothing) and stays green.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -242,6 +246,89 @@ def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
     )
 
 
+def _submitted_callables(tree: ast.Module) -> list[ast.AST]:
+    """The callable argument node of every awaited off-loop submission.
+
+    i.e. the second positional argument of each awaited
+    `_run_off_loop(_CAPTURE_EXECUTOR, …)` — whatever shape it has (`ast.Name` or
+    `ast.Attribute`; `_refers_to` decides who it names). Both this and the
+    reference arm ask it, so the two cannot disagree about what a submission is.
+    """
+    awaited = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
+    }
+    out: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == _OFF_LOOP
+            and id(node) in awaited
+        ):
+            continue
+        args = list(node.args)
+        if (
+            len(args) > 1
+            and isinstance(args[0], ast.Name)
+            and args[0].id == _OFF_LOOP_POOL
+        ):
+            out.append(args[1])
+    return out
+
+
+def _statically_false(test: ast.expr) -> bool:
+    """True when the interpreter itself would fold ``test`` to a false value.
+
+    Only the constant foldings are graded — a literal `False`, `not` of a literal
+    truth, an `and` with any false operand, an `or` whose operands are all false.
+    A run-time-constant guard (`if _FEATURE:`) is deliberately NOT modelled: it is
+    not statically decidable, and the header says so instead of pretending to
+    grade it.
+    """
+    if isinstance(test, ast.Constant):
+        return not test.value
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        operand = test.operand
+        return isinstance(operand, ast.Constant) and bool(operand.value)
+    if isinstance(test, ast.BoolOp):
+        folded = [_statically_false(v) for v in test.values]
+        return any(folded) if isinstance(test.op, ast.And) else all(folded)
+    return False
+
+
+def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
+    """`(line, source)` of every enclosing `if`/`while` that folds to false.
+
+    ⛔ `orelse` is NOT descended with the guard pushed: the else-branch of a
+    statically-false `if` is exactly the branch that RUNS, so a submission there is
+    live and must not be reported.
+    """
+    dead: list[tuple[int, str]] = []
+
+    def walk(node: ast.AST, guards: list[tuple[int, ast.expr]]) -> None:
+        if isinstance(node, (ast.If, ast.While)):
+            walk(node.test, guards)
+            for child in node.body:
+                walk(child, [*guards, (node.lineno, node.test)])
+            for child in node.orelse:
+                walk(child, guards)
+            return
+        if node is target:
+            dead.extend(
+                (line, ast.unparse(test))
+                for line, test in guards
+                if _statically_false(test)
+            )
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child, guards)
+
+    walk(tree, [])
+    return dead
+
+
 def test_every_stamp_call_runs_off_the_loop() -> None:
     """`_stamp_capture_provenance` must be called from a leg submitted off-loop.
 
@@ -413,6 +500,47 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         f"removes. A surviving {_OFF_LOOP}({_OFF_LOOP_POOL}, …) submission "
         "elsewhere does not make that path off-loop: pass the function to the "
         "awaited submission and delete every other reference (#13722)")
+
+    # ⛔ A SUBMISSION UNDER A STATICALLY-FALSE GUARD IS NOT A SUBMISSION (review
+    # finding, P2, measured on `/tmp` mutants). Arms 1-4 are all satisfied by a
+    # module whose ONLY submission sits under `if True and False:` — the reference
+    # is legal, awaited, on the right pool, and the owner is a sync `def` — while
+    # the interpreter never reaches it: the chain never runs, so there is no
+    # record, no `PointRevised`, no eventId on minted points and no non-fatal
+    # warning, and every arm above stays green. That is the same silent-loss state
+    # arm 3 rejects for `async def`, reached by "disabling" the offload instead of
+    # mis-typing it. Run-time-constant guards stay ungraded (see the header).
+    #
+    # ⛔ EVERY SUBMISSION OF THE OWNER, NOT ANY ONE OF THEM (review finding, P2):
+    # a first cut redded as soon as ONE submission sat under a folded-false guard,
+    # so a functionally CORRECT tree — a live awaited submission plus a leftover
+    # `if False:` duplicate beside it — was reported as "the chain silently does
+    # NOT run", which is false there, and it sends a fixer hunting an unreachable
+    # submission that does not exist. The silent-loss state is exactly "NO
+    # submission of this owner is reachable", so the arm fires only when every one
+    # of them is dead-guarded. A dead duplicate beside a live submission runs
+    # nothing and is therefore inert — it is not a second way to run the chain,
+    # which is what the reference arm grades.
+    by_owner: dict[str, list[ast.AST]] = {}
+    for node in _submitted_callables(tree):
+        for owner in sorted(owners):
+            if _refers_to(node, owner):
+                by_owner.setdefault(owner, []).append(node)
+    dead_guards = {
+        name: [guard for guards in per for guard in guards]
+        for name, per in (
+            (name, [_dead_guards(tree, node) for node in nodes])
+            for name, nodes in by_owner.items()
+        )
+        if per and all(per)
+    }
+    assert not dead_guards, (
+        f"EVERY submission of {_STAMP_DOOR}'s chain sits under a STATICALLY-FALSE "
+        f"guard at {dead_guards} (owner: [(line, test)]) — the interpreter folds "
+        "those tests away, so no submission is ever reached and the chain "
+        "silently does NOT run: no record, no `PointRevised`, no warning "
+        "(#13722). Remove the dead guard rather than leaving the offload "
+        "unreachable")
 
 
 if __name__ == "__main__":  # pragma: no cover
