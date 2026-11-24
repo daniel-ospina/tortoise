@@ -71,10 +71,12 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `f379299c64dd`, whose four landings since `e6b3cf2908ba` register no fast file of their own, so
-# `main`'s own emission is unmoved — plus this PR's `core` registration
+# `f379299c64dd` — and ⛔ NOT "unmoved": one of those landings since `e6b3cf2908ba`,
+# #14471's `da4b76a5851c`, registers `tests/test_13526_quota_refusal_figures.py` `core` at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT`, so `main`'s own emission moved as well (it packs seven shards at
+# 837.5 s and four at 837.4 s) — plus this PR's `core` registration
 # `tests/test_4625_schema_reads_off_write_path.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, the ONLY
-# `fast_pool()` addition on this tree) the verb packs five shards at 837.7 s
+# `fast_pool()` addition this tree makes on top of that) the verb packs five shards at 837.7 s
 # (a, c, d, e, k) and six at 837.6 s (b, f, g, h, i, j) — re-derived here rather than carried — so
 # `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
@@ -82,13 +84,14 @@ version: 1
 # counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
 # `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
 # `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
-# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
-# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
-# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
-# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
-# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1, and this
-# PR's `tests/test_4625_schema_reads_off_write_path.py` is the SIXTH — the only addition this tree
-# makes on top of `main`'s count.
+# #14038's `tests/test_13998_capacity_notice.py`, #14429's `tests/test_spool_drain_rehearsal.py`
+# (listed in shard `k`) and #14471's `tests/test_13526_quota_refusal_figures.py` — SIX of them on top
+# of #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c
+# at `4993fa08`, so the baseline's total includes it) — and EVERY one of them re-partitions every
+# bin, which is why the split is quoted and not only the worst figure: six registrations x 2.0 s is
+# the whole of 9200.1 -> 9212.1 on `main`, and this PR's
+# `tests/test_4625_schema_reads_off_write_path.py` is the SEVENTH — the whole of the 2.0 s between
+# `main`'s 9212.1 s pool and this tree's 9214.1 s.
 # ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
 # the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
