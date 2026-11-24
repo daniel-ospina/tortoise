@@ -1208,26 +1208,24 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             stores=NO_LIVE_VECTOR,  # renders the clause; the CALLER's `MERGE` names the label
         ),
     ),
-    # ── A writer the name-level census walk found, classed by READING its seam (#14483) ────────
-    #: `#14220` added `tortoise/embed_seam.py::_external_rows` and declared nothing, so the census
-    #: credited `24 of 25` outside-gate writers and held row 1 at PARTIAL over this one. Discovered
-    #: by the NAME-LEVEL enumeration (it returns a variable list of vectors, which no name-level
-    #: walk can tell from a producer) — not by a widened shape filter.
     (
+        # ⛔ THE `#14220` LANDING SHIPPED THIS WRITER WITH NO DECLARATION (#14483). The census's
+        # discovery is deliberately OVER-INCLUSIVE at the NAME level and says so, so it credits
+        # any function that produces a vector; a seam carrying a PARSER therefore arrives with no
+        # class at all, and DoD row 2 is held at PARTIAL while a writer's class and label are
+        # unknown. Declared here rather than teaching the census to guess between a parser and a
+        # writer — the register is the product's home for "named, accepted exception" (#11085).
         "tortoise.embed_seam::_external_rows",
         WriterClass(
             EXEMPT,
-            "`tortoise/embed_seam.py::_external_rows` — a PARSER of a provider's HTTP answer: it "
-            "picks the vector table out of the decoded payload (`vectors` / `embeddings`) and "
-            "normalises every row through `_external_vector`, so what it RETURNS is a "
-            "`list[list[float]]`. Its own body issues no store clause and names no graph label: "
-            "the rows go back to `ExternalBacking.encode`, which hands them to its CALLER, and "
-            "no function in this seam stores one. It enrols because the census enumeration is "
-            "deliberately name-level — a bypass that reads as exempt is the shape that "
-            "population exists to catch — so the match is READ and classified here rather than "
-            "silenced by narrowing the scan",
-            "#14186",
-            stores=NO_LIVE_VECTOR,  # parses a provider answer into floats; no store clause at all
+            "`tortoise/embed_seam.py::_external_rows` PICKS THE VECTOR TABLE out of an external "
+            "embedding provider's answer and returns `list[list[float]]` — a response PARSER. "
+            "Its own body issues no store and names no graph label: every row it returns is "
+            "handed back to `ExternalBacking.encode`, and from there to the seam's caller, so "
+            "the value never reaches a graph write from this function (#14220 landed it as a "
+            "writer with no declaration; #14483 is that red)",
+            "#14483",
+            stores=NO_LIVE_VECTOR,  # its only assignment is the return list it builds
         ),
     ),
 )

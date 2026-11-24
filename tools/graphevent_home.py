@@ -29,7 +29,7 @@ multisets per type, and the verdict is:
 ⛔ **`covered` IS THE HARDER ANSWER TO REACH, ON PURPOSE.** Three things that
 would otherwise read as coverage are named deficits: a type the record carries
 under a DIFFERENT name (the hard-delete lane writes `PointRetracted` to the store
-and `EntityMutated` to the journal, `sdk.py:3801`) is reported as
+and `EntityMutated` to the journal, `sdk.py:3831`) is reported as
 ``mapped_types`` and makes the verdict ``not_covered``, because its row coverage
 is not comparable — the two payloads are different shapes; an EMPTY feed on
 either side produces **no verdict at all** (exit 2), never a vacuous ``covered``;
@@ -40,8 +40,8 @@ managed to read.
 see the two refusals `#13083` established from the code, which are properties
 of the PRODUCER and not of any tenant's data: `_emit_event` skips the journal
 entirely when a payload-only emit carries no `point`/`id`/`turns`
-(`sdk.py:16225-16226`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
-`EntityMutated` to the journal (`sdk.py:3786-3801`, "two stores, one meaning
+(`sdk.py:16258-16259`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
+`EntityMutated` to the journal (`sdk.py:3815-3831`, "two stores, one meaning
 each"). ``covered`` on a tenant therefore means "this tenant's history happens to
 be reproducible", never "the producers agree".
 
@@ -375,8 +375,8 @@ READERS: tuple[dict[str, Any], ...] = (
                "EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is "
                "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` "
                "at `:647`), and the export endpoint's own whole-graph scan is "
-               "`hosted_api.py:34456` (`_export_graph_snapshot`; the `"
-               "\"GraphEvent\" in labels` branch is `:34486` and the append `:34494` — a "
+               "`hosted_api.py:34515` (`_export_graph_snapshot`; the `"
+               "\"GraphEvent\" in labels` branch is `:34545` and the append `:34553` — a "
                "SERVING reader under this census's own class rule, so the `serving: 1` "
                "count in this file excludes it). No row carries either (#14204). ⚠️ This "
                "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "
@@ -415,7 +415,7 @@ GRAPH_EVENT_TYPES = frozenset({
 #:
 #: ⛔ A MAPPED TYPE IS NOT COVERAGE. `PointRetracted` (store) and `EntityMutated`
 #: (journal) are the same removal announced to two surfaces with **different
-#: payload shapes** (`sdk.py:3786-3801`: *"Two stores, one meaning each"*), so the
+#: payload shapes** (`sdk.py:3815-3831`: *"Two stores, one meaning each"*), so the
 #: payload digests can never be compared across that pair. The mapping exists so
 #: the report says "the record carries this event under another name, and its ROW
 #: coverage is not comparable" instead of the false "the record has no such type",

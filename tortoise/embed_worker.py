@@ -79,11 +79,11 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 def _require_peer() -> bool:
     """Whether an unverifiable peer must be REFUSED rather than allowed.
 
-    The vocabulary is the declared contract (:func:`tortoise.env_truthy.is_truthy`),
-    not a local copy: a second spelling is how the five-way divergence #4097 exists
-    to prevent started. ``is_truthy`` is exactly the set this read carried
-    (``{"1","true","yes","on"}``, case-insensitive, whitespace-stripped), so the
-    behaviour is unchanged — and the guard in ``tests/test_env_truthy.py`` grades it.
+    ⛔ THE ONE VOCABULARY, NOT A LOCAL COPY (#4097). The set here used to be a
+    literal `{"1", "true", "yes", "on"}` — byte-identical to `env_truthy.TRUTHY`
+    and still a second declaration of it, which is the drift `test_env_truthy.py`
+    exists to refuse. `is_truthy` reads the same vocabulary and the same way
+    (unset/blank/falsy/garbage -> False), so the answer is unchanged.
     """
     return is_truthy(os.environ.get(ENV_WORKER_REQUIRE_PEER))
 
