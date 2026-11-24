@@ -1880,6 +1880,13 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
     store.put_batch(batch)
     store.get_batch(ORG, batch.batch_id)
     store.put_item(ORG, items[0])
+    # ⛔ `put_items` IS the acceptance write, and it carried an UNBALANCED BRACE
+    # through a green suite (#14415 review round 14, P1): this pin claims "every
+    # Cypher statement `GraphBatchStore` can emit" but drove only `put_item`, so
+    # neither the brace guard below nor the live round-trip could reach the one
+    # statement EVERY acceptance emits — which is what made a production-only
+    # syntax error invisible while the feature was dead on arrival.
+    store.put_items(ORG, items)
     store.put_item_if_state(ORG, items[0], BatchItemState.QUEUED)
     store.put_item_if_state(ORG, items[0], BatchItemState.QUEUED,
                             expected_attempts=1)
@@ -1952,7 +1959,7 @@ def test_every_emitted_statement_is_brace_balanced():
     doubled brace anywhere in any statement) and not only that one line.
     """
     seen = _every_store_statement()
-    assert len(seen) >= 17, f"only {len(seen)} statements reached the store"
+    assert len(seen) >= 18, f"only {len(seen)} statements reached the store"
     # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
     # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
     # leaves the braces balanced and emits the literal text `{attempts_clause}`,
