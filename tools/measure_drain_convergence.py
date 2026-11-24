@@ -41,10 +41,29 @@ What it measures, and why each number is in the receipt:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This tool's answer
+# is 0 (a receipt was produced) and a `raise SystemExit(<message>)` would exit 1,
+# which is indistinguishable from the measurement itself failing; the tool has no
+# other use for 2, and 2 is the repo's own "could not run" convention
+# (`tools/cypher_inventory.py`). `SystemExit(<int>)` carries no message, so the
+# refusal is printed explicitly.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/measure_drain_convergence.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/measure_drain_convergence.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import subprocess
-import sys
 import tempfile
 import threading
 import time
