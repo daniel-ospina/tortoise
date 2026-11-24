@@ -11494,6 +11494,44 @@ def _durations_row_tail(key: str) -> str:
     return ""
 
 
+#: `docs/ops/ci-wall-clock.md` §7 states the runner pool as a dated measurement
+#: (`| runners registered / online | 12 / 12 (… at read) |`). Read it rather than
+#: hard-code it here: the doc is the artifact that owns the measurement, so a
+#: re-tune is ONE edit there, and a pool that GREW keeps the shipped caps
+#: conservative instead of red on a stale literal.
+_RUNNER_POOL_ROW_RE = re.compile(
+    r"^\|\s*runners registered / online\s*\|\s*(?P<pool>\d+)\s*/\s*\d+",
+    re.MULTILINE)
+
+#: MATRIX slots kept free for other PRs — the doc's `sum <= 12 - 3 = 9`. It reserves
+#: MATRIX headroom only, and is deliberately not a total-concurrency budget.
+_RESERVED_FOR_OTHER_PRS = 3
+
+#: The measured start stagger (4.0–23.9 m) against the measured per-shard wall
+#: (p50 10.5 m): the pool already delivers these shards in 2–4 waves.
+_MAX_MEASURED_WAVES = 4
+
+
+def _measured_runner_pool() -> int:
+    """The runner-pool figure `docs/ops/ci-wall-clock.md` §7 dates its read to.
+
+    Fails closed: a missing row is a measurement this arm cannot grade, and an
+    unreadable pool would make `sum(caps) <= pool - 3` vacuously true.
+    """
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text(encoding="utf-8")
+    matches = list(_RUNNER_POOL_ROW_RE.finditer(doc))
+    assert len(matches) == 1, (
+        f"expected exactly ONE `runners registered / online` row in "
+        f"docs/ops/ci-wall-clock.md, found {len(matches)} — the fan-out bound "
+        "reads its pool from that measurement, and a second copy makes which one "
+        "is live unknowable")
+    pool = int(matches[0].group("pool"))
+    assert pool >= 4, (
+        f"the doc's measured runner pool is {pool} — too small to bound three "
+        "matrix caps against; almost certainly a mis-parse rather than a real read")
+    return pool
+
+
 def test_every_matrix_bearing_job_declares_a_fan_out_cap():
     """#6744 PRESENCE arm: every matrix job declares `max-parallel`.
 
@@ -11503,10 +11541,27 @@ def test_every_matrix_bearing_job_declares_a_fan_out_cap():
     12-runner pool). The job ids are DERIVED from the workflow, so a FOURTH matrix
     added later cannot ship unbounded behind a green run.
 
-    ⛔ SCOPE: presence only. The wave count and the sum are the arithmetic the
-    B7 cut removed; with the cap present they are re-derivable from the pool
-    (`docs/ops/ci-wall-clock.md` §7), and what nothing else can see is a cap that
-    is GONE.
+    The two BOUNDS `#6744` was measured into are carried too, because presence
+    alone is not the invariant that regressed: raising the cap silently re-admits
+    the whole fan-out. Both sides were measured (9 runs, jobs API `filter=all`,
+    2026-10-30T21:48Z..10-31T02:54Z, `docs/ops/ci-wall-clock.md` §7):
+
+    1. **no invented waves** — `ceil(shards / cap) <= 4`, because the measured
+       start stagger (4.0–23.9 m) against the measured per-shard wall
+       (p50 10.5 m) says the pool already delivers these shards in 2–4 waves, so
+       a cap needing more than 4 is strictly added wall;
+    2. **no monopolisation** — the three matrices overlap, so one PR's maximum
+       MATRIX hold is their SUM, and it must leave `_RESERVED_FOR_OTHER_PRS` of
+       the measured pool outside any one PR: `sum(caps) <= pool - 3`. It bounds
+       MATRIX slots only (the same PR's eligible non-matrix jobs can still take
+       those runners) — see the doc's "What the cap does NOT bound: the total".
+
+    ⛔ The INVARIANTS are pinned, never the chosen number. Both the pool and the
+    reserved headroom are READ (`_measured_runner_pool()` from the doc's own dated
+    row, which is the artifact that owns the measurement), so a re-tune from a
+    fresh read needs one doc edit and reds nothing: a 4/4/4 split against a
+    16-runner pool passes. What cannot pass is a cap that is GONE, or one grown
+    past the pool.
     """
     wf = _load_python_ci()
     matrix_jobs = {
@@ -11527,6 +11582,42 @@ def test_every_matrix_bearing_job_declares_a_fan_out_cap():
         f"matrix-bearing job(s) declare no integer `max-parallel`: {missing} — an "
         "uncapped matrix lets one PR hold its whole shard set at once (#6744), "
         "and nothing else in the suite names the absence")
+
+    # The shard counts come from the selector that PACKS the matrix, so this arm
+    # follows a shard-count change instead of going stale on a literal. The ids are
+    # hand-written here, so require the derived set to be exactly these: a FOURTH
+    # matrix added later must be given a shard count (and so a cap) rather than
+    # ship unbounded behind a green run (#6744 review P2).
+    from tools.ci_selection import carve_shard_count, fast_shard_count, slow_shard_count
+
+    manifest = load_manifest()
+    shards = {
+        "test": fast_shard_count(manifest),
+        "test-slow": slow_shard_count(manifest),
+        "test-carve-out": carve_shard_count(manifest),
+    }
+    assert matrix_jobs == set(shards), (
+        f"the matrix-bearing jobs in python-ci.yml are {sorted(matrix_jobs)}, but "
+        f"this arm only bounds {sorted(shards)} — a new matrix must be added here "
+        "(with its shard count) so it cannot ship unbounded (#6744)")
+
+    pool = _measured_runner_pool()
+    caps = {j: wf["jobs"][j]["strategy"]["max-parallel"] for j in matrix_jobs}
+    for job_id, cap in sorted(caps.items()):
+        waves = -(-shards[job_id] // cap)
+        assert waves <= _MAX_MEASURED_WAVES, (
+            f"{job_id}: cap {cap} over {shards[job_id]} shards needs {waves} "
+            f"waves, past the measured {_MAX_MEASURED_WAVES}-wave ceiling — a cap "
+            "this small makes the matrix the critical path instead of the queue "
+            "(#6744)")
+
+    hold = sum(caps.values())
+    assert hold <= pool - _RESERVED_FOR_OTHER_PRS, (
+        f"one PR would hold {hold} MATRIX jobs at once ({dict(sorted(caps.items()))}), "
+        f"so fewer than {_RESERVED_FOR_OTHER_PRS} of the {pool} measured runners are "
+        f"left for other PRs: the bound is {pool} - {_RESERVED_FOR_OTHER_PRS} = "
+        f"{pool - _RESERVED_FOR_OTHER_PRS} (#6744 — measured per-PR peak was 18 of "
+        "a 12-runner pool, and a green run cannot see it)")
 
 
 #: ⛔ RETIRED with B7's durations-map arithmetic cut. The two arms this block
