@@ -1918,6 +1918,23 @@ SWEEP_NAMES = 66
 #: The last two re-cuts are attributable and worth knowing: 11896 -> 11900 was this PR's own batch
 #: surface at `4b7be98fb38b`; 11900 -> 11908 is the 402-copy tests added on the recut, whose new
 #: `ha.` / `est.` / `detail` attribute reads are untyped receivers the sweep deliberately leaves alone.
+#: ⛔ MERGED `origin/main` `989765162f` INTO THIS BRANCH — the pair below is `--repin`'s own output on
+#: the RESOLVED merge tree, never inherited from either parent (this branch pinned `(11911,
+#: "270de036aa1b72b7")`, `main` `(11901, "953c70c05b55923b")`). THE +1 IS ATTRIBUTED BY THE TOOL'S
+#: OWN ROW DIFF, not by arithmetic: `--report --base 28ca66878d --top 3000` run at the pre-merge head
+#: `e2f46b75e678` (in a detached worktree) AND on this tree, both row sets sorted and diffed, yields
+#: exactly TWO differences out of an 861-row set, BOTH `main`'s and both in ONE file:
+#:   * `reached.update` absent → **3** — a shape that did not exist before, and main's
+#:   * `projection.g.query` **26 → 24** (−2) — the same edit removing two receiver calls
+#: both in `tests/test_7879_record_chain.py`, from main's `#14446` (`f635f9e00075`): a set-mutation
+#: receiver (`reached.update(...)` over a comprehension of imported names) is exactly the ordinary-word
+#: shape this pin exists to DECLARE and deliberately leave alone — renaming it would rewrite a test's
+#: own bookkeeping. Net **+1 occurrence over +1 row** (861 → 862), and `typed references still
+#: pointing at a public name` stays **0**, so no typed call site is legitimised by this re-cut.
+#: ⛔ AND THE PEER LANE FOLDED `origin/main` IN AGAIN on its own head (its commits, plus
+#: `origin/feat/14219-batches`'s `edd9c68585b7`, are in the tree this record is written on), so the
+#: attribution above describes ONE of the two folds and the pair below is `--repin`'s own output on
+#: the RESOLVED tree — never either parent's, and never the sum of the two.
 SWEEP_RESIDUE = (11913, "7f983a0f90145874")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
