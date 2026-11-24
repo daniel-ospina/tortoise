@@ -256,11 +256,36 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2080 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2294 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
+    kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
+    RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
+    the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
+    `2cccf90` walked 1930, each measured by THIS function on its own file, and the resolved run is
+    their UNION plus this lane's fold note, never a sum of them. ⛔ AND RE-WALKED AGAIN on THIS LATER
+    FOLD of `origin/main` `af40c97c`, which re-cut the pin 11920 → **11913** (the −7 is `#14544`'s
+    DoD-probe cut deleting the receivers that test carried) and RESTORED the 146 distinct `#:` lines
+    of `main`'s own records from `e66997b8` that the branch's resolution did not already carry — so
+    the run reads the figure above, measured by THIS function on the RESOLVED file. The 2047 named
+    above is the PREVIOUS fold's reading (`60db4d7`), and the 2059 this head read before `main`'s
+    block was restored; both are kept because every fold's record stays — neither is this head's
+    figure. ⛔ THOSE NUMBERS ARE A
+    MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
+    <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
+    re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as
+    the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
+    ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
+    defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
+    penultimate branch reading as the resolved one. Only that figure is graded
+    (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
+    lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
+    the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
+    `59a08fdb8b40`, 1930 on `main`): ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
-    and `main` 1833, so the figure is re-derived here rather than carried from either side — and
-    GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    and `main` 1833, so the figure is re-derived here rather than carried from either side — ⛔ AND
+    RE-WALKED AGAIN on the LATER fold of `origin/main` `59a08fdb8b40`, which re-ran this sentence's
+    own walk rather than carrying either side's number, because that fold kept both blocks too —
+    and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -394,6 +419,35 @@ def _residue_block() -> str:
     PRE-REBASE figure, and an unscoped `git grep -c` citation) added 11 `#:` lines INSIDE the run,
     so the figure above is RE-MEASURED by this walk on the current file (`2069` -> `2080`) rather
     than adjusted by arithmetic on the last reading,
+    — and THIS fold of `origin/main` `ae9bf0f959` kept both sides' blocks in
+    `tools/sdk_privatise.py` once more, and the row-set attribution prose this lane added for it
+    (four shapes, 860 rows on BOTH sides) sits in that run like every fold's prose before it, so
+    the figure above is RE-MEASURED by this walk on the RESOLVED file at 1977 rather than
+    inherited from either side: the pre-merge branch head `abf5fefe` walks **1890** and `main`'s
+    own blob walks **1921**, each measured by THIS function on its own file, and the resolved run
+    is the union of the two blocks plus this lane's attribution — never a sum of them, which is
+    why the branch's reading sitting BELOW `main`'s does not make the resolved figure `main`'s
+    plus a delta. The sentence that carries it arrived from `main`'s copy of this file (the
+    branch's `abf5fefe` copy had no such arm at all), and it was TRUE at `main`: its blob walks
+    the 1921 it published. It is not true of the MERGE tree, which is the whole reason the figure
+    is graded rather than trusted.
+    — and `main`'s NEXT two commits (`2cccf90f4dd4`, whose own note records that its
+    `recorded.update(keep)` receiver moved its pin by one) add that note to the same run, so THIS
+    fold's figure is again this function's own walk of the RESOLVED file rather than either side's
+    reading; the row it names is the one row this fold adds, and the pin below is `--repin`'s output
+    on that same tree.
+    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks in
+    `tools/sdk_privatise.py` once more (`main`'s #4625 `_JSONB_CACHE.update` re-pin record
+    beside this branch's own fold notes, each preserved verbatim there), so the figure above is
+    re-measured by this walk on the RESOLVED file rather than carried from either side: `main`'s
+    block names the pair it derived on ITS tree (`11910`) and the `seen.update(kwargs)` row it
+    counted row by row, while the pair this tree publishes is `--repin`'s output HERE (`11920`)
+    — neither parent's number.
+    — and THIS FOLD merges `origin/main` `10f0107689` (the PR was `CONFLICTING` again, and the two
+    conflicted files are once more this pin and its grading suite): BOTH sides' clauses above are
+    kept verbatim, each being a true reading of the tree it NAMES, and the figure above is this
+    walk's own reading of the RESOLVED file rather than either side's numeral or an arithmetic
+    adjustment of one (the whole point of grading it), so no count is typed here to go stale,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2790,12 +2844,17 @@ def test_baseline_rev_prefers_the_MERGE_BASE_then_falls_back_to_origin_main(monk
 def test_the_check_WIRES_the_resolved_baseline_into_the_ratchet(monkeypatch, tmp_path, capsys):
     """⛔ THE WIRING ITSELF, which is the mutant that survived every other arm (#14548 review, F3).
 
-    Replacing `base_rev, why = baseline_rev(args.baseline)` with `base_rev, why = None, "x"` left
-    all fifteen ratchet arms green: they grade `ratchet_verdict` / `baseline_rows` directly, and
-    the only other `main()` arm returns at the VACUOUS CHECK 67 lines earlier. That mutant puts
-    `--check` back on the frozen-pin ceiling — the headline behaviour of this PR, gone, with a
-    green suite. So this arm drives `main()` through the RESOLVED-baseline path and grades both
-    the wiring (`ratchet baseline: <sha>`) and the verdict (a growth REDS, exit 1).
+    Replacing `base_rev, why = baseline_rev(args.baseline)` with `base_rev, why = None, "x"` is the
+    mutant that puts `--check` back on the frozen-pin ceiling — the headline behaviour of this PR,
+    gone — and it reds THREE arms, MEASURED rather than estimated: this one,
+    `test_check_reds_growth_through_main_and_names_the_line` and
+    `test_on_a_post_merge_tree_the_dead_ratchet_is_STATED` (3 failed, 64 passed at the head this was
+    measured on). ⛔ An earlier cut of this docstring said the mutant "left all fifteen ratchet arms
+    green" and that "the only other `main()` arm returns at the VACUOUS CHECK 67 lines earlier" —
+    both FALSE since those arms were added (they too drive `main()` through the degraded path), and
+    a justification that overstates its evidence is the same defect as a gate that overstates its
+    coverage. This arm is still worth having: it is the ONLY one that grades the RESOLVED-baseline
+    path and the printed `ratchet baseline: <sha>` line.
 
     Mutation: `main(): base_rev, why = None, "x"` -> the run takes the degraded pin path, prints
     no `ratchet baseline:`, and exits 0 (1 <= the pin) — both asserts RED.
@@ -3113,7 +3172,11 @@ def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch
     Mutation: drop `-z` from the `ls-files`/`ls-tree` reads (back to `.split()`/`.splitlines()`) →
     `py_files()` stops listing the file at all (the first assert REDs); drop it from the `diff` read
     → the baseline and the attribution RED. Restoring either one alone leaves a MIXED state, which
-    is the third state described above.
+    is the third state described above. ⛔ AND THE `ls-tree` HALF IS GRADED ELSEWHERE, because THIS
+    carrier MOVED and the `diff` arm reseeds it whatever `tree_paths` holds (measured: dropping
+    `-z` from `ls-tree` alone left this arm and the other 66 green) —
+    `test_an_UNCHANGED_non_ascii_file_is_SEEDED_at_its_count` is the arm that reds, which is why
+    it exists.
     """
     repo = _git_repo(tmp_path / "r")
     (repo / "tortoise").mkdir()
@@ -3160,6 +3223,89 @@ def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch
     text = "\n".join(lines)
     assert "tortoise/añ.py" in text and "baseline 1 -> now 2" in text, (
         f"and the growth is ATTRIBUTED to that file at its real baseline, not `baseline 0`: {text}")
+
+
+def test_an_UNCHANGED_non_ascii_file_is_SEEDED_at_its_count(tmp_path, monkeypatch):
+    """⛔ `ls-tree` must answer the SAME paths `ls-files` does, or a pristine file reads as growth.
+
+    (#14548 review, P3-1: dropping `-z` from the `ls-tree` read left EVERY arm green.) The seeding
+    population (`per_file`) keeps only paths the BASELINE TREE has, and that population is
+    `ls-tree`'s. With git's default `core.quotePath` the row for `tortoise/añ.py` arrives C-quoted,
+    so the path is not in `tree_paths`, it is not seeded, and — on a tree that changed NOTHING —
+    the file's own committed receiver is read as growth: a FALSE RED on a clean tree, which is the
+    direction that gets a gate switched off. `-z` closes it; this arm is what reds if it is
+    removed. (`test_a_non_ascii_path_is_MEASURED_not_silently_dropped` cannot catch this: its
+    carrier MOVED, so the `diff` arm reseeds it whatever `tree_paths` holds.)
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "tortoise").mkdir()
+    carrier = repo / "tortoise" / "añ.py"
+    carrier.write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    # PREMISE, measured rather than assumed: without `-z` git quotes this row on `ls-tree` too.
+    quoted = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=repo,
+        capture_output=True, text=True, check=True).stdout
+    assert '"tortoise/a\\303\\261.py"' in quoted, (
+        "premise: git's default `core.quotePath` quotes this row, so a non-`-z` read names no file "
+        f"on disk: {quoted!r}")
+
+    measured = {"tortoise/añ.py": privatise.edits_for(carrier, rmap).residue}
+    sites = {"tortoise/añ.py": privatise.edits_for(carrier, rmap).sites}
+    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured, sites)
+    assert sum(base_files.get("tortoise/añ.py", Counter()).values()) == 1, (
+        "the UNCHANGED file's committed receiver IS its own baseline, so it must be seeded at 1 — "
+        f"a quoted `ls-tree` row leaves it unseeded and reads `baseline 0`: {base_files}")
+    ok, lines = privatise.ratchet_verdict(
+        Counter({"reg.update": 1}), base, measured, base_files, sites, "HEAD",
+        baseline_sites=base_sites)
+    assert ok is True, (
+        f"a tree that changed NOTHING must not red on its own untouched file: {lines}")
+
+
+def test_a_rename_whose_dest_GAINED_a_receiver_keeps_the_SOURCE_count(tmp_path, monkeypatch):
+    """⛔ The `R`/`C` record carries TWO paths, and a width-1 parse loses the destination.
+
+    (#14548 review, P3-1: collapsing `width = 2 if kind.startswith(("R", "C"))` to `1` left every
+    arm green.) A rename is not growth (`test_a_rename_is_not_growth`), but a rename whose dest
+    ALSO gains a receiver IS: the dest's baseline is the SOURCE blob's count, so the verdict must
+    attribute `baseline 1 -> now 2`. With `width = 1` the parser takes the source as the record's
+    only path, stops on the truncated next record, and never reseeds the dest — so the attribution
+    reads `baseline 0 -> now 2` and blames the rename for a receiver the file always had.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    subprocess.run(["git", "mv", "a.py", "d.py"], cwd=repo, check=True, capture_output=True)
+    (repo / "d.py").write_text(_UNTYPED + "    reg.update({'b': 2})\n", encoding="utf-8")
+    status = privatise._git("diff", "--name-status", "-M", "HEAD")
+    fields = status.strip().split("\t")
+    assert fields[0].startswith("R") and fields[1:] == ["a.py", "d.py"], (
+        f"premise: this IS the `R` record under test (score varies with the edit): {status!r}")
+
+    edits = privatise.edits_for(repo / "d.py", rmap)
+    measured = {"d.py": edits.residue}
+    sites = {"d.py": edits.sites}
+    assert sum(measured["d.py"].values()) == 2, "premise: the working tree holds both receivers"
+    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured, sites)
+    assert sum(base_files.get("d.py", Counter()).values()) == 1, (
+        "the dest's baseline is the SOURCE blob's ONE receiver — a width-1 parse never reseeds the "
+        f"dest, so it is absent from the map and reads `baseline 0`: {base_files}")
+
+    total = Counter()
+    for rows in measured.values():
+        total += rows
+    ok, lines = privatise.ratchet_verdict(
+        total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
+    assert ok is False, f"a receiver added inside a renamed file is still growth: {lines}"
+    text = "\n".join(lines)
+    assert "d.py" in text and "baseline 1 -> now 2" in text, (
+        f"the growth must be attributed to the DEST against the source's count, not `baseline 0`: {text}")
 
 
 def test_a_path_with_a_SPACE_is_MEASURED_not_split_away(tmp_path, monkeypatch):
@@ -3330,6 +3476,37 @@ def test_check_refuses_a_file_it_cannot_parse(tmp_path, monkeypatch, capsys):
     assert privatise.main() == 1, "an unparseable file must red, not silently reduce the count"
     err = capsys.readouterr().err
     assert "CANNOT ANSWER" in err and "broken.py" in err, err
+
+
+def test_repin_refuses_a_population_the_check_cannot_grade(tmp_path, monkeypatch, capsys):
+    """⛔ `--repin` must not PUBLISH a pair for a tree the run already refused to grade.
+
+    (#14548 review, P3.) `--repin` returned ABOVE the `<<syntax-error>>` refusal and above the
+    zero-file refusal, so it printed a `SWEEP_RESIDUE = (n, digest)` pair for a population holding
+    an unparseable file — whose real rows collapse into ONE `<<syntax-error>>` row, so the pair is
+    a DIFFERENT tree's count — and `(0, …)` for a walk that measured nothing. A published pair is
+    exactly what a lane pastes as a re-pin, so the refusals must gate it as they gate `--check`.
+
+    Mutation: move the `if args.repin:` block back above `broken`/`walked == 0` -> both `not in`
+    asserts RED (a pair is printed) while `--check` keeps refusing the same fixtures.
+    """
+    (tmp_path / "broken.py").write_text(
+        "def broken(:\n    reg.update(1)\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "broken.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--repin"])
+    assert privatise.main() == 1, "an unparseable file must refuse `--repin`, never publish a pair"
+    refused = capsys.readouterr()
+    assert "SWEEP_RESIDUE = " not in refused.out, (
+        f"no pair may be printed for a tree the run refused to grade: {refused.out!r}")
+    assert "CANNOT ANSWER" in refused.err, refused.err
+
+    _stub_walk(monkeypatch, tmp_path, [], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--repin"])
+    assert privatise.main() == 1, "a zero-file walk must refuse `--repin` too"
+    empty = capsys.readouterr()
+    assert "SWEEP_RESIDUE = " not in empty.out, (
+        f"`(0, …)` is the pair a stale clone pastes; it must not be published: {empty.out!r}")
+    assert "measured no Python files" in empty.err, empty.err
 
 
 def test_the_sdk_class_body_is_read_from_the_same_bytes_as_the_blob(tmp_path, monkeypatch):
