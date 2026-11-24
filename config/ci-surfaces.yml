@@ -72,8 +72,10 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
 # `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 deletions shrink the durations map and
-# RETIRE `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite, which is why this PR
-# takes `main`'s copy of that file rather than its own, folded over the #14371, #14186, #14434,
+# RETIRE `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
+# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
+# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
+# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
