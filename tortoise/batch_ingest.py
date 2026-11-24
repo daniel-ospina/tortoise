@@ -2229,7 +2229,26 @@ class BatchCoordinator:
             # from the same item stamp this call owns, so it is an identity a
             # later writer cannot move. The CAS accepts only the two states a live
             # adoption can be in at this instant; a cancel has already left them.
-            current = self._store.get_batch(org_id, bid)
+            # ⛔ AND THE READ MUST NOT RAISE INTO `submit`'s ROLLBACK (round 22,
+            # MEDIUM — measured). This arm is inside `submit`'s `try`, whose
+            # `except Exception` does `self._store.discard(org_id, bid)` +
+            # `_discard_staged(...)` — deleting the batch row, its item rows and its
+            # staged bytes of a batch THIS CALL DOES NOT OWN. A read fault here
+            # (graph over budget, a broken socket) used to escape as a plain
+            # exception and reach it, so an interleaving that previously ended in a
+            # clean rollback-exempt refusal ended in unrecoverable deletion of
+            # another writer's ACKed batch. Measured at `874bcd74`: `submit` raised
+            # `RuntimeError` and the winner's row was DELETED with its items gone;
+            # with only this hunk reverted, `_BatchIdConflict` and the row intact.
+            # A fault is "not provably ours", so it REFUSES.
+            try:
+                current = self._store.get_batch(org_id, bid)
+            except Exception:
+                _logger.warning(
+                    "batch %s: the row could not be read while deciding who owns "
+                    "the id — refusing rather than discarding a batch this call "
+                    "may not own", bid, exc_info=True)
+                current = None
             if (current is not None and current.created_at == stamp
                     and self._store.put_batch_if_state(
                         batch, (BatchState.RESUMING, BatchState.RUNNING),
