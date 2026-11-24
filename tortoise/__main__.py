@@ -6050,12 +6050,75 @@ def _cmd_create_point(args) -> int:
     if api_key is None:
         print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
         return 1
+    # #14424: `_resolve_config_path` returns `TORTOISE_API_URL` VERBATIM (no `rstrip`), so a
+    # user-set value ending in `/` produced `https://…//v1/points` (and a `//v1/search` in the
+    # success hint) -> 404. Normalize once, here, so both the request and the hint agree — the
+    # same `rstrip("/")` the rest of this module applies (e.g. `endpoint` above,
+    # `_doctor_hosted_rows`).
+    # ⛔ COERCE BEFORE `rstrip`. `_resolve_config_path` validates `api_key` is a
+    # `str` but passes `api_url` through VERBATIM, and `./.tortoise` is
+    # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches `.rstrip()`
+    # on a list and raises `AttributeError` with a raw traceback, replacing the
+    # clean refusal BASE shipped (measured on 4993fa083f: the `URLError` arm
+    # answered "Cannot reach API at ['https://a.example.test']: unknown url
+    # type" and returned 1). A repository must not be able to crash the WRITE
+    # verb — the same coercion `_doctor_hosted_rows` applies belongs here.
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    api_url = (api_url or "https://api.premiselabs.co").rstrip("/")
+    # ⛔ REFUSE A NON-URL **BEFORE** BUILDING THE REQUEST — this is the only place in
+    # this verb that may say "nothing was sent", because nothing has been. The
+    # coercion above only makes the value a STRING, not a URL: a store `api_url`
+    # of `42` becomes `"42"`, and `Request(...)` raises
+    # `ValueError: unknown url type: '42/v1/points'`.
+    #
+    # ⛔ AND IT MUST BE A PRE-FLIGHT, not a `except ValueError` alone. A bare
+    # `except ValueError` over the `try` below ALSO catches the ValueErrors that
+    # `urlopen` raises AFTER the request was sent — `Invalid IPv6 URL` from a
+    # redirect handler, for one (measured: a server that answers the POST with a
+    # `302` whose `Location` is malformed; the server received and processed the
+    # write, and the handler then raised). Saying "nothing was sent" there is the
+    # same false safety fact the neighbouring `URLError` arm was rewritten to
+    # avoid, and `test_an_unreachable_api_does_not_claim_nothing_was_written`
+    # exists to keep that claim out of this verb.
+    # ⛔ THE CHECK MUST BE CASE- AND WHITESPACE-TOLERANT, because the transport is:
+    # `urllib.parse._splittype` lowercases the scheme, so BASE accepted and SENT
+    # `HTTPS://host.example` and `" https://host.example"` (both measured against a
+    # real server, rc 0). An exact `startswith` turned those into a hard refusal
+    # whose message ("not an http(s) URL") asserts the opposite of the truth. Only
+    # the GUARD is normalised — `api_url` itself is not rewritten — so any input
+    # BASE accepted is still accepted and sent as before.
+    if not api_url.strip().lower().startswith(("http://", "https://")):
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: not an http(s) "
+              f"URL.", file=_sys.stderr)
+        print("The request was never built, so nothing was sent — check the "
+              "configured API URL (it must start with http:// or https://).",
+              file=_sys.stderr)
+        return 1
 
     payload = {
         "content": args.content,
         "kind": args.kind or "statement",
     }
+    if getattr(args, "dedup", False):
+        # #14424: the server's create door accepts `dedup` (content-hash fold,
+        # #1643 P1-2) and defaults it to False. Opting in is what makes a RETRY
+        # after a wait-bound breach safe — the measured failure is 4 attempts
+        # through this verb leaving 4 identical Points, because the refusal
+        # text tells the caller to re-send and nothing made re-sending safe.
+        payload["dedup"] = True
 
+    # ⛔ CONSTRUCT THE REQUEST OUTSIDE THE `try` BELOW. `Request(...)` PARSES the
+    # URL and raises `ValueError` (`Invalid IPv6 URL`) BEFORE any socket exists —
+    # and the pre-flight above ADMITS such a value (`http://[::1` starts with
+    # `http://`). While construction sat inside that `try`, its `ValueError` fell
+    # into the `except ValueError` arm, which is necessarily HEDGED ("that does
+    # not prove it failed to land") because that arm also covers post-send /
+    # redirect-phase errors. So a URL the client could not even build a request
+    # from was reported as a possibly-committed write, inventing a duplicate risk
+    # for a request that was never made. Splitting the two makes BOTH messages
+    # true: construction cannot put a byte on the wire and now says so, and the
+    # hedge stays where it is warranted.
     try:
         data = _json.dumps(payload).encode("utf-8")
         req = Request(
@@ -6067,22 +6130,249 @@ def _cmd_create_point(args) -> int:
             },
             method="POST",
         )
+    except ValueError as e:
+        # Same redaction as the arm below: `{e}` quotes the URL it failed on.
+        _build_text = str(e).replace(api_url, "<api_url>")
+        if api_key:
+            _build_text = _build_text.replace(api_key, "<api_key>")
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: "
+              f"{_printable(_build_text)}", file=_sys.stderr)
+        print("The request was never built, so nothing was sent — check the "
+              "configured API URL.", file=_sys.stderr)
+        return 1
+
+    try:
         with urlopen(req, timeout=30) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        # #14424: the wait-bound refusal's own text is "wait for the advertised
+        # delay before retrying, and retry only if repeating the operation is
+        # safe" — and BOTH halves were unactionable here: the advertised delay
+        # is a `Retry-After` HEADER this verb discarded, and nothing told the
+        # caller how to make the repeat safe (the `dedup` fold above does).
+        # Empty for codes whose next action is not "re-send" (a 422 rejects
+        # the body), so nothing is printed that would misadvise one.
+        _hint = _create_point_retry_hint(e, dedup_used=bool(payload.get("dedup")))
+        if _hint:
+            print(_hint, file=_sys.stderr)
         return 1
     except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        # #14424 review P3: mask the base before printing it. Five lines below,
+        # the success hint this verb rewrites prints it through
+        # `_printable(_mask_display_target(...))` for exactly this reason: a
+        # store `api_url` carrying `user:pass@` (or `?token=`) reached stderr
+        # verbatim on any connect failure of the FIRST-RUN verb. The idiom is
+        # the module's own (`_doctor_hosted_rows`, `:5192`).
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: {e.reason}",
+              file=_sys.stderr)
+        # #14424 review: "nothing was sent" is NOT a fact this error can
+        # establish, and the neighbouring HTTPError arm already says so about
+        # the same write. `urlopen` raises `URLError` from `h.request(...)` — a
+        # send phase an EPIPE/ECONNRESET can cut AFTER the bytes reached the
+        # wire — and it FOLLOWS REDIRECTS, so a 301/302/303 answering this POST
+        # is a request the server already processed and a failure on the SECOND
+        # hop lands here with the write already committed. RFC 9110 permits
+        # retrying a POST only when the client knows the operation is
+        # idempotent OR can determine the original request was never applied;
+        # this error cannot determine the second, so name the override rather
+        # than assert the retry is free.
+        print("The request did not complete — that does not prove it failed to "
+              "land. Re-run with --dedup (or read back first) so a retry "
+              "cannot duplicate the write.", file=_sys.stderr)
+        return 1
+    except (TimeoutError, OSError) as e:
+        # ⛔ A stall while READING the response — after the request was fully
+        # sent — never reaches the `URLError` arm above: `do_open` wraps only
+        # the SEND (`h.request(...)` sits inside `except OSError: raise
+        # URLError(err)`), so the `resp.read()` in this verb raises
+        # `TimeoutError`/`OSError` straight through and the user gets a bare
+        # traceback for a write that was already on the wire. That is the same
+        # dead-end the arms above exist to close, one layer down, and the same
+        # class and treatment are already recorded one command up
+        # (`_cmd_signup`: "without it the D2 contract degrades into a
+        # traceback") and at `:5188`.
+        print(f"Cannot complete the request ({e}).", file=_sys.stderr)
+        print("The request was sent before the connection failed, so the write "
+              "MAY have landed. Reconcile with `GET /v1/points` before "
+              "re-sending, or re-run with `--dedup` to make the retry safe.",
+              file=_sys.stderr)
+        return 1
+    except (UnicodeDecodeError, _json.JSONDecodeError) as e:
+        # #14424 review P3: the server ANSWERED, so this is not the arm above —
+        # the connection did not fail, the body was unreadable (an HTML proxy
+        # page behind a 502, a truncated body). The write still MAY have landed,
+        # so the next action is the same, and the CAUSE is stated apart from it.
+        # ⛔ `UnicodeDecodeError` is named here because it is a `ValueError` but
+        # NOT a `JSONDecodeError`: a binary/undecodable 2xx body (a truncated
+        # gzip, an upstream answering in raw bytes) escaped every arm and
+        # tracebacked out of `main()`, which has no backstop. Widening to bare
+        # `ValueError` was REJECTED — that would also swallow a programming
+        # error in the request construction inside this same `try`.
+        print(f"Cannot read the API's response as JSON ({e}).", file=_sys.stderr)
+        print("The server answered, so the write MAY have landed. Reconcile "
+              "with `GET /v1/points` before re-sending, or re-run with "
+              "`--dedup` to make the retry safe.", file=_sys.stderr)
+        return 1
+    except ValueError as e:
+        # ⛔ HEDGED ON PURPOSE. This arm catches what the pre-flight above could
+        # not: a `ValueError` raised by `urlopen`/the redirect handler AFTER the
+        # request was on the wire (`Invalid IPv6 URL` is the measured one). So it
+        # may NOT claim the write was not sent — see the `URLError` arm for the
+        # same reasoning, and `test_an_unreachable_api_does_not_claim_nothing_was_written`.
+        # ⛔ `Request(...)` CONSTRUCTION IS DELIBERATELY OUTSIDE THIS `try`: it
+        # cannot put a byte on the wire, so its `ValueError` gets the "nothing was
+        # sent" wording at the construction site instead of this hedge. Moving it
+        # back in makes a never-built request read as a possibly-committed write.
+        #
+        # ⛔ AND REDACT THE TEXT: `{e}` quotes the URL it failed on, so a store
+        # `api_url` carrying `?token=…`/`user:pw@` would reach stderr unmasked —
+        # and a malformed `api_key` is echoed too
+        # (`Invalid header value b'Bearer tt_…'`), which is the PRIMARY credential.
+        # The masked target beside it made the line look already handled.
+        _err_text = str(e).replace(api_url, "<api_url>")
+        if api_key:
+            _err_text = _err_text.replace(api_key, "<api_key>")
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: "
+              f"{_printable(_err_text)}", file=_sys.stderr)
+        print("The request did not complete — that does not prove it failed to "
+              "land. Check the configured API URL and API key, and re-run with "
+              "`--dedup` (or read back first) so a retry cannot duplicate the "
+              "write.", file=_sys.stderr)
         return 1
 
+    # #14424 review P3: a 2xx this verb cannot READ is not a success, and until
+    # here it was a bare traceback on the first-run verb — `result.get` on a
+    # `[]`/`null` body raises AttributeError, out of `main()`, which has no
+    # backstop (`raise SystemExit(main())`). `_cmd_org_keys_list` one command up
+    # guards the same shape the same way ("2xx with a non-object body ([]/null)
+    # — clean error, not AttributeError").
+    if not isinstance(result, dict):
+        # ⛔ A 2xx means the POST most likely COMMITTED, so this arm must say the
+        # same thing as its three siblings in this function (URLError,
+        # Timeout/OSError, decode). It used to print only "Invalid response",
+        # which tells a user to re-run and manufactures exactly the duplicate
+        # Point this PR exists to prevent (measured: 4 attempts, 4 Points).
+        print(f"Invalid response from API: expected a JSON object, got "
+              f"{type(result).__name__}.", file=_sys.stderr)
+        print("The server answered with 2xx, so the write MAY have landed. "
+              "Reconcile with `GET /v1/points` before re-sending, or re-run "
+              "with `--dedup` to make the retry safe.", file=_sys.stderr)
+        return 1
     point_id = result.get("id", result.get("point_id", "unknown"))
     print(f"Created point: {point_id}")
     print(f"  Kind: {args.kind or 'statement'}")
     content_preview = args.content[:100] + "..." if len(args.content) > 100 else args.content
     print(f"  Content: {content_preview}")
+    # #14424: the criterion's real moment is the SEARCH, and this verb is where
+    # a first-run user stands when they need it. The CLI has no search verb
+    # (declared in docs/evidence/14424-onboarding/README.md D5), so the next
+    # action must name the doors that do — otherwise "Created point: <id>" is a
+    # success with no next step, and the memory is never found again.
+    # ⛔ NAME THE STORE THAT ACTUALLY WON. `_resolve_config_path` resolves
+    # env -> ./​.tortoise -> ~/.tortoise/credentials.json, and
+    # `docs/quickstart-cloud.md` tells users to create the PROJECT-LOCAL one with
+    # `tortoise init --api-key`. A hint that always says
+    # `~/.tortoise/credentials.json` therefore names a file the user was never
+    # told to create, and following it sends an empty Bearer to a gated endpoint
+    # (`/v1/search` -> 401). `_cfg_path` is the store that resolved, so print it.
+    _key_src = (_printable(str(_cfg_path)) if _cfg_path is not None
+                else "$TORTOISE_API_KEY")
+    print(f"  Next: search for it — GET "
+          f"{_printable(_mask_display_target(api_url or ''))}/v1/search?q=WORD "
+          f"with an `Authorization: Bearer` header carrying the key from "
+          f"`{_key_src}` — or the `tortoise_search` MCP tool / "
+          "`TortoiseSDK.search_knowledge`. This CLI has no search verb yet "
+          "(#14424).")
     return 0
+
+
+def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
+    """The next action after a failed `tortoise create-point` (#14424).
+
+    THE DEAD-END THIS CLOSES. Measured on the deployed build (2026-11-23):
+    `tortoise create-point` hit `504` four times and **all four writes
+    committed** — the org read back 4 identical Points. The server's own
+    refusal says *"wait for the advertised delay before retrying, and retry
+    only if repeating the operation is safe"*, and this verb made both halves
+    unactionable: the delay is a `Retry-After` **header** it discarded, and no
+    word of the output said how a repeat could be made safe. The AX rule is
+    that a surface must not refuse where the next action is knowable
+    (`docs/ax/ax-principles.md`, #10183); here it is knowable, so it is stated:
+
+    * what changed — the write MAY have landed even though this command failed;
+    * what to do next — wait the advertised delay, then re-run **with
+      `--dedup`**, which folds the retry onto the same content hash instead of
+      adding a second Point;
+    * how to override — no flag is required to re-send; the cost of omitting
+      `--dedup` is a duplicate, which is the caller's call to make.
+
+    ⛔ WHICH ARM SPEAKS ABOUT THE WRITE — the claims are not transferable. A
+    `504` is the transport's wait-bound breach, whose own text says the work may
+    still complete (measured: it can, and it does not always — two attempts on
+    one content landed once). A `429` is an ADMISSION refusal (`hosted_api`'s
+    ingest/rate-limit refusals are answered before the write runs), so it must
+    not inherit the duplicate warning; a bare `503` may come from a proxy whose
+    origin died mid-write, so it gets the safe-re-send advice and NOT the claim
+    that the write completed. Anything else returns empty — a `422` is the
+    server rejecting the body, and "re-send it" is not the next action.
+
+    Kept out of the handler so the wording is testable without an HTTP mock.
+    """
+    code = getattr(exc, "code", None)
+    if code not in (429, 503, 504):
+        return ""
+    retry_after = None
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        try:
+            retry_after = headers.get("Retry-After")
+        except Exception:  # a header object we cannot read
+            retry_after = None
+    lines: list[str] = []
+    if retry_after:
+        # RFC 9110: `Retry-After = HTTP-date / delay-seconds`. Appending " s"
+        # unconditionally renders a proxy's HTTP-date as
+        # "Retry-After: Wed, 21 Oct 2015 07:28:00 GMT s" (#14424 review), so
+        # echo the value as supplied and add the unit only where it IS seconds.
+        _ra = str(retry_after).strip()
+        lines.append(
+            f"The server advertised Retry-After: {_ra}"
+            f"{' s' if _ra.isdigit() else ''} — wait that long before "
+            f"re-sending.")
+    else:
+        lines.append(
+            "The server advertised no Retry-After; wait 10 s — the delay the "
+            "deployed server sends when it advertises one — before re-sending.")
+    if code == 429:
+        # Refused at admission: the write never ran, so a re-send after the
+        # delay cannot duplicate anything.
+        lines.append(
+            "A rate-limit refusal is answered before the write runs, so "
+            "re-sending after that delay is safe.")
+        return "\n".join(lines)
+    if code == 504:
+        lines.append(
+            "This failure does NOT mean nothing was written: the work may have "
+            "completed on the server.")
+    if dedup_used:
+        lines.append(
+            "Re-running is safe with this attempt's --dedup: the server "
+            "folds identical content onto the existing Point instead of "
+            "adding another.")
+    else:
+        lines.append(
+            "Re-running WITHOUT --dedup can create a duplicate Point for "
+            "content that already landed on the HOSTED API, where dedup "
+            "defaults off (measured: 4 attempts, 4 Points). Re-run with "
+            "--dedup to make the retry safe. On a self-hosted server dedup "
+            "already defaults ON, so the flag is a no-op there and the retry "
+            "folds either way (`tortoise/selfhost_api.py:35`).")
+    return "\n".join(lines)
 
 
 def _context_source_label(api_url: str | None) -> str:
@@ -9831,6 +10121,40 @@ def _cmd_session_drain(api_key: str, api_url: str,
               file=_sys.stderr)
     summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
+    # #14350 (D1): the two states that are NOT a failure of any entry, printed
+    # even when nothing else happened — a pass that refused to run, and a pass the
+    # box's own capacity stopped, are exactly the cases where a silent drain reads
+    # as "nothing to do".
+    if summary.held_by_claim:
+        print(f"spool drain: {summary.claim_holder or 'another drainer holds this spool'} "
+              "— serialized drain: one drainer per box (#14350)",
+              file=_sys.stderr)
+    if summary.claim_unavailable:
+        # ⛔ THE REASON IS THE SUMMARY'S, not a hard-coded sentence: this arm covers
+        # an unwritable root AND an unclearable obstruction at the claim path, and
+        # telling an operator "unwritable spool root" about a non-empty directory is
+        # a false diagnosis (review finding).
+        print("spool drain: the drain claim could not be created "
+              f"({summary.claim_unavailable_reason or 'unwritable spool root'}) — "
+              "this pass ran WITHOUT the one-drainer exclusion",
+              file=_sys.stderr)
+    if summary.lost_claim:
+        print("spool drain: this pass no longer held the drain claim (a peer took "
+              "it over) — stopping rather than draining twice",
+              file=_sys.stderr)
+    if summary.capacity is not None and summary.capacity_stopped:
+        # ⛔ `capacity_stopped`, not just `capacity`: a pass that was refused once
+        # and then FILED everything has nothing to report — saying "pass ended"
+        # about it would describe a state the box had for one POST (review finding).
+        yields = (f" after {summary.capacity_yields} yield"
+                  f"{'s' if summary.capacity_yields != 1 else ''}"
+                  if summary.capacity_yields else "")
+        print(f"spool drain: server at capture capacity (HTTP "
+              f"{summary.capacity.get('status')}"
+              f"{' ' + str(summary.capacity['code']) if summary.capacity.get('code') else ''}"
+              f") — pass ended{yields}; nothing charged to any entry's attempts, "
+              f"resumes on the next opportunity",
+              file=_sys.stderr)
     # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
     # the ledger exists to close — turns stored, no import receipt (by design),
     # the capture-failure breadcrumb cleared by the 2xx, and no local record
@@ -16108,13 +16432,137 @@ def _cmd_doctor(args):
             _session_index_reason = ("pre-init-default" if _is_default_target
                                      else "pre-init-configured")
             _icon = "⚠️" if _is_default_target else "❌"
-            _detail = (
-                f"not set up yet — no Tortoise DB at {target}"
-                + (f" ({_missing})" if _missing else "")
-                + ". Run `tortoise init` to create it, or point "
-                "doctor at your setup with TORTOISE_DB_URI / "
-                "TORTOISE_DB_PATH / --db."
-            )
+            # #14424: on the DEFAULT target with a HOSTED credential, "run
+            # `tortoise init`" is the WRONG next action — that verb builds a
+            # local graph the user will never write to. Measured on a clean HOME
+            # with a fresh signup key (2026-11-23): doctor printed "Run
+            # `tortoise init` to create it" to a box whose memory lives at
+            # api.premiselabs.co. The AX rule is that a surface must not refuse
+            # where the next action is knowable (#10183); here it is knowable,
+            # so the row names the hosted action and says `init` is the override.
+            # Resolution is OFFLINE (`_resolve_config_path`, no request), so the
+            # no-credential-means-no-network contract below is untouched.
+            _hosted_identity: tuple[str, str | None] | None = None
+            try:
+                _h_path, _h_cfg, _h_key, _h_url = _resolve_config_path()
+                # ⛔ AN ENV-ONLY `TORTOISE_API_KEY` IS NOT A HOSTED IDENTITY (#11912
+                # review round 15, the predicate `_doctor_hosted_rows` applies
+                # ~1,300 lines below). That variable is ALSO the documented shared
+                # key for a self-hosted `serve --http --auth static`
+                # (`.env.example:149-150`, `tortoise/auth.py` `require_auth`,
+                # `docs/quickstart-selfhosted.md:65`), so without this gate a
+                # healthy self-host box that exports it — exactly what that
+                # quickstart instructs — reads "you have a hosted credential" and
+                # is told its next step is `tortoise create-point`, which resolves
+                # that SAME env key against `TORTOISE_API_URL` or the production
+                # default. Following the advice therefore sends the user's LOCAL
+                # STATIC SECRET to api.premiselabs.co: the #1708 §D1b silent
+                # backend switch, in prose form, and the same shape round 15
+                # refused for the /health probe — which is why the two rows
+                # CONTRADICTED each other in one report.
+                #
+                # Deliberately the SAME three escapes as that predicate: a FILE
+                # store always counts (the whole point of #11912 — a revoked
+                # stored key must never read green), and so does an explicitly
+                # named `TORTOISE_API_URL` or a hosted-shaped key.
+                #
+                # ⛔ "Hosted-shaped" is not just `_HOSTED_KEY_PREFIXES`: the
+                # `Hosted` row ALSO admits the `oat_` family as a hosted identity
+                # (`:15677` — an OAuth access token that is MCP-only by design,
+                # ADR-010). Omitting it here left the same one-screen
+                # contradiction this gate exists to remove, narrowed to `oat_`: a
+                # Graph row saying "Run `tortoise init`" beside a Hosted row
+                # naming an OAuth identity. The row then names the MCP door for
+                # that family rather than `create-point`, because `oat_` tokens
+                # are MCP-only and REST `/v1/*` refuses them — the deferral that
+                # used to excuse this (`the Hosted row below says …`) no longer
+                # ships, and it was wrong anyway: the pointer must name a step
+                # the key can take, not a row that may decline to grade.
+                # ⛔ Do NOT widen `_HOSTED_KEY_PREFIXES` itself —
+                # `test_the_hosted_prefixes_match_the_auth_contract` pins it to
+                # `tortoise/auth.py::API_KEY_PREFIXES`.
+                import os as _hos
+                _h_env_url_explicit = bool(
+                    (_hos.environ.get("TORTOISE_API_URL") or "").strip())
+                _h_hosted_shaped = (_h_key or "").startswith(
+                    (*_HOSTED_KEY_PREFIXES, _OAUTH_ONLY_KEY_PREFIX))
+                if _h_key and _is_default_target and (
+                        _h_path is not None or _h_env_url_explicit
+                        or _h_hosted_shaped):
+                    _hosted_identity = (_h_path.name if _h_path else "env", _h_url)
+            except MemoryError:
+                raise
+            except (_ConfigError, OSError, RuntimeError):
+                # The same state §8's own resolver arm grades: a refused store is
+                # its finding, not this row's — no network was attempted either.
+                _hosted_identity = None
+            if _hosted_identity is not None:
+                _src, _h_url = _hosted_identity
+                # ⛔ `_h_url` is STORE-SUPPLIED and lands in a verdict row, so it
+                # needs the same TWO passes every other row in this verb applies
+                # (see `base = _printable(_mask_display_target(api_url or ""))`
+                # in `_doctor_hosted_rows`), and for the same reason:
+                #   * `_printable` — a store `api_url` of
+                #     `https://a.test\n  ✅ Graph: health: 999 Points, forged`
+                #     printed a SECOND `Graph: health` results row on the
+                #     pre-init path (measured: two rows matched
+                #     `^\s+\S+\s+Graph: health:`), and a verdict report must
+                #     never let a store forge a row; `_health_line` takes the
+                #     FIRST match, so a forged line can win the read.
+                #   * `_mask_display_target` — a `user:pass@` or `?token=` in
+                #     that URL otherwise reaches the transcript, against this
+                #     store's own contract that it NEVER prints the credential.
+                # ⛔ COERCE FIRST. `_resolve_config_path` validates `api_key` is a
+                # `str` but passes `api_url` through VERBATIM, and `./.tortoise` is
+                # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches
+                # `_mask_display_target` -> `.split()` on a list and raises
+                # `AttributeError`, killing the whole verb with no report (measured,
+                # exit 1 after the banner). `_doctor_hosted_rows` (:15554) coerces for
+                # exactly this reason; this arm sits outside every guard, so it must
+                # too.
+                _display_url = _printable(_mask_display_target(
+                    _h_url if isinstance(_h_url, str) else str(_h_url or "")))
+                # ⛔ THE NAMED NEXT STEP MUST BE ONE THIS KEY CAN ACTUALLY TAKE.
+                # `_h_hosted_shaped` admits `_OAUTH_ONLY_KEY_PREFIX`, but an
+                # `oat_` token is MCP-only (ADR-010) and REST `/v1/*` refuses it,
+                # and an unsendable key makes every transmitting verb raise — so
+                # naming `create-point` unconditionally contradicted the Hosted
+                # row printed two lines below and, for a CR/LF key, steered the
+                # user into the one command whose traceback ECHOES the key.
+                _prefix = (
+                    f"not used by this setup — you have a hosted credential "
+                    f"({_src}{', ' + _display_url if _display_url else ''}), "
+                    f"so your memory lives there and a local graph is not "
+                    f"required. "
+                )
+                _override = (" Override: run `tortoise init` only if you ALSO "
+                             "want a local graph.")
+                if not _is_sendable_key(_h_key):
+                    _detail = _prefix + (
+                        "⛔ This credential cannot be sent in a request header "
+                        "(not latin-1 encodable, or contains CR/LF), so no verb "
+                        "here can use it — re-minting is the next step: "
+                        "`tortoise signup`, `tortoise recover`, or `tortoise "
+                        "key create`.") + _override
+                elif (_h_key or "").startswith(_OAUTH_ONLY_KEY_PREFIX):
+                    _detail = _prefix + (
+                        "Your next step is the MCP door, not a REST verb: this "
+                        "is an OAuth access token, and `oat_` tokens are "
+                        "MCP-only (ADR-010), so `/v1/*` refuses them. For "
+                        "`tortoise create-point`, mint a `tt_`/`tk_` API key.") + _override
+                else:
+                    _detail = _prefix + (
+                        "Your next step is `tortoise create-point \"…\"` — "
+                        "`tortoise doctor` without `--offline` checks whether "
+                        "that will work.") + _override
+            else:
+                _detail = (
+                    f"not set up yet — no Tortoise DB at {target}"
+                    + (f" ({_missing})" if _missing else "")
+                    + ". Run `tortoise init` to create it, or point "
+                    "doctor at your setup with TORTOISE_DB_URI / "
+                    "TORTOISE_DB_PATH / --db."
+                )
             results.append(("Graph: health", _icon, _detail))
         else:
             try:
@@ -18307,6 +18755,11 @@ def main(argv: list[str] | None = None) -> int:
     cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
     cp.add_argument("content", help="Point content (text)")
     cp.add_argument("--kind", default="statement", help="Point kind (default: statement)")
+    cp.add_argument(
+        "--dedup", action="store_true",
+        help="Fold onto an existing Point with the same content instead of "
+             "creating a duplicate — makes a retry after a timeout safe (the "
+             "server's content-hash dedup, #1643) (#14424)")
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")

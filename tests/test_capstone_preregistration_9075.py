@@ -2118,7 +2118,16 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # requirement is that no binding of it points anywhere but its own line.
     for symbol, expected_line, entry in (
         ("TORTOISE_STATE_VALUE_VERBATIM", 527, '("TORTOISE_STATE_VALUE_VERBATIM", "1"))'),
-        ("TORTOISE_PARTIAL_GAP_FILL", 498, '"TORTOISE_PARTIAL_GAP_FILL")'),
+        # ⛔ `#14343` put its pin on the SAME source line as the `#11534` entry —
+        # deliberately, because a line inserted inside that tuple moves every
+        # `probes/capstone_measure.py` cite below it — so BOTH symbols bind to
+        # `:498` and share ONE line literal. The binding is what keeps that
+        # deliberate choice from decaying into a bare number nobody re-checks:
+        # splitting the line later reds here until the cite moves with it.
+        ("TORTOISE_PARTIAL_GAP_FILL", 498,
+         '"TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON'),
+        ("TORTOISE_S4_EMBED_JSON", 498,
+         '"TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON'),
     ):
         bound = {
             int(n) for n in re.findall(
@@ -3750,9 +3759,11 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           the two steps that emit `fast_matrix` and nowhere else: both `run:` scripts are byte-identical
 #:           (`_code()` unchanged), neither writes `$GITHUB_PATH`/`$GITHUB_ENV`, neither swallows an exit
 #:           code, and the step set and order are unchanged — so the sibling-shim, shim and `_ALWAYS_RUN`
-#:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter,
-#:           pinned by `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
+#:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter
 #:           and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`.
+#:           (The second arm this cited, `test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
+#:           was cut in the B7 test-bureaucracy cut, 2026-11-23; the emitter-reach half it carried is
+#:           what `test_the_changes_job_carries_no_job_scope_env` still checks.)
 #:   #10897 — `changes`: `Emit push matrix (#1472/#6135)` + `Tier-2 duration split (#1473)` — digest-only
 #:           movement, and like #10186 it is the `env:` block WIDENED (two keys added beside
 #:           `CI_SHARD_ROUTING`), not the `run:` script. `_code()` is byte-identical on both steps;
@@ -3764,8 +3775,10 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           (the operator's declared fold runner class); the DECISION is
 #:           `tools/ci_selection.py::resolve_fold_runner`, so the lever is unit-tested and an unusable
 #:           declaration falls back to the row's own runner rather than routing a required check onto
-#:           a label no runner carries. Reaches every emitter, pinned by
-#:           `tests/test_ci_selection.py::test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job`.
+#:           a label no runner carries. (The emitter-reach arm and the whole fold seam's unit
+#:           cluster this cited were cut in the B7 test-bureaucracy cut, 2026-11-23 —
+#:           `resolve_fold_runner` is UNGRADED now; what is left is the emitter-reach arm that
+#:           proves the workflow's env KEYS are the selector's constants.)
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (

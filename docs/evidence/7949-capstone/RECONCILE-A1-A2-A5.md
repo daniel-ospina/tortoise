@@ -68,7 +68,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1773`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:12487`, and
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:12497`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
 tree — see the fifth-landing amendment below:** the consumer landed as **`#11548`**, and that grep now
@@ -94,14 +94,14 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:22052` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:22051`, and the
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:22085` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:22084`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
-- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12487`,
-  `relation_write.py:7`, `sdk.py:22039`), against the *"that comment and no consumer at all"* this
+- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12497`,
+  `relation_write.py:7`, `sdk.py:22072`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
   and one of them the **call** (`:700`): a declared hierarchy over a pair the story *states* is routed
@@ -191,10 +191,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:22492`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:22525`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:22492`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
+   `:22525`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` on the MERGED tree — the only
    figure that survives, because this number depends on BOTH sides' `sdk.py` growth:
    `origin/main` carried a figure correct for `main`, and this branch's head had ALREADY moved
@@ -208,9 +208,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    note left out of its own enumeration — and an omission is exactly what a completeness claim
    hides. ⛔ Named by its SENTENCE, not by a line number (#14060 round-17 review, P3): a
    `README.md:<n>` pointer into a file that grows on any paragraph inserted above it is the same
-   unchecked anchor this note exists to catch — and the arms that DO resolve `README.md:<n>` cites
-   read `E1-E5-PROOFS.md` (`test_every_readme_line_cite_carries_the_sentence_it_quotes`) and one
-   test's own docstring, so neither reads one written HERE (#14060 review round 18, P3: this said
+   unchecked anchor this note exists to catch — and the only arm that resolved `README.md:<n>`
+   cites INTO `E1-E5-PROOFS.md` was CUT in the 2026-11-23 B4 test cut; a test's own docstring is
+   the sole remaining instance, so nothing reads one written HERE (#14060 review round 18, P3: this said
    "no arm resolves cites INTO this README", which those two arms refute — what is true is that no
    arm reads a `README.md:<n>` cite THIS RECORD carries). The bare
    parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 287 lines and deleted 1 in `tortoise/sdk.py` (`git show --numstat 32011c4dad -- tortoise/sdk.py` -> `287 1`, net `+286` — this clause said "inserted 286", which is the NET column, not the added one the sibling `#12882` clause below counts), 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. Then at the `#14060`
@@ -226,12 +226,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on the tree of that head.
    ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
    under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
-   them above this writer (the live cite above is `sdk.py:22492`), so at the merged head
-   `22440` is `sourceKind="agentSession",`, `22385` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
-   mint opens at `21210` (`21210-21234`, same `-A 24` window). They are stamped by head and NOT
+   them above this writer (the live cite above is `sdk.py:22525`), so at the merged head
+   `22494` is `sourceKind="agentSession",`, `22439` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
+   mint opens at `21243` (`21243-21267`, same `-A 24` window). They are stamped by head and NOT
    re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
    note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
-   merged tree (`sdk.py:22492`). No arm reads the numbers in THIS block — which is why they rot
+   merged tree (`sdk.py:22525`). No arm reads the numbers in THIS block — which is why they rot
    silently. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
@@ -368,7 +368,7 @@ def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extrac
 def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
 the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
-(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:21210-21234`. Nothing
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:21243-21267`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
 *"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
@@ -457,7 +457,7 @@ named a Subject and the spine relabelled it an Object.
 mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
 remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
 this record is measured on,
-the write seam routes by kind (`tortoise/sdk.py:21210-21234`): `_ekind = _payload_entity_kind(e)` →
+the write seam routes by kind (`tortoise/sdk.py:21243-21267`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
@@ -725,7 +725,7 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :10449 :10467 :10474 :10854
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :10459 :10477 :10484 :10864
 
 # A1 (§1) — the declaration reads, and a production caller outside its own module now writes it
 # ⛔ This header read "…and nothing production writes it" until #11548/#11237 landed
@@ -774,19 +774,19 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:12487 (the comment that WAS stale, corrected in place by #11001's lane),
-# relation_write.py:7, sdk.py:22039.
+# extractor_v2.py:12497 (the comment that WAS stale, corrected in place by #11001's lane),
+# relation_write.py:7, sdk.py:22072.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:22052 (`_capture_session` reaches it at `sdk.py:19918`). Of the three hits only ONE was still prose-about-absence (the stale comment at
-# `extractor_v2.py:12487`); the other two are the consumer announcing itself. Read §0's amendment
+# sdk.py:22085 (`_capture_session` reaches it at `sdk.py:19951`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# `extractor_v2.py:12497`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
-# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
+# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12497` was
 # corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
 # record keeps its number — to state the consumer (`apply_relation_edges`, called from
 # `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. Its number then was
-# `:11524`; this tree carries the same comment at `extractor_v2.py:12487`. So the A1 paragraph's quote
+# `:11524`; this tree carries the same comment at `extractor_v2.py:12497`. So the A1 paragraph's quote
 # is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
@@ -796,11 +796,11 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :12487 (was the stale "nothing
+                                                          # :12497 (was the stale "nothing
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
-                                                          # CONSUMER's docstring) and sdk.py:22039 (the
+                                                          # CONSUMER's docstring) and sdk.py:22072 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
                                                           # consumer": the second hit IS the consumer
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
@@ -817,7 +817,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16626`) that derives the doc's cite, two are the
+                                                          # (`:16716`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -826,9 +826,8 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # `tests/test_7949_capstone_measure.py`) rather than side-picked, at
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
-                                                          # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the (`:16626`) cite earlier in this block IS the
-                                                          # derived value the guard reads at this head — named by the value, never by its
+                                                          # later commits on this branch (#13802 review, P2)**: the value the guard reads at THIS
+                                                          # head IS (`:16716`) — named by the value in BOTH places it is typed, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
                                                           # ⛔ IT IS PARENTHESISED IN BOTH PLACES ON PURPOSE (#14060 review, P3): the arm
@@ -853,7 +852,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
 #     DERIVE the cite — a citation pin, not a consumer.
 # So: 1 file reads the channel through the literal name (`test_10999`), 1 reads it through a rebind
 # (`write_path_relation_lane`), and 1 does not read it at all (the pin). `"relations"` is a
-# RESULT-level key (`extractor_v2.py:12739`, `"relations": payload_relations`), which is why both
+# RESULT-level key (`extractor_v2.py:12749`, `"relations": payload_relations`), which is why both
 # readers can see it at all.
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
@@ -900,7 +899,7 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 # *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '22492p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '22525p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
@@ -929,7 +928,7 @@ grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-915
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 git grep -n -A 24 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 24 reproduces sdk.py:21210-21234
+                                                          # line — the -A 24 reproduces sdk.py:21243-21267
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'

@@ -80,7 +80,25 @@ ROW = (
     1700000000.0,                  # s.client_captured_at
     "cli_observed",                # s.client_captured_at_source
     "hook",                        # s.capture_lane
+    # #14232: the in-flight extraction-phase pair, APPENDED LAST (r[13]/r[14])
+    # so no positional column above shifts — the same append-only rule #3520 and
+    # #3516 followed. `_session_row_dict` reads them as the
+    # `phase=`/`phase_at=` qualifiers of the extraction status, so a fixture
+    # that stops at r[12] makes it raise IndexError on every row (that is how
+    # this pin was found red at the #14232 head, "tuple index out of range").
+    # ABSENT, never `null`, on a terminal row: `None` here is the
+    # "in-flight, phase unrecorded" arm — see
+    # `test_session_capture_status.py` for the terminal shape.
+    None,                          # s.capture_extraction_phase    (NEW, #14232)
+    None,                          # s.capture_extraction_phase_at (NEW, #14232)
 )
+
+#: The RETURN clause is append-only, so the fixture must cover EVERY positional
+#: column it reads. Pinned explicitly rather than left implicit: a short tuple
+#: only shows up as an opaque `IndexError` inside `_session_row_dict`, which
+#: reads as a code defect instead of the fixture drift this binding exists to
+#: catch. Extending the RETURN therefore reds HERE, with the arity named.
+_ROW_POSITIONAL_COLUMNS = 15  # r[0..14]
 
 
 def _fake_urlopen(payload):
@@ -229,6 +247,14 @@ def test_api_row_dict_serves_exactly_the_shared_projection():
     Exercised on the real unit (`_session_row_dict`), not re-implemented here —
     a test that rebuilds the dict it is checking would be green on a no-op.
     """
+    # The fixture's ARITY is part of the binding (#14232): the RETURN clause is
+    # append-only, so a fixture that stops short of the newest columns raises an
+    # opaque `IndexError` inside `_session_row_dict` instead of naming the drift.
+    assert len(ROW) == _ROW_POSITIONAL_COLUMNS, (
+        f"the positional fixture carries {len(ROW)} column(s) but the shared "
+        f"RETURN clause reads {_ROW_POSITIONAL_COLUMNS} (r[0.."
+        f"{_ROW_POSITIONAL_COLUMNS - 1}]) — append the new column(s) to ROW, "
+        "never insert them (#3520/#3516/#14232 all append-only)")
     d = _session_row_dict(ROW, {})
     assert set(d) == set(SESSION_LIST_FIELDS)
     assert d["turns"] == 2  # the COUNT, straight from s.turn_count

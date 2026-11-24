@@ -6,14 +6,14 @@ doc_status: draft
 created: 2026-11-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#13094, #13083, #13082, #12894, #4664, #9025, CAPABILITY-PLACEMENT-AUDIT.md §2.6/§5.2/§6.3"
+aboutObjects: "#13094, #13083, #13082, #12894, #4664, #9025"
 ownedBy: epistemic-team
 ---
 
 # `:GraphEvent` — the reader census, the measured residency, and why the move is a STORE re-home (#13094)
 
 This is `#13094`'s answer to the question its own body says must be answered **first**, and the
-measurement `#13083` §5.1 explicitly left UNMEASURED. It is written so the next lane starts from a
+measurement `#13083` explicitly left UNMEASURED. It is written so the next lane starts from a
 measurement instead of re-deriving one — which is the whole cost `#13094` has carried since the
 census merged as `#14043`.
 
@@ -33,9 +33,11 @@ them; claims carry the `file:line` that refutes them if wrong.
 ## 1. The reader census — every statement, classified
 
 Produced by `uv run python tools/graphevent_home.py readers` (`readers.json` beside this file).
-**16 statements** in `tortoise/` read or maintain the `:GraphEvent` label — including the three
-`ensure_event_schema` DDL statements, because a re-home has to recreate the schema they describe, and the
-two whole-graph export scans, which carry the label without naming it.
+**16 rows — one per censused statement SITE —** in `tortoise/` read or maintain the `:GraphEvent`
+label — including the three `ensure_event_schema` DDL statements, because a re-home has to recreate the
+schema they describe, and the two whole-graph scans in the restore path, which carry the label without
+naming it (that scan's text occurs four times in `hosted_backup.py`; the two rows pin the exact count in
+`occurrences`, which covers the live read in `_restore_into_temp_verify_swap`).
 
 | # | reader | `file:line` (this head) | what it needs | class |
 |---|---|---|---|---|
@@ -53,26 +55,44 @@ two whole-graph export scans, which carry the label without naming it.
 | 12 | `_refresh_first_seq` | `event_store.py:1104` | aggregate `min` inside an RMW on the **sibling** label | maintenance |
 | 13 | `webhook_delivery._head_seq` fallback | `webhook_delivery.py:1049` | aggregate `max` | maintenance |
 | 14 | backup footprint | `hosted_backup.py:892` | aggregate `max, min` | maintenance |
-| 15 | whole-graph export (dump side) | `hosted_backup.py:1333` | a label-agnostic dump | maintenance |
-| 16 | whole-graph export (restore-side scan) | `hosted_backup.py:1534` | a label-agnostic dump | maintenance |
+| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1333` | a label-agnostic read of the target graph | maintenance |
+| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1534` | a label-agnostic read of the graph | maintenance |
 
-⚠️ **The line addresses in `#13083` §2.6 for rows 15–16 are stale at this head**: the census cites
-`:1316`/`:1517`, and the statements are at `:1333`/`:1534`. Re-derived here rather than shifted by a
-constant, because `hosted_backup.py`'s drift is not one offset (the census itself records `+2` below
-its `:1038` and `+134` above it).
+⚠️ **Rows 15–16 are re-derived by CONTENT here, not by shifting the census's addresses.** As merged,
+`#13083` cited `:1182`/`:1383` for them; that row has since been re-cut to this head's
+`:1333`/`:1534`, which is where these rows point. No single delta gets from the pin to them, because
+`hosted_backup.py`'s drift accumulates in **three offset steps** — the two `+2`
+import lines land after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`)
+and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
+cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied lands at
+`:1316`/`:1517`, which are NOT the statements (`:1316` is `retired_vectors += 1`).
 
 **Verdict: `record_only`-shaped.** Not one reader needs a graph capability — no traversal, no adjacency
 walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup, an ordered range scan,
 an aggregate, a predicate delete, or the schema those depend on; those are SQL shapes paying RAM prices.
-The **serving** row is exactly one statement, so a re-home re-points one read and not a family of them.
+The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
+and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
+own whole-graph scan (`hosted_api.py:34426`) is a serving reader under this census's own class rule and
+is deliberately **not censused** (`#14204`; the exclusion is stated in §7 step 4 and in the restore row's
+own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
+home. A re-home must re-point it too.
 
 **Classification, made checkable** rather than asserted in a document:
 
 * `tests/test_13094_graphevent_home.py::test_every_declared_reader_still_names_its_statement_in_the_tree`
   — every row's statements must still resolve **in its file** (content-matched, whitespace-collapsed, so
   a re-indent is not a false red while a reword is a real one), and `min_occurrences` is asserted where
-  one file holds the same statement twice (the dedupe probe and `_event_row_exists`; the two export
-  scans), so one survivor cannot vouch for two rows.
+  one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
+  `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
+  the census; the two `hosted_backup.py` restore-side scans share their text with four occurrences in
+  that file (one more live read at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
+  EXACT count — deleting any of the four reds (`occurrences`), which a `min_occurrences` floor did not
+  do: measured, deleting BOTH censused sites left 2 and stayed green. What the pin still cannot do is
+  say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
+  those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
+  statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
+  whole-graph scan is `hosted_api.py:34426` (`_export_graph_snapshot`; the `:GraphEvent` branch is
+  `:34456` and the append `:34464`), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -93,29 +113,44 @@ the other direction — every declared row resolves, and a reworded or deleted s
 
 ## 2. The measured residency — what the shape costs, in bytes
 
-`#13083` §5.1 is explicit that its own residency figure is **unmeasured**: the payload is exact
+`#13083` is explicit that its own residency figure is **unmeasured** (that census document, which
+carried this as its §5.1, was deleted on 2026-11-23 — `#11081` audit row B2): the payload is exact
 (12,768 B over 67 `:GraphEvent` nodes ≈ **190 B/event**) and the RAM figure is run-dependent drift it
-refused to quote. So it is measured here, against a real FalkorDB, with production's own schema.
+refused to quote. So it is measured here, against a real FalkorDB, with production's schema INTENT —
+the two `CREATE INDEX` statements plus the `event_id` unique constraint that production's own path
+never manages to create (see `measure_graphevent_residency.py`'s docstring and `#14212`,
+which carries the measurement). ⛔ **BUT THE TWO SLOPES
+QUOTED BELOW WERE MEASURED WITHOUT THAT CONSTRAINT**, and this is the sentence that has to say so
+rather than leave it to a footnote: both committed JSONs record it REFUSED
+(`schema[1].installed == false` — the constraint is the SECOND of the three statements, and `schema`
+index 1 in both JSONs — the graph-key-slot defect the instrument names), so those slopes are
+a **LOWER BOUND** — a graph without that constraint's index understates the cost, never overstates it
+(the two plain `CREATE INDEX` statements WERE installed; only the constraint was refused) — and re-running the
+instrument (it issues the constraint the module way, the only form that runs) is what would make them
+a coverage claim about production's intent. ⚠️ Each JSON carries that reading as a `schema_note`, so a
+reader who meets the recorded `refused` line in the artifact FIRST cannot take it for a server limit.
 
 Instrument: `measure_graphevent_residency.py` (this directory), run at head `05d218fcaf` (recorded as
 `tree.git_head` in both JSONs). Outputs: `measurement-payload88.json`, `measurement-payload190.json`.
 
 **How it measures.** `INFO memory` `used_memory` at three populations (20k / 40k / 60k rows), and the
 **marginal slope** between the last two. The slope is the quoted number: the graph's fixed cost (the two
-`CREATE INDEX` statements, and where the server accepts it the `event_id` unique constraint — the same
-three statements `event_store.ensure_event_schema` issues) is paid once and would otherwise be divided
+`CREATE INDEX` statements, and the `event_id` unique constraint the script also issues — the same
+three statements `event_store.ensure_event_schema` WRITES, though production's `g.query()` cannot parse
+the constraint's module command, so **every slope quoted below is WITHOUT it**: neither committed JSON
+installed the constraint, and the instrument's own docstring says so) is paid once and would otherwise be divided
 into every node and reported as if it recurred.
 
 | synthetic payload | slope | `GRAPH.MEMORY USAGE` at 60k rows |
 |---|---|---|
 | 88 B (the `PointAdded`-with-actor shape, unpadded) | **557.4 B/node** | 23 MB total, 8 MB indexes, 14 MB node attributes |
-| 190 B (`#13083` §4's measured tenant average) | **597.2 B/node** | 19 MB node attributes, 8 MB indexes |
+| 190 B (the `#13083` census's fixed-corpus measure: 67 `:GraphEvent` nodes, 12,768 B) | **597.2 B/node** | 19 MB node attributes, 8 MB indexes |
 
 **Projected onto the shape that matters** — the label census's **72,488** `:GraphEvent` nodes
-(`#13880`'s 2026-11-19 label census, the count `#13083` §2.6 also carries):
+(`#13880`'s 2026-11-19 label census):
 
 ```text
-72,488 × 597.2 B = 43.3 MB        (190 B payload, the tenant-average shape)
+72,488 × 597.2 B = 43.3 MB        (190 B payload, the census's fixed-corpus shape)
 72,488 × 557.4 B = 40.4 MB        (88 B payload, the floor of the two)
 ```
 
@@ -125,18 +160,36 @@ allowance**, which is why this is the census's largest single item.
 
 ### 2.1 The share — corrected, because the briefing's figure is arithmetically impossible
 
-`:GraphEvent` is **61 %** of that census's node total on the largest legacy graph
-(**72,488 of 118,755** = 0.6104), which is the largest non-`:Point` population in the store. The
-`#13094` dispatch brief states "72,488 nodes of 118,755 — **42 %** of the store", and 42 % cannot be
-derived from those two numbers; the figure is wrong at the source, and it is corrected here rather than
-quoted.
+⚠️ **The share, and whose denominator it is.** The `#13094` dispatch brief states "72,488 nodes of
+118,755 — **42 %** of the store", and 42 % cannot be derived from those two numbers: 72,488 / 118,755 =
+**0.6104, i.e. 61 %**. Both figures are the BRIEF's, not the tree's, so the correction is arithmetic on
+the brief's own pair, and it is stated that way rather than dressed up as a measurement. The
+provenance of each number is below, once.
+
+⛔ **And the tree's own recorded share is a DIFFERENT number from a different census, which is why none
+of this is quoted as "the" share.** `graph-scripts/business_map_13880/business_map.json` records
+**76,610 of 126,908 = 60 %** from a live Falkor read on 2026-11-20, and it carries the rule against
+mixing the two (*"No share is derived from mixing them … only the second states a denominator"*): the
+72,488 is a label census over the graph **exports** (2026-11-19) with no denominator recorded here. So
+the projection below uses the node COUNT from that census and multiplies it by the measured slope — it
+never divides by a node total — and 42 % is corrected to 61 % only as arithmetic on the brief's pair.
+
+⚠️ **Provenance of the two numbers in that ratio — they are not the same artifact.** `72,488` is
+committed and traceable: `#13880`'s 2026-11-19 label census, recorded in
+`graph-scripts/business_map_13880/`. **`118,755` appears in no committed artifact other than this
+disclosure** — its only source is the `#13094` dispatch brief itself, and the export label census the
+72,488 comes from *states no denominator* (`business_map.json`: "only the second states a
+denominator"). So the 61 % is arithmetic
+over the brief's pair, stated because the brief's own percentage is wrong, **not** a figure reproducible
+from a committed artifact. Nothing downstream depends on it — the projection is 72,488 × the slope, not
+a share — so it is disclosed rather than leaned on.
 
 ⛔ **Do not mix the two censuses**, which is why the share is stated twice with its own denominator:
 `#13880`'s **label census over the graph EXPORTS** (2026-11-19) counts **72,488**; a **live Falkor read a
 day later** (2026-11-20) counts **76,610 of 126,908** = **60 %**. `graph-scripts/business_map_13880/
 business_map.json` records both and the rule (*"No share is derived from mixing them … only the second
-states a denominator"*). The projection above uses the label census's count against the label census's
-denominator, which is why it is computed as 72,488 × the slope and not as a share of anything.
+states a denominator"*). The projection above uses the label census's count (72,488) against the slope,
+never against a denominator taken from the other surface.
 
 ### 2.2 What this measurement is NOT
 
@@ -161,11 +214,13 @@ range is given and the repeat is follow-up on `#13094` rather than resolved by r
 ## 3. Is `public.journal_event` already the home? **No — and not for a missing-column reason**
 
 `#13094`'s body entertains the cheap answer: *"a record home very likely exists already … the move
-may be a feed re-pointing."* `#13083` §6.3 refused to assume it and named the question. Here is the
+may be a feed re-pointing."* The `#13083` census (deleted 2026-11-23, `#11081` audit row B2;
+its text is in git history) refused to assume it and named the question. Here is the
 answer, with the refutations executed rather than argued:
 
 1. **A payload-only emit writes NO journal record at all.** `_emit_event` returns before the JSONL
-   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16203`, contract restated in
+   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16226`, the `return None` under the
+   comment at `:16224`, contract restated in
    `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
    `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3801`) — and the
@@ -190,8 +245,22 @@ answer, with the refutations executed rather than argued:
 
 The verb that answers this on a **real tenant**, per event type and by payload multiset, is
 `tools/graphevent_home.py superset` — read-only, and it refuses to mint the graph it is asked about
-(see §3.1). Exit `1` = not covered, exit `2` = **no verdict** (never "covered"), including for an EMPTY
-feed on either side. ⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
+(see §3.1). Exit `1` = not covered, exit `2` = **no verdict** (never "covered") — for an empty feed on
+**either** side (an empty graph is the purged/mistyped case; an empty RECORD is the mistyped
+`--org-id`/`--graph-id` or never-armed-scope case, and reporting that as "the record is short" would send
+an operator to backfill a record that was never asked), and for a feed the cursor could **not prove it
+reached the end of** — the walk ends with a `count()` comparison and a NULL-`seq` check, because three
+shapes the store admits (a NULL `seq`, a `seq` stored as a string, a duplicated `(seq, event_id)` pair
+past a page boundary) make an empty page indistinguishable from the end.
+
+⚠️ **The count comparison also refuses on CONCURRENT MUTATION, and that is disclosed rather than
+surprising.** The total is counted AFTER the walk, so a row appended in the tail window, or any row
+DELETED after being read (retention purges delete `:GraphEvent`), yields `total != len(rows)` and exit
+`2`. The direction is right — a feed that changed under the read is not something to certify — but it
+means "no verdict" here can mean *"the feed moved while I read it"*, not *"the feed is broken"*.
+Re-run before concluding anything about the tenant.
+
+⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
 producers disagree** (refutation 1 is a property of the producer, not of any tenant's history), so a
 `covered` tenant is not evidence that a re-point would not drop future events. And a type the record
 carries under another name (`PointRetracted` / `EntityMutated`) is reported as a **named deficit**
@@ -204,14 +273,23 @@ A Cypher read against a graph the server does not hold **creates** it — measur
 (`tortoise/projection/__init__.py`: a plain `MATCH (n) RETURN 1 LIMIT 1` "ADDED it to `GRAPH.LIST`",
 `#11113`), and reproduced while building this bundle. So both verbs require an **explicit** `--graph`
 (there is no default: defaulting to `tortoise` would mint an empty, sweep-unowned graph on every
-multi-tenant server) and refuse a name `GRAPH.LIST` does not carry — **before** binding it. Pinned by
-`test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read`.
+multi-tenant server) and refuse a name `GRAPH.LIST` does not carry — **before** binding it. The refusal
+lives in the ONE reader both verbs call (`_graph_rows`), not in a verb: round 1 put it in `residency`
+only, so `superset` — the verb whose verdict gates a re-home — was the one that could mint a graph.
+`residency` ALSO carries a verb-level guard, and it is not redundant: its `MATCH (n)` totals read runs
+**before** `_graph_rows`, so without that guard the totals read would mint the graph and `_graph_rows`
+would then find "present" the empty graph it had just created. Pinned at the reader, at `superset` end
+to end, and at `residency`'s own totals read
+(`test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read`,
+`test_the_superset_verb_refuses_an_unknown_graph_too`,
+`test_the_residency_verb_refuses_an_unknown_graph_before_reading_totals`).
 
 ---
 
 ## 4. Why the prescribed mechanism cannot express this move — and the `#4664` hazard
 
-`#13083` §5.2 prescribes: *"give it a `NODE_TABLES` record home with a tier column, then tier it."*
+The `#13083` census prescribed: *"give it a `NODE_TABLES` record home with a tier column, then
+tier it."* (That prescription was the deleted document's, not something the issue carries.)
 That route is **wrong for this shape**, and the reason is structural, not administrative:
 
 > `cache_projection.read_record_view` builds `SELECT * FROM public.{NODE_TABLES[label]}` for **every**
@@ -242,7 +320,7 @@ state, and not a licence to add the other two.
 
 **The correct mechanism is a STORE re-home**, which is a different thing from a tier: `:GraphEvent`
 is not a projection of the record, it is a second durable store whose rows no replay reproduces.
-That is why `#13083` §6.3 says the work is *"prove `journal_event` is a superset — and if it is
+That is why the `#13083` census says the work is *"prove `journal_event` is a superset — and if it is
 not, add what is missing"*, and why this PR stops at "it is not, and here is what the real route
 costs".
 
@@ -275,12 +353,22 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
-| `tests/test_13094_graphevent_home.py` | 21 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity, the paging cursor against duplicate and fractional `seq`, the graph-minting refusal, the exit-code contract, and the tool's own selection |
-| `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible |
+| `tests/test_13094_graphevent_home.py` | 40 pins: the census resolving (with `min_occurrences`), its DDL completeness, the unique-constraint row naming the dedupe layer that actually holds (with `event_store.py`'s own bytes as the arm, so a lane that fixes `#14212` the module way must re-derive the row), the capability vocabulary, the capability-arm control table as a SPECIFICATION (a LITERAL expected arm per shape — three RE-SPACED and two BACKTICK-QUOTED spellings so `_NO_WS` is discriminating on both bypasses, `apoc.` / `call algo` / both `db.idx.*` procedures each pinned by their own row, and every arm that a first-match ordering does NOT exempt (`*1..`, `*..`, `)<-`, `shortestpath`) — plus a completeness pin that every arm in the tool is either pinned or declared undecidable, and that the two sets are a PARTITION), the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read, and a PRESENT non-string `event_id` — the arm that reds if the predicate is relaxed to `is None`), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so, the exit-code contract, the measurement script's own refusal code, the measurement script's module command addressing its PROBE GRAPH KEY rather than a constraint name (reverting that slot once left the suite green while the census published a false server limit), and the same script refusing a run whose schema statement did not install — asserted at the ISSUANCE PATH (`execute_command`'s own argv, with a whitespace-bearing key) and at `main()`'s exit 2, plus that gate's ACCEPTING arm (a complete schema must still publish a measurement, so a gate that refuses ALWAYS cannot pass either), a run that COULD NOT RUN exiting 2 rather than escaping as a traceback (Python's uncaught-exception exit is 1, the code `1` this README reserves for a produced verdict), the committed census being the verb's own bytes (the drift pin), the export-scan cites OPENING on the def / branch / append they name — derived from this sentence, because the equality arm above compares artifact to tool and both carried the same offset-shifted numbers once, the guard's comment/literal pre-pass agreeing with the write gate's grammar on every non-backtick input while keeping the one backtick branch that grammar cannot express (so a `//` inside `\`a//b\`` cannot swallow a pattern), and this declared count matching the file's own count |
+| `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2**, and exits **2** again when a run's schema statement did not install (`schema_complete: false` — a population measured without the schema it claims must not be quoted as one); `1` is reserved for a produced verdict, so a refusal never shares it |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
 **No product code changed. No graph write changed. No record read changed. Nothing deleted.**
-`git diff --name-only origin/main...HEAD` lists no `tortoise/*.py`.
+`git diff --name-only origin/main...HEAD -- 'tortoise/*.py'` lists two files —
+`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
+a `#` comment. That is MEASURED, not restated, because the line counts move with every rebase:
+`git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
+prints `0` at this head, so no changed body line is anything but a comment. Each block carries a
+count this PR re-derived
+(`160` distinct cite targets above the pivot from `724` in all, over `208` citing files —
+`uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
+`--check` grades the two note blocks against the same measurement, so none of them is a hand
+count), not a
+change to what the code does.
 
 ---
 
@@ -302,10 +390,12 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
 3. **A backfill + cutover + strip verb**, preview-by-default, refusing to stop the graph write or
    delete a row unless the census proves coverage in the same process (the `#13610`/`#13796` pattern
    already used for vectors: a gate that is **measured, never asserted**).
-4. **Re-point the three maintenance readers** that reach the label directly rather than through
+4. **Re-point the four maintenance readers** that reach the label directly rather than through
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
-   (`hosted_backup.py:892`), and the export/restore scans (`:1333`/`:1534` — the export must either
-   skip the label or be documented as not carrying a record-only shape).
+   (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
+   export scan — both are in `restore_graph`, and the export side is NOT censused at all
+   (`hosted_backup.py:454` and `hosted_api.py:34426`, #14204), so a re-point driven by this census
+   alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and
    names both counts; (b) a payload-only emit after the cutover still reaches `poll_events` (the

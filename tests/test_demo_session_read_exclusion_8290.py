@@ -670,7 +670,7 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
-_PIVOT = 26087
+_PIVOT = 27093
 
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
@@ -1192,6 +1192,71 @@ def test_the_census_sees_and_restates_its_docstring_pivot_example(tmp_path, monk
     assert census_mod._sweep(measured, refresh=False) == 0, (
         "the example now states the measured pivot and `--check` still calls it "
         "stale — the verb is not reading the line it just wrote")
+
+
+def test_the_13094_evidence_figures_are_a_row_check_sees_and_refresh_restates(tmp_path, monkeypatch):
+    """The 13094 evidence README's three census figures are a ROW, not a hand count.
+
+    Why this exists (#14428 review, P3): `docs/evidence/13094-graphevent/README.md`
+    states `160` distinct cite targets above the pivot from `724` in all over `203`
+    citing files — the same measurement the two notes state — and while that sentence
+    sat outside `_NOTES` nothing graded it: mutating ``from `724` in all`` to ``723``
+    left `test_13094_graphevent_home.py` + `test_docs_citation_refs.py` at 80 passed
+    (measured at `5391e008`), so the sentence could drift with every signal green.
+
+    ⛔ The remedy is the nightly ROW, not an equality arm in this suite, and the
+    module docstring says why: the population belongs to EVERY tracked file, so a
+    per-PR test comparing it to prose reds unrelated PRs (~1 commit in 30 adds a
+    `hosted_api.py:<n>` citation). `--check` is that channel, and this arm pins the
+    MECHANISM against a throwaway copy while the real README is graded by the verb.
+
+    REDS IF: the row is dropped (`--check` returns 0 over the degraded copy — the
+    pre-row behaviour), a stale figure survives `--check`, `--refresh` leaves it
+    stale, or the restated sentence does not then read green.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    measured = census_mod.census(_PIVOT)
+    readme = repo / census_mod._EVIDENCE_13094
+    pattern = (
+        r"\(`(\d+)` distinct cite targets above the pivot from `(\d+)` in all, over "
+        r"`(\d+)` citing files"
+    )
+
+    # The module's OWN reader, not a second regex: a row and an arm that read the
+    # sentence differently are two implementations of one definition.
+    stated = census_mod._stated(readme.read_text(encoding="utf-8"), pattern)
+    assert stated is not None, (
+        "the 13094 README no longer states its three census figures in the sentence "
+        "the row reads — re-point the row and this pin at the new wording, never "
+        "delete either: an ungraded measurement is the class this row closes")
+
+    # DERIVED from the copy, like the two arms above: a restatement elsewhere must
+    # not turn this degradation into a silent no-op.
+    stale = [stated[0], stated[1] + 7, stated[2]]
+    readme.write_text(
+        readme.read_text(encoding="utf-8").replace(
+            f"`{stated[1]}` in all", f"`{stale[1]}` in all", 1),
+        encoding="utf-8")
+    assert census_mod._stated(readme.read_text(encoding="utf-8"), pattern) == stale, (
+        "the degradation did not land on the README's `in all` total — the row would "
+        "then be read as stale for a reason other than the one this arm asserts")
+
+    assert census_mod._sweep(measured, refresh=False) == 1, (
+        "`--check` stayed green over a stale 13094 evidence figure — the sentence is "
+        "outside the figure set, so a recurrence is invisible to the verb that "
+        "exists to catch it (#14428 review, P3)")
+    assert census_mod._sweep(measured, refresh=True) == 1, (
+        "a stale figure is stale work: the refresh pass must report it, not 0")
+    assert census_mod._stated(
+        readme.read_text(encoding="utf-8"), pattern
+    ) == [measured["above_pivot"], measured["distinct_targets"], measured["citing_files"]], (
+        "`--refresh` left the 13094 README stating old figures — the restatement "
+        "pass and the row it reads have diverged")
+    assert census_mod._sweep(measured, refresh=False) == 0, (
+        "the README now states the measured figures and `--check` still calls them "
+        "stale — the verb is not reading the sentence it just wrote")
 
 
 def test_the_nightly_census_drift_job_still_runs_the_check_verb():

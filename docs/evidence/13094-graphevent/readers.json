@@ -57,7 +57,7 @@
       ],
       "needs": "DDL: a uniqueness constraint on event_id",
       "class": "maintenance",
-      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so on a server without the verb it is REFUSED and production runs without it."
+      "why": "\u26d4 THE SUSPENDERS, not the belt \u2014 the row said both, in one breath, until #14183 review round 10 measured which layer holds. `ensure_event_schema` issues it through `g.query()`, which cannot parse a module command, so the constraint is never created in production: the app-side dedupe pre-check in `event_store.py` is the belt that is actually there, and the store admits a duplicated `(seq, event_id)` row if that probe goes. \u26a0\ufe0f `event_store.py:795-798` still states the reverse and is tracked as #14212 (a product-code comment, out of this census's files). \u26d4 THE `missing supporting exact-match index` THIS ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 review round 9, measured): the measurement put `tortoise_ge_uid` in the GRAPH-KEY slot of the module command, so it ran against a freshly minted graph with no `event_id` index at all. Correctly formed against a graph WITH that index the command is ACCEPTED (`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs alike \u2014 there is no asynchronous-index race to allow for."
     },
     {
       "file": "tortoise/event_store.py",
@@ -137,7 +137,7 @@
       ],
       "needs": "aggregate (min) computed inside an RMW on :GraphEventMeta",
       "class": "maintenance",
-      "why": "the purge floor; note the RMW itself is on the SIBLING label and is not this shape's reader (\u00a72.7 of the audit draws that line)."
+      "why": "the purge floor; note the RMW itself is on the SIBLING label and is not this shape's reader \u2014 a statement whose pattern names only a SIBLING label is that label's reader, not this shape's."
     },
     {
       "file": "tortoise/webhook_delivery.py",
@@ -164,26 +164,28 @@
     {
       "file": "tortoise/hosted_backup.py",
       "line": "1333",
-      "reader": "whole-graph export (dump side)",
+      "reader": "whole-graph scan (restore's dirty-target pre-check)",
       "snippets": [
         "MATCH (n) RETURN labels(n), properties(n)"
       ],
       "min_occurrences": 2,
-      "needs": "a full label-agnostic dump",
+      "occurrences": 4,
+      "needs": "a full label-agnostic read of the target graph",
       "class": "maintenance",
-      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability. \u26a0\ufe0f It is censused because a re-home must decide what the export does with the shape, not because it reads one."
+      "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside `def restore_graph` at `:1098`), NOT the export: it refuses a dirty target before the rebuild, so a re-home must keep it reading every node whatever shape it carries. \u26a0\ufe0f It is censused because the restore must decide what it does with a `:GraphEvent` node, not because it reads one. \u26a0\ufe0f NEITHER EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` at `:647`), and the export endpoint's own whole-graph scan is `hosted_api.py:34426` (`_export_graph_snapshot`; the `\"GraphEvent\" in labels` branch is `:34456` and the append `:34464` \u2014 a SERVING reader under this census's own class rule, so the `serving: 1` count in this file excludes it). No row carries either (#14204). \u26a0\ufe0f This statement occurs FOUR times in `hosted_backup.py` \u2014 `:1333`, `:1534`, the live read at `:3603` (`_restore_into_temp_verify_swap`) and a docstring mention at `:3442` \u2014 and the exact count is pinned, so deleting any of them reds. What the pin cannot do is say WHICH occurrence a row addresses: the `line` is that address and nothing grades it."
     },
     {
       "file": "tortoise/hosted_backup.py",
       "line": "1534",
-      "reader": "whole-graph export (restore-side scan)",
+      "reader": "whole-graph scan (restore's node-count verification)",
       "snippets": [
         "MATCH (n) RETURN labels(n), properties(n)"
       ],
       "min_occurrences": 2,
-      "needs": "a full label-agnostic dump",
+      "occurrences": 4,
+      "needs": "a full label-agnostic read of the graph",
       "class": "maintenance",
-      "why": "the second whole-graph scan: the same statement shape as the line above, in the restore path, so both rows require TWO occurrences."
+      "why": "the second restore-side scan (the restore's `actual_nodes` verification, `hosted_backup.py:1533-1534`): the same statement shape as the line above, so both rows require two occurrences \u2014 see the residual noted on that row."
     }
   ],
   "counts": {

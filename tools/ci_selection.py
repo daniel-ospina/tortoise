@@ -168,10 +168,10 @@ MAX_CARVE_SHARDS = 26
 #
 # ABSENCE KEEPS THE HISTORICAL SHAPE (2 legs), exactly like `fast_shards`:
 # deleting the key gives the leg count back, but it is NOT by itself a complete
-# rollback — the wall guard recomputes from the map (2 legs project ~20.9m
-# against `SLOW_LEG_WALL_TARGET_MIN`), so removing the key reds
-# `test_slow_shards_are_duration_packed_and_meet_the_wall_target` as well. A real
-# rollback moves the target with it.
+# rollback — the wall guard recomputes from the map (2 legs project well over
+# `SLOW_LEG_WALL_TARGET_MIN`), so removing the key is a ceiling regression that
+# `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+# reds. A real rollback therefore moves the target with it.
 # 1 is NOT legal here: an unsharded slow lane is 37.9m + setup, and a silent
 # drop to 1 would be a ceiling regression nothing else here would name.
 DEFAULT_SLOW_SHARDS = 2
@@ -224,8 +224,12 @@ SLOW_LEG_CAPPED_WALL_TARGET_MIN = 20.0
 # sweep the committed map's largest was 355.0 s (`test_lane_stash.py`) — 2.54×,
 # i.e. the pin was passing on 0.04 of margin. That sweep then MEASURED
 # `test_calibration.py` at 390.0 s (it had carried the flat 2.0 s default, so no
-# sweep had ever weighed it), which puts 15m at 2.31× and reds
-# `test_watchdog_is_per_shard_and_scales_with_the_shard`. 19m = ceil(390.0 ×
+# sweep had ever weighed it), which puts 15m at 2.31× and red the shard-scaling
+# pin — CUT in the B7 test-bureaucracy cut (2026-11-23), which removed the
+# durations-map arithmetic from `tests/test_ci_selection.py`. ⛔ THE FLOOR IS NOW
+# UNPINNED: no test references `WATCHDOG_FLOOR_MIN` (the derivation arm went with
+# the cut), so a re-tune here is reviewed by reading this comment, not by a
+# failing test. 19m = ceil(390.0 ×
 # 2.9 / 60) restores the stated derivation (1140 s / 390.0 s = 2.92×).
 # ⚠️ The alternative — moving that file to `slow_files` — is a SELECTIVITY
 # decision (a change to it would stop running the fast shards), so it is left to
@@ -1209,7 +1213,46 @@ SOURCE_PATTERNS = {
             # The `eval` half of the fix is one tuple down (the replay proxy).
             # Pinned by tests/test_ci_selection.py::
             # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
-            "tortoise/temporal_leg.py"),
+            "tortoise/temporal_leg.py",
+            # ⛔ #14237 review (P1, the #6138 class — a doc that GAINED a reader):
+            # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+            # reads this how-to and asserts every `tortoise_*` mention in it is a labelled
+            # migration note, not an instruction — but `docs/` is in `NON_PYTHON_PREFIXES`
+            # and the doc sat in no SOURCE_PATTERNS row, so a DOC-ONLY edit that re-points
+            # the how-to at a retired door filtered to `changed == []` and took the
+            # docs-only early return. Measured before this entry:
+            #   select(["docs/how-to/provision-a-graph-per-end-user.md"]) ->
+            #     surfaces=[] , full=False , 106 files, guard ABSENT
+            # i.e. the guard ran on a `mcp_server.py` diff (FULL matrix, shared module)
+            # and NEVER on the one change class it exists to catch — the reader it protects
+            # would have been told to call a name `tools/list` does not advertise, with
+            # every gate green. Registered against `sdk`, the surface the guard itself is
+            # registered in (`config/ci-surfaces.yml`), the narrower of the two remedies
+            # the review named. ⛔ WHAT IT COSTS WHEN THE DOC CHANGES, MEASURED (#14237
+            # round-2 review P2 asked for the cost; round-3 review P2 corrected the
+            # statement, which had conflated the two leg shapes). Three facts, each from a
+            # different mechanism, so they must not be merged into one number:
+            #   · `select([this doc])` -> surfaces=['sdk'], test_files=221 INCLUDING the
+            #     guard, `full=False`;
+            #   · `slow_run=True` with `slow_selected=3` — the slow leg is diff-SCOPED by
+            #     that list (three of the sdk legs), NOT the 64-file `slow_files` pool it
+            #     also emits (`slow_files` is the declared pool every return path carries,
+            #     and it sizes nothing on a tier-2 PR) — so the nightly backstop is not
+            #     what a doc edit wakes;
+            #   · `carve_out_run=True` runs the WHOLE carve-out pool — 66 files in 3 shard
+            #     jobs — because that leg is diff-GATED but never diff-SIZED
+            #     (`.github/workflows/python-ci.yml:266`). THIS is the real cost of the
+            #     registration, and the one a reader would not guess.
+            # That is the ONE declared exception to the #2147/#2148 "docs-only touches no
+            # slow leg" property — pinned by tests/test_ci_selection.py::
+            # test_the_p7_how_to_selects_its_reader_and_declares_the_cost — and it is
+            # accepted because the alternatives are strictly wider: `tier1` would put the
+            # whole catalogue suite in every PR's smoke leg, and `core` would select the
+            # core pool without selecting the guard. Named as
+            # a CONCRETE file, not a glob — `select()` matches with `startswith` and has no
+            # glob support. If a SECOND doc-reading guard is added later, graduate this to
+            # `tier1` instead of growing this row.
+            "docs/how-to/provision-a-graph-per-end-user.md"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #10605: the MCP CLIENT side — the driver every long-lived consumer
@@ -2005,9 +2048,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # digest, the two token refusals or the unmatched-node count would merge
              # with every falsifier that catches those asleep — and the failure it would
              # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
-             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
-             # and by
-             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
+             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin.
+             # (The second `test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`
+             # citation was cut with the B7 durations-map arithmetic, 2026-11-23.)
              "tools/entity_vector_backfill.py",
              # #13906: the dense-leg QUERY-parity harness
              # (`tools/vector_parity_13906.py`) owns
@@ -3752,7 +3795,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never go red shipped in the first place. With the entry: `surfaces:
              # ['core']` and the file is selected. Pinned by
              # tests/test_14192_read_wave_tool.py::test_a_tool_only_diff_selects_this_pin.
-             "tools/read_wave_latency.py")
+             "tools/read_wave_latency.py",
+             # #14429 review P2 ("neither headline invariant has an assertion"): the
+             # spool-drain rehearsal instrument owns tests/test_spool_drain_rehearsal.py
+             # (registered `core`), and this is the #1349/#3332/#3616 silent-drop class
+             # one tool over — MEASURED before this entry:
+             # `--changed-files tools/spool_drain_rehearsal.py --event pull_request` ->
+             # `surfaces: []`, `full: false`. That is the fail-OPEN direction for THIS
+             # file specifically: its two load-bearing claims are "the source spool was
+             # never written" and "never point the drain at production", both enforced
+             # only inside its own control flow, so the diff most worth guarding is the
+             # one that weakens `_gate_uri` or `_source_unchanged`. With the entry:
+             # `surfaces: ['core']` and the pin is selected. Pinned by
+             # tests/test_spool_drain_rehearsal.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/spool_drain_rehearsal.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -3983,6 +4039,20 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
+    # #14343: the extractor cost instrument. `tools/` is in the flat
+    # NON_PYTHON_PREFIXES tuple, which swallows every tools change before
+    # SOURCE_PATTERNS matching, so a tool-ONLY diff came back
+    # `surfaces: []` and ran NONE of this tool's pins — measured at the head
+    # that added its `--receipts` refusal: `--changed-files
+    # tools/extractor_cost_measure.py` -> surfaces [], full False, and
+    # `test_extractor_cost_measure.py` / `test_extractor_embed_json_14343.py`
+    # absent from the 106 files. That is the #1349/#2938 silent-drop class the
+    # `core` rows for those two suites cite from the other side: the tests were
+    # registered, but nothing SELECTED them on an instrument-only change — the
+    # likeliest change to break its medians, its serialization arithmetic or its
+    # fail-closed refusal. Fail-closed to the full matrix rather than a narrow
+    # surface, because the instrument's own surfaces span core + api + eval.
+    "tools/extractor_cost_measure.py",
     # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must
@@ -5733,10 +5803,16 @@ def slow_wall_projection(manifest: dict,
                          max_parallel: int | None = None) -> dict:
     """#9539: the projected slow-leg wall, from the committed `durations` map.
 
-    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This is
-    the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`; it is a
-    PROJECTION from the map (never a measurement), which is why the setup
-    allowance is a measured constant rather than an assumption inside it.
+    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This WAS
+    the number the wall guard held to `SLOW_LEG_WALL_TARGET_MIN`; ⛔ ITS CALLERS
+    WERE THE B7-CUT ARMS (`test_slow_shards_are_duration_packed_and_meet_the_
+    wall_target` and the wall-clock/cap arithmetic around it, CUT 2026-11-23), so
+    this function now has NO caller and NO grader in the tree — the projection is
+    a reading a human takes, not a gate. It is kept because it is the documented
+    re-derivation for the two targets below; retire it deliberately if that is
+    the decision. It is a PROJECTION from the map (never a measurement), which is
+    why the setup allowance is a measured constant rather than an assumption
+    inside it.
 
     #6744: it is the PER-LEG wall, and with the matrix capped it is not the
     job's. Pass the job's `max_parallel` and the projection also reports
@@ -5891,9 +5967,9 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     is killed, and it is reachable today: at a 30.62-minute estimate
     `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
     1.80x — which the ceiling's own comment treated as "the validated budget"
-    rather than as a breach, and which
-    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
-    asserts without ever computing the margin.
+    rather than as a breach, and which the shard-scaling pin asserted without
+    ever computing the margin (that pin was CUT in the B7 test-bureaucracy cut,
+    2026-11-23; this function is the check that computes the margin now).
 
     ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
     from. The two axes are independent and only ONE is visible here:
@@ -6247,11 +6323,11 @@ def resolve_shard_routing(value: str | None) -> str:
 # so shipping `runs-on: [self-hosted, fold]` as the default would have produced
 # exactly that hang on every fold.
 #
-# So the decision lives HERE, in Python, where it is unit-tested (#10897's test
-# (d)), and the declaration `CI_FOLD_RUNNER_LABELS` is the operator switch:
-#   * unset / not a fold            -> every row keeps its own `runner`, byte-identical to main;
-#   * a fold + a VALID declaration  -> every row carries the declared label array;
-#   * a fold + an INVALID one       -> falls back to the row's own `runner` and says so on stderr.
+# So the decision lives HERE, in Python — TESTABLE, but UNGRADED since the B7 cut
+# (2026-11-23) took the fold-seam arms: inerting the resolver reds nothing (measured
+# 0 of 793). `CI_FOLD_RUNNER_LABELS` is the operator switch:
+#   * unset / not a fold -> every row keeps its own `runner`, byte-identical to main;
+#   * VALID -> every row carries the declared array;  * INVALID -> fall back and warn on stderr.
 # ⛔ A MALFORMED setting can only lose the priority, never the job. A WELL-FORMED
 # one naming a class no runner carries is the operator's deliberate assertion and
 # IS sufficient to hang the fold — `parse_fold_runner` checks the SHAPE of the
@@ -6311,8 +6387,10 @@ def resolve_fold_runner(
 
     ⛔ `matrix_runner` is returned UNCHANGED rather than re-serialised: the
     non-fold path must stay byte-identical to main's, so a lane diffing the
-    emitted matrix sees no change at all (pinned by
-    `tests/test_ci_selection.py::test_the_fold_runner_seam_is_inert_by_default`).
+    emitted matrix sees no change at all (its pin, `test_the_fold_runner_seam_is_
+    inert_by_default`, was CUT in the B7 cut, 2026-11-23 — the FOLD-SEAM cluster,
+    not the durations arithmetic — so the identity return below is UNGRADED and
+    this comment is the whole record of it).
 
     ⛔ `warn=False` exists because this runs PER ROW: the caller resolves the
     same declaration for every shard, and `::warning::` annotations are capped at

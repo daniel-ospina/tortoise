@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:12820, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12830, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12820-12842` (`_collect_classify_items`, the collector's item set), `:15244` and `:15397` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12830-12852` (`_collect_classify_items`, the collector's item set), `:15254` and `:15407` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:12820-12842`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12830-12852`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:15244` (the S2 pass) and `:15397` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15254` (the S2 pass) and `:15407` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15257`, `classify(S2) failed` / `:15408`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15267`, `classify(S2) failed` / `:15418`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -3155,8 +3155,11 @@ to answer.
   class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the
   ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any*
   edit to this file, and the bundle README's present-tense digest with it.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a supersede
-  marker.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has successors
+  (§10.39–§10.41), and its own numbers are untouched by them. ⛔ Until this line was corrected it
+  read "*This entry is LIVE for the merged tree* — it has no successor, so it must not carry a
+  supersede marker", which §10.39's landing had already falsified while §10.39–§10.41 all follow it;
+  no test greps this phrase, which is why the suite stayed green over it (`#14377`).
 
 ### 10.39 — the sixth row's PRODUCER lands: `E6` is now measured, and no bar moved (`#11695`, 2026-11-20)
 
@@ -3217,29 +3220,127 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 
 ### 10.40 — `#14277`'s extractor instrumentation moves every `extractor_v2.py` cite, and no value moves with it (2026-11-22, `#14277`)
 
+> ⛔ **Superseded for the merged tree by §10.41.** §10.40 measured `#14277`'s own `+5`…`+76`
+> shift; `#14357` then inserted its own hunks above the same cites, so the numbers this entry
+> re-pointed are 10 lines short again. The entry is kept as history and is no longer the
+> newest; §10.41 carries the tree this record now describes.
+
 - **Why it exists.** `#14277` measures the extractor's real token spend and adds the prompt-cache
-  split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py`: **`+5`** before the
-  first symbol this document cites and **`+76`** in the S2/VET region, so `:15239`→`:15244`,
-  `:15701`→`:15706`, `:17894`→`:17970` and so on. ⛔ **THE S2/VET DELTA IS `+76`, NOT THE `+73`**
-  an earlier cut of this entry asserted, and the three figures that followed from it were wrong by
-  three (`:17967` for the gate, `:17968`/`:17969` for the call pair): measured at the re-cut that
-  merged `origin/main` `0467ba329d` into `#14140`, `if vet_enabled and embed_list:` is `:17970` and
-  `_run_vet_pass(` is `:17971`, while `:15239`→`:15244` and `:15701`→`:15706` are `+5` as stated.
-  Every cite OUTSIDE §10 is a claim about the
+  split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py` in ONE region and
+  then a CLUSTER, so the shift is **not uniform**: **`+5`** from the hunk at `-14741,6 +14741,11`
+  down to the cost-envelope block, then **`+11` … `+76`** progressively as that block's remaining
+  hunks land (`-16314,6 +16319,12` — the +6 of that hunk takes the shift from +5 to +11 — through
+  `-16986,7 +17061,8`), so `:15239`→`:15244`,
+  `:15701`→`:15706` and `:15620`→`:15625` move `+5` while `:17894`→`:17970` moves `+76`. ⛔ **`+76`
+  IS NOT A CONSTANT FOR "THE REST"**: this entry stated `+73` first and then `+76` for the whole
+  tail, and BOTH are wrong for every cite inside the `14746`–`16313` window — which is why the
+  arrows below are MEASURED per cite and never computed from a number stated here. Every cite
+  OUTSIDE §10 is a claim about the
   tree, and `tests/test_7949_capstone_measure.py` resolves them, so a live cite moves with the code or
   the suite reds. Inside §10 that holds only for the NEWEST entry: §10.1–§10.39 are frozen history, no
-  pin reads them (§10.14), and none may be re-pointed — but §10.40 IS read, by
-  `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves this entry's two
-  `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls. Only the ARROW
+  pin reads them (§10.14), and none may be re-pointed — §10.40 **was** read, by
+  `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves the newest
+  entry's two `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls; that
+  test reads `entries[-1]` (`tests/test_7949_capstone_measure.py:10798`) so the duty passes to §10.41
+  with the successor, and §10.40's cites are now frozen history with no reader. Only the ARROW
   cites here (`:15239`→`:15244`, `:15701`→`:15706`, `:17894`→`:17970`) are hand-checked.
 - **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
   class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
   denominator are the ones this record froze. The two `if items:` gates it names are re-pointed
   (`:15244`/`:15397`), as are the two fail-open `except` arms (`:15257`/`:15408`) and the
   `_run_vet_pass` calls (`:17971` for the S2 pass, `:15373` for the union pass).
+- **⛔ Two corrections this entry has taken, both because an arrow IS a claim.** It first carried
+  `:17894`→`:17967` (**three** lines short of the tree, which carries `if vet_enabled and
+  embed_list:` at `:17970`), and the correction to `+76` was then stated as a blanket for "the
+  rest" — measured false for the `14746`–`16313` window, where the shift is `+5`
+  (`:15620`→`:15625`). `test_the_newest_change_control_entry_describes_the_shipped_tree` caught both.
 - **`document_sha256` is re-cut in this same commit**, per §8's rule for *any* edit to this file —
   the §10.38 precedent, not a new reading of it. ⛔ Re-cutting a digest is a mechanical consequence
   of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's "the owner's
   call" covers (a threshold or a control-arm definition changing).
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
+  (§10.41), which re-derives the same `extractor_v2.py` carriers onto the tree that merges
+  `#14357`. Its own numbers are untouched here, and the supersede marker above is the record of
+  what moved.
+
+### 10.41 — `#14357`'s extractor yield guard moves every `extractor_v2.py` cite again, and no value moves with it (2026-11-23, `#14357`)
+
+- **Why it exists.** `#14357` suppresses thinking on the extractor's fallback pool members and
+  refuses to treat an empty `finish_reason="length"` extraction as a document with no facts. That
+  work inserts **`+10`** lines at `_complete_parsed` (the yield guard) and a further cluster in
+  `_classify_error` / `_is_fatal_error` / `_complete`, so the shift is **not uniform** and the
+  arrows below are MEASURED per cite against this tree — never computed from a constant stated
+  here (the rule §10.40 had to learn twice).
+- **The measured shift.** `+10` for every cite above `:16091`; then `+19`, `+21`, `+26`, `+30`,
+  `+37`, `+59` as the `16100`–`17200` cluster's hunks land; **`+85`** for the tail (`:17970` in
+  §10.40's own table is `:18055` here). Measured on this tree:
+  `:14788`→`:14798` (the vet flag), `:14792`→`:14802` (the early return),
+  `:14823`→`:14833` (its vet surface), `:14819`→`:14829` (the classify block),
+  `:15244`→`:15254` and `:15397`→`:15407` (the two `if items:` gates),
+  `:15257`→`:15267` and `:15408`→`:15418` (the two fail-open `except` arms),
+  `:15373`→`:15383` and `:17971`→`:18056` (the union and S2 `_run_vet_pass` calls),
+  `:17970`→`:18055` (`if vet_enabled and embed_list:`), `:14668`→`:14678` (the entry point),
+  `:12820`→`:12830` (`_collect_classify_items`), `:11404`→`:11414` and
+  `:11410`→`:11420` (the v2 write gate), `:15706`→`:15716` (`result["classify_later"] = {`)
+  and `:15716`→`:15726` (`result["vet"] = {`).
+- **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
+  class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
+  denominator are the ones this record froze. The two `if items:` gates this tree carries are
+  `:15254` and `:15407`; the two fail-open `except` arms are `:15267` and `:15418`; the
+  `_run_vet_pass` calls are `:18056` (S2) and `:15383` (union).
+- **⛔ The cites were re-derived, not `+10`-ed.** `git diff -U0 ff2218b6a7..HEAD --
+  tortoise/extractor_v2.py` (the parent of this branch's first `extractor_v2.py` commit; its file is
+  byte-identical to `ee0e460fb3`'s, so either ref reproduces the comparison) was turned into a line
+  map and every cite was re-resolved through it. The base is **19,396** lines, NAMED so a re-measurer
+  reproduces the comparison instead of guessing which tree the base was; `19,385` of those lines land
+  on a byte-identical head line, and the **11** that do not are exactly the base lines a hunk EDITS:
+  `:16092`–`:16097`, `:16157`, `:16158`, `:16184`, `:16233` — and `:16994`, the `_complete` docstring
+  line `093d82ac97` appended its raise note to IN PLACE, a one-line REPLACEMENT whose net delta is
+  `0`, so it shifts nothing and is still caught rather than passed as unmoved. A cite that lands on
+  edited code was therefore caught rather than silently moved. **Counting convention**, stated so a
+  re-measurer reproduces the pair rather than a near neighbour: for EVERY base line `n`, compare
+  `base[n]` with `head[n + d]`, where `d` is the number of lines the change inserts or deletes ABOVE
+  `n` — a pure insertion *after* `n` does not shift `n`, and a base line a hunk REPLACES is compared
+  with the replacement. ⛔ **The count is a measurement of THIS change, not a perpetual census** —
+  a number belongs to the head it was opened on (§10.19/§10.22/§10.24) — **so it is stated per tree
+  and never inherited:** this paragraph reported `19,383`/`13` first, then `19,386`/`10`, and now
+  `19,385`/`11`. The first charged the insertion *after* `:2435`, `:16200` and `:17092` to those
+  lines (`base[2435] == head[2435]`, `base[16200] == head[16226]`, `base[17092] == head[17151]` —
+  all three byte-identical at their own positions, a boundary off-by-one); the second was measured
+  before `093d82ac97` edited `:16994`, which is the eleventh. Both earlier pairs are recorded here
+  rather than overwritten: a count that silently changes with the tree is how each previous revision
+  went wrong, and §10.40's rule is that a number in this document is re-MEASURED, never carried.
+- **⛔ The bundle's frozen cites stayed frozen, and NOT because the map spares them.** `:8278-8285`
+  and `:8288-8292` sit BELOW the first hunk (which inserts after `:2435`), so the line
+  map DOES move them `+10`. They are left alone because they live inside a `_BUNDLE_HISTORICAL`
+  paragraph (`"no longer\s+resolve"`) — numbers deliberately frozen at the head they name — and
+  `tests/test_7949_capstone_measure.py` pins that exclusion set (`_BUNDLE_HISTORICAL`,
+  `tests/test_7949_capstone_measure.py:5418-5423`), so shifting them would red its
+  `skipped` arm instead of passing silently. `:8534-8538` is NOT part of that protection and is not a
+  citation of ours: `README.md:254-255` records it as the number #9919 *predicted* and the bundle did
+  not use, it is written with no file prefix, so neither `_BUNDLE_CITE` nor `_BUNDLE_SIBLING_CITE`
+  matches it and the README's own paragraph says a bare number there "is read by no pin" — but the line
+  map does move it `+10`, so if it is ever promoted into a real cite it must be re-derived first.
+  An earlier revision of this lane's commit message gave
+  the opposite (false) reason; the mechanism above is the measured one. The bundle's documents (`README.md`, `E1-E5-PROOFS.md`,
+  `A4-PER-LAYER.md`, both probes, `docs/00_index.md`, the S2.1 row in
+  `EXTRACTOR-V4-ARCHITECTURE.md`) and the hand-typed pin tables in
+  `tests/test_7949_capstone_measure.py` were re-cut together, because the pin and the document are
+  two halves of one claim.
+- **`document_sha256` is re-cut in this same commit**, per §8's rule for *any* edit to this file —
+  the §10.40 and §10.38 precedent, not a new reading of it. Re-cutting a digest is a mechanical
+  consequence of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's
+  "the owner's call" covers (a threshold or a control-arm definition changing).
 - **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede
   marker.
+- **§10.40's own status bullet is corrected in `c9a996dabf`.** It was added reading
+  "*This entry is LIVE for this tree — it has no successor*" while the supersede marker above it
+  already named §10.41, so the entry stated two mutually exclusive things about itself. It now uses
+  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` did NOT carry it either** — its own
+  status bullet read "*This entry is LIVE for the merged tree — it has no successor*" (now quoted at
+  `:3160-:3161` inside the corrected bullet's own disclosure), which §10.39–§10.41 already falsify, so
+  **two** entries carried a present-tense live designation, not one. Its correction is made in the
+  peer commit `9f77e04562` (**#14377**) rather than left filed: a frozen §10.x STATUS bullet is not a
+  cite, so a sentence that three successors had already falsified can be corrected without moving a
+  number — and the digest re-cut that edit carried in the same commit is the one it owed. What a merge
+  lane must not do is re-point a frozen §10.x *cite*; this is the other case.

@@ -4109,6 +4109,312 @@ class TestDoctorPreInit:
         assert "❌" not in line
         assert not (tmp_path / ".tortoise").exists()  # no dir created by the probe
 
+    def test_a_hosted_box_is_not_told_to_run_tortoise_init(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """#14424: the first-run row must name the next action a user's MODE has.
+
+        MEASURED on a clean HOME holding a fresh signup key (2026-11-23): doctor
+        printed `Graph: health: not set up yet — no Tortoise DB at
+        ~/.tortoise/tortoise.db … Run `tortoise init` to create it` — a
+        self-hosted action, to a box whose memory lives at api.premiselabs.co.
+        `init` would build a local graph that user never writes to.
+
+        Mutation: delete the `_hosted_identity` arm and this REDs on
+        `create-point` being absent from the row (and on the row telling a
+        hosted user to run `init`).
+        """
+        import json as _json
+
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        store = tmp_path / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text(_json.dumps({
+            "api_key": "tt_hostedkey0123456789",
+            "api_url": "https://api.premiselabs.co",
+        }))
+        # The hosted probe is NOT this test's subject: keep it offline so no
+        # request leaves the box and the assertion stays about the graph row.
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        line = _health_line(out)
+        assert "⚠️" in line and "❌" not in line   # hosted-only is not a failure
+        assert "not used by this setup" in line
+        assert "create-point" in line               # the mode's own next action
+        # ⛔ THE POINTER MUST NOT PROMISE A VERDICT THE HOSTED ROW CAN DECLINE.
+        # Under `--offline` (this very test's mode) the Hosted row prints `not
+        # probed (--offline) … NOT tested`, and on a raising probe it prints `the
+        # hosted check could not run … UNGRADED`; a sentence claiming that row
+        # "says whether that will work" therefore resolves to nothing in the mode
+        # the evidence bundle itself exercised. Mutation: restore "says whether
+        # that will work" and this REDs.
+        # ⛔ THE POINTER MUST NOT DEPEND ON A ROW THAT MAY NOT BE PRINTED. An
+        # earlier cut said "the `Hosted` row below shows whether that will work,
+        # or why it could not be checked", but `_doctor_hosted_rows` returns
+        # immediately after its `Credentials` \(❌\) arm for an unsendable key
+        # (`__main__.py:15585-15592`), so in that admitted state NO `Hosted` row is
+        # appended at all (measured: report holds `Graph: health` + `Credentials`
+        # only) and the pointer resolves to nothing. Naming the COMMAND instead is
+        # true in every state, including that one.
+        assert "without `--offline` checks whether that will work" in line
+        # ...and the self-hosted remedy is demoted to the named override
+        assert "init` only if you ALSO want a local graph" in line
+
+    def test_a_self_hosted_box_still_gets_the_init_remedy(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The complement, so the hosted arm cannot silently swallow the
+        self-hosted first run: no credential → the row keeps `tortoise init`."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+        rc = _run_doctor([])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not set up yet" in line
+        assert "Run `tortoise init` to create it" in line
+        assert "create-point" not in line
+
+    def test_an_env_only_static_secret_is_not_read_as_a_hosted_identity(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """#11912 round 15 governs THIS row too: `TORTOISE_API_KEY` is also the
+        documented shared key for a self-hosted `serve --http --auth static`
+        (`.env.example:149-150`, `tortoise/auth.py` `require_auth`,
+        `docs/quickstart-selfhosted.md:65`), so an env-only, non-hosted-shaped
+        key on the default target must NOT be narrated as "a hosted credential".
+
+        ⛔ Why it is more than wording: the row's named next action is
+        `tortoise create-point`, which resolves that SAME env key against
+        `TORTOISE_API_URL` or the production default — so a false claim here
+        walks a self-host user into sending a LOCAL SECRET to
+        api.premiselabs.co. That is the #1708 §D1b silent backend switch, and
+        `_doctor_hosted_rows` (round 15) already refuses it for the /health
+        probe; this row had no such predicate, so the two rows CONTRADICTED each
+        other in one report.
+
+        Mutation: drop the `_h_path is not None or _h_env_url_explicit or
+        _h_hosted_shaped` gate and this REDs — the row flips to "you have a
+        hosted credential" (observed).
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY",
+                           "local-static-key-for-my-own-serve")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not set up yet" in line
+        assert "Run `tortoise init` to create it" in line
+        assert "hosted credential" not in line
+        assert "create-point" not in line
+
+    def test_a_hosted_shaped_env_key_still_counts_as_hosted(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The other direction, so the round-15 gate cannot over-block: a
+        `tt_` key (the prefix `signup`/`key create` mint) exported in the
+        environment IS a hosted identity, and the row must name the hosted next
+        action even with no credential FILE present."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_hostedkey0123456789")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "create-point" in line
+
+    def test_an_explicit_api_url_still_counts_as_hosted(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The second escape, for a self-host user who named their OWN endpoint:
+        an explicit `TORTOISE_API_URL` makes the identity hosted (their memory
+        really does live at that URL), so the row must fire. This is what keeps
+        the gate narrow — it refuses only the env-only, unnamed-endpoint,
+        non-hosted-shaped shape."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "local-static-key")
+        monkeypatch.setenv("TORTOISE_API_URL", "https://tortoise.example.com")
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "create-point" in line
+
+    def test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The NEW pre-init row must inherit `_printable`, like every other row.
+
+        `api_url` is store-supplied (`<cwd>/.tortoise` is attacker-controllable
+        by this module's own reckoning) and this row interpolates it into a
+        VERDICT row. The sibling pin
+        `test_control_bytes_in_api_url_cannot_forge_a_row` seeds a DB first, so
+        it exercises the healthy branch and never reaches this arm — which is
+        exactly why the omission survived. Measured before the fix, with a store
+        `api_url` of `https://a.test\\n  ✅ Graph: health: 999 Points, forged`
+        and no DB seeded: TWO lines matched `^\\s+\\S+\\s+Graph: health:`, and
+        `_health_line` takes the FIRST, so a forged row won the read.
+
+        Mutation: revert the row's interpolation to the raw `_h_url` and this
+        REDs on `len(rows) == 2` (observed).
+        """
+        import re as _re
+
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        forged = "https://a.example.test\n  ✅ Graph: health: 999 Points, forged"
+        _write_credential(tmp_path, _FAKE_HOSTED_KEY, api_url=forged)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # NO DB is seeded, so the #2204 pre-init branch (and only it) renders.
+
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        rows = [ln for ln in out.splitlines()
+                if _re.match(r"^\s+\S+\s+Graph: health:", ln)]
+        assert len(rows) == 1, out[-1500:]        # one row, not two
+        assert "not used by this setup" in rows[0]
+        assert "\\n" in out, "the newline should be escaped, not executed"
+
+    def test_the_hosted_row_does_not_print_a_url_credential(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Same rule, second pass: a `user:pass@` in the store's `api_url` must
+        not reach the transcript from this row either.
+
+        `_mask_display_target` exists for exactly this and every other hosted row
+        wraps its `api_url` in it; this row applied neither pass, so a credential
+        embedded in the URL (or a `?token=`) was printed to the terminal on the
+        first-run path — against this store's own contract that it NEVER prints
+        the credential.
+
+        Mutation: revert to the raw `_h_url` and this REDs on the password
+        appearing in `out` (observed).
+        """
+        _write_credential(tmp_path, _FAKE_HOSTED_KEY,
+                          api_url="https://svc:sup3rsecretpw@a.example.test")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+        line = _health_line(out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "sup3rsecretpw" not in out, "the URL credential reached the transcript"
+        assert "a.example.test" in line    # host stays readable for diagnosis
+
+    def test_an_oauth_token_counts_as_hosted_too(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """`oat_` is the THIRD admitted Bearer family, and the `Hosted` row
+        already treats it as a hosted identity (`:15677`: an OAuth access token,
+        MCP-only by design — ADR-010). Omitting it from this row's gate left the
+        same one-screen contradiction the gate exists to remove, narrowed to
+        `oat_`: a Graph row saying "Run `tortoise init`" beside a Hosted row
+        naming an OAuth identity.
+
+        The row defers to the COMMAND (`tortoise doctor` without `--offline`
+        checks whether that will work), which is what makes it correct for a
+        REST-only verb like create-point.
+
+        Mutation: check only `_HOSTED_KEY_PREFIXES` and this REDs — the row
+        flips back to "Run `tortoise init`".
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "oat_sometokenabcdef")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "hosted credential" in line
+        assert "Run `tortoise init` to create it" not in line
+        # ⛔ AND IT MUST NOT SEND AN MCP-ONLY TOKEN AT A REST VERB. `/v1/*`
+        # rejects any non-`tt_`/`tk_` Bearer (401 "Invalid API key format"), so
+        # naming `create-point` here contradicted the Hosted row printed one line
+        # below. Mutation: restore the unconditional create-point sentence and
+        # this REDs.
+        assert "create-point" not in line.replace(
+            "For `tortoise create-point`, mint a `tt_`/`tk_` API key.", "")
+        assert "MCP door" in line
+
+    def test_a_key_that_cannot_be_sent_is_not_routed_to_a_transmitting_verb(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """An unsendable key must not be pointed at `tortoise create-point`.
+
+        `http.client` raises `ValueError: Invalid header value b'Bearer <THE
+        KEY>'` when the key carries CR/LF or is not latin-1 encodable — and that
+        traceback ECHOES the key, into a transcript this module's own contract
+        says users paste into issues. The sibling row already refuses to PROBE
+        such a key (`_doctor_hosted_rows`); this arm must not route it to the one
+        command that echoes it either.
+
+        Mutation: drop the `_is_sendable_key` branch and this REDs.
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_abc\nINJECTED")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        # The report still FAILS (the Hosted row's ❌ for that key is a failure),
+        # which is the same verdict the sibling row gives it — this arm only has
+        # to stop redirecting the user at a verb that would echo the key.
+        assert rc == 1
+        assert "not used by this setup" in line
+        assert "create-point" not in line
+        assert "cannot be sent in a request header" in line
+
+    def test_an_unrelated_env_key_still_gets_the_init_remedy(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Guards against over-widening: the `oat_` escape must not turn every
+        unexplained env value into a hosted identity."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "something-unrecognised")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "Run `tortoise init` to create it" in line
+        assert "hosted credential" not in line
+
 
 class TestDoctorImportHygiene:
     """#2204 O/I/T (3) regression: importing tortoise modules on a clean env

@@ -179,7 +179,7 @@ this job. The first response was to raise the cap to 50 over a SUM that included
 that arm is now VOID, because #11063 removed the save from this job.** It runs
 `actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
 steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
-`.[test,postgres]` downloads (`python-ci.yml:4816` — the `Install package + the postgres extra` step
+`.[test,postgres]` downloads (`python-ci.yml:4838` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
 **20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
@@ -195,7 +195,7 @@ stated there once, not restated here, which is how this pair drifted apart in th
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
 The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom statements
-below, and `test-track-b`'s save arm — `python-ci.yml:3230`, `cache: pip`) are optimistic by ~7 m
+below, and `test-track-b`'s save arm — `python-ci.yml:3242`, `cache: pip`) are optimistic by ~7 m
 against the censored 15.9 m and by ~11 m against the completed ~20 m. ⛔ **`test` is NOT one of
 them:** #11063 re-derived its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term and
 split its payload, so it no longer writes the 3.6 GB archive at all (its row below is the
@@ -235,7 +235,7 @@ names:
   job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
   reason worth keeping: its save surface is created by a third-party action**, not by an
   `actions/cache` step of its own (`actions/setup-python` with `cache: pip`,
-  `python-ci.yml:3230`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
+  `python-ci.yml:3242`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
   like a comfortable 10 m. It is the only `cache: pip` site left in the workflow. Save arm:
   5 m in-step + ~1 + ~9 = 15 m × 1.5 = 22.5 → **30**.
 
@@ -246,15 +246,18 @@ SUM. `test` cleared it with room to spare until the 2026-11-09 refresh — the r
 map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10; #11576 then
 raised it 10 → 11 for the same reason one merge later (the history is at the end of this
 parenthetical). At **`fast_shards: 11`** — the shipped shape — the row reads: 10 m
-last-failed pre-phase + the emitted **25 m** per-shard
+last-failed pre-phase + the emitted **28 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **56.6 m against
-90, x 1.5 = 85.0** — 5.0 m of headroom, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **59.6 m against
+90, x 1.5 = 89.5** — 0.5 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
-`test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
+`test_the_test_job_carries_no_unbounded_cache_post_step`. ⛔ The emission quoted above is **28 m** at
+the 2026-11-23 head (`--emit-push-matrix` reads 28 m on all eleven shards); the last re-cut recorded
+further down read 25 m, and the pack moves with every registration, so the CURRENT figure is the
+emission and the history below is history. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
 (`tests/test_10999_batch_story_relations.py`), **27 m** until the 2026-11-09 sweep re-weighted the fast
 pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards took it to
@@ -290,32 +293,89 @@ because the pack as a whole moved to `720.0` (720.0 × 2.0 / 60 = 24.00, which `
 ceils to **24**; 720.6 lands at 24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed
 the subtraction had stopped separating the pair and withdrew the `24 m` arm on that basis — that
 reading does NOT reproduce at the head it named and is itself withdrawn here. ⛔ **AND THE PAIR STOPS
-SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: the pool now
-reads **25 m** at **720.7**, and with the same three removed it STILL reads **25 m** at **720.2** —
-because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minutes` is
-`ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
-the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
-an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
-that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
-merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
+SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: at the
+commit that folds it (`8674087341`) the pool reads **25 m** at **720.8-720.9**, and with the same three
+removed it STILL reads **25 m** at **720.3-720.4** — because the 24/25 boundary is EXACTLY
+`est_seconds` 720.0 (`shard_watchdog_minutes` is `ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and
+720.3 → 24.01 → **25**), and `main`'s pack moved the three-removed arm 0.3-0.4 s above that cliff. ⛔
+The `720.7` / `720.2` an earlier cut of this sentence quoted HERE are real, but they belong to the
+PRE-merge head `ccb98b3623` (**720.6-720.7** with the three present, **720.1-720.2** with them
+removed) — one tree's emission carried under another tree's sha is the exact defect this section
+records, so both trees are named and each figure is the one measured AT it. Two lanes measured this
+same pair opposite ways within an hour for exactly that reason, so the durable fact is NOT which
+minute a given tree emits: it is that these three suites move the ceiling by ~0.5-0.6 s around a
+720.0 s cliff (max-to-max `720.9 − 720.4` = 0.5, max-to-min `720.9 − 720.3` = 0.6 at the merge;
+`720.7 − 720.2` and `720.7 − 720.1` at the pre-merge head; their declared 6.0 s over the 11 shards
+is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
-LOWER A WEIGHT: the three enter at
+LOWER A WEIGHT: **at `f56aac204ca6`** the three entered at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
-their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits 720.7 at the merged tree) — the three files' +6 s over 11
-shards is what was measured to cross the minute boundary at the earlier head. The three
-hand-added figures are re-added from the
-emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
-header block, which reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
-`test_demo_session_read_exclusion_8290.py` `durations:` row, which repeats 85.0 m against the 90 m
-cap), which is the 1-decimal restatement of the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on
-the UNROUNDED total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying
-the ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre,
-which is how this one sentence came to disagree with the row above it — and the `84.9 / 5.1` this
-sentence itself carried was that same re-derivation, withdrawn here: ⛔ NOT the sum of the four ROUNDED
+their `durations:` rows **there**, so removing or shrinking those rows changed nothing (measured: dropping
+all three `durations:` rows still emitted **721.3** on THAT resolution
+(see the `0467ba32` re-cut below) — so lowering or dropping
+those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ **THE MERGE THAT CARRIES `#13998`'S OWN REGISTRATION IS A FURTHER TREE, AND IT RE-PACKS NOTHING**, so the figure is read off THAT tree rather than inherited from the pre-sweep one: `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no `durations:` row; `--emit-push-matrix` lists it in shard `c`), and that merged tree (`1457f7905d`) emits **eight shards at 836.4 s** (a, b, c, d, e, h, j, k) **and three at 836.3 s** (f, g, i) — `ceil(836.4/60 x 2)` = **28 m**, i.e. this branch's registration does not move the term the 2026-11-23 sweep set. ⚠️ Re-measured 2026-11-23 (tortoise#14405) because this paragraph previously carried `835.8-835.9 s on all eleven shards` for the same tree, which that tree does not emit: that figure was read off a DIFFERENT tree and named this one, the exact defect class this section exists to record. ⛔ The `721.6 s` / `25 m` and the four-at-`721.3`-seven-at-`721.2` split an earlier cut of this paragraph quoted belong to the PRE-sweep merge with `origin/main` `588cf7ae` (and to `10e51693f1` / `c0b929403aa9` respectively); they are named here as HISTORY and not carried as this head's term — one tree's emission under another tree's sha is the exact defect class this section exists to record. ⛔ The premise is
+scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
+(`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
+is still `2.0`), so **at `a7baa98d053d`** dropping all three DOES move the worst — `835.7 s →
+836.0 s`, the 28 m minute unchanged (both arms re-emitted at that sha; the number is pinned to
+a NAMED commit rather than "this head" on purpose — it moves with every merge to `main`, and a
+figure whose head is not named is the rot this paragraph's own rule forbids) — what moves the term is three more
+files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
+applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
+RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
+merged `origin/main` `b4da1f5c` emitted **25 m on all eleven shards**, the worst at `est_seconds`
+**720.7** (`ceil(720.7/60 x 2)` = 25, re-read after that merge — it emitted 720.6 on the tree before
+it), and the pool it packed held BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i`
+— `test_14012_resident_cli`, `test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5
+`test_miss_rate_m5.py` (shard `d`, beside `resident_cli`) — so no arithmetic on the two parents'
+figures would have predicted the merged reading. ⛔ **THE MERGE WITH `origin/main` `10e51693` IS A
+FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not this tree's term:**
+`--emit-push-matrix` on THAT tree emits **25 m on all eleven shards** at a worst `est_seconds` of
+**721.1** (and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly
+that, then restoring the manifest), which is `#14192`'s added suites packing into the same pool.
+⛔ **THE MERGE WITH `origin/main` `0467ba32` IS YET ANOTHER TREE, AND THE FIGURE MOVES AGAIN — so
+`721.1` is HISTORY too, and this document's own lesson now has a third data point:**
+`--emit-push-matrix` at head `f56aac204ca6` emits **25 m on all eleven shards** at a worst
+`est_seconds` of **721.3** (shards `a`, `b`, `c`, `i`; the other seven read 721.2), and dropping
+the same three `durations:` rows still reads **721.3** — re-derived by doing exactly that and
+restoring the manifest. ⛔ Provenance, because that is what this paragraph exists to keep right:
+`f56aac204ca6` is NOT the merge that carried `0467ba32` — its parents are `89b2eff808cb` and
+`52790225a552` (`git rev-list --parents -n1 f56aac204ca6`), and `89b2eff808cb` is the commit that
+merged `origin/main`. Nothing turns on the difference for THIS figure: `config/ci-surfaces.yml`
+is byte-identical across `89b2eff808cb`, `f56aac204ca6` and `0f41e95d3664`
+(`sha256 f5cc27b5d72151ed…`), so all three emit 721.3 — ⛔ **and NOT at this head**, whose map the
+2026-11-23 sweep re-packed; quoting 721.3 against it would be the stale restatement this paragraph
+exists to forbid, and the sweep's own figures are re-derived below. The `+0.2 s` is ONE file: `git log --diff-filter=A
+--name-status 10e51693..0467ba32 -- 'tests/test_*.py'` names exactly one addition,
+`tests/test_extractor_cost_measure.py` (what removing it drops is its `config/ci-surfaces.yml`
+`surfaces: core:` LIST ENTRY — at `f56aac204ca6` the file had NO `durations:` row at all, and the
+18.2 s row that exists at THIS head was created by the same refresh; named, not line-numbered,
+because this refresh moved it, and re-naming the number is the rot `tools/ci_check_repair.py`
+argues against), and removing THAT entry —
+nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
+same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD HAVE PREDICTED IT
+(`721.1` on the parent that merged `10e51693`, `721.3` here). ⛔ **THAT SENTENCE IS HISTORY, AND SO
+ARE THE TERMS IT QUOTES**: at `f56aac204ca6` the minute was
+unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added trio stood at 56.6 m / 85.0 m / 5.0 m. The
+**2026-11-23 sweep** then re-packed this pool, so that trio is history too: at `a7baa98d053d` the
+committed map
+emits **28 m** on all eleven shards at a worst `est_seconds` of **835.7**
+(`ceil(835.7/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
+hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0.5 m** (the row
+above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
+x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
+`durations:` row, which repeats 89.5 m against the 90 m cap), which is the 1-decimal restatement of
+the terms' own total, 59.64 m — ⛔ the × 1.5 is taken on the 2-dp total the committed S=11 header
+block states, 59.64 → 89.46 →
+**89.5 m**, headroom 90 − 89.46 = 0.54 → **0.5 m**: multiplying the 1-dp 59.6 instead reads
+89.4 m / 0.6 m and overstates the headroom by 0.06 m, which is how this one sentence came
+to disagree with the row above it. At the 56.64 m total that clause read `84.9 / 5.1`
+before the `#14183` re-cut withdrew it: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
+RE-CUT** — exactly the ROUNDED-SUM path the clause just above forbids — and `origin/main` and this
+branch corrected it independently, to the same pair — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
-first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
+first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) rather than the `0.5 m` S=10 had been clearing by. The 2026-11-23 sweep has since moved the trio to `89.5 m / 0.5 m`, and the other two copies (`config/ci-surfaces.yml`'s S=11 header block and the `test_demo_session_read_exclusion_8290.py` row) were re-cut with it. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
@@ -326,9 +386,18 @@ not fit — but on the measured rates, not on an assumption: this run's degraded
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
 class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
-~57 m+ degraded against the ~13.36 m of room the SUM leaves. Splitting the payload is what brings it
-inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
-that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
+~57 m+ degraded against the **~8.36 m** of room the SUM leaves. Splitting the payload is what brings it
+inside. The room is `60 − SUM_without_cache_write` (arm 2 is `SUM x 1.5 <= 90`, so `SUM <= 60`):
+`60 − (10 + 28 + 6 + 3.03 + 4.23 + 0.38)` = `60 − 51.64` = **8.36 m**. It read `13.36 m` until the
+2026-11-23 sweep, which is `60 − 46.64` — the **23 m** worst-shard era this file records above in
+this section, i.e. the figure survived the 23 → 25 → 28 m moves while the rest of the paragraph
+was re-cut. Re-derive it with the emission rather than restating it, exactly like the trio above.
+(⛔ `8.36` is the 2-dp arithmetic on the terms as PRINTED above — `60 − 51.64` — and it agrees with
+the committed `config/ci-surfaces.yml` S=11 header block's `0.5 m` of headroom; summing the
+UNROUNDED terms instead gives `60 − 51.6467` = 8.35, which moves no verdict and would put this
+sentence 0.01 m away from the instrument it cites.)
+`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
+that shape — no implicit `actions/cache@` post step anywhere in the job, `~/.cache/uv` written by exactly one `actions/cache/save@` that is time-bounded, `cache-hit`-gated and preceded by a bounded `uv cache prune`, and `~/.cache/pip` restore-only (two other jobs own that key) — and it also holds this section's emitted-watchdog figure to the emission. The watchdog itself comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
@@ -340,13 +409,24 @@ false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its
 save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its cap
 (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all; its own ungated `~/.cache/huggingface` POST is unmeasured) and
 `test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
-`~/.cache/huggingface` POST (`python-ci.yml:3547-3549`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
+`~/.cache/huggingface` POST (`python-ci.yml:3563-3565`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
-`install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2949-2954`). The ~30 m this row used to
-carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2942-2946` is
+`install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2957-2964`). The ~30 m this row used to
+carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2950-2954` is
 `actions/cache/restore@`), and it still carries an ungated `actions/cache@v4` POST on `~/.cache/huggingface`
-(`python-ci.yml:2985-2987`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
+(`python-ci.yml:2995-2997`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
+⛔ The command this § invites names a **durable** commit, and that is deliberate: the follow-up, and
+the pre-merge merge tree this paragraph's split was emitted at, are commits on this PR's own branch,
+and this repo squash-merges with `delete_branch_on_merge`, so a cite naming their shas stops resolving
+the moment the branch lands — a RED on the required `docs` job for every PR afterwards, not a missing
+footnote. The citation is therefore the durable re-derivation arm ALONE — an ancestor of `main` whose
+command prints nothing (`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty) — and it
+says only that: re-deriving never reads a diff. The branch-side emission belongs to the tree the
+sentence above names; it is NOT this cite's tree, and reading it as such is the same
+one-tree's-numbers-under-another-tree's-sha error this paragraph exists to record. Nothing grades the
+emitted number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it with
+`--emit-push-matrix` at the sha the sentence names.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
@@ -387,7 +467,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4808-4810` — its `Restore pip dependency
+  `test-record-postgres` mounts that path (`python-ci.yml:4828-4830` — its `Restore pip dependency
   caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
   so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
   and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
@@ -669,32 +749,35 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | 5 / 3 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
-⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(10 / 2)` = 5
-waves exceeds the `max_waves = 4` ceiling invariant 1 pins
-(`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`), so a
-re-derivation from a fresh measurement that picks the row with the most pool headroom (`8 / 9`) is
-redded by the pin shipped in this same section. The two rows that fail the other side are the
+⛔ **The `2 / 2 / 2` row is the one candidate this section's own invariant rejects.** `ceil(10 / 2)` = 5
+waves exceeds the `max_waves = 4` ceiling of invariant 1, so a re-derivation from a fresh measurement
+that picks the row with the most pool headroom (`8 / 9`) is rejected by invariant 1 — and by the arm
+that holds it, `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: measured, `max-parallel: 2`
+reds it with `test: cap 2 over 11 shards needs 6 waves, past the measured 4-wave ceiling`. The two
+rows that fail the other side are the
 mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3 = 9`, so they fail
 invariant 2.
 
 **The accepted regression has two components, and only the run-level number judges it.** The slow
-matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is ~8.2 m on the
-committed map's PROJECTION (`slow_wall_projection()`'s 8.18 m per leg, recomputed below — ⛔ not the
+matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is ~8.6 m on the
+committed map's PROJECTION (`slow_wall_projection()`'s 8.59 m per leg, recomputed below — ⛔ not the
 measured p50, which the row above puts at 8.9 m; a projection is not a measurement and this file does
-not conflate them), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
-the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
+not conflate them), so its band goes ~8.6 m → ~17.2 m (1 wave → 2), still narrower than
+the fast band under the same cap (~42 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.36 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.59 m` per leg → **`17.19 m`** from the
 committed `durations` map (re-derived from the map, not restated: registering
 `test_10371_nonpoint_lifecycle_guard.py` in `slow_files` moved this projection from the `8.64 m` →
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
-flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). The
-`test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
-`test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
-`SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
+flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
+slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head). The
+`slow_wall_projection` instrument recomputes it) — and `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m)
+holds it. That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
-double it, which is the false PASS this pin exists to prevent. The fast
+double it, which is the false PASS a per-leg-share guard would let through — so the cap is a
+committed number that `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+compares the projection against, not a number any test gets to opine. The fast
 matrix's band is pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
 (it was `ceil(10/3)` = 4 at the 10-shard shape and `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
 protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for
@@ -763,15 +846,30 @@ these jobs is measured from runner pickup — the in-step watchdog is started IN
 start delayed by the cap cannot consume a shard's budget. The matrix itself is untouched (the
 shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
 on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
-cannot conclude before a shard it needs has run. Both halves are pinned, and by three separate
-pins rather than two — the caps are a different property from the two false-red halves:
+cannot conclude before a shard it needs has run. Both halves are backed by the workflow's own
+wiring, and the arithmetic behind the caps is stated above AND held by the arm the third bullet
+names — the invariants are pinned there, the NUMBER is not:
 
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
-  than a workflow literal →
-  `tests/test_ci_selection.py::test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`;
+  than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
+  mechanically (both `test` and `test-slow` take theirs from `fromJSON(...)` and carry no literal
+  `include:` rows); the WATCHDOG half is pinned TWICE, once here and once outside this file, so
+  neither pin is safe to delete on its own —
+  `tests/test_ci_selection.py` (`test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed`)
+  parses the `Run fast test suite` step and requires its gating line to carry
+  `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m` (a whole-file scan is not enough: the
+  identical string sits in heading comments), and
+  `tests/test_ci_last_failed.py` (`test_prephase_has_its_own_bounded_watchdog`) requires the same
+  expression on the pre-phase line and refuses a literal, so read the job itself for the shard's
+  watchdog;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
-- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) →
-  `::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`.
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — all THREE are
+  held by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: presence for every
+  matrix-bearing job (derived from the workflow, so a fourth matrix must be given a shard count and
+  a cap), the wave band against `_MAX_MEASURED_WAVES`, and the sum against
+  `pool - _RESERVED_FOR_OTHER_PRS`, where the pool is READ from THIS document's §7 row
+  (`_measured_runner_pool()` parses `runners registered / online`). Re-derive all three from the
+  pool before moving any of the three numbers.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but
@@ -779,22 +877,34 @@ NOTE that §2's command keys on `.steps[].started_at|completed_at`, so it yields
 not the within-run start stagger; the stagger (4.0–23.9 m, the 2–4 wave claim invariant 1 rests
 on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), which §2 never reads.
 
-If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
-`measured_pool` literal in the test is the one input that must be edited with the caps (below). If
+If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool,
+edit the §7 row to the fresh reading, and re-derive the caps together. There is no measured-pool
+literal in the suite to edit, because the arm READS this row: one edit here moves the bound. ⛔ The
+suite's comments beside that input quote no figure on purpose, so they cannot go stale; if you ever
+add one, correct it in the same change — nothing reads THESE comments, so nothing would red
+(a `path:line` citation in a comment IS read: `tests/test_ci_selection.py` grades one). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
-shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.18 m ≈ 16.36 m` (the `8.18` above is that per-leg figure rounded; `#13685`'s
-`slow_files` entry moved the job wall `8.1767 × 2 ≈ 16.35 m` → `16.36 m` by adding one 2.0-weight
-file to the pool, and the pin recomputes both halves), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
+(`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
+reading `ceil(9/3)` an earlier 9-shard shape gave), slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59`
+above is that per-leg figure — `6.5933 m` plus the `2.0 m` setup allowance, printed as `8.59`,
+so take the product on the HIGHER-PRECISION leg, not the 2-dp one: `2 × 8.59` reads 17.18 and is
+the same ROUNDED-SUM trap the
+`59.64 m` trio clause above forbids; the pin
+recomputes both halves from the map, and both moved on
+the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the
+2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
-⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
-`tests/test_ci_selection.py` holds `measured_pool = 12` as a **literal** and asserts
-`sum(caps) <= measured_pool - reserved_for_others`. The test pins the INVARIANTS; the pool they
-are measured against is the one number in it that is measured rather than derived, so it has to
-move **in the same change as the caps**. Landing a permitted re-tune without it (4/4/4 against a
-16-runner pool, say) satisfies both invariants and still reds the required check on the stale
-constant.
+⛔ **Re-measuring the pool is a cap decision, and the suite GRADES the decision you make.** The arm
+named in the bullet above holds all three: the caps' presence, `ceil(shards/cap) <= 4`, and
+`sum(caps) <= pool - 3` with the pool read from the §7 row above — so a cap that is GONE, one
+shrunk until it invents waves, and one grown past the pool each red it. What it deliberately does
+NOT pin is WHICH permitted split you choose: it holds the invariants, not the number, so a
+re-tune (4/4/4 against a 16-runner pool, say — measured to pass: `sum 12 <= 16 - 3`, `ceil(11/4) =
+3 <= 4`) passes and needs no test edit. What a re-tune DOES need is the §7 row edited to the fresh
+reading, because that row is now the arm's input: leave it stale and the bound grades the old pool.
+Re-derive the three numbers from the fresh pool in the same change and state the arithmetic here.
 
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95

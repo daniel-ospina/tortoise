@@ -4,8 +4,22 @@
 persisted Beta width exceeds ``CONTESTED_VARIANCE_THRESHOLD``. That width is a
 division over ``α+β``, evaluated once per candidate row, and it was the cost this
 change targeted. #14192 put a NECESSARY precondition in front of it, so that the
-division, the coercion CASE and the band checks are skipped on the rows that were
-always going to be rejected:
+division and the band checks are skipped on the rows that were always going to be
+rejected. ⛔ **BUT NOT ALL OF THE COERCION, AND THE GUARD IS NOT FREE** — the
+bound is built from the same ``numeric_operand_cypher`` expressions the division
+uses, so coercion ALSO runs INSIDE the guard itself, on every row that reaches
+it — not on every candidate row: the guard is the third ``AND``ed conjunct
+inside the contested ``OR`` arm, so a row failing the presence checks ahead of
+it, or matched by the NAND/terminal alternatives, never evaluates it. On
+the emitted predicate: 8 coercion ``CASE WHEN`` before ``$contested_sum_bound``
+against 73 between it and ``$contested_threshold`` (72 coercion + the division's
+own selector), so a rejected row pays 8 coercion cases to skip 72.
+BOTH halves are graded below — and so is the 72/1 split, and the conjunct
+ordinal that last sentence turns on (``third`` is read back out of BOTH copies
+and compared to the emission), because the share the
+caveat quotes (72 of 80 coercion, 90%, 64 net) is arithmetic over that split and
+over neither total alone. The guard's own 8 are its price, not a saving —
+which is a CAVEAT on the saving, never a claim that no coercion is spared:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
 
@@ -28,6 +42,9 @@ already paid for once.
 """
 from __future__ import annotations
 
+import inspect
+import re
+
 import pytest
 
 from tortoise.graph_ops import (
@@ -43,6 +60,7 @@ from tortoise.search_engine import (
     _beta_variance,
     beta_variance_sum_bound,
     get_relationships_bounded,
+    numeric_operand_cypher,
 )
 
 
@@ -277,9 +295,17 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
       precede the guard, i.e. the division would run first and the guard would
       spare nothing, which is the entire point on the measured read.
 
-    OBSERVED at the reviewed head: one crit query, one occurrence, arm at
-    offset 579 / guard at 2163, depth 1 → 2, ``$contested_threshold`` after the
-    guard, and ``contested_sum_bound == 5.25`` — the same value the twin returns.
+    OBSERVED on ``origin/main`` (`70fbd1a27d`, re-measured, not carried): one
+    crit query, one occurrence, arm at offset 579 / guard at 2136, depth 1 → 3,
+    ``$contested_threshold`` at 13864, and ``contested_sum_bound == 5.25`` — the
+    same value the twin returns. ⛔ THE FIVE NUMERALS IN THAT SENTENCE ARE GRADED,
+    not decorative: this test reads them back OUT of this docstring and compares
+    each one to the measurement, the same coupling the ``CASE WHEN`` numerals get
+    below (and in ``beta_variance_sum_bound``'s docstring). That is because an
+    earlier cut of this paragraph quoted guard offset 2163 at depth ``1 → 2`` and
+    NOTHING recomputed it: a byte offset no assertion reads is a claim, and a
+    claim rots into a false one (round-17 review P2 3, round-20 review, and the
+    cycle-2 residual that closed this).
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls
@@ -307,6 +333,312 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert _paren_depth(crit, guard) > _paren_depth(crit, arm), (
         "the guard is not enclosed by the contested arm — it would prune "
         "NAND/terminal peers")
+    # ⛔ AND THE OFFSET/DEPTH PAIR THE ``OBSERVED`` PARAGRAPH QUOTES, read back
+    # OUT of that paragraph and compared to THIS predicate. The assertions above
+    # grade the RELATION (arm < guard < division, guard nested deeper than the
+    # arm) and never the bytes, so an earlier cut could quote guard offset 2163 at
+    # depth ``1 → 2`` with every row green — the ungraded-numeral class this PR
+    # exists to close, one level out in prose nothing read (cycle-2 review). The
+    # numerals are reproduced here so the paragraph is a claim the test checks,
+    # not a stale measurement the reader has to trust; a real move (a presence
+    # check added ahead of the guard, a re-spelled arm opener) reds this row and
+    # asks for a re-derive, which is the cost the span's magnitude band already
+    # accepts.
+    own_doc = " ".join(
+        (test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division
+         .__doc__ or "").split())
+    observed = re.search(
+        r"arm at offset (\d+) / guard at (\d+), depth (\d+) → (\d+), "
+        r"``\$contested_threshold`` at (\d+)", own_doc)
+    assert observed, (
+        "this docstring no longer states the offset/depth pair in the graded "
+        "form ('arm at offset N / guard at N, depth N → N, "
+        "``$contested_threshold`` at N') — restore the wording or re-point this "
+        "row, but do not leave the pair ungraded again")
+    (doc_arm, doc_guard, doc_arm_depth, doc_guard_depth,
+     doc_division) = (int(part) for part in observed.groups())
+    assert (doc_arm, doc_guard, doc_division) == (arm, guard, division), (
+        f"the docstring quotes arm/guard/threshold offsets "
+        f"({doc_arm}, {doc_guard}, {doc_division}), but THIS predicate measures "
+        f"({arm}, {guard}, {division}) — the paragraph has rotted off the "
+        f"emission it describes")
+    assert (doc_arm_depth, doc_guard_depth) == (
+        _paren_depth(crit, arm), _paren_depth(crit, guard)), (
+        f"the docstring quotes depth {doc_arm_depth} → {doc_guard_depth}, but "
+        f"THIS predicate nests the arm at {_paren_depth(crit, arm)} and the "
+        f"guard at {_paren_depth(crit, guard)}")
+    # ⛔ THE DOCSTRING'S "8 ``CASE WHEN`` BEFORE ``$contested_sum_bound``" IS A
+    # MEASURED NUMERAL, so it is GRADED here rather than trusted (round-17
+    # review, P2 3). Without this the figure rots silently the moment
+    # `numeric_operand_cypher` or the guard's operand set changes — the same
+    # ungraded-numeral class the ``OBSERVED`` paragraph used to apologise for
+    # (it is graded below now). Both bounds are claims, so both are asserted:
+    #   * BEFORE THE ARM, 0 — the coercion is the price of the GUARD. A
+    #     `CASE WHEN` ahead of the arm would mean the coercion is paid on rows
+    #     the arm then discards, which is the opposite of the correction this
+    #     docstring makes (the arm's alternatives use `coalesce(col, literal)`
+    #     comparisons and one BARE `other.status IS NOT NULL`; none emits a
+    #     `CASE WHEN`, measured 0 across `crit[:arm]`).
+    #   * BEFORE THE GUARD, 8 — attributable, not coincidental: 4 `CASE WHEN`
+    #     per `numeric_operand_cypher` operand x the guard's TWO operands.
+    assert crit[:arm].count("CASE WHEN") == 0, (
+        "a coercion `CASE WHEN` precedes the contested arm, so the docstring's "
+        "claim that the coercion is the GUARD's price (and no saving) is no "
+        "longer true")
+    guard_cases = crit[:guard].count("CASE WHEN")
+    assert guard_cases == 8, (
+        f"{guard_cases} coercion `CASE WHEN` precede "
+        "`$contested_sum_bound`, but the docstring promises 8 (4 per "
+        "`numeric_operand_cypher` operand x the guard's two operands) — "
+        "re-derive the docstring's numeral against THIS predicate")
+    # ⛔ AND THE HALF THE GUARD SPARES, so "the guard is its own price" can never
+    # be read as "no coercion is spared". Measured at the same head: 73
+    # `CASE WHEN` sit BETWEEN the guard and `$contested_threshold` — the
+    # ~11.7k-char coercion `CASE` the division carries, which the file's own
+    # `beta_variance_gt_cypher` note names. If that expression ever collapsed, the
+    # guard's saving would vanish while the `8` above stayed true, so BOTH
+    # directions are pinned rather than only the one an earlier cut of this PR
+    # asserted.
+    spared = crit[guard:division].count("CASE WHEN")
+    assert spared == 73, (
+        f"{spared} `CASE WHEN` sit between the guard and "
+        "`$contested_threshold`, but the docstring promises 73 (72 coercion + "
+        "the division's own selector) — re-derive BOTH "
+        "numerals against THIS predicate")
+    # ⛔ AND THE DOCSTRING ITSELF IS GRADED, not just the emission. The two
+    # numerals above are compared against LITERALS, so on their own they pin the
+    # predicate but NOT the prose: a docstring could be inverted to "73 before
+    # the guard / 8 spared" — the exact false claim this PR exists to correct —
+    # and both assertions above would stay green. That is the very
+    # ungraded-numeral class the module docstring apologises for, so the
+    # docstring's own numerals are read OUT OF THE DOCSTRING and compared to the
+    # same measurements. (The prose-figure precedent this paragraph cited,
+    # `test_sdk_privatise_sweep.py::test_the_abbreviation_length_claim_reproduces`,
+    # was cut in the B8 test-bureaucracy cut, 2026-11-23.)
+    doc = inspect.getdoc(beta_variance_sum_bound) or ""
+    doc_before = re.search(r"\*\*(\d+)\*\* coercion ``CASE WHEN`` before", doc)
+    doc_spared = re.search(r"against \*\*(\d+)\*\* between it and", doc)
+    assert doc_before and doc_spared, (
+        "`beta_variance_sum_bound`'s docstring no longer states both CASE WHEN "
+        "numerals in the graded form ('**N** coercion ``CASE WHEN`` before' / "
+        "'against **N** between it and') — restore the wording or re-point this "
+        "test, but do not drop the coupling")
+    assert int(doc_before.group(1)) == crit[:guard].count("CASE WHEN"), (
+        f"the docstring says {doc_before.group(1)} coercion `CASE WHEN` precede "
+        f"the guard, but THIS predicate measures "
+        f"{crit[:guard].count('CASE WHEN')} — the prose has rotted off the emission")
+    assert int(doc_spared.group(1)) == spared, (
+        f"the docstring says {doc_spared.group(1)} `CASE WHEN` are spared, but "
+        f"THIS predicate measures {spared} — the prose has rotted off the emission")
+    # ⛔ AND THIS FILE'S OWN MODULE DOCSTRING, which quotes the same two numerals
+    # and WAS ungraded (round-20 review). A copy that nothing reads is the same
+    # ungraded-figure class as the totals above, one level out: the sentence that
+    # justified this block named "the module docstring" while reading the
+    # FUNCTION docstring, so the module's copy could rot and every row stay green.
+    # Read from the module object rather than the source text, so the letter of
+    # how the docstring is spelled does not matter — only the numerals do.
+    module_doc = " ".join((__doc__ or "").split())
+    module_numerals = re.search(
+        r"(\d+) coercion ``CASE WHEN`` before ``\$contested_sum_bound`` "
+        r"against (\d+) between it and", module_doc)
+    assert module_numerals, (
+        "this module's docstring no longer states the two ``CASE WHEN`` numerals "
+        "in the graded form — restore the wording or re-point this test, but do "
+        "not leave the copy ungraded")
+    assert (int(module_numerals.group(1)), int(module_numerals.group(2))) == (
+        crit[:guard].count("CASE WHEN"), spared), (
+        f"this module's docstring quotes ({module_numerals.group(1)}, "
+        f"{module_numerals.group(2)}) for the guard and the spared slice, but "
+        f"THIS predicate measures ({crit[:guard].count('CASE WHEN')}, {spared}) "
+        "— the module's copy has rotted off the emission")
+    # ⛔ AND THE SPLIT THE DOCSTRING DERIVES THREE MORE NUMERALS FROM. The rows
+    # above grade the two TOTALS — the emission against literals, and the prose
+    # against the emission — and NEITHER grades their split. The caveat quotes
+    # "spares **72 of the predicate's 80 coercion `CASE WHEN`** … 90% of the
+    # coercion … net of the 8 it pays, a rejected row still skips 64" — and 72
+    # is NOT `73 - 8`: it is `73 - the division's own selector`, and a selector
+    # is not a coercion. So a coercion that became a selector leaves BOTH graded
+    # totals untouched and moves the quoted share, which is the same
+    # ungraded-figure class this file already closed for the `8` and the `73`.
+    # The count is measured from the emission's own structure rather than
+    # restated, so the row cannot drift with the coercion's shape: one
+    # `numeric_operand_cypher` emission is `emission_cases` `CASE WHEN`, and it
+    # spells the finite-range bound twice (a `<=` and a `>=`), so half the
+    # bound's occurrences is the number of emissions in the slice.
+    emission = numeric_operand_cypher("tortoise_probe_operand")
+    emission_cases = emission.count("CASE WHEN")
+    range_lit = emission.split("<= ")[1].split(" ")[0]
+    coercions = (crit[guard:division].count(range_lit) // 2) * emission_cases
+    assert spared - coercions == 1, (
+        f"{spared - coercions} `CASE WHEN` in the spared slice are not "
+        "`numeric_operand_cypher` coercions, but the docstring derives its "
+        "share as `72 coercion + the division's own selector` — exactly one. "
+        "With a different split the quoted 72 / 80 / 64 are all wrong while "
+        "the 8 and the 73 above stay green: re-derive the share")
+    # ⛔ AND THE TWO FIGURES DERIVED FROM THAT SPLIT ARE NOT ASSERTED, ON PURPOSE.
+    # `coercions == 72` is `spared - 1` and `8 + coercions == 80` is `8 + 72`:
+    # both follow from rows asserted above, so asserting them would be an
+    # assertion NO MUTANT CAN REDDEN — dead weight by the standard this repo
+    # already applies (`tests/test_rerank_pool.py`, agent-infra#3442 rule 3). An
+    # earlier cut of this block carried both rows; they were removed rather than
+    # kept for the look of coverage (round-20 review). The claim they were meant
+    # to pin — that the SHARE rests on the split, not on the totals — is pinned
+    # by the row above, which is the one a re-split actually reds.
+    # ⛔ AND THE SHARE ITSELF, IN THE COPIES LISTED BELOW — not just the four
+    # headline numerals. Arithmetic cannot rot on its own but PROSE still does: measured at
+    # `de4cab96`, inverting any of `72 of 80` / `90%` / `99%` / `64` left every
+    # row green, and at `21f9da1a` the DERIVATION copies were still ungraded —
+    # `(72 coercion + the division's own selector)`, `pays 8 coercion ``CASE``s to
+    # skip 72`, and `(the 8 above + the 72 below)`, the last being the
+    # paragraph's own derivation of 80, so inverting it stated a false derivation
+    # while the graded headline stayed true (round-21 and round-22 reviews).
+    #
+    # So the rows below are built FROM the emission and demanded as literal
+    # substrings of each docstring that quotes them. ⛔ NO COMPLETENESS CLAIM IS
+    # MADE HERE, on purpose: two earlier cuts of this comment asserted that a
+    # copy outside the tuple "is either absent from both docstrings or a new copy
+    # this tuple must learn about", and both times several copies were present
+    # and ungraded — including the headline `(72 of 80)` restatement — so the
+    # sentence was the same ungraded-claim defect one level up (rounds 22 and
+    # 23). The list is what it is; a copy not in it is simply not graded by it.
+    coercions_total = guard_cases + coercions
+    pct_coercion = round(100 * coercions / coercions_total)
+    pct_slice = round(100 * coercions / spared, 1)
+    net_cases = coercions - guard_cases
+    selectors = spared - coercions
+    function_doc_copies = (
+        f"{coercions} of the predicate's {coercions_total} coercion",
+        f"{pct_coercion}% of the coercion",
+        f"{coercions} of the {spared} ``CASE WHEN`` it spares",
+        f"{pct_slice}%, a different number",
+        f"still skips {net_cases} coercion",
+        f"({coercions} coercion + the division's own selector)",
+        f"pays {guard_cases} coercion ``CASE``s to skip {coercions}",
+        f"(the {guard_cases} above + the {coercions} below)",
+        f"({coercions} of {coercions_total})",
+        f"That {guard_cases} is the guard's own",
+        f"net of the {guard_cases} it pays",
+        f"({coercions} of {spared} — {pct_slice}%",
+    )
+    module_doc_copies = (
+        f"({coercions} of {coercions_total} coercion, {pct_coercion}%, "
+        f"{net_cases} net)",
+        f"({coercions} coercion + the division's own selector)",
+        f"pays {guard_cases} coercion cases to skip {coercions}",
+        f"the {coercions}/{selectors} split",
+        f"The guard's own {guard_cases} are its price",
+    )
+    for where, text, rows in (
+            ("`beta_variance_sum_bound`'s docstring", doc, function_doc_copies),
+            ("this module's docstring", module_doc, module_doc_copies)):
+        missing = [row for row in rows if row not in text]
+        assert not missing, (
+            f"{where} no longer states {missing!r} — these are the share numerals "
+            "derived from THIS emission (spared "
+            f"{spared}, coercions {coercions}, guard {guard_cases}), so a copy "
+            "that drifts off them re-inverts the claim this PR exists to keep "
+            "true. Restore the wording or re-point this test; do not leave a "
+            "copy ungraded")
+    # ⛔ AND THE ORDINAL THE NARROWING SENTENCE TURNS ON, which is a numeral too.
+    # Both copies now say coercion runs on every row that REACHES the guard
+    # "not on every candidate row: the guard is the third ``AND``ed conjunct
+    # inside the contested ``OR`` arm, so a row failing the presence checks
+    # ahead of it … never evaluates it" — and NOTHING recomputed that ordinal:
+    # measured at `07fd752374`, rewriting `third` to `fourth` in either copy
+    # left this whole file green (7 passed). It is the same ungraded-figure
+    # class the offsets and the ``CASE WHEN`` numerals above were closed for,
+    # and it rots in the direction that matters — INSERTING a conjunct ahead of
+    # the guard is exactly the edit that changes how many rows pay the 8 while
+    # every graded total above stays put.
+    #
+    # The ordinal is DERIVED from the emission, not restated: the arm's own
+    # conjunct separators are the `` AND ``s sitting at the arm's nesting + 1.
+    # Deeper ones are NOT separators — conjunct 1 carries an ``AND`` inside its
+    # span, and the guard's own operands two more — which is why the depth
+    # filter is load-bearing rather than `crit[arm:guard].count(" AND ")`.
+    guard_conjunct = 1 + sum(
+        1 for hit in re.finditer(r" AND ", crit[arm:guard])
+        if _paren_depth(crit, arm + hit.start()) == _paren_depth(crit, arm) + 1)
+    ordinals = {1: "first", 2: "second", 3: "third", 4: "fourth",
+                5: "fifth", 6: "sixth"}
+    assert guard_conjunct in ordinals, (
+        f"the contested arm ANDs {guard_conjunct} conjuncts ahead of the guard "
+        "— extend `ordinals` here and re-derive the narrowing sentence in both "
+        "docstrings")
+    for where, text in (("`beta_variance_sum_bound`'s docstring",
+                        " ".join(doc.split())),
+                        ("this module's docstring", module_doc)):
+        stated_ordinal = re.search(
+            r"the (\w+) ``AND``ed conjunct inside the contested ``OR`` arm",
+            text)
+        assert stated_ordinal, (
+            f"{where} no longer states the guard's conjunct ordinal as "
+            "'the <ordinal> ``AND``ed conjunct inside the contested ``OR`` "
+            "arm' — restore the wording or re-point this row, but do not leave "
+            "the ordinal ungraded")
+        assert stated_ordinal.group(1) == ordinals[guard_conjunct], (
+            f"{where} calls the guard the {stated_ordinal.group(1)} ``AND``ed "
+            f"conjunct of the contested arm, but THIS predicate measures it as "
+            f"the {ordinals[guard_conjunct]} ({guard_conjunct - 1} conjunct "
+            "separator(s) precede it) — so the sentence's 'a row failing the "
+            "presence checks ahead of it … never evaluates it' no longer "
+            "describes this emission")
+    # ⛔ EVERY BAND FIGURE IN THIS MESSAGE IS READ FROM CODE, NOT RESTATED — the
+    # two edges are the pinned literals below, and the deltas and percentages are
+    # computed from them and the live span. The band is NOT derived from the span:
+    # that is what makes a rename red it. The caller chooses the band; the message
+    # can therefore only be wrong about arithmetic it performed, never about a
+    # tolerance it restated (rounds 21, 22 and 29 reviews: earlier wordings said
+    # the figures were "derived from the enforced bound", which the two pinned
+    # literals contradicted). The rename anecdote below is NOT computed either and
+    # does not claim to be: `216`, `+1,080` and `12,808` are a MEASUREMENT taken at
+    # the commit whose span read 11,728, stated as an anecdote rather than a live
+    # figure, so a moved span makes the anecdote historical rather than false.
+    #
+    # RESTATING a derived figure is how this message twice
+    # acquired a claim its band did not implement (rounds 21 and 22): one cut
+    # promised "an order of magnitude" over a ±7% band, and the next restated the
+    # tolerance against the measured 11,728 — correct at that tree and false the
+    # moment an edit inside the slice moves the span, which is precisely the
+    # event this row exists to red. Deriving both leaves nothing to drift, so
+    # the message cannot state a tolerance the comparison does not enforce.
+    magnitude_lo, magnitude_hi = 11_000, 12_500
+    spared_span = len(crit[guard:division])
+    lo_delta, hi_delta = magnitude_lo - spared_span, magnitude_hi - spared_span
+    lo_pct, hi_pct = (100 * lo_delta / spared_span, 100 * hi_delta / spared_span)
+    assert magnitude_lo < spared_span < magnitude_hi, (
+        f"the docstring quotes the spared span as a ~{spared_span / 1000:.1f}k-char "
+        "coercion `CASE` and "
+        f"THIS predicate measures {spared_span} chars. This is a MAGNITUDE "
+        "tripwire for a figure the prose quotes as a '~N.Nk' magnitude, NOT "
+        "a byte pin, and its real tolerance is what it actually implements: the "
+        f"band reds AT OR BELOW {magnitude_lo:,} ({lo_delta:+,} / "
+        f"{lo_pct:+.1f}%) and AT OR ABOVE {magnitude_hi:,} ({hi_delta:+,} / "
+        f"{hi_pct:+.1f}%) — the edges themselves red, because both comparisons "
+        "are strict."
+        " ⛔ A semantics-preserving rename inside the slice REDS "
+        "IT — measured, `other` -> `other_peer` (216 occurrences) moves the span "
+        "by +1,080 to 12,808 — and that false block is the ACCEPTED cost of "
+        "grading an approximate figure at all, not a bug to be explained away. "
+        "Earlier cuts of this message claimed an order-of-magnitude tolerance "
+        "over a ±7% band, and then restated the tolerance instead of deriving "
+        "it, i.e. told the first reader who hit the red something false about "
+        "the row (rounds 21, 22 and 23).")
+    # ⛔ AND THE PROSE FIGURE ITSELF, not only the emission it describes: the
+    # band above grades the SPAN, so `the ~11.7k-char coercion CASE` could be
+    # rewritten to 15.0k with every row green (round-24 review, measured). The
+    # prose numeral is the span rounded to the one decimal it quotes, so a span
+    # that moves far enough to change that rounding reds this and the band above
+    # independently.
+    prose_k = re.search(r"the ~([\d.]+)k-char coercion", doc)
+    assert prose_k, (
+        "`beta_variance_sum_bound`'s docstring no longer names the spared span as "
+        "'the ~N.Nk-char coercion' — restore the wording or re-point this test, "
+        "but do not leave the figure ungraded")
+    assert float(prose_k.group(1)) == round(spared_span / 1000, 1), (
+        f"the docstring calls the spared span ~{prose_k.group(1)}k chars, but "
+        f"THIS predicate measures {spared_span} ({spared_span / 1000:.3f}k) — "
+        "re-derive the figure against the emission")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 

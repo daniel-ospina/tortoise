@@ -2706,7 +2706,7 @@ wheels = [
 
 [[package]]
 name = "tortoise-graph"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "falkordb" },
@@ -2754,6 +2754,8 @@ test = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "pyyaml" },
+    { name = "regex" },
+    { name = "tiktoken" },
 ]
 
 [package.dev-dependencies]
@@ -2766,6 +2768,7 @@ dev = [
     { name = "pytest-playwright" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "regex" },
     { name = "requests" },
     { name = "ruff" },
     { name = "scikit-learn" },
@@ -2800,10 +2803,12 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,!=6.0.4" },
     { name = "pyyaml", marker = "extra == 'test'", specifier = "==6.0.3" },
     { name = "redis", specifier = ">=7.1,<8" },
+    { name = "regex", marker = "extra == 'test'", specifier = ">=2022.1.18" },
     { name = "scikit-learn", marker = "extra == 'embeddings'", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3,<6" },
-    { name = "sentry-sdk", specifier = ">=2.0" },
+    { name = "sentry-sdk", specifier = ">=2.0,<3" },
+    { name = "tiktoken", marker = "extra == 'test'", specifier = ">=0.14.0" },
     { name = "uvicorn", specifier = ">=0.23.0" },
 ]
 provides-extras = ["embeddings", "quadrature", "postgres", "backups", "parity", "test"]
@@ -2818,6 +2823,7 @@ dev = [
     { name = "pytest-playwright", specifier = ">=0.9" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.6" },
+    { name = "regex", specifier = ">=2022.1.18" },
     { name = "requests", specifier = ">=2.31" },
     { name = "ruff", specifier = "==0.16.4" },
     { name = "scikit-learn", specifier = ">=1.0" },

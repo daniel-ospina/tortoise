@@ -1,4 +1,4 @@
-// tortoise-hook-version: 24
+// tortoise-hook-version: 33
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -287,11 +287,13 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -464,6 +466,74 @@ export const QUOTA_EXCEEDED_CODE = "quota_exceeded";
 export const COHORT_COST_CAP_CODE = "cohort_cost_cap";
 /** Every 402 category this client can name. */
 const REFUSAL_CODES = [QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE] as const;
+
+/**
+ * #14350 (D1): the server's machine-readable CAPACITY category
+ * (`hosted_api._CAPTURE_CAPACITY_CODE`).
+ *
+ * ⛔ Why this category is special. Every other refusal here is a verdict about
+ * the ENTRY — its harness is malformed, its org is out of quota, the network
+ * failed — and so it is charged to the entry's `attempts`. A capacity refusal is
+ * a verdict about the BOX, in the same instant, for every entry: the server is
+ * running `_CAPTURE_MAX_IN_FLIGHT` captures right now. Charging it to the entry
+ * is what turned a 908-entry backlog into `attempts` 10–17 — one saturated pass
+ * charged EVERY pending entry, and exponential backoff then pushed most of them
+ * hours out, so the head stopped falling while every surface reported a drain in
+ * progress (#14342 §7.3).
+ */
+export const CAPTURE_CAPACITY_CODE = "capture_capacity_saturated";
+
+/**
+ * #14350: the drain claim — ONE drainer per spool, across BOTH legs.
+ *
+ * The spool directory is shared by this leg and the Python CLI, and both drain
+ * it: every `session_start` fires one, `agent_end` another, shutdown a final
+ * flush, and `tortoise session drain` can be run by hand. N concurrent drains
+ * POST into ONE server ceiling of 8 captures, which is the self-feeding shape
+ * #14342 starts from. The claim is the exclusion; `tortoise/drain_claim.py`
+ * states the protocol (atomic create via `link`, a lease, three staleness rules)
+ * and the Python leg implements the same file. **Anything that changes here must
+ * change there**: a divergence is invisible — each leg would take its own claim
+ * — and it would restore the defect silently.
+ */
+export const DRAIN_CLAIM_FILE = "drain.claim";
+
+/**
+ * #14350: how long a claim stays valid without a refresh — from the transport,
+ * not from comfort. The longest step between refreshes is ONE POST, bounded by
+ * `REQUEST_TIMEOUT_MS` (10 s) plus `CONFIRM_READ_TIMEOUT_MS` on the refusal path
+ * plus local work; the Python drain uses 120 s for the same bound and the two
+ * legs must agree or one would steal the other's live claim.
+ */
+export const DRAIN_CLAIM_TTL_MS = 120_000;
+
+/**
+ * The claim's on-disk format version — MIRRORS `tortoise.drain_claim.CLAIM_VERSION`.
+ *
+ * It is not decoration: `claimIsStale` stales out a record carrying any other
+ * value, because a format this build does not know must never be interpreted by
+ * today's semantics (the whole point of a version field, and the trait that was
+ * missing when review found it read nowhere).
+ *
+ * ⛔ v2 = the timestamps are MILLISECONDS, which is what THIS leg always wrote.
+ * v1 was written in SECONDS by the Python leg, so each leg read the other's live
+ * claim as long expired and STOLE it — two drainers, the exact defect the claim
+ * removes (found in review; measured across processes against the real
+ * predicate). Bumping the version is what makes a surviving v1 record SAFE: it is
+ * unattributable (rule 1) rather than misevaluated by a factor of 1000.
+ */
+export const DRAIN_CLAIM_VERSION = 2;
+
+export interface DrainClaimRecord {
+  version: number;
+  token: string;
+  leg: string;
+  pid: number;
+  host: string;
+  boot_id?: string;
+  started_at: number;
+  expires_at: number;
+}
 
 export interface CaptureConfig {
   apiUrl: string;
@@ -1352,12 +1422,48 @@ export interface FlushSummary {
    *  bounded pass lost nothing, and what tells the caller to continue. */
   remaining: number;
   /** #2100: why the pass stopped early. Absent on a pass that reached the end. */
-  stopped?: "attempts" | "budget" | "quota";
+  stopped?: "attempts" | "budget" | "quota" | "capacity" | "claim";
   /** #2100: the quota refusal this pass hit, if any (402 / `quota_exceeded`).
    *  A quota-blocked box is a NAMED state (`capture: BLOCKED`), not a growing
    *  silent backlog of per-item deferrals. */
   quota?: QuotaRefusal;
+  /** #14350 (D1): this pass did NOT run because another drainer holds the
+   *  spool's claim (`tortoise.drain_claim` / `drain.claim`). The correct answer
+   *  for the second of two concurrent drains: every entry it would have
+   *  attempted is still on the spool and the HOLDER is working the same list. */
+  heldByClaim?: boolean;
+  /** #14350: the operator line naming who holds the claim (leg + pid). */
+  claimHolder?: string;
+  /** #14350: the pass STOPPED because it no longer held the claim (a peer took
+   *  it over after our refresh was missed). Recorded rather than thrown: the
+   *  correct response — stop being the second drainer — has already happened. */
+  lostClaim?: boolean;
+  /** #14350: the claim could not be CREATED (an unwritable spool root), so this
+   *  pass ran WITHOUT the cross-process exclusion. Never a silent state. */
+  claimUnavailable?: boolean;
+  /** ⛔ WHICH unclearable thing made the exclusion unavailable, when one did.
+   *  The Python leg carries the same field (`FlushSummary.claim_unavailable_reason`)
+   *  and the operator line prints it instead of a hard-coded guess: the old text
+   *  said "the spool root is not writable" for a NON-EMPTY DIRECTORY at the claim
+   *  path too, which is a false diagnosis of a real fault (#14423 cycle-7 review,
+   *  P1 — the Pi leg had no such cause at all). */
+  claimUnavailableReason?: string;
+  /** #14350: the CAPACITY refusal that ended this pass, if any. Nothing was
+   *  charged to the entry's `attempts` and no backoff was armed — that is the
+   *  difference between this and a per-entry deferral, and it is what keeps the
+   *  head monotone. */
+  capacity?: CapacityRefusal;
   discarded: DiscardRecord[];
+}
+
+/** The server's CAPACITY refusal, as the client can name it (#14350). */
+export interface CapacityRefusal {
+  status: number;
+  /** The server's machine-readable category, when its body carries one. */
+  code?: string;
+  /** The server's own `Retry-After` seconds, when its body carries one. */
+  retry_after?: number;
+  detail?: string;
 }
 
 /** The server's quota refusal, as the client can name it (#2100). */
@@ -1497,18 +1603,44 @@ function serialiseTurn(turn: Turn): string {
  * fewer turns than the digest covers while still stamping the entry FILED.
  * Non-conversational roles are excluded at CAPTURE time (`extractTurns`).
  */
-export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
+export const TURNS_OK = "ok";
+export const TURNS_ABSENT = "absent";
+export const TURNS_UNREADABLE = "unreadable";
+
+/** `readSpoolTurns` PLUS why it is empty (#12487).
+ *
+ *  `readSpoolTurns` returns `[]` for an ABSENT log, an EMPTY log and a log it
+ *  could not open — and `writeSpoolEntry` must tell those apart for the same
+ *  reason it must for the meta: "nothing stored" and "stored bytes I could not
+ *  see" cannot share one decision. A RESYNC (see `writeSpoolEntry`'s
+ *  unusable-prior arm) may move a stored log aside, and moving a log this
+ *  process cannot read is a way to hide a conversation from every surface that
+ *  could deliver it. Mirrors `capture_spool._read_turns_state`.
+ */
+export function readSpoolTurnsState(
+  dir: string,
+  sessionId: string,
+): { turns: Turn[]; state: string } {
   const path = logPathFor(dir, sessionId);
   let text: string;
   try {
     text = readFileSync(path, "utf8");
-  } catch {
+  } catch (err) {
     // Absent, or unreadable (EACCES, a DIRECTORY in its place, ELOOP). Returning
     // [] lets `flushSpool` record a `transcript_empty` discard. Throwing here
     // aborted the WHOLE drain loop — one corrupt entry permanently wedged every
     // other session's filing, with no ledger line (the Python twin guards this).
-    return [];
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return { turns: [], state: code === "ENOENT" ? TURNS_ABSENT : TURNS_UNREADABLE };
   }
+  return { turns: parseSpoolTurns(text), state: TURNS_OK };
+}
+
+export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
+  return readSpoolTurnsState(dir, sessionId).turns;
+}
+
+function parseSpoolTurns(text: string): Turn[] {
   const turns: Turn[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -1552,17 +1684,24 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
  *  `tests/test_capture_spool.py` (Python leg) and `tortoise-capture.test.ts`
  *  (this leg), in BOTH directions.
  *
- *  Mirrors `capture_spool.list_spool_metas` EXCEPT on non-UTF-8 bytes, and the
- *  exception is stated rather than papered over: Python's decoder raises
- *  `UnicodeDecodeError` (→ corrupt, entry destroyed) while Node's
- *  `readFileSync(…, "utf8")` never throws and substitutes U+FFFD (→ a usable
- *  meta, entry filed). The two legs drain ONE directory, so this is a
- *  pre-existing divergence, NOT something this change introduced — filed
- *  separately rather than widened here. */
+ *  Non-UTF-8 bytes (#12484): Node's `readFileSync(…, "utf8")` never throws — it
+ *  substitutes U+FFFD and this leg FILES the entry — while Python's decoder
+ *  raised `UnicodeDecodeError` and took the corrupt path, DESTROYING it. Both
+ *  legs drain ONE directory, so whichever touched the file first decided
+ *  delivered-vs-destroyed on the same bytes. Python has moved to the same
+ *  RETAINED class this leg's reader implies (a read-class refusal, never a
+ *  destroy). ⚠️ Stated, not claimed: the legs still do not AGREE on filing —
+ *  filing it on the Python side is unsafe, because every read there derives its
+ *  path from the meta's `session_id` and a recovered-with-replacement id would
+ *  address a different file name. What is gone is the DESTRUCTIVE divergence.
+ *
+ *  Mirrors `capture_spool._scan_spool`, including its third element: the stems
+ *  this scan could NOT read (#12483), so the ceilings can count their bytes
+ *  without a second walk of `entries/`. */
 export function listSpoolEntries(
   dir: string,
   opts: { repair?: boolean } = {},
-): { metas: SpoolMeta[]; discards: DiscardRecord[] } {
+): { metas: SpoolMeta[]; discards: DiscardRecord[]; unreadable: string[] } {
   // `repair: false` reads the same files and SKIPS the corrupt ones: no ledger
   // line, no quarantine, no unlink. For a READER that must not mutate the spool
   // it describes — the health line (`spoolHealthLine` → `spoolSaturated`), the
@@ -1577,6 +1716,11 @@ export function listSpoolEntries(
   // it is recorded ONCE per distinct unreadable SET (see the aggregate below)
   // rather than once per file per scan.
   const unreadable: { stem: string; message: string }[] = [];
+  // Stems whose meta was READ but is unusable (not JSON, wrong shape, no
+  // session_id). Separate from `unreadable` because the LEDGER distinguishes
+  // them — but both are entries this scan cannot see through, so both go back to
+  // the callers that must COUNT them (#14347 review, cycle 2, finding 2).
+  const corrupt: string[] = [];
   const root = entriesDir(dir);
   let names: string[];
   try {
@@ -1589,7 +1733,7 @@ export function listSpoolEntries(
     // spool it could not read, with no ledger line — the same silent-empty
     // failure the guard below exists to close. Any other error is recorded.
     if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-      return { metas, discards };
+      return { metas, discards, unreadable: [] };
     }
     discards.push(
       recordDiscard(dir, {
@@ -1598,7 +1742,7 @@ export function listSpoolEntries(
         detail: `cannot list ${root}: ${err instanceof Error ? err.message : String(err)}`,
       }),
     );
-    return { metas, discards };
+    return { metas, discards, unreadable: [] };
   }
   for (const name of names) {
     if (!name.endsWith(".meta.json")) continue;
@@ -1615,12 +1759,14 @@ export function listSpoolEntries(
       // ENOENT here is a race with another drain's unlink, not a corruption —
       // wrong MOMENT, not wrong bytes. Every errno in this arm is the same
       // class: the entry was not read, so nothing may be concluded about it.
-      if (repair) {
-        unreadable.push({
-          stem: name.replace(/\.meta\.json$/, ""),
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+      // Collected whether or not `repair` is on: collecting is not a mutation,
+      // and the health line — which must not mutate — is one of the two readers
+      // that need the stems (#12483). Only the LEDGER RECORD is gated on
+      // `repair`.
+      unreadable.push({
+        stem: name.replace(/\.meta\.json$/, ""),
+        message: err instanceof Error ? err.message : String(err),
+      });
       continue;
     }
     let meta: SpoolMeta | undefined;
@@ -1631,8 +1777,16 @@ export function listSpoolEntries(
       meta = undefined;
     }
     if (!meta || typeof meta.session_id !== "string" || !meta.session_id) {
-      if (!repair) continue;
       const stem = name.replace(/\.meta\.json$/, "");
+      // ⛔ COLLECTED WHATEVER `repair` IS — the same rule the read class above
+      // follows. A corrupt meta is an entry that occupies disk and that
+      // `metas.length` cannot see, so a read-only scan that silently dropped it
+      // UNDER-COUNTED the ceiling it was asked about; that is how the write
+      // path's admission probe, once it stopped repairing, would have lost a
+      // whole class. Collecting is not a mutation; only the recorded line and the
+      // quarantine below are.
+      corrupt.push(stem);
+      if (!repair) continue;
       discards.push(
         recordDiscard(dir, {
           session_id: `unreadable:${stem}`,
@@ -1681,7 +1835,7 @@ export function listSpoolEntries(
   //  enumerate all of them from the ledger — they read the count here and list
   //  `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
   //  ledger is not an audit trail, it is a second problem.
-  if (unreadable.length) {
+  if (unreadable.length && repair) {
     const stems = unreadable.map((u) => u.stem).sort();
     const stamp = stemSetStamp(stems);
     const example = unreadable[0]!.message;
@@ -1716,7 +1870,66 @@ export function listSpoolEntries(
       ),
     );
   }
-  return { metas, discards };
+  // #12483: the stems go BACK to the caller because a retained-unreadable entry
+  // is on disk and in no parsed list — both ceilings would otherwise compute the
+  // spool's size without it (measured: 5,228 bytes held against a 1,000-byte
+  // ceiling, predicate answering False). One scan, both answers. The CORRUPT
+  // class comes back too: it is just as invisible to `metas.length`, and a
+  // read-only probe that dropped it would stop counting what it cannot parse.
+  //
+  // ⛔ AND SO DOES A META-LESS TURN LOG (#14347 review, cycle 3, finding 3). The
+  // writer stores the log BEFORE the meta and `discardEntry` unlinks the meta
+  // FIRST, so an ENOSPC or a failed second unlink leaves a byte-bearing
+  // `<key>.turns.jsonl` with no meta — in neither `metas`, `unreadable` (built
+  // from `.meta.json` names) nor `orphanPaths` (matches only `.orphan`). Nothing
+  // counted it, so BOTH ceilings were blind to bytes on disk. It goes in the
+  // THIRD element (what the ceilings must count that no parsed meta can) and NOT
+  // into `unreadable`, whose ledger record says "cannot read N spool meta(s)" —
+  // an absent meta is not an unreadable one. Mirrors `capture_spool._scan_spool`.
+  const metaStems = new Set(
+    names
+      .filter((name) => name.endsWith(".meta.json"))
+      .map((name) => name.replace(/\.meta\.json$/, "")),
+  );
+  const strayLogs = names
+    .filter((name) => name.endsWith(".turns.jsonl"))
+    .map((name) => name.replace(/\.turns\.jsonl$/, ""))
+    .filter((stem) => !metaStems.has(stem) && fileSize(join(root, `${stem}.turns.jsonl`)) > 0);
+  return {
+    metas,
+    discards,
+    unreadable: [...unreadable.map((u) => u.stem), ...corrupt, ...strayLogs].sort(),
+  };
+}
+
+/** Bytes on disk for entries whose meta this process could NOT read (#12483).
+ *
+ *  A retained-unreadable entry (#11802) has no parsed meta, so it is in neither
+ *  `metas.length` nor `spoolEntryBytes` — and its turn log keeps its live
+ *  `.turns.jsonl` name, so `orphanPaths` does not see it either. Nothing counted
+ *  it, and the BYTE CEILING therefore stopped enforcing: with a 5,000-byte turn
+ *  log beside one filed entry, `entries/` held 5,228 bytes while
+ *  `spoolSaturated(maxTotalBytes: 1000)` returned false — writes kept being
+ *  admitted past the ceiling with no refusal and no `capture: SATURATED`.
+ *
+ *  ⛔ NOTHING HERE IS EVICTABLE, and that is the point. `pruneSpool` may only
+ *  evict FILED entries and orphans; an entry with no readable meta cannot be
+ *  ranked, its delivered-ness is unknowable, and its class is REVERSIBLE (fix
+ *  the access — #10175's rule for a saturated spool with nothing reclaimable).
+ *  So these bytes count toward `total` and never toward the reclaimable credit.
+ *
+ *  `stat` needs no read permission, so an EACCES meta still contributes its size
+ *  — which is the only reason this reading is possible at all. Mirrors
+ *  `capture_spool._unreadable_entry_bytes`.
+ */
+function unreadableEntryBytes(dir: string, stems: string[]): number {
+  const root = entriesDir(dir);
+  let total = 0;
+  for (const stem of stems) {
+    total += fileSize(join(root, `${stem}.meta.json`));
+    total += fileSize(join(root, `${stem}.turns.jsonl`));
+  }
+  return total;
 }
 
 /** Size on disk of one spool entry (meta + turn log). */
@@ -1756,7 +1969,7 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
  *  the session id) is REMOVED, so no verb can rebuild the session id the server
  *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
  *  once said "recoverable", which overstated what the name can deliver.) */
-function quarantineLog(log: string): void {
+function quarantineLog(log: string): string | undefined {
   let size = 0;
   try {
     size = statSync(log).size;
@@ -1769,7 +1982,7 @@ function quarantineLog(log: string): void {
     } catch {
       // already gone
     }
-    return;
+    return undefined;
   }
   let target = `${log}.orphan`;
   let suffix = 1;
@@ -1781,7 +1994,14 @@ function quarantineLog(log: string): void {
     renameSync(log, target);
   } catch {
     // leave it in place — better than deleting it
+    return undefined;
   }
+  // ⛔ THE SUCCESS PATH MUST RETURN THE TARGET (#14347 review, cycle 2,
+  // finding 5). Without it this function returned `undefined` on SUCCESS too, so
+  // an admitted resync recorded "were QUARANTINED to (none) — preserved on disk"
+  // while the `.orphan` sat right there, and the caller's `undefined &&
+  // fileSize > 0` refusal guard passed only by accident of the missing return.
+  return target;
 }
 
 /** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
@@ -1938,16 +2158,27 @@ function boundsStamp(bounds: SpoolBounds): string {
   return `${bounds.maxEntries}:${bounds.maxTotalBytes}`;
 }
 
-/** `(meta-name count, bytes)` from ONE directory listing, PARSING no file.
+/** `(entry count, bytes)` from ONE directory listing, PARSING no file.
  *
  * The write path asks `spoolSaturated` on EVERY turn — synchronously from the
  * `turn_end` hook — and the real predicate `JSON.parse`s every meta (measured
  * 1.4 s at 20 000 entries, the ceiling this PR raises 20x). Both numbers here
- * are UPPER bounds on what `saturatedForMetas` computes (the count is read from
- * names alone, so it can only over-count a spool carrying corrupt metas, and the
- * byte total sums EVERY regular file in `entries/`, so it can only over-count
- * the live entries plus orphans), which makes "under both ceilings here" a proof
- * of "not saturated there".
+ * are UPPER bounds on what `saturatedForMetas` computes, which makes "under
+ * both ceilings here" a proof of "not saturated there".
+ *
+ * ⛔ THE COUNT IS EXACT, AND THAT MATTERS (#14347 review, cycle 4, P1; cycle 5,
+ * P2). The real count is `metas + unreadable + corrupt + strayLogs`
+ * (`listSpoolEntries`'s return). Every `.meta.json` NAME lands in exactly one of
+ * parsed/unreadable/corrupt, so the meta-name count IS the first three terms —
+ * not merely an upper bound on them. The fourth is a byte-bearing
+ * `<key>.turns.jsonl` with no sibling meta: the shape this writer produces when
+ * it stores the log BEFORE the meta and the meta write fails. A count read from
+ * meta names alone cannot see it, so it is added here from the same listing
+ * (`strayStems` minus `metaStems`), and a ZERO-byte log is skipped because the
+ * real count skips it too. Counting it keeps this exit EXACT rather than
+ * declining it: returning `undefined` whenever such a log existed also worked,
+ * but nothing reaps a meta-less log (`pruneSpool` reaps metas and `.orphan`
+ * only), so one abandoned session left every later turn paying the full parse.
  *
  * Returns `undefined` — never a guess — for anything it cannot bound: an
  * unreadable directory, a dirent whose stat fails, or a NON-REGULAR dirent (a
@@ -1960,11 +2191,20 @@ export function cheapSpoolScan(dir: string): { names: number; total: number } | 
     const base = entriesDir(dir);
     let names = 0;
     let total = 0;
+    const metaStems = new Set<string>();
+    const strayStems = new Set<string>();
     for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (!entry.isFile()) return undefined;
-      total += lstatSync(join(base, entry.name)).size;
-      if (entry.name.endsWith(".meta.json")) names += 1;
+      const size = lstatSync(join(base, entry.name)).size;
+      total += size;
+      if (entry.name.endsWith(".meta.json")) {
+        names += 1;
+        metaStems.add(entry.name.slice(0, -`.meta.json`.length));
+      } else if (entry.name.endsWith(".turns.jsonl") && size > 0) {
+        strayStems.add(entry.name.slice(0, -`.turns.jsonl`.length));
+      }
     }
+    for (const stem of strayStems) if (!metaStems.has(stem)) names += 1;
     return { names, total };
   } catch {
     return undefined;
@@ -2230,13 +2470,47 @@ export function writeSpoolEntry(
   const metaPath = metaPathFor(dir, snapshot.sessionId);
   const logPath = logPathFor(dir, snapshot.sessionId);
 
-  let prior: SpoolMeta | undefined;
-  try {
-    prior = JSON.parse(readFileSync(metaPath, "utf8")) as SpoolMeta;
-  } catch {
-    prior = undefined;
-  }
-  const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
+  // #12487: `prior === undefined` has TWO causes and only one of them is safe
+  // to treat as a fresh session. When the meta is UNUSABLE, the turn log is
+  // still addressable — its path comes from the CALLER's session id, not from the
+  // meta — so the stored turns are read anyway and the decision below is made on
+  // what is actually on disk. Mirrors `capture_spool.write_spool_entry`.
+  const priorRead = readSpoolEntryState(dir, snapshot.sessionId);
+  const prior = priorRead.meta;
+  // ⛔ AN ABSENT META IS NOT AN EMPTY ENTRY (#14347 review, cycle 3, finding 3).
+  // This function writes the LOG first and the meta second, and `discardEntry`
+  // unlinks the meta first — so an ENOSPC (the normal condition on the box this
+  // PR exists for) or a failed second unlink leaves a byte-bearing
+  // `.turns.jsonl` with no meta. Reading that as a fresh session REPLACED the log
+  // with no record and no `.orphan`, and its bytes are none of `metas`,
+  // `unreadable` or `orphanPaths` — so BOTH ceilings were blind to them: exactly
+  // #12483's false PASS, one state over. The log path comes from the CALLER's
+  // session id, so the stored turns are as addressable here as in the UNUSABLE
+  // arm. Mirrors `capture_spool.write_spool_entry`.
+  const strayLogBytes = fileSize(logPath);
+  const metaAbsent = priorRead.state === PRIOR_META_ABSENT;
+  const unusablePrior =
+    priorRead.state === PRIOR_META_UNUSABLE || (metaAbsent && strayLogBytes > 0);
+  // ⛔ `prior === undefined` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
+  // In the UNUSABLE arm `prior` is undefined BY DEFINITION while the entry —
+  // meta AND turn log — still occupies bytes. Every question that is really
+  // about disk occupancy (is this write a REPLACEMENT? is the stored content
+  // over `maxEntryBytes`?) must ask THIS. Asking the wrong one counted a growth
+  // of an unreadable entry TWICE, so the writer refused at ~half the byte
+  // ceiling while the health line reported the same spool healthy. Mirrors
+  // `capture_spool.write_spool_entry`.
+  const entryOnDisk = priorRead.state !== PRIOR_META_ABSENT || strayLogBytes > 0;
+  // ONE spelling of "why this prior cannot be used", so no record below can
+  // describe an ABSENT meta as one it "could not read" (the ledger may not lie
+  // in either direction).
+  const priorDesc = metaAbsent
+    ? `the stored meta (${basename(metaPath)}) is ABSENT and a ${strayLogBytes}-byte` +
+      ` turn log (${basename(logPath)}) is the only record of this entry`
+    : `the stored meta (${basename(metaPath)}) could not be read or used`;
+  const storedRead = entryOnDisk
+    ? readSpoolTurnsState(dir, snapshot.sessionId)
+    : { turns: [] as Turn[], state: TURNS_ABSENT };
+  let stored = storedRead.turns;
 
   // #3516 §B: the entry's lane is set-only-when-present, FIRST-WRITER-WINS, and
   // carried forward — NOT `model`'s rule (that one is not carried forward).
@@ -2304,7 +2578,137 @@ export function writeSpoolEntry(
       (t, i) => t.role === snapshot.turns[i].role && t.content === snapshot.turns[i].content,
     );
 
-  const logText = extendsStored
+  let extendsLog = extendsStored;
+  // ⛔ THE LOG AXIS IS NOT NESTED INSIDE THE META AXIS (#14347 review, cycle 3,
+  // finding F1 — the Python twin is `capture_spool.write_spool_entry`).
+  // `storedRead.state` is resolved for EVERY on-disk entry, but its only reader
+  // used to sit inside `if (unusablePrior)` below — so a READABLE meta beside an
+  // UNREADABLE turn log skipped the guard entirely, `stored` was `[]` so
+  // `extendsStored` was false, and the write reached `atomicWrite(logPath,
+  // logText)`. A rename inside a writable directory needs no read permission on
+  // the target, so a mode-`000` log was REPLACED by the snapshot with
+  // `written: true` and NO record at all. That is #11802's rule — a read refusal
+  // is not a corruption, and NOTHING IS DESTROYED — applied one axis over, which
+  // is also the shape the external comparables take for an unreadable SOURCE
+  // (restic: an *incomplete* snapshot, exit 3, never a valid-empty replacement).
+  // So the refusal runs whenever the state is KNOWN, not only when the meta also
+  // failed: refuse, retain, leave the entry byte-identical.
+  if (entryOnDisk && storedRead.state === TURNS_UNREADABLE) {
+    // The record says which of the two files could NOT be read. Both arms share
+    // `DISCARD_META_UNREADABLE` ("the stored state could not be read", retained,
+    // reversible) because a new reason would have to be mirrored into the
+    // retention set and the Python leg for no behavioural gain; the `detail` is
+    // what a reader needs, and it is exact in both arms.
+    const what = unusablePrior
+      ? `${priorDesc} — and that turn log could not be read either`
+      : `the stored turn log could not be read (its meta ${basename(metaPath)} could)`;
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: captureKey(snapshot.sessionId, snapshot.turns),
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${what}, so this snapshot was REFUSED and the entry left` +
+            " byte-identical: nothing can be concluded about what is on disk," +
+            " and a resync would hide a conversation that some other uid may" +
+            " still be able to deliver",
+        },
+        {
+          stamp: unusablePrior
+            ? `unusable-meta:${snapshot.sessionId}`
+            : `unreadable-turns:${snapshot.sessionId}`,
+        },
+      ),
+    );
+    return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+  }
+
+  // The stored turn count this write would QUARANTINE if it is admitted —
+  // resolved before the guards and APPLIED after them (#14347 review F3).
+  let divergentTurns = 0;
+  let divergentBytes = 0;
+  // ⛔ NOTHING ABOUT THE DISPOSITION IS RECORDED YET (#14347 review, cycle 3,
+  // finding 2). The admission guard ~230 lines below can still REFUSE this
+  // write, and a record emitted here asserted what the write DID — "the write
+  // APPENDED N new turn(s)" — for a write that was refused and never happened.
+  // The disposition is CARRIED and recorded on the admitted path, once the write
+  // it describes has actually happened. Mirrors `capture_spool.write_spool_entry`.
+  let unusableDisposition: "append" | "fresh" | undefined;
+  let appendedTurns = 0;
+  if (unusablePrior) {
+    // ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
+    // (#12487). Measured on the Python twin (the same code): `written: true` with
+    // no record, the log fell from 6 lines to 1, and
+    // `filed_key`/`attempts`/`next_attempt_at_ms` were wiped — because `stored`
+    // was assumed empty, so `extendsStored` was false and the log was REWRITTEN
+    // from the snapshot alone.
+    //
+    // THREE DISPOSITIONS, decided by what is actually knowable:
+    //  1. THE LOG CANNOT BE READ EITHER — nothing about this entry is known, and
+    //     a resync would MOVE a conversation no surface could then deliver.
+    //     REFUSE; the state is reversible (fix the access) and the entry is left
+    //     byte-identical. This is #12487's own case.
+    //  2. THE SNAPSHOT EXTENDS THE STORED LOG — an append adds only turns that
+    //     were not on disk, so it cannot destroy anything. ADMIT it and write the
+    //     meta fresh (repairing the entry). The retry/filing state is the one
+    //     thing that cannot be carried (it lived in the unreadable meta); the
+    //     server's capture key makes the resulting re-POST idempotent, and the
+    //     alternative — never spooling this live session again — turns one
+    //     corrupt byte into an ongoing silent loss.
+    //  3. THE SNAPSHOT DIVERGES — RESYNC by QUARANTINING the stored log (its
+    //     bytes are PRESERVED for forensics and still counted by the byte
+    //     ceiling) and writing the fresh snapshot. Never an overwrite.
+    //
+    // The record is stamped by SESSION, not by `entries/` state: an admitted
+    // append rewrites the meta, which moves the directory mtime on every turn, so
+    // a per-state stamp would re-record per turn forever (#4714's amplification
+    // class).
+    // (disposition 1 — the log cannot be read either — is enforced ABOVE,
+    // outside this arm: the log axis is an axis, not a sub-case of the meta one.
+    // See `if (entryOnDisk && storedRead.state === TURNS_UNREADABLE)`.)
+    if (extendsLog) {
+      unusableDisposition = "append";
+      appendedTurns = snapshot.turns.length - stored.length;
+    } else {
+      // ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can still
+      // REFUSE this write, and a refusal must leave the entry byte-identical.
+      // Quarantining here renamed the stored log BEFORE the decision, so a
+      // REFUSED write had already moved the only addressable copy of the
+      // transcript its own refusal text promised was "kept". The disarm and the
+      // record are deferred to the admitted path; refusing is not a no-op, it
+      // is a mutation. Mirrors `capture_spool.write_spool_entry`.
+      divergentTurns = stored.length;
+      // ⛔ THE GATE IS "THE LOG HAS BYTES", NOT "THE LOG PARSED TO TURNS"
+      // (#14347 review, cycle 2, finding 1). `stored` is the PARSED list, so a log
+      // that HAS bytes but parses to ZERO turns — a torn first append, a foreign
+      // format — left `divergentTurns == 0`, skipped the quarantine entirely and
+      // was OVERWRITTEN by the full-snapshot write: `written: true`, no record, no
+      // `.orphan`. That is #12487's own signature, reintroduced by gating a BYTE
+      // decision on a PARSE result. Mirrors `capture_spool.write_spool_entry`.
+      divergentBytes = fileSize(logPath);
+      stored = [];
+      extendsLog = false;
+      if (divergentBytes === 0) {
+        // ⛔ THE FOURTH STATE — and it is NOT disposition 3 (#14347 review,
+        // cycle 11, finding 2). The meta is unusable and there is NO stored turn
+        // log at all, so nothing diverges and nothing can be quarantined: the
+        // `divergentBytes > 0` quarantine below is skipped, `quarantineNote`
+        // stays undefined, and the write proceeded with NO record — while both
+        // sibling arms RECORD that the entry's retry/filing state could not be
+        // carried ("it lived in the unreadable meta"). Measured on the Python
+        // twin: `written: true, discards: []` and the meta's `filed_key` gone.
+        // No transcript bytes are at risk here (there are none), so the write is
+        // right and the SILENCE is the defect — #4714's amplification class.
+        // Mirrors `capture_spool.write_spool_entry`.
+        unusableDisposition = "fresh";
+      }
+    }
+  }
+
+  const logText = extendsLog
     ? snapshot.turns.slice(stored.length).map(serialiseTurn).join("")
     : snapshot.turns.map(serialiseTurn).join("");
   const appendedBytes = Buffer.byteLength(logText, "utf8");
@@ -2386,7 +2790,7 @@ export function writeSpoolEntry(
   const metaText = `${JSON.stringify(meta, null, 2)}\n`;
   // Size the entry as it will exist AFTER this write: the new meta, plus the
   // existing log when appending (or only the new log when rewriting).
-  const logBytesAfter = extendsStored
+  const logBytesAfter = extendsLog
     ? fileSize(logPath) + appendedBytes
     : appendedBytes;
   const entryBytes = Buffer.byteLength(metaText, "utf8") + logBytesAfter;
@@ -2405,9 +2809,30 @@ export function writeSpoolEntry(
     // reviewer's 1032-byte conversation, destroyed by one oversized turn — the
     // entry is legal and fileable, and all this write needs is to be REFUSED.
     // Mirrors the Python writer's `capture_spool.write_spool_entry`.
-    if (prior) {
+    if (entryOnDisk) {
       const onDisk = spoolEntryBytes(dir, snapshot.sessionId);
       if (onDisk > bounds.maxEntryBytes) {
+        if (prior === undefined) {
+          // On disk and over the bound, but the META cannot be read — so it
+          // cannot be marked terminal either (#14347 review F2, consequence 4).
+          // This used to fall into the FRESH arm below, recording
+          // `retained: false` / `bytes: 0` about an entry that is on disk.
+          discards.push(
+            recordRefusal(dir, {
+              session_id: snapshot.sessionId,
+              capture_key: meta.capture_key,
+              reason: DISCARD_ENTRY_TOO_LARGE,
+              retained: true,
+              detail:
+                `${detail}, and the content already on disk (${onDisk} bytes) is` +
+                ` also over that bound, so this entry can never be filed — and` +
+                ` ${priorDesc}, so it cannot be marked terminal either. The` +
+                " write is REFUSED and the entry left byte-identical (a retained" +
+                " refusal, never a reported loss)",
+            }),
+          );
+          return { written: false, bytes: onDisk, discards };
+        }
         // The stored entry can never be filed: RETAINED and marked terminal,
         // exactly like a permanent HTTP refusal (`quarantineEntry`, #7708). This
         // branch used to be the one place that deleted a PREVIOUSLY SPOOLED
@@ -2476,10 +2901,40 @@ export function writeSpoolEntry(
   // directions: a new entry could cross the byte ceiling on its own, and an
   // EXISTING entry could grow past it with no eviction path at all (measured
   // 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
+  const replacesSessionId: string | undefined = entryOnDisk
+    ? snapshot.sessionId
+    : undefined;
   if (
     admissionSaturated(dir, bounds, {
       projectedBytes: entryBytes,
-      replacesSessionId: prior ? snapshot.sessionId : undefined,
+      // #14347 review F2: an entry that occupies disk is a REPLACEMENT, whether
+      // or not its meta was readable. `undefined` here counted the entry twice
+      // and inflated the count term by one for a write that adds no entry.
+      replacesSessionId,
+      // …and a REPLACEMENT adds no COUNT either — the count term now CARRIES
+      // the classes that used to be invisible to it (#14347 review, cycle 5,
+      // finding 1). The cycle-2 F4 operand was `prior === undefined`, written
+      // when `saturatedForMetas` counted `metas.length` alone: back then an
+      // entry whose meta could not be read was in NEITHER that list NOR
+      // anything else, so it had to be added by hand. `parsedCount` became
+      // `metas.length + unreadableCount` in the same commit, so the same entry
+      // is now counted by BOTH operands and the write path over-counts by one:
+      // a spool holding one readable plus one read-refused entry at
+      // `maxEntries: 2` reported `draining` and refused the refused entry's own
+      // growth — permanently, because the refusal stamp replays and the
+      // projection only grows.
+      //
+      // The correct question is the POST-WRITE entry count, and it is the same
+      // question whether or not the meta was readable: an entry already on disk
+      // is already in one of the counted classes, so it adds 0; only a session
+      // that is not there at all adds 1.
+      addsEntry: !entryOnDisk,
+      // The bytes this write is about to quarantine are in neither
+      // `entryBytes` nor the replaced entry's size (#14347 review, cycle 2,
+      // finding 3), so without this an admitted resync could land the spool over
+      // the ceiling and the `pruneSpool` on the SAME call would evict the orphan
+      // it had just promised to keep.
+      pendingOrphanBytes: divergentBytes,
       sessionId: snapshot.sessionId,
     })
   ) {
@@ -2494,7 +2949,7 @@ export function writeSpoolEntry(
           detail:
             `spool is at its ceiling (maxEntries=${bounds.maxEntries},` +
             ` maxTotalBytes=${bounds.maxTotalBytes}) with NOTHING evictable —` +
-            ` this ${prior ? "session GROWTH" : "NEW session"} was REFUSED rather` +
+            ` this ${entryOnDisk ? "session GROWTH" : "NEW session"} was REFUSED rather` +
             " than evicting an UNDELIVERED entry; the turns the spool already" +
             " holds are kept, and any newer turn is still in the harness session log",
         },
@@ -2503,19 +2958,73 @@ export function writeSpoolEntry(
         {
           bounds,
           projectedBytes: entryBytes,
-          replacesSessionId: prior ? snapshot.sessionId : undefined,
+          replacesSessionId,
         },
       ),
     );
     return {
       written: false,
-      bytes: prior ? spoolEntryBytes(dir, snapshot.sessionId) : 0,
+      bytes: entryOnDisk ? spoolEntryBytes(dir, snapshot.sessionId) : 0,
       discards,
     };
   }
 
+  let quarantineNote: string | undefined;
+  if (divergentBytes > 0) {
+    // ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
+    // diverge arm above (cycle-2 finding 1).
+    //
+    // ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
+    // F3/F4). Above the guards it mutated the spool before the decision. And
+    // `quarantineLog` returns `undefined` for TWO outcomes — "nothing to keep"
+    // and "the rename FAILED" — so accepting it blindly fell through to
+    // `atomicWrite` over the still-present log: a DESTRUCTION disclosed as a
+    // retention (`retained: true`). A log that still has bytes after a failed
+    // quarantine is the third disposition — REFUSE, entry byte-identical.
+    const quarantined = quarantineLog(logPath);
+    if (quarantined === undefined && fileSize(logPath) > 0) {
+      discards.push(
+        recordRefusal(
+          dir,
+          {
+            session_id: snapshot.sessionId,
+            capture_key: meta.capture_key,
+            reason: DISCARD_META_UNREADABLE,
+            retained: true,
+            detail:
+              `${priorDesc}, and its stored turn log could not be moved aside` +
+              ` (${divergentTurns} parsed turn(s) still at ${basename(logPath)}) —` +
+              " so this snapshot was REFUSED and the entry left byte-identical:" +
+              " writing it would overwrite the very turns this path exists to" +
+              " preserve",
+          },
+          { stamp: `unusable-meta-unquarantinable:${snapshot.sessionId}` },
+        ),
+      );
+      return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+    }
+    // ⛔ THE RECORD IS CARRIED, NOT EMITTED (#14347 review, cycle 3, finding 2):
+    // it says the entry WAS rewritten, and the write below can still fail — a
+    // write failure must not leave that claim on the ledger. It is emitted after
+    // the write, under its OWN stamp, because this disposition and the append one
+    // are two different EVENTS about one session and the shared stamp suppressed
+    // the second (a session that appends on turn N and diverges later had its
+    // quarantine record swallowed, leaving the earlier "APPENDED … and
+    // overwrote nothing" as the ledger's account of turns that had left the
+    // queue). The stored log is described by BOTH its bytes and its parsed
+    // turns: the gate is the bytes, so a byte-bearing/zero-parse log must not
+    // report "the stored 0 turn(s) were quarantined" about 22 bytes.
+    quarantineNote =
+      `this snapshot diverges from the stored log, so the stored turn log` +
+      ` (${divergentBytes} byte(s), ${divergentTurns} parsed turn(s)) was QUARANTINED to` +
+      ` ${quarantined === undefined ? "(none)" : basename(quarantined)}` +
+      " — preserved on disk for forensics and still counted against the byte" +
+      " ceiling — and the entry was rewritten from this snapshot; the" +
+      " retry/filing state could not be carried forward";
+  }
+
   try {
-    if (extendsStored) {
+    if (extendsLog) {
       // fsync the append: this is the path holding the MOST RECENT turns, and a
       // power loss (not just a process kill) must not drop them.
       const fd = openSync(logPath, "a", 0o600);
@@ -2533,16 +3042,80 @@ export function writeSpoolEntry(
   } catch (err) {
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
     // with a reason rather than returning an empty discard list (the silent
-    // drop this issue exists to remove).
+    // drop this issue exists to remove). When the quarantine already ran its
+    // bytes are STILL PRESERVED, and that fact must survive into the ledger too.
+    const errText = err instanceof Error ? err.message : String(err);
     discards.push(
       recordDiscard(dir, {
         session_id: snapshot.sessionId,
         capture_key: meta.capture_key,
         reason: DISCARD_WRITE_FAILED,
-        detail: err instanceof Error ? err.message : String(err),
+        detail: quarantineNote === undefined ? errText : `${errText}; ${quarantineNote}`,
       }),
     );
     return { written: false, bytes: 0, discards };
+  }
+
+  // ⛔ THE DISPOSITION RECORD IS EMITTED HERE — AFTER THE WRITE IT DESCRIBES
+  // (#14347 review, cycle 3, finding 2). Emitted above the admission guard, a
+  // saturated spool returned `[<"the write APPENDED N new turn(s)">,
+  // <spool_saturated refusal>]` for a write that never happened; emitted before
+  // `atomicWrite`, a failed write left "the entry was rewritten" standing. Each
+  // disposition carries its OWN stamp: they share `(session_id, reason)`, and the
+  // dedupe key is that pair plus the stamp, so one stamp made the second
+  // disposition's record a suppressed repeat of the first. Mirrors
+  // `capture_spool.write_spool_entry`.
+  if (unusableDisposition === "append") {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${priorDesc}; the write APPENDED ${appendedTurns} new turn(s)` +
+            " and overwrote nothing; the entry's retry/filing state could not be" +
+            " carried forward (it lived in the unreadable meta), so the entry may" +
+            " re-POST once",
+        },
+        { stamp: `unusable-meta-append:${snapshot.sessionId}` },
+      ),
+    );
+  } else if (unusableDisposition === "fresh") {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${priorDesc}; the entry had NO stored turn log, so there was` +
+            " nothing to append to or quarantine; the meta was rewritten from the" +
+            " snapshot and the entry's retry/filing state could not be carried" +
+            " forward (it lived in the unreadable meta), so the entry may re-POST" +
+            " once",
+        },
+        { stamp: `unusable-meta-fresh:${snapshot.sessionId}` },
+      ),
+    );
+  } else if (quarantineNote !== undefined) {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail: `${priorDesc}; ${quarantineNote}`,
+        },
+        { stamp: `unusable-meta-diverge:${snapshot.sessionId}` },
+      ),
+    );
   }
 
   // Post-write prune: keep the spool inside BOTH ceilings, oldest first. Never
@@ -2614,7 +3187,7 @@ export function pruneSpool(
   bounds: SpoolBounds = DEFAULT_BOUNDS,
 ): DiscardRecord[] {
   const discards: DiscardRecord[] = [];
-  const { metas } = listSpoolEntries(dir);
+  const { metas, unreadable } = listSpoolEntries(dir);
   const orphans = orphanPaths(dir);
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
@@ -2629,10 +3202,57 @@ export function pruneSpool(
       return compareAge(a.meta, b.meta);
     });
 
-  let count = metas.length;
+  // #14347 review, cycle 6, finding 2: this scan REPAIRS, so a CORRUPT meta is
+  // already unlinked and its log already renamed to `.orphan` by the time we get
+  // here — that stem is in `unreadable` but is NO LONGER AN ENTRY. Counting it
+  // made prune evict one filed entry per corrupt meta for a count overage that
+  // ceased to exist inside the same call. Its bytes are already correct
+  // (`unreadableEntryBytes` reads 0 for it) and its log is credited as an orphan;
+  // only the COUNT was stale. A stem that still has its meta OR its live turn log
+  // is still an entry.
+  // A stem that still has its meta OR its live turn log is still an entry —
+  // one definition, shared with `spoolSaturated` (`liveUnreadableStems`).
+  let count = metas.length + liveUnreadableStems(dir, unreadable).length;
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    // #12483: the retained-unreadable class is on disk and can never be evicted
+    // (see `unreadableEntryBytes`), so it counts here too — otherwise the
+    // eviction loop spends the filed class trying to reach a ceiling it cannot.
+    unreadableEntryBytes(dir, unreadable) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // ⛔ THE COUNT TERM MUST NAME THE SAME POPULATION AS THE PREDICATE THAT SET
+  // THE CEILING (#14347 review, cycle 5, finding 2). `saturatedForMetas` counts
+  // `metas.length + unreadableCount`; `count` here was `metas.length` alone, so
+  // with K retained-unreadable/stray entries the spool settled at
+  // `maxEntries + K` — every admitted write spent one filed entry and the
+  // predicate's own ceiling was never reached. Measured on the Python twin:
+  // 3 filed + 1 chmod-000 entry at `maxEntries: 3` → `pruneSpool` returned `[]`,
+  // the predicate said not-saturated, and the write was admitted with
+  // `spool_count_exceeded` while the post-write count was STILL 4. The
+  // unreadable class is not evictable (the loop only ever spends filed
+  // entries), so it belongs in the ceiling test and never in the decrement.
+  const orphanBytes = orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  const evictableBytes =
+    ranked.reduce((sum, r) => sum + (entryFiled(r.meta) ? r.bytes : 0), 0) + orphanBytes;
+  // ⛔ DO NOT SPEND THE FILED CLASS FOR ROOM THAT CAN NEVER BE MADE (#12483).
+  // The PERMANENT classes — an undelivered entry (never evicted) and a
+  // retained-unreadable one (no meta to rank) — cannot shrink, so if their bytes
+  // ALONE carry the spool over `maxTotalBytes`, evicting filed entries and
+  // orphans cannot bring it back under and destroying them buys nothing. The
+  // floor is constant while this loop runs (each eviction subtracts the same
+  // bytes it removes from the evictable pool), so one check up front is the whole
+  // test. The COUNT axis is deliberately not folded in: a count overage IS
+  // relievable by a filed entry even when the byte ceiling is not.
+  //
+  // ⛔ THE LOOP BELOW HONOURS THE SAME FLOOR (#14347 review, cycle 3, finding
+  // 1). Without it, a spool breaching BOTH ceilings evicted EVERY filed entry to
+  // relieve one count slot (measured on the Python twin: 5 filed 100-byte
+  // entries + one 2,000-byte undelivered entry at maxEntries=3,
+  // maxTotalBytes=1000 lost all 5) and was still over the byte ceiling
+  // afterwards — the same #10175 violation this floor exists to prevent.
+  const bytesReachable =
+    total > bounds.maxTotalBytes && total - evictableBytes <= bounds.maxTotalBytes;
+  if (count <= bounds.maxEntries && !bytesReachable) return discards;
   // The quarantined-log pass runs AFTER the filed-entry pass below, never before
   // it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on the
   // wire), while an orphan's delivered-ness is unknowable — so the certain
@@ -2643,7 +3263,12 @@ export function pruneSpool(
   // is never evicted at all (capture-loss). The record names the class in the
   // same `loss` vocabulary the live entries use (#6388).
   for (const { meta, bytes } of ranked.filter(({ meta: m }) => entryFiled(m))) {
-    if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
+    // #14347 review, cycle 3, finding 1: `bytesReachable` false means no eviction
+    // can bring the byte term under the ceiling (the permanent classes alone are
+    // over it), so a loop still testing `total <= maxTotalBytes` never stops on
+    // that axis and spends the whole filed class for a count overage that needed
+    // one eviction.
+    if (count <= bounds.maxEntries && (total <= bounds.maxTotalBytes || !bytesReachable)) break;
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
     // #6388: name the CLASS of loss. The discard line is the only surface a cap
@@ -2662,7 +3287,7 @@ export function pruneSpool(
     total -= bytes;
   }
   for (const orphan of orphans) {
-    if (total <= bounds.maxTotalBytes) break;
+    if (total <= bounds.maxTotalBytes || !bytesReachable) break;
     const size = fileSize(orphan);
     discards.push(
       recordDiscard(dir, {
@@ -2689,6 +3314,32 @@ export function pruneSpool(
   // rather than destroying old work. Filed-first was already the #6388 ranking;
   // this makes it the whole candidate set.
   return discards;
+}
+
+/** The unreadable stems that are STILL ENTRIES after the scan that found them.
+ *
+ * `listSpoolEntries(repair: true)` unlinks a corrupt meta and renames its turn log
+ * to `.orphan` INSIDE the scan, yet still reports the stem. A COUNT taken from
+ * that list therefore counts an entry the same call deleted, and the two readers
+ * disagreed: `pruneSpool` has excluded those stems since #14347 review cycle 6
+ * ("a count overage that ceased to exist inside the same call"), while
+ * `spoolSaturated` passed the raw length as `unreadableCount` — so the public
+ * predicate answered true for a spool its own repair had just left able to admit
+ * a capture, and answered false on the next call (#14347 review, cycle 11,
+ * finding 1). Measured on the Python twin at `0bd9cec63fb2`: 2 readable
+ * undelivered + 1 corrupt meta at `maxEntries: 3` → `true`, then `false`.
+ *
+ * One definition, both readers. With `repair: false` nothing is unlinked, so
+ * every stem still has its meta and this is a no-op — the health line must keep
+ * counting the corrupt entry it can still SEE (it describes the spool it reads).
+ */
+function liveUnreadableStems(dir: string, stems: string[]): string[] {
+  const entriesPath = entriesDir(dir);
+  return stems.filter(
+    (stem) =>
+      existsSync(join(entriesPath, `${stem}.meta.json`)) ||
+      existsSync(join(entriesPath, `${stem}.turns.jsonl`)),
+  );
 }
 
 /**
@@ -2733,7 +3384,12 @@ export function pruneSpool(
 export function spoolSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
   opts: { repair?: boolean } = {},
 ): boolean {
   // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
@@ -2744,8 +3400,19 @@ export function spoolSaturated(
   // repair to the `pruneSpool` scan after an admitted write and to `flushSpool`
   // (both scan with repair on). A refused write repairs nothing itself: a refusal
   // is not a change to the spool, and the next drain is the surface that heals it.
-  const { metas } = listSpoolEntries(dir, opts);
-  return saturatedForMetas(dir, metas, bounds, projection);
+  const { metas, unreadable } = listSpoolEntries(dir, opts);
+  return saturatedForMetas(
+    dir,
+    metas,
+    bounds,
+    projection,
+    unreadableEntryBytes(dir, unreadable),
+    // The COUNT population is filtered by what the scan left on disk; the BYTES
+    // are not, because a stem whose meta is still present must still weigh. Both
+    // readers share ONE definition (see `liveUnreadableStems`; #14347 review,
+    // cycle 11, finding 1).
+    liveUnreadableStems(dir, unreadable).length,
+  );
 }
 
 /** Is THIS write refused? The write path's entry point to `spoolSaturated`.
@@ -2770,9 +3437,16 @@ export function spoolSaturated(
 export function admissionSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string; sessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    sessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
 ): boolean {
-  const { projectedBytes, replacesSessionId, sessionId } = projection;
+  const { projectedBytes, replacesSessionId, sessionId, addsEntry, pendingOrphanBytes } =
+    projection;
   if (
     sessionId !== undefined &&
     refusedAtCurrentState(
@@ -2788,14 +3462,34 @@ export function admissionSaturated(
   }
   const cheap = cheapSpoolScan(dir);
   if (cheap !== undefined) {
-    const added = replacesSessionId === undefined ? 1 : 0;
+    const added = addsEntry === false || (addsEntry === undefined && replacesSessionId !== undefined) ? 0 : 1;
     if (
       cheap.names + added <= bounds.maxEntries &&
-      cheap.total + (projectedBytes ?? 0) <= bounds.maxTotalBytes
+      cheap.total + (projectedBytes ?? 0) + (pendingOrphanBytes ?? 0) <= bounds.maxTotalBytes
     )
       return false;
   }
-  return spoolSaturated(dir, bounds, { projectedBytes, replacesSessionId });
+  // ⛔ THE PROBE MUST NOT REPAIR (#14347 review, cycle 2, finding 2). This fell
+  // through to `spoolSaturated` with `opts` omitted, i.e. `repair` ON — so the
+  // write path called the repairing scanner directly, and on a spool near a
+  // ceiling a write that was then REFUSED had ALREADY had its meta unlinked and
+  // its turn log renamed to `.orphan`, which the next `pruneSpool` evicts. The
+  // refusal text said "the turns the spool already holds are kept" about turns
+  // the probe had just moved. `spoolSaturated`'s own docstring states the rule
+  // this call site broke: "A refused write repairs nothing itself".
+  //
+  // ⚠️ STATED CONSEQUENCE: with `repair: false` a CORRUPT meta counts as
+  // permanent (its orphan-able log is not an orphan yet), so admission is more
+  // conservative than the post-repair state. That refusal loses nothing — the
+  // entry is intact, the conversation is still in the harness session log, and
+  // the DRAIN (`flushSpool`) still repairs and prunes, which unblocks it.
+  // Conservative-and-intact beats admitted-and-destroyed.
+  return spoolSaturated(
+    dir,
+    bounds,
+    { projectedBytes, replacesSessionId, addsEntry, pendingOrphanBytes },
+    { repair: false },
+  );
 }
 
 /** The ceiling arithmetic of `spoolSaturated`, over an ALREADY-READ scan.
@@ -2812,22 +3506,65 @@ function saturatedForMetas(
   dir: string,
   metas: SpoolMeta[],
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
+  unreadableBytes = 0,
+  unreadableCount = 0,
 ): boolean {
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
   const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    // #12483: a RETAINED-UNREADABLE entry occupies bytes and can never be
+    // evicted, so it is added to the total and NOT to the reclaimable credit.
+    // Without this the byte ceiling stopped enforcing the moment an entry became
+    // unreadable — measured 5,228 bytes in `entries/` against a 1,000-byte
+    // ceiling with the predicate answering False.
+    unreadableBytes +
+    // Bytes a resync is about to quarantine are NOT in the projection (#14347
+    // review, cycle 2, finding 3): they become an `.orphan` AFTER the decision,
+    // so an admitted resync could land the spool over the byte ceiling and the
+    // `pruneSpool` on the SAME call would then evict the orphan it had just
+    // promised to keep. They are NOT reclaimable credit either — credit would say
+    // "prune may delete them", which is the outcome being avoided.
+    (projection.pendingOrphanBytes ?? 0) +
     reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
+  // The COUNT answer and the BYTE answer are different questions (#14347
+  // review, cycle 2, finding 4). The caller's answer is the POST-WRITE entry
+  // count: `addsEntry` is `true` only when the session is not on disk at all —
+  // the write path passes `!entryOnDisk` (#14347 review, cycle 5, finding 1), so
+  // an unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is NOT
+  // `prior === undefined`: that operand was written when `parsedCount` was
+  // `metas.length` alone, and it now double-counts the unreadable class, which
+  // `unreadableCount` below already carries. Defaults keep every existing
+  // caller's behaviour. (The wording is the Python twin's, `capture_spool.py`
+  // `_admission_saturated` — see #14347 review, cycle 7, finding 1: this block
+  // stated the operand cycle 5 had already removed, twelve lines above the rule
+  // it contradicted, so a reader believed whichever leg they opened first.)
+  const addsEntry =
+    projection.addsEntry ?? (projection.replacesSessionId === undefined);
+  // #12483 said "both ceilings": `metas.length` cannot see a read-refused or
+  // corrupt entry either, so counting only parsed metas admitted writes past
+  // `maxEntries` without limit (measured: 6 unreadable metas against a ceiling of
+  // 3). Those entries are permanent — no meta to rank, never evicted — so they
+  // belong in the TOTAL and in the FLOOR, exactly like the byte term.
+  const parsedCount = metas.length + unreadableCount;
+  let strict = false;
+  let count = parsedCount;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.
-    if (metas.length < bounds.maxEntries && total - reclaimableOrphanBytes < bounds.maxTotalBytes)
+    strict = true;
+    if (parsedCount < bounds.maxEntries && total - reclaimableOrphanBytes < bounds.maxTotalBytes)
       return false;
   } else {
-    const count = metas.length + (replacesSessionId === undefined ? 1 : 0);
+    count = parsedCount + (addsEntry ? 1 : 0);
     if (replacesSessionId !== undefined) {
       // A GROWTH replaces this entry's bytes instead of adding a second copy of
       // them, and adds no count.
@@ -2844,7 +3581,49 @@ function saturatedForMetas(
   // The entry being written can never reclaim ITSELF: `pruneSpool` is told to keep
   // it (`keepSessionId`), so counting it would admit a write nothing can make room
   // for.
-  return !metas.some((m) => entryFiled(m) && m.session_id !== replacesSessionId);
+  //
+  // ⛔ BUT "A FILED ENTRY EXISTS" IS NOT "ROOM CAN BE MADE" (#12483). Two classes
+  // are permanent by design: an UNDELIVERED entry (never evicted) and a
+  // retained-UNREADABLE one (no meta to rank, and the state is reversible). Once
+  // those two alone carry the spool over a ceiling, evicting the filed class
+  // cannot bring it back under — so admitting the write spends FILED entries for
+  // room that does not exist, one write at a time, while the spool keeps
+  // reporting "not saturated". The FLOOR below is the size AFTER evicting
+  // everything the spool is allowed to evict; if the floor is still over, the
+  // answer is REFUSED (#10175's rule: refuse new work, never destroy the queue to
+  // admit it). Mirrors `capture_spool._saturated_for_metas`.
+  const filed = metas.filter(
+    (m) => entryFiled(m) && m.session_id !== replacesSessionId,
+  );
+  const floorBytes =
+    total -
+    filed.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) -
+    reclaimableOrphanBytes;
+  // ⛔ THE STRICT ARM'S FLOOR MUST CARRY THE `+1` THE WRITER WILL ADD (#14347
+  // review, cycle 6, finding 1). `strict` means "no projection was offered", and
+  // every caller of that arm is asking the question about a NEW capture —
+  // `captureHealthLine` above all — so the post-write count is
+  // `parsedCount + 1`, exactly as `admissionSaturated` computes it for a fresh
+  // session. Without the `+1` the floor is one short of the writer's, and the two
+  // disagree whenever `parsedCount - filed.length === maxEntries` with at least
+  // one filed entry: measured, three readable undelivered + one FILED at
+  // `maxEntries: 3` gave health `DRAINING (3 queued)` while the writer refused
+  // every NEW capture with `spool_saturated`. The writer is right (after prune
+  // evicts the filed entry the count is 4, still over a ceiling of 3, so room
+  // cannot be made and #10175 requires the refusal) — the health line was the
+  // false PASS. The byte axis is deliberately NOT given the same `+1`: a new
+  // capture's bytes are unknown to a caller that offered no projection, and the
+  // `>=` comparison is the conservative stand-in for them.
+  const floorCount = count + (strict ? 1 : 0) - filed.length;
+  const overCount = strict ? parsedCount >= bounds.maxEntries : count > bounds.maxEntries;
+  const overBytes =
+    strict
+      ? total - reclaimableOrphanBytes >= bounds.maxTotalBytes
+      : total - reclaimableOrphanBytes > bounds.maxTotalBytes;
+  if (overBytes && (strict ? floorBytes >= bounds.maxTotalBytes : floorBytes > bounds.maxTotalBytes))
+    return true;
+  if (overCount && floorCount > bounds.maxEntries) return true;
+  return filed.length === 0;
 }
 
 /**
@@ -3669,7 +4448,146 @@ async function refusalOutcomeVerdict(
  * while the current one is still live (so a live session is never filed
  * mid-conversation and then silently frozen by the server's session_id replay).
  */
+/**
+ * #14350 (D1): ONE drainer per spool — the wrapper that enforces it.
+ *
+ * An UNTARGETED pass (`onlySessionId` absent) takes the spool's claim and does
+ * NOTHING (`heldByClaim`) when another process holds it. Every `session_start`
+ * fires a drain, `agent_end` another, shutdown a final flush, and the Python CLI
+ * drains the same directory — so N passes used to POST into ONE server ceiling of
+ * 8 captures. That is the self-feeding shape #14342 §7.3 measured (908 entries,
+ * `attempts` 10–17).
+ *
+ * ⛔ A TARGETED pass (`onlySessionId`) does NOT take the claim, deliberately:
+ * it files ONE named session (the shutdown flush of the LIVE conversation), one
+ * POST is the most it can hold, and delaying a session's own filing behind a
+ * whole-spool drain is a product regression, not contention control.
+ *
+ * ⛔ `""` counts as UNTARGETED on both sides of that split — the claim here and
+ * the `opts.onlySessionId && …` filter inside the pass — so an empty id can never
+ * mean "drain the whole spool, unclaimed" (review finding: it did).
+ *
+ * The claim is released in a `finally` — a pass that throws must not leave the
+ * spool locked until the lease expires — and it is refreshed between entries
+ * (`renewIfDue`); a `false` from the refresh means a peer took it over, and the
+ * pass then STOPS rather than becoming the second drainer it exists to prevent.
+ */
 export async function flushSpool(
+  cfg: CaptureConfig,
+  opts: {
+    dir?: string;
+    fetchImpl?: FetchLike;
+    now?: number;
+    excludeSessionId?: string;
+    onlySessionId?: string;
+    timeoutMs?: number;
+    bounds?: SpoolBounds;
+    inFlight?: Set<string>;
+    maxAttempts?: number;
+    budgetMs?: number;
+    budgetClock?: () => number;
+  } = {},
+): Promise<FlushSummary> {
+  if (opts.onlySessionId) {
+    return flushSpoolPass(cfg, opts, undefined);
+  }
+  const dir = opts.dir ?? SPOOL_DIR;
+  // ⛔ `raced` is the third state `undefined` cannot carry (#14423 review, P2).
+  // `acquireDrainClaim` answers `undefined` for TWO different situations: the
+  // environment cannot hold a claim at all (`mkdir`/write failed — run UNCLAIMED
+  // and say so) and "both takeover attempts lost a race, the path is momentarily
+  // EMPTY" — which this function used to read, via `existsSync`, as the first one
+  // and therefore run the pass UNCLAIMED beside a peer that is mid-install, i.e.
+  // the two-drainer defect R1 states cannot happen. The Python twin fails closed
+  // here: ANY `None` from `acquire` becomes `held_by_claim` (`capture_spool.py`).
+  const race: { raced: boolean; obstruction?: string } = { raced: false };
+  const claim = acquireDrainClaim(dir, { leg: "pi", state: race });
+  if (!claim) {
+    const record = readDrainClaim(dir);
+    if (record) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      const who = typeof record.pid === "number" ? `pid ${record.pid}` : "an unnamed process";
+      const leg = typeof record.leg === "string" ? ` (${record.leg} leg)` : "";
+      summary.claimHolder =
+        `another drainer holds this spool${leg}: ${who} — nothing attempted`;
+      return summary;
+    }
+    // ⛔ AN UNCLEARABLE OBSTRUCTION IS NOT A HOLDER (checked BEFORE the
+    // can't-read arm below, because that arm's answer — fail closed — is wrong
+    // here): there is no claim record to honour, only something that cannot be
+    // one. Running unclaimed cannot create a second drainer, while reporting
+    // contention names a process that does not exist and wedges the spool FOREVER
+    // — the permanent block #14350 forbids. The reason NAMES the object, in the
+    // same words the Python leg uses, because both legs write the same
+    // `status.json` for the same spool (R6).
+    if (race.obstruction) {
+      const summary = await flushSpoolPass(cfg, opts, undefined);
+      summary.claimUnavailable = true;
+      summary.claimUnavailableReason =
+        `${race.obstruction} exists and is not a claim record (not a regular file) ` +
+        "and could not be cleared — this pass ran WITHOUT the one-drainer exclusion";
+      return summary;
+    }
+    // ⛔ SOMETHING AT THE CLAIM PATH THAT WE COULD NOT READ IS NOT "NOBODY":
+    // a regular file that a transient error made unreadable (EMFILE, EIO, EACCES)
+    // belongs to a holder that may well be draining right now, and running the
+    // pass UNCLAIMED beside it is the two-drainer defect this mechanism removes.
+    // Fail CLOSED: report it as held, and let the next pass try the read again.
+    if (existsSync(drainClaimPathFor(dir))) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      summary.claimHolder =
+        "a claim file exists at this spool but could not be read " +
+        "(pid unknown) — nothing attempted";
+      return summary;
+    }
+    // A lost takeover race with an EMPTY path is NOT "the claim cannot be created":
+    // the peer that won is installing. Fail CLOSED exactly as the unreadable case
+    // above does, and let the next pass try again.
+    if (race.raced) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      summary.claimHolder =
+        "another drainer won the claim while this pass was acquiring it " +
+        "(holder unknown) — nothing attempted";
+      return summary;
+    }
+    // No claim AND nothing at the path: the claim file could not be CREATED (an
+    // unwritable or unlistable spool root). Run the pass UNCLAIMED and say so — a
+    // root that cannot hold a 60-byte claim file cannot hold a spool entry either,
+    // so the pass can only report the broken spool, and refusing to run would hide
+    // that report (the false-PASS direction is the worse error).
+    const summary = await flushSpoolPass(cfg, opts, undefined);
+    summary.claimUnavailable = true;
+    return summary;
+  }
+  try {
+    return await flushSpoolPass(cfg, opts, claim);
+  } finally {
+    try {
+      claim.release();
+    } catch {
+      /* the lease expires on its own */
+    }
+  }
+}
+
+function emptyFlushSummary(): FlushSummary {
+  return {
+    attempted: 0,
+    filed: 0,
+    deferred: 0,
+    skipped: 0,
+    heldByBackoff: 0,
+    heldBack: 0,
+    terminal: 0,
+    remaining: 0,
+    discarded: [],
+  };
+}
+
+async function flushSpoolPass(
   cfg: CaptureConfig,
   opts: {
     dir?: string;
@@ -3692,22 +4610,15 @@ export async function flushSpool(
      *  look instantaneous or infinitely long). */
     budgetClock?: () => number;
   } = {},
+  /** #14350: the claim this pass holds, when it holds one (`flushSpool` owns
+   *  acquire/release; `undefined` is a TARGETED pass, which takes none). */
+  claim?: DrainClaim,
 ): Promise<FlushSummary> {
   const dir = opts.dir ?? SPOOL_DIR;
   const doFetch = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   const nowMs = opts.now ?? Date.now();
   const busy = opts.inFlight;
-  const summary: FlushSummary = {
-    attempted: 0,
-    filed: 0,
-    deferred: 0,
-    skipped: 0,
-    heldByBackoff: 0,
-    heldBack: 0,
-    terminal: 0,
-    remaining: 0,
-    discarded: [],
-  };
+  const summary: FlushSummary = emptyFlushSummary();
 
   const maxAttempts =
     typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts)
@@ -3783,6 +4694,31 @@ export async function flushSpool(
       summary.stopped ??= "quota";
       summary.remaining += 1;
       continue;
+    }
+    // #14350 (D1): a CAPACITY refusal is the box's, not this entry's, so the
+    // rest of the pass is guaranteed to meet the same condition — stop before
+    // attempting (and refusing) the remaining entries one by one. Like the quota
+    // arm: `remaining`, never `skipped`, and nothing armed on the entries.
+    if (summary.capacity) {
+      summary.stopped ??= "capacity";
+      summary.remaining += 1;
+      continue;
+    }
+    // #14350: refresh the lease between entries. `false` means a peer took the
+    // claim over after a refresh was missed — stop, rather than become the
+    // second drainer this mechanism exists to prevent.
+    if (claim && !claim.renewIfDue()) {
+      // ⛔ `renew` refuses an EXPIRED record, and the scan above is unbounded and runs
+      // inside the lease — so a scan longer than the TTL expired our OWN claim and
+      // this pass would attempt nothing, forever. `reclaim` re-arms it with the same
+      // compare-and-swap and only while the record is OURS; a real takeover still
+      // stops us (#14423 merge-gate review, mirrored from the Python leg).
+      if (!claim.reclaim()) {
+        summary.lostClaim = true;
+        summary.stopped ??= "claim";
+        summary.remaining += 1;
+        continue;
+      }
     }
     if (summary.attempted >= maxAttempts) {
       summary.stopped ??= "attempts";
@@ -3947,6 +4883,25 @@ export async function flushSpool(
         );
         continue;
       }
+      // #14350 (D1): THE BOX, NOT THE ENTRY. Checked BEFORE the marker read and
+      // before any write, and it does all three things the Python leg does in the
+      // same place: name the cause, charge nothing (`attempts` / `next_attempt_at_ms`
+      // untouched), and end the pass (the `summary.capacity` guard at the top of
+      // the loop stops every later entry). No confirm read either: this entry was
+      // not processed at all, so there is no marker direction to decide.
+      //
+      // ⚠️ Stated asymmetry with the Python drain: that leg may YIELD (honouring
+      // `retry_after`) before giving up, because it runs detached. This leg's pass
+      // is AWAITED on `session_shutdown`, so it must not sleep — it ends, and the
+      // next opportunity continues. Both charge nothing, which is the property
+      // that matters.
+      const capacity = capacityRefusal(res);
+      if (capacity) {
+        summary.capacity = capacity;
+        summary.stopped ??= "capacity";
+        summary.deferred += 1;
+        continue;
+      }
       // #12603: THE MARKER DIRECTION, on the refusal path. A retryable refusal is
       // not proof that nothing committed (#4675) — the transport bound ABANDONS
       // its handler rather than cancelling it — so this asks the ONE question the
@@ -4017,12 +4972,54 @@ export async function flushSpool(
 }
 
 /** Read every turn the spool holds for a session (for tests + diagnostics). */
+export const PRIOR_META_OK = "ok";
+export const PRIOR_META_ABSENT = "absent";
+export const PRIOR_META_UNUSABLE = "unusable";
+
 export function readSpoolEntry(dir: string, sessionId: string): SpoolMeta | undefined {
+  return readSpoolEntryState(dir, sessionId).meta;
+}
+
+/** The three states of an entry's meta from a WRITER's seat (#12487).
+ *  `ok` — read and usable. `absent` — nothing on disk for this session.
+ *  `unusable` — SOMETHING IS ON DISK and it could not be read (EACCES/EIO/
+ *  EISDIR) or could not be used as a meta (invalid JSON, no usable
+ *  `session_id`).
+ *
+ *  `readSpoolEntry` answers `undefined` for BOTH non-ok states, which is right
+ *  for a READER and wrong for the WRITER: `writeSpoolEntry` treated them alike
+ *  by building the new entry over `stored = []`, so the log was REWRITTEN from
+ *  the snapshot (destroying stored turns) and `filed_key` / `attempts` /
+ *  `next_attempt_at_ms` were wiped. Measured on the Python twin, which is the
+ *  same code: the log fell from 6 lines to 1 and an already-filed session read
+ *  as undelivered. Mirrors `capture_spool._read_prior_meta`.
+ */
+export function readSpoolEntryState(
+  dir: string,
+  sessionId: string,
+): { meta?: SpoolMeta; state: string } {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(metaPathFor(dir, sessionId), "utf8")) as SpoolMeta;
-  } catch {
-    return undefined;
+    raw = readFileSync(metaPathFor(dir, sessionId), "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return { state: code === "ENOENT" ? PRIOR_META_ABSENT : PRIOR_META_UNUSABLE };
   }
+  let meta: unknown;
+  try {
+    meta = JSON.parse(raw);
+  } catch {
+    return { state: PRIOR_META_UNUSABLE };
+  }
+  if (
+    !meta ||
+    typeof meta !== "object" ||
+    typeof (meta as SpoolMeta).session_id !== "string" ||
+    !(meta as SpoolMeta).session_id
+  ) {
+    return { state: PRIOR_META_UNUSABLE };
+  }
+  return { meta: meta as SpoolMeta, state: PRIOR_META_OK };
 }
 
 /**
@@ -4053,8 +5050,743 @@ export function quotaRefusal(res: {
   };
 }
 
+/** The server's machine-readable `detail.code`, or `undefined` (total). */
+function serverRefusalCode(detail: string): string | undefined {
+  if (!detail) return undefined;
+  // The transport detail is `HTTP <status> — <body>`, so the JSON is a SUFFIX.
+  const start = detail.indexOf("{");
+  if (start < 0) return undefined;
+  let node: unknown;
+  try {
+    node = JSON.parse(detail.slice(start));
+  } catch {
+    return undefined;
+  }
+  for (let depth = 0; depth < 2; depth += 1) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+    const rec = node as Record<string, unknown>;
+    const code = rec.code;
+    if (typeof code === "string" && code !== "") return code;
+    node = rec.detail;
+  }
+  return undefined;
+}
+
 function statusPathFor(dir: string): string {
   return join(dir, SPOOL_STATUS_FILE);
+}
+
+/**
+ * #14350 (D1): the CAPACITY refusal this failed POST represents, if any.
+ *
+ * The sibling of `quotaRefusal`, and typed for the same reason: the server
+ * publishes `detail.code = "capture_capacity_saturated"` precisely so a capture
+ * client — which ships independently of the server's prose — can name the
+ * condition without matching a message.
+ *
+ * ⛔ What `flushSpool` does with this is the whole point of D1, and it is NOT
+ * what it does with a quota refusal: a quota refusal is REPORTED and the entry
+ * deferred on its backoff clock (unchanged); a CAPACITY refusal is evidence
+ * about nothing on the spool, so the entry is not charged, and the pass stops.
+ * `attempts` then measures what it is for — the entry's own refusals — which is
+ * what makes the epic's `attempts <= 3` falsifiable at all.
+ */
+export function capacityRefusal(res: {
+  status?: number | null;
+  detail?: string;
+}): CapacityRefusal | undefined {
+  const detail = typeof res.detail === "string" ? res.detail : "";
+  const status =
+    typeof res.status === "number" && Number.isFinite(res.status) ? res.status : undefined;
+  const typed = detail.includes(CAPTURE_CAPACITY_CODE);
+  // ⛔ THE STATUS IS THE TRIGGER, THE CODE IS THE NAME (the Python leg's rule,
+  // verbatim). Requiring the typed category would leave the measured defect
+  // alive on every deployment that does not send one — the entry would be
+  // charged for a condition that says nothing about it. A 429 IS a saturation
+  // signal by construction.
+  if (status !== 429 && !typed) return undefined;
+  const retryAfter = retryAfterSeconds(detail);
+  return {
+    status: status ?? 429,
+    // ⛔ THE SERVER'S OWN CATEGORY WINS WHEN IT SENT ONE (mirrors
+    // `capture_spool._parsed_refusal_code`). The capture lane has a SECOND 429 —
+    // `ingest_rate_limited`, the per-ORG window — and relabelling it
+    // `capture_capacity_saturated` wrote a cause the server never sent into the
+    // SHARED `status.json`, overwriting the accurate record the Python leg had
+    // just written and telling the operator "wait for a slot" when the answer is
+    // "wait for the org's ingest window". The status still makes it BOX-level for
+    // the charging rule; the code only NAMES it.
+    code: serverRefusalCode(detail) ?? CAPTURE_CAPACITY_CODE,
+    ...(retryAfter !== undefined ? { retry_after: retryAfter } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+/**
+ * The server's `retry_after` out of a refusal body, or `undefined`.
+ *
+ * TOTAL over every shape — an unparseable body, a scalar, a nested `detail`
+ * object, a string, a negative or non-finite number each answer `undefined` — so
+ * a corrupt body can never throw inside the per-entry loop.
+ */
+function retryAfterSeconds(detail: string): number | undefined {
+  if (!detail) return undefined;
+  // ⚠️ THIS LEG'S `detail` IS NOT ALWAYS A BARE JSON BODY: `post()` composes
+  // `HTTP <status> — <json>` for a non-2xx (see `post`), while the Python drain
+  // carries the raw body. So the parse is attempted on the whole string and,
+  // failing that, from the first `{` — otherwise every refusal this leg reports
+  // would silently lose the server's own `retry_after` and the two legs would
+  // disagree about one refusal body.
+  let body: unknown;
+  const candidates = [detail];
+  const brace = detail.indexOf("{");
+  if (brace > 0) candidates.push(detail.slice(brace));
+  for (const candidate of candidates) {
+    try {
+      body = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    const found = retryAfterFrom(body);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function retryAfterFrom(body: unknown): number | undefined {
+  const candidates: unknown[] = [body];
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const nested = (body as Record<string, unknown>).detail;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) candidates.push(nested);
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const raw = (candidate as Record<string, unknown>).retry_after;
+    let value: number | undefined;
+    if (typeof raw === "number" && Number.isFinite(raw)) value = raw;
+    else if (typeof raw === "string" && raw.trim() !== "") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) value = parsed;
+    }
+    if (value !== undefined && value >= 0) return value;
+  }
+  return undefined;
+}
+
+// ── #14350 (D1): the cross-process drain claim ────────────────────────
+
+export function drainClaimPathFor(dir: string): string {
+  return join(dir, DRAIN_CLAIM_FILE);
+}
+
+/** Read the parsed claim, or `undefined`. The SURFACE (drain line, tests).
+ *
+ * ⛔ THE TOLERANCE HERE IS A SAFETY PROPERTY, not convenience (review finding).
+ * `acquireDrainClaim` refuses to take a claim `claimIsStale` judges LIVE; the
+ * caller then asks this function whether the refusal was "somebody holds it" or
+ * "the spool cannot hold a claim". A reader STRICTER than the staleness
+ * predicate answers `undefined` for a record that is live — and the caller then
+ * runs UNCLAIMED beside that holder, which is the two-drainer defect this whole
+ * mechanism removes. So the contract is: **whatever `claimIsStale` can judge is
+ * readable here.** Token-ness is the surface's business, not this reader's.
+ */
+export function readDrainClaim(dir: string): DrainClaimRecord | undefined {
+  const claimPath = drainClaimPathFor(dir);
+  let text: string;
+  try {
+    // ⛔ `lstatSync` FIRST: reading a FIFO or a socket BLOCKS until a writer
+    // appears, so a corrupt object at the claim path used to hang the drain,
+    // `renew`, the holder line and every health surface forever (measured on the
+    // Python twin; review finding). Only a REGULAR file is read.
+    if (!lstatSync(claimPath).isFile()) return undefined;
+    text = readFileSync(claimPath, "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  return typeof record.expires_at === "number" && Number.isFinite(record.expires_at)
+    ? (record as unknown as DrainClaimRecord)
+    : undefined;
+}
+
+/**
+ * Is this process alive on THIS box? Unprovable reads as ALIVE (#14350).
+ *
+ * ERROR is "exists, not ours". Every other failure leaves the question
+ * unanswered, and the answer that cannot create a SECOND drainer is "alive":
+ * honouring a dead claim costs one skipped pass (the next one takes it), while
+ * stealing a live one is the defect the claim exists to remove.
+ */
+export function pidAlive(pid: unknown): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ESRCH") return false;
+    return true;
+  }
+  return true;
+}
+
+function readBootId(): string | undefined {
+  // Linux only. Absent (macOS, a container without /proc), the pid rule is
+  // skipped and only the lease governs — the safe degradation: the lease still
+  // bounds a dead holder's claim, and the pid rule can never fire on a pid it
+  // cannot disambiguate across reboots.
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function thisHost(): string {
+  try {
+    return hostname() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * The three staleness rules, as one TOTAL predicate (#14350).
+ *
+ * 1. UNATTRIBUTABLE — unreadable, not an object, no usable `expires_at`.
+ * 2. EXPIRED — `now >= expires_at`. The only rule that applies to a claim from
+ *    another host (a copied spool): this box cannot check that host's pids.
+ * 3. DEAD HOLDER — same `host` AND same `boot_id` (a rebooted box can reuse a
+ *    pid) and `process.kill(pid, 0)` says it is gone.
+ *
+ * Pure, so every staleness test pins it directly.
+ */
+export function claimIsStale(
+  record: unknown,
+  opts: {
+    nowMs: number;
+    host?: string;
+    bootId?: string;
+    alive?: (pid: unknown) => boolean;
+  },
+): boolean {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return true;
+  const rec = record as Record<string, unknown>;
+  // Rule 1 also covers a record whose VERSION this build does not know: a future
+  // format must never be interpreted by today's semantics — the version field
+  // exists to say so, and reading it nowhere made it decoration (review finding).
+  if (rec.version !== DRAIN_CLAIM_VERSION) return true;
+  const expires = rec.expires_at;
+  if (typeof expires !== "number" || !Number.isFinite(expires)) return true;
+  if (opts.nowMs >= expires) return true;
+  if (opts.host === undefined) return false;
+  if (rec.host !== opts.host) return false;
+  if (
+    typeof rec.boot_id === "string" && rec.boot_id !== "" &&
+    typeof opts.bootId === "string" && opts.bootId !== "" &&
+    rec.boot_id !== opts.bootId
+  ) {
+    return true;
+  }
+  const pid = rec.pid;
+  if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) {
+    const alive = opts.alive ?? pidAlive;
+    if (!alive(pid)) return true;
+  }
+  return false;
+}
+
+export interface DrainClaim {
+  token: string;
+  /** Refresh the lease. `false` means the claim is no longer ours. */
+  renew(nowMs?: number): boolean;
+  /** Refresh only when a third of the TTL has gone (the per-entry call). */
+  renewIfDue(nowMs?: number): boolean;
+  /** Re-arm a lease that lapsed while WE were still the holder (mirror of the
+   *  Python `DrainClaim.reclaim`). `renew` refuses an EXPIRED record on purpose, and
+   *  the pass's one unbounded step — the whole-spool scan — runs inside the lease, so
+   *  a scan longer than the TTL expired our OWN claim and every later pass attempted
+   *  nothing, forever (#14423 merge-gate review). Ownership, not the clock, decides:
+   *  the record on disk must still carry OUR token, and the re-arm is the same
+   *  compare-and-swap `renew` uses, so a real takeover still wins. */
+  reclaim(nowMs?: number): boolean;
+  /** Give the claim up. `false` means we no longer held it. */
+  release(): boolean;
+}
+
+/**
+ * Atomically MOVE the claim aside, so the comparison can be trusted.
+ *
+ * ⛔ THE READ-COMPARE-UNLINK SEQUENCE THIS REPLACES WAS RACY, and the race
+ * restored the exact defect the claim exists to remove (review finding, both
+ * legs): two processes that both judged the same claim stale both pass a
+ * compare, then one installs its own claim while the other is between its read
+ * and its unlink — and the second unlink removes the NEW, LIVE claim. Both then
+ * hold it, and the loser only finds out at its next refresh.
+ *
+ * `rename` is the arbiter: exactly one contender can move the file away, and the
+ * CONTENT THAT WAS THERE lands in the quarantine — so the caller compares bytes
+ * it provably owns the moment of. Returns `[quarantine, raw]`, or `undefined`
+ * when the claim was already gone (a peer moved it first; not a failure).
+ *
+ * ⚠️ EXPORTED AS THE TEST SEAM, mirroring the Python twin, which drives
+ * `drain_claim._takedown` directly: the restore branch this pairs with is a
+ * two-writer interleaving that a single-threaded caller can never reach through
+ * `acquireDrainClaim`, so exporting is the only way to test the real bytes
+ * rather than an asserted-away claim.
+ */
+export function takedownClaim(
+  path: string, token: string,
+): { quarantine: string; raw: string } | undefined {
+  // ⚠️ The `.tmp-` INFIX is load-bearing: `sweepStaleTempFiles` collects
+  // abandoned `*.tmp-*` files by mtime, and a taker killed between the rename and
+  // the disposal would otherwise leave a file in the spool root nothing ever
+  // collects. The quarantine lives for microseconds; the sweep bound is minutes.
+  const quarantine = `${path}.tmp-take-${process.pid}-${token}`;
+  try {
+    renameSync(path, quarantine);
+  } catch {
+    return undefined;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(quarantine, "utf8");
+  } catch {
+    try { unlinkSync(quarantine); } catch { /* best effort */ }
+    return undefined;
+  }
+  return { quarantine, raw };
+}
+
+/**
+ * Drop a quarantined claim, or PUT IT BACK if it was not the one we judged.
+ *
+ * `true` means the bytes really were `expected` and the claim is gone. `false`
+ * means we displaced somebody else's NEW claim — a third process installed it
+ * between our rename and our write — so it is restored by `linkSync` (which
+ * cannot replace a claim a FOURTH process has since installed; on `EEXIST` the
+ * displaced holder loses and stops at its next refresh — the safe direction).
+ *
+ * ⚠️ EXPORTED AS THE TEST SEAM — see `takedownClaim`.
+ */
+export function disposeQuarantine(
+  quarantine: string, raw: string, path: string, expected: string,
+): boolean {
+  if (raw !== expected) {
+    try { linkSync(quarantine, path); } catch { /* a fourth holder has it */ }
+    try { unlinkSync(quarantine); } catch { /* best effort */ }
+    return false;
+  }
+  try { unlinkSync(quarantine); } catch { /* best effort */ }
+  return true;
+}
+
+/**
+ * Remove something at the claim path that is not a readable claim.
+ *
+ * A DIRECTORY, a socket or a dangling symlink there is corruption, not a holder:
+ * `linkSync` fails `EEXIST` at it, nothing reads it as a claim, and leaving it
+ * blocks every future drain forever — the "a stale claim is re-verifiable, not a
+ * permanent block" rule, failing in its worst direction.
+ *
+ * A symlink is removed WITHOUT following it, so this cannot reach outside the
+ * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
+ * content is the worse error, and the caller's answer is to report the spool HELD
+ * with no holder named — `flushSpool`'s `existsSync` arm, not `claimUnavailable` —
+ * and retry on the next pass, so the corruption is surfaced once per pass rather
+ * than silently drained beside. (An earlier version of this comment said "run
+ * unclaimed and say so", which is the arm for a root that cannot hold a claim at
+ * all — the opposite direction; corrected in the #14423 cycle-7 review, and the
+ * Python twin `drain_claim._clear_unusable_claim_path` has the same polarity.)
+ * Mirrors that function, which discriminates on `S_ISDIR` and `unlink`s EVERYTHING
+ * else.
+ *
+ * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
+ * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a
+ * device that raises `ENOTDIR` (POSIX `rmdir(2)`). The `catch` then answered
+ * `false`, the caller answered `undefined` = "somebody else holds it", and NOTHING
+ * on this leg could ever remove the object: every later pass reported "another
+ * drainer holds this spool … pid unknown" with zero POSTs, forever — the exact
+ * permanent block #14350 forbids, clearable only by a PYTHON drain. The Python
+ * twin never had this arm wrong (#14423 cycle-6 review, P1).
+ */
+function clearUnusableClaimPath(path: string): boolean {
+  try {
+    const st = lstatSync(path);
+    if (st.isDirectory()) {
+      rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+      return true;
+    }
+    // A symlink is unlinked AS A LINK (never followed), and a FIFO, a socket or a
+    // device too: it is an object, not content, so `unlink` is the correct removal.
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Take the spool's drain claim, or `undefined` when another holder has it.
+ *
+ * `undefined` is NOT an error: it is the correct answer for the second of two
+ * concurrent drains, and the caller must treat it as "do nothing this pass".
+ *
+ * The create is `linkSync` — atomic create-if-absent, and the target becomes
+ * visible WITH ITS FULL CONTENT because the content is written to a temp file
+ * first. `rename` would REPLACE an existing target (both processes "win"), and
+ * plain `wx` gives a window where a reader sees a zero-length claim and reads it
+ * as corrupt while the holder is mid-write. Renewal uses `rename` (atomic
+ * replace) for the mirror-image reason: a reader must never see a torn record.
+ */
+export function acquireDrainClaim(
+  dir: string,
+  opts: {
+    leg: string;
+    ttlMs?: number;
+    nowMs?: number;
+    host?: string;
+    bootId?: string;
+    alive?: (pid: unknown) => boolean;
+    /** ⛔ Set to `{ raced: true }` when the two attempts were lost to a PEER's
+     *  takeover rather than to an environment that cannot hold a claim. The
+     *  caller must then fail CLOSED (treat it as held): the path is momentarily
+     *  empty because the winner is installing, not because nothing can be written
+     *  (#14423 review, P2). Mirrors the Python leg, where any `None` from
+     *  `acquire` is `held_by_claim`. */
+    state?: {
+      raced: boolean;
+      /** ⛔ Set when SOMETHING sits at the claim path that is not a claim record and
+       *  cannot be cleared (a non-empty directory, a FIFO, a device). `undefined`
+       *  cannot carry this: the caller must answer it DIFFERENTLY from both "a
+       *  regular claim we could not read" (fail CLOSED — it may be a live holder)
+       *  and "a lost race, the path is momentarily empty" (fail CLOSED — a peer is
+       *  installing). This one is the opposite: there is no holder to honour, and
+       *  reporting contention would name a process that does not exist and wedge
+       *  the spool FOREVER, which #14350 forbids. Mirrors `capture_spool.py`'s
+       *  `S_ISREG` branch, which discriminates the same three causes
+       *  (#14423 cycle-7 review, P1: the Pi leg collapsed them into `heldByClaim`). */
+      obstruction?: string;
+    };
+    /** ⛔ TEST SEAM for the ORDER of the dispose paths (`release`, and `renew`'s
+     *  compare-and-swap). The not-ours
+     *  release must take NO destructive step, and that is a fact about which
+     *  function was CALLED — not about the bytes afterwards: a rename + restore
+     *  preserves the inode, the mtime and the content, so the pre-fix order is
+     *  byte-indistinguishable from the fixed one whenever no third process fills
+     *  the gap (#14423 review, cycle 7: reverting `release` to takedown-first left
+     *  the whole suite green, including two release tests). The Python leg asserts
+     *  the same fact by monkeypatching `_takedown`; this is the Pi equivalent.
+     *  `renew` uses it too, so the CAS's window (peer claims between our takedown
+     *  and our install) can be driven from this leg instead of only inferred. */
+    takedown?: (
+      path: string, token: string,
+    ) => { quarantine: string; raw: string } | undefined;
+  },
+): DrainClaim | undefined {
+  const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
+  const host = opts.host ?? thisHost();
+  const bootId = opts.bootId ?? readBootId();
+  const alive = opts.alive ?? pidAlive;
+  const path = drainClaimPathFor(dir);
+  const markRaced = (): void => {
+    if (opts.state) opts.state.raced = true;
+  };
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch {
+    // An unmakeable spool root cannot hold a spool entry either, so the pass
+    // about to run can only report the broken spool. Run UNCLAIMED rather than
+    // hide that report (the false-PASS direction is the worse error) — and say
+    // so on the summary.
+    return undefined;
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const nowMs = opts.nowMs ?? Date.now();
+    const token = randomToken();
+    const record: DrainClaimRecord = {
+      version: DRAIN_CLAIM_VERSION,
+      token,
+      leg: opts.leg,
+      pid: process.pid,
+      host,
+      ...(bootId ? { boot_id: bootId } : {}),
+      started_at: nowMs,
+      expires_at: nowMs + ttlMs,
+    };
+    const tmp = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+    try {
+      writeFileSync(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      linkSync(tmp, path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        try { unlinkSync(tmp); } catch { /* best effort */ }
+        return undefined;
+      }
+      try { unlinkSync(tmp); } catch { /* best effort */ }
+      let raw: string | undefined;
+      try {
+        // Same `lstat` gate as `readDrainClaim` (a FIFO would block here too).
+        raw = lstatSync(path).isFile() ? readFileSync(path, "utf8") : undefined;
+      } catch {
+        raw = undefined;
+      }
+      let parsed: unknown;
+      try {
+        parsed = raw === undefined ? undefined : JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      if (!claimIsStale(parsed, { nowMs, host, bootId, alive })) return undefined;
+      if (raw === undefined) {
+        // The read failed. ⛔ WHAT KIND OF OBJECT IS THERE decides whether we may
+        // delete it: a transient local error (EMFILE, EIO, EACCES after a mode
+        // drift) on a perfectly good REGULAR file is NOT evidence that the file is
+        // junk. The doctrine everywhere else here is "unprovable reads as ALIVE",
+        // so a regular claim we could not read is HONOURED (`undefined` = somebody
+        // holds it) and never unlinked — routing it to the clear path deleted a
+        // LIVE claim (review P0).
+        let mode: ReturnType<typeof lstatSync> | undefined;
+        try {
+          mode = lstatSync(path);
+        } catch {
+          mode = undefined;  // it vanished (a peer released); retry the link
+        }
+        if (!mode) { markRaced(); continue; }
+        if (mode.isFile()) return undefined;
+        // A directory, symlink, FIFO/socket or device: corruption, not a holder.
+        // Leaving it would `EEXIST` every future attempt — a permanent block.
+        if (!clearUnusableClaimPath(path)) {
+          if (opts.state) opts.state.obstruction = path;
+          return undefined;
+        }
+        continue;
+      }
+      // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
+      const moved = takedownClaim(path, token);
+      if (!moved) { markRaced(); continue; }  // a peer moved it first; the next attempt decides
+      if (!disposeQuarantine(moved.quarantine, moved.raw, path, raw)) {
+        // We displaced a NEWER claim than the one we judged stale. It is
+        // restored; give up this tick — and this is a LOST RACE, so the path may
+        // be momentarily empty while the winner installs (see `state.raced`).
+        markRaced();
+        return undefined;
+      }
+      // The stale claim IS gone and our own `linkSync` never landed, so the path is
+      // empty for the same reason as every other lost takeover: a peer is
+      // installing. ⛔ THIS ARM WAS MISSED by the first cut of `state.raced`
+      // (#14423 cycle-6 review, P2) — it fell through to the loop-end `undefined`,
+      // which `flushSpool` read as "the root cannot hold a claim" and ran the pass
+      // UNCLAIMED beside that peer.
+      markRaced();
+      continue;
+    }
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    let renewedAt = nowMs;
+    return {
+      token,
+      renew(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        // Read the RAW record first: the CAS below compares BYTES, and a
+        // re-serialised object is not proof of what was on disk. lstat-gated, so a
+        // FIFO at the claim path cannot hang the refresh (the Python twin's
+        // `read_claim` had that bug; see `readDrainClaim`).
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        let current: unknown;
+        try {
+          current = JSON.parse(rawNow);
+        } catch {
+          return false;
+        }
+        if (!current || typeof current !== "object" || Array.isArray(current)) return false;
+        if ((current as Record<string, unknown>).token !== token) return false;
+        // ⛔ An ALREADY-EXPIRED claim is never resurrected (review finding): a
+        // holder that overran its lease is still the token owner on disk and must
+        // not overwrite the successor a peer legitimately installed.
+        const expires = (current as Record<string, unknown>).expires_at;
+        if (typeof expires === "number" && at >= expires) return false;
+        // ⛔ THE REFRESH IS A COMPARE-AND-SWAP ON THE INODE, not a read followed by
+        // a `rename`. The earlier version read, renamed, and then READ BACK to
+        // verify — which reads the bytes this process just wrote, so it always
+        // matched and the guard was vacuous. The race it claimed to cover is real
+        // (a peer whose takeover lands between our read and our rename has its
+        // fresh claim clobbered, and both processes then hold the spool for up to
+        // `ttl/3`), and the trigger is a renewal landing at the deadline. Reusing
+        // `takedownClaim` (the same arbiter `acquire` uses) and installing the
+        // refresh with `linkSync` makes the window a real CAS: `EEXIST` means a
+        // peer claimed in it and THEIR claim stands, which is the safe direction.
+        // The Python twin states the same reasoning; this is one protocol (R6).
+        // ⛔ THE SAME SEAM `release` USES, for the same reason: the CAS's window
+        // (between our takedown and our install) is a fact about ORDER, and without
+        // a way to stand inside it a test can only pin the primitive. The Python
+        // twin's window test monkeypatches `_takedown`; this is the Pi equivalent
+        // (#14423 cycle-7 review, P2 — the earlier Pi test called `linkSync`
+        // directly, so reverting this line to `renameSync` left it green).
+        const moved = (opts.takedown ?? takedownClaim)(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
+          // We displaced a NEWER record than the one we judged — dispose puts it
+          // back, and we are no longer the holder.
+          disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+          return false;
+        }
+        const next: DrainClaimRecord = {
+          ...record,
+          started_at: record.started_at,
+          expires_at: at + ttlMs,
+        };
+        const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+        try {
+          writeFileSync(tmpPath, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+          try {
+            linkSync(tmpPath, path);  // create-if-absent: a peer's claim is never clobbered
+          } finally {
+            try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+            // A peer holds the claim now. Their record STANDS; ours is obsolete.
+            disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+            return false;
+          }
+          // A failed WRITE is not "not ours" (review finding): reporting it as a
+          // lost claim aborts a pass that still owns the spool AND parks the claim
+          // with a live pid, so every later pass reads `heldByClaim` for up to the
+          // full lease while the operator is told a peer took it. Put ours BACK.
+          try { linkSync(moved.quarantine, path); } catch { /* a peer has it */ }
+          try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+          const still = readDrainClaim(dir);
+          return !!still && still.token === token;
+        }
+        disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+        renewedAt = at;
+        return true;
+      },
+      renewIfDue(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        if (at - renewedAt < ttlMs / 3) return true;
+        return this.renew(at);
+      },
+      reclaim(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawNow);
+        } catch {
+          return false;
+        }
+        if (!parsed || typeof parsed !== "object"
+            || (parsed as Record<string, unknown>).token !== token) {
+          return false;  // a peer's record: their claim stands
+        }
+        // The same CAS `renew` uses: move aside, compare the bytes we judged,
+        // install with `link` so a peer that claimed in the window is never clobbered.
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
+          disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+          return false;
+        }
+        const fresh: DrainClaimRecord = {
+          ...record,
+          started_at: record.started_at,
+          expires_at: at + ttlMs,
+        };
+        try {
+          // ⛔ The quarantined bytes are the CAS evidence and the RESTORE source: they
+          // are never rewritten. The fresh record goes to a scratch name and is
+          // installed with `linkSync` (create-if-absent), so a peer that claimed in the
+          // window keeps its claim.
+          const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+          writeFileSync(tmpPath, `${JSON.stringify(fresh)}\n`, { mode: 0o600 });
+          try {
+            linkSync(tmpPath, path);
+          } finally {
+            try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          }
+        } catch {
+          // Put back the record we moved aside: never lose a lease to a failed refresh.
+          try { linkSync(moved.quarantine, path); } catch { /* a fourth holder has it */ }
+          try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+          return false;
+        }
+        try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+        renewedAt = at;
+        return true;
+      },
+      release(): boolean {
+        // ⛔ A NOT-OURS RELEASE TOUCHES NOTHING — it reads and compares BEFORE it
+        // moves anything (mirror of `tortoise/drain_claim.py`'s `release`, added in
+        // the same review cycle: the two legs must not diverge on the property the
+        // module docstring states). Taking the successor's claim aside first made
+        // this promise false in a THREE-process interleaving: a third process
+        // installing into the momentarily-empty path made the restore `linkSync`
+        // fail `EEXIST`, and the successor's quarantined bytes were then unlinked —
+        // a live claim destroyed by a release that was trying to be polite
+        // (#14423 cycle-6 review, P2; reproduced with these seams).
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;  // gone, unreadable, or not a regular file: nothing to release
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawNow);
+        } catch {
+          return false;
+        }
+        if (!parsed || typeof parsed !== "object"
+            || (parsed as Record<string, unknown>).token !== token) {
+          return false;  // not ours: leave it exactly where it is
+        }
+        // Ours. The takedown's quarantine compare is what makes the disposal safe
+        // against a peer that replaces the record between the read above and the
+        // rename below.
+        const moved = (opts.takedown ?? takedownClaim)(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
+          disposeQuarantine(moved.quarantine, moved.raw, path, "\u0000<not-ours>");
+          return false;
+        }
+        try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+        return true;
+      },
+    };
+  }
+  return undefined;
+}
+
+function randomToken(): string {
+  // 16 hex chars, the same width the Python leg mints — an OWNERSHIP value, not
+  // a secret, so `Math.random` would do, but a per-leg-predictable token makes a
+  // confused-deputy delete conceivable for no gain.
+  let out = "";
+  for (let i = 0; i < 16; i += 1) {
+    out += Math.floor(Math.random() * 16).toString(16);
+  }
+  return out;
 }
 
 /**
@@ -4291,8 +6023,15 @@ export function captureHealthLine(
  *  cannot read still counts as PENDING (it may be waiting) and is EXCLUDED from
  *  the saturation metas — the same asymmetry the two separate walks had.
  */
-function healthScan(dir: string): { pending: number; metas: SpoolMeta[] } | undefined {
-  const { metas, discards } = listSpoolEntries(dir, { repair: false });
+function healthScan(
+  dir: string,
+): {
+  pending: number;
+  metas: SpoolMeta[];
+  unreadableBytes: number;
+  unreadableCount: number;
+} | undefined {
+  const { metas, discards, unreadable } = listSpoolEntries(dir, { repair: false });
   if (discards.some((d) => d.reason === DISCARD_SPOOL_UNREADABLE)) return undefined;
   let onDisk = 0;
   try {
@@ -4304,7 +6043,27 @@ function healthScan(dir: string): { pending: number; metas: SpoolMeta[] } | unde
   const pending =
     Math.max(0, onDisk - metas.length) +
     metas.filter((m) => terminalMarker(m) === undefined && !entryFiled(m)).length;
-  return { pending, metas };
+  // #12483: the third element is WHY the metas/ceiling asymmetry is no longer a
+  // hole. A meta this leg cannot READ is retained and never evicted, so its
+  // BYTES still count against the byte ceiling — returned here so the health line
+  // reaches the same SATURATED verdict the write path reaches, without a second
+  // walk. A meta it can read but not USE (invalid JSON, no `session_id`) is
+  // COUNTED too (#14347 review F3): `listSpoolEntries` collects those stems
+  // BEFORE its `repair` gate, so a read-only probe still sees the class it would
+  // otherwise drop — and this scan passes `repair: false`, so it quarantines
+  // nothing; the repairing scan (the drain) is what moves such an entry.
+  // Mirrors `capture_spool._health_scan`.
+  //
+  // ⛔ THE COUNT ELEMENT IS THE OTHER HALF (#12483's "both ceilings"):
+  // `metas.length` cannot see either unreadable class, so a health line that
+  // counted only parsed metas described a spool of three entries as having none —
+  // and the write path, which counts them, disagreed with it about one directory.
+  return {
+    pending,
+    metas,
+    unreadableBytes: unreadableEntryBytes(dir, unreadable),
+    unreadableCount: unreadable.length,
+  };
 }
 
 function spoolHealthLine(
@@ -4340,7 +6099,14 @@ function spoolHealthLine(
   // SATURATED is a statement ABOUT them, so a caller (a test, a fleet surface)
   // that knows the real pair passes it rather than inheriting the module
   // default. Mirrors the Python leg's `capture_health_line(..., bounds=...)`.
-  const saturated = saturatedForMetas(dir, scan.metas, opts.bounds ?? DEFAULT_BOUNDS);
+  const saturated = saturatedForMetas(
+    dir,
+    scan.metas,
+    opts.bounds ?? DEFAULT_BOUNDS,
+    {},
+    scan.unreadableBytes,
+    scan.unreadableCount,
+  );
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
   // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that
@@ -4418,9 +6184,18 @@ function spoolHealthLine(
  * allowance) stays exactly that. A DIFFERENT recorded category is named as
  * itself — a spend cap reported as "quota" sends the owner to buy a plan that
  * cannot lift it.
+ *
+ * ⛔ THE CAPACITY ARM IS THE PYTHON TWIN'S (`capture_spool._refusal_label`),
+ * and its absence here was an R6 divergence over a file both legs write: both
+ * legs persist `reason: "capture_capacity_saturated"` into the same
+ * `<spool>/status.json`, so the health line read
+ * `429 capture capacity` on the Python leg and `429 capture_capacity_saturated`
+ * on this one — and the PR body's "Named, durably" row states the first as the
+ * contract (review finding).
  */
 function refusalLabel(reason: string | undefined): string {
   if (!reason || reason === QUOTA_EXCEEDED_CODE || reason === "402") return "quota";
+  if (reason === CAPTURE_CAPACITY_CODE) return "capture capacity";
   return reason;
 }
 
@@ -4525,10 +6300,40 @@ function reportFlush(
         (summary.remaining > 0
           ? summary.stopped === "quota"
             ? `, paused ${summary.remaining} (quota refused; not retried in this pass)`
-            : opts.continuing
-              ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
-              : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
+            // #14350: a CAPACITY stop is the box's, so a follow-up pass would
+            // meet the same ceiling. Named as its own state — and never
+            // described as "continues in the background" — for the same reason
+            // as the quota arm.
+            : summary.stopped === "capacity"
+              ? `, paused ${summary.remaining} (server at capture capacity; nothing charged to any entry)`
+              : opts.continuing
+                ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+                : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
           : ""),
+    );
+  }
+  // #14350: the two states that are NOT a failure of any entry, reported even
+  // when nothing else happened — a pass that refused to run, and a pass that
+  // could not take the exclusion, are exactly the cases where a silent drain
+  // reads as "nothing to do".
+  if (summary.heldByClaim) {
+    log(
+      `${summary.claimHolder ?? "another drainer holds this spool"} ` +
+        `— serialized drain: one drainer per box (#14350)`,
+    );
+  }
+  if (summary.claimUnavailable) {
+    warn(
+      summary.claimUnavailableReason
+        ? `spool flush: ${summary.claimUnavailableReason}`
+        : "spool flush: the drain claim is unavailable (the spool root is not writable) " +
+          "— this pass ran WITHOUT the one-drainer exclusion",
+    );
+  }
+  if (summary.lostClaim) {
+    warn(
+      "spool flush: this pass no longer held the drain claim (a peer took it over) " +
+        "— stopped rather than drain twice",
     );
   }
   for (const d of summary.discarded) {
@@ -4645,7 +6450,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
           updated_at: new Date().toISOString(),
         });
-      } else if (summary.attempted > 0) {
+      } else if (summary.attempted > 0 && !summary.capacity) {
         // Some POST was ATTEMPTED and none of them was refused for quota, so the
         // recorded cause is superseded: the marker is the LAST OBSERVED
         // 402, not a permanent verdict. Without this, a box that was
@@ -4666,11 +6471,33 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           updated_at: new Date().toISOString(),
         });
       }
+      if (summary.capacity) {
+        // #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
+        // server's own 429 so `capture: BLOCKED (n queued, 429 capture capacity)`
+        // names the cause — the same durable half the quota arm gets, for the same
+        // reason: the hook that fired this drain threw its stderr away, so a
+        // console line alone leaves the next process to re-POST to find out why
+        // nothing moved. Self-healing: a later pass with a free slot writes `ok`,
+        // and the health line clears it when the queue empties.
+        writeCaptureStatus(spoolDir, {
+          version: 1,
+          state: "blocked",
+          reason: summary.capacity.code ?? `${summary.capacity.status}`,
+          status: summary.capacity.status,
+          ...(summary.capacity.detail
+            ? { detail: summary.capacity.detail.slice(0, 500) }
+            : {}),
+          updated_at: new Date().toISOString(),
+        });
+      }
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
       // as the last thing the lane logged is the misdiagnosis the supersede
       // exists to prevent.
-      if (summary.quota || (previous?.state === "blocked" && summary.attempted > 0)) {
+      if (
+        summary.quota || summary.capacity ||
+        (previous?.state === "blocked" && summary.attempted > 0)
+      ) {
         log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
       }
     } catch (err) {
@@ -4704,8 +6531,12 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // The report is told whether a continuation is ACTUALLY scheduled — it
         // runs before the decision, so asking it to guess produced "continues in
         // the background" on the last pass of a spent chain (#2100 review 2).
+        // #14350: a CAPACITY stop is the box's, like a quota stop — chaining
+        // would spend the following passes meeting the same ceiling, so neither
+        // continues in the background.
         const willChain =
-          summary.remaining > 0 && !summary.quota && chain + 1 < FLUSH_MAX_CHAIN;
+          summary.remaining > 0 && !summary.quota && !summary.capacity &&
+          chain + 1 < FLUSH_MAX_CHAIN;
         reportFlush(summary, where, { continuing: willChain });
         recordOutcome(summary);
         if (willChain) {

@@ -159,6 +159,694 @@ class TestGlobalConfigCommands:
         assert "# Tortoise memory (from previous sessions) — hosted (tortoise.example.com)" in out
 
 
+class TestCreatePointRetrySafety:
+    """#14424 — `create-point` must not leave a first-run user in a dead-end.
+
+    MEASURED on the deployed build (2026-11-23, commit `e74cf1d13da7`): four
+    attempts of this verb each returned `504` and **all four committed**, so the
+    org held 4 identical Points. The server's refusal says *"wait for the
+    advertised delay before retrying, and retry only if repeating the operation
+    is safe"* — and the verb made both halves unactionable: it discarded the
+    `Retry-After` header that IS the advertised delay, and nothing said how a
+    repeat could be made safe. See `docs/evidence/14424-onboarding/`.
+
+    Mutation check: drop the `_create_point_retry_hint` print from
+    `_cmd_create_point` and the two refusal tests RED; drop the `dedup` payload
+    arm and `test_dedup_flag...` REDs.
+    """
+
+    @staticmethod
+    def _refusal(code: int, headers: dict[str, str] | None = None):
+        import io as _io
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        msg = Message()
+        for k, v in (headers or {}).items():
+            msg[k] = v
+        body = json.dumps({"detail": "the server's wait budget was exceeded"}).encode()
+        return HTTPError("https://api.premiselabs.co/v1/points", code,
+                         "Gateway Timeout", msg, _io.BytesIO(body))
+
+    def test_dedup_flag_sends_the_content_hash_fold(self, tmp_path):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"id": "p1"})) as urlopen:
+            rc = main(["create-point", "hello world", "--dedup"])
+        assert rc == 0
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        assert payload["dedup"] is True
+        assert payload["content"] == "hello world"
+
+    def test_omitting_the_flag_keeps_the_existing_payload(self, tmp_path):
+        """No behaviour change for the default path — `dedup` stays server-side
+        default (False) unless the caller opts in."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"id": "p1"})) as urlopen:
+            assert main(["create-point", "hello world"]) == 0
+        assert "dedup" not in json.loads(urlopen.call_args.args[0].data.decode())
+
+    def test_a_successful_create_names_where_to_search(self, tmp_path, capsys):
+        """D5: the verb has no search sibling, so the success message must name
+        the door that does — otherwise the memory is written and never found."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+        assert "Created point: p1" in out
+        assert "/v1/search?q=" in out
+        assert "tortoise_search" in out
+        # ⛔ THE NAMED DOOR MUST BE RUNNABLE, or it is the same dead end it exists
+        # to close. `/v1/search` is gated (`hosted_api.py:15765`
+        # `Depends(get_current_org_gated)` -> 401 "Missing Authorization header"
+        # at `hosted_api.py:9859`), so a hint that omits the header sends a
+        # first-run user straight into a refusal. Mutation: drop the header
+        # clause and this REDs.
+        assert "Authorization: Bearer" in out
+        # ⛔ AND IT MUST NAME WHERE THE KEY ACTUALLY IS. `signup` writes
+        # `~/.tortoise/credentials.json` and never sets `TORTOISE_API_KEY`
+        # (measured: no `environ[...]` in `_cmd_signup`), so a hint naming only
+        # the env var hands the documented first-run user an empty Bearer and a
+        # 401 — a fresh refusal inside the hint that exists to remove one.
+        # Mutation: narrow the hint back to the env var and this REDs.
+        assert "credentials.json" in out
+        # ...and the printed URL must survive a paste. An unquoted `<` is a shell
+        # REDIRECT, so a `<a word from it>` placeholder fails before any request
+        # is made. Mutation: restore an angle-bracket placeholder and this REDs.
+        assert "<" not in out
+
+    def test_the_success_hint_masks_the_url_user_as_well_as_the_password(
+            self, tmp_path, capsys):
+        """STRONGER than `test_the_success_hint_never_prints_a_url_credential` on
+        two axes it leaves open — and WEAKER on a third, so it does not replace it.
+
+        That test (added by `f7d769fb66e6`) asserts TWO things:
+        `assert "sup3rsecretpw" not in out` AND `assert "/v1/search?q=" in out`
+        (the path must survive — a `***`-redacted URL satisfies it, so it does not
+        cover the host). What it leaves open:
+          * the USER half — measured: masking only the password (`:pw@` → `:***@`,
+            user kept) leaves that test GREEN (30 passed) and reds this one at
+            `"svc:"`;
+          * the HOST — an over-broad `***/v1/search?q=WORD` redaction reds this one
+            at the full-literal assert below, while the sibling stays green because
+            its path assertion is still satisfied.
+        What it covers and this one does NOT: the `?q=WORD` query form — dropping it
+        reds that test and leaves this one green (also covered at
+        `test_a_successful_create_names_where_to_search`). Keep both.
+
+        ⛔ CORRECTION, recorded rather than re-worded out of sight: an earlier
+        version of this docstring claimed the success path had *no* equivalent
+        witness and cited a `173 passed` measurement. That was false at its own
+        parent — the figure was taken over `45beda518b42..65d4028a3d`, BEFORE
+        `f7d769fb66e6` added the sibling test, and was never re-taken. A second
+        version then called this test "strictly stronger", which is also false
+        (mutant: drop `?q=WORD` reds the sibling and leaves this one green). The
+        three claims above are the measured ones.
+
+        Why it still matters: `api_url` is store-supplied and
+        `_resolve_config_path` passes it through verbatim, while `./.tortoise` is
+        repo-controllable — so userinfo in that value reaches a transcript users
+        paste into issues (`_mask_display_target`'s own docstring, `:3765`).
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:s3cr3t@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+
+        # The credential must not reach the transcript...
+        assert "s3cr3t" not in out
+        assert "svc:" not in out
+        # ...the userinfo is masked, and the host stays usable so the instruction
+        # is still runnable rather than redacted into uselessness.
+        assert "https://:***@api.premiselabs.co/v1/search" in out
+
+    def test_the_success_hint_does_not_let_a_url_forge_a_line(self, tmp_path, capsys):
+        """`_printable` is the line-forgery guard on the same interpolation.
+
+        A store `api_url` containing a newline would otherwise emit a second,
+        attacker-authored line into the transcript — the class the doctor row pins
+        as `test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row`.
+
+        Mutation: drop `_printable(...)` at the hint and this REDs (observed).
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://a.example.test\n  FORGED-LINE",
+        }))
+        store.chmod(0o600)
+
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+
+        # No physical transcript line may start with the forged payload.
+        assert not any(ln.strip().startswith("FORGED-LINE") for ln in out.splitlines())
+
+    def test_a_trailing_slash_api_url_does_not_produce_a_double_slash(
+            self, tmp_path, capsys):
+        """D5: `_resolve_config_path` returns `TORTOISE_API_URL` VERBATIM, so a
+        user-set value ending in `/` used to yield `…//v1/points` and a
+        `…//v1/search` in the success hint -> 404 from a message the verb
+        promises is runnable.
+
+        Mutation: drop the `rstrip("/")` in `_cmd_create_point` and both
+        assertions RED."""
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        f = d / "credentials.json"
+        f.write_text(json.dumps({**GLOBAL_CFG, "api_url": "https://api.premiselabs.co/"}))
+        f.chmod(0o600)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok({"id": "p1"})) as _url:
+            assert main(["create-point", "hello world"]) == 0
+        # the REQUEST went to the normalized base, not `…//v1/points`
+        sent = _url.call_args[0][0].full_url
+        assert "//v1/" not in sent.replace("https://", "")
+        assert sent.rstrip().endswith("/v1/points")
+        # and the hint a user copies did not inherit the extra slash either
+        out = capsys.readouterr().out
+        assert "//v1/search" not in out
+
+    def test_the_success_hint_never_prints_a_url_credential(self, tmp_path, capsys):
+        """The success line prints the target URL, so it must MASK userinfo.
+
+        `doctor` output and CLI transcripts are what users paste into issues, and
+        a store-supplied `api_url` may carry basic-auth credentials.
+
+        Mutation: replace `_printable(_mask_display_target(api_url or ''))` with
+        `api_url or ''` and this REDs — measured, the raw form printed
+        `https://svc:sup3rsecretpw@api.premiselabs.co/v1/search?q=WORD`.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:sup3rsecretpw@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+        assert "sup3rsecretpw" not in out
+        assert "/v1/search?q=" in out
+
+    @pytest.mark.parametrize("bad_api_url", [
+        ["https://a.example.test"],          # list  -> AttributeError on .rstrip
+        {"https://a.example.test": True},    # dict  -> AttributeError on .rstrip
+        42,                                   # int   -> ValueError: unknown url type
+        True,                                 # bool  -> ValueError: unknown url type
+        "notaurl",                            # str   -> ValueError: unknown url type
+    ])
+    def test_a_non_string_api_url_refuses_cleanly_instead_of_crashing(
+            self, tmp_path, capsys, bad_api_url):
+        """A repo-controllable store must not crash the WRITE verb.
+
+        `_resolve_config_path` validates `api_key` is a `str` but passes
+        `api_url` through VERBATIM, and `./.tortoise` is attacker-controllable.
+        Two DIFFERENT crash shapes reach this verb, and each had its own arm:
+
+        * `rstrip("/")` on a list/dict → `AttributeError: 'list' object has no
+          attribute 'rstrip'` — closed by coercing to `str` first;
+        * a value that IS a `str` but not a URL (an int/bool coerced to `"42"`,
+          or a literal `"notaurl"`) → `ValueError: unknown url type: '42/…'`
+          raised by `Request(...)`, which no `except` arm caught, so it escaped
+          `main()` as a raw traceback.
+
+        ⛔ The coercion alone was NOT enough — it converts a non-string into a
+        string that is not a URL. Both arms are required, which is why this test
+        is parametrized over both shapes rather than pinning the list case that
+        was the first one measured. On BASE (`4993fa083f`) every row above except
+        list/dict already tracebacked.
+
+        Mutation: drop the `isinstance` coercion → the list/dict rows RED with
+        `AttributeError`; the int/bool/str rows are now refused by the PRE-FLIGHT,
+        so dropping the `except ValueError` arm no longer reds them (measured —
+        that arm is reached only by a `ValueError` raised AFTER the request was
+        built, e.g. from the redirect handler).
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": bad_api_url,
+        }))
+        store.chmod(0o600)
+        assert main(["create-point", "hello world"]) == 1
+        captured = capsys.readouterr()
+        assert "Cannot reach API" in captured.err
+        # No traceback may escape, whichever arm answered.
+        assert "AttributeError" not in captured.err
+        assert "ValueError" not in captured.err
+
+    def test_a_non_url_api_url_is_refused_before_the_request_is_built(
+            self, tmp_path, capsys):
+        """The PRE-FLIGHT is the only spot allowed to say "nothing was sent".
+
+        Without it the non-URL case falls to the hedged `except ValueError` arm,
+        which correctly says the write MAY have landed — true for a redirect-phase
+        failure, but wrong and unactionable here, where no request was ever built.
+
+        ⛔ MEASURED, and why this test exists: deleting the whole pre-flight block
+        left the file GREEN (43 passed) — the parametrized test above passes
+        either way because the hedged arm still prints "Cannot reach API" and
+        returns 1. So the arm's own justification ("nothing has been sent") was
+        unpinned until this assertion was added.
+
+        Mutation: delete the pre-flight block and this REDs on "nothing was sent".
+        ⚠️ NOT on `assert not urlopen.called` — measured: with the block deleted,
+        `Request(...)` still raises for the non-URL before `urlopen` is reached, so
+        that assert passes either way. It is belt-and-braces (it pins that the
+        refusal happens BEFORE the request is built), not the discriminator.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": 42}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            assert main(["create-point", "hello world"]) == 1
+        # The decisive fact: no request was ever BUILT, let alone sent.
+        assert not urlopen.called
+        err = capsys.readouterr().err
+        assert "nothing was sent" in err
+        assert "does not prove it failed to land" not in err
+
+    @pytest.mark.parametrize("tolerated", [
+        "HTTPS://host.example",      # urllib lowercases the scheme
+        " https://host.example",     # leading space; BASE sent this
+    ])
+    def test_a_url_the_transport_accepts_is_not_refused_by_the_pre_flight(
+            self, tmp_path, capsys, tolerated):
+        """The pre-flight must not refuse what urllib itself accepts.
+
+        `urllib.parse._splittype` lowercases the scheme, and BASE accepted and
+        SENT `HTTPS://host.example` and `" https://host.example"` (measured
+        against a real server, rc 0). An exact `startswith` here turned both into
+        a hard refusal whose message ("not an http(s) URL") was false — a
+        regression introduced WITH the pre-flight.
+
+        Mutation: drop `.strip().lower()` from the guard and this REDs.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": tolerated}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})) as urlopen:
+            assert main(["create-point", "hello world"]) == 0
+        assert urlopen.called
+        assert "not an http(s) URL" not in capsys.readouterr().err
+        # ⛔ AND THE VALUE MUST NOT BE REWRITTEN. The commit's central
+        # non-regression claim is that only the GUARD is normalised — otherwise a
+        # mutant that lowercases `api_url` before the check would still pass every
+        # assertion above while silently lowercasing the HOST, the PATH and a
+        # `?Token=` query (measured: that mutant left the file 46 passed). So pin
+        # the sent URL. `urllib`'s own `unwrap()` strips a leading space; that is
+        # BASE's behaviour, not this guard's.
+        sent = urlopen.call_args[0][0].full_url
+        assert sent == {
+            "HTTPS://host.example": "HTTPS://host.example/v1/points",
+            " https://host.example": "https://host.example/v1/points",
+        }[tolerated]
+
+    def test_a_valueerror_after_the_send_does_not_claim_nothing_was_sent(
+            self, tmp_path, capsys):
+        """The arm catches ValueErrors raised AFTER the write was on the wire.
+
+        A bare `except ValueError` around a `try` that contains `urlopen` also
+        catches ones the redirect handler raises on the SECOND hop — measured:
+        a server answering the POST with a `302` whose `Location` is malformed
+        makes urllib raise `Invalid IPv6 URL` after the server has already
+        received and processed the write. Saying "nothing was sent" there is the
+        same false safety fact
+        `test_an_unreachable_api_does_not_claim_nothing_was_written` exists to
+        keep out of this verb.
+
+        Mutation: make this arm print the pre-flight "nothing was sent" text and
+        this REDs.
+        """
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=ValueError("Invalid IPv6 URL")):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "Invalid IPv6 URL" in err
+        assert "nothing was sent" not in err.lower()
+        assert "does not prove it failed to land" in err
+
+    def test_a_url_the_client_cannot_build_never_claims_the_write_may_land(
+            self, tmp_path, capsys):
+        """A CONSTRUCTION-phase `ValueError` must not borrow the post-send hedge.
+
+        `Request(...)` parses the URL and raises `ValueError: Invalid IPv6 URL`
+        BEFORE any socket exists — and the pre-flight ADMITS the value
+        (`http://[::1` starts with `http://`). While construction shared the
+        `try` with `urlopen`, that `ValueError` landed in the arm whose message
+        is hedged ("does not prove it failed to land"), so a request that was
+        never built read as a possibly-committed write and invented a duplicate
+        risk the user cannot have. Measured on the tree that shipped it: store
+        `api_url="http://[::1"` printed "The request did not complete — that does
+        not prove it failed to land … re-run with `--dedup`".
+
+        ⛔ The sibling above is the OTHER half and must stay: a `ValueError`
+        raised by `urlopen`/the redirect handler AFTER the send DOES warrant the
+        hedge. Splitting construction out is what makes both true.
+
+        Mutation: move `req = Request(...)` back inside the `urlopen` `try` and
+        this REDs — the hedge reappears and `urlopen` is never reached.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": "http://[::1"}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            assert main(["create-point", "hello world"]) == 1
+        assert not urlopen.called, "no request may reach the transport"
+        err = capsys.readouterr().err
+        assert "nothing was sent" in err
+        assert "does not prove it failed to land" not in err
+
+    def test_the_valueerror_arm_does_not_echo_the_credential(self, tmp_path, capsys):
+        """`{e}` quotes the URL it failed on, and can quote the header value.
+
+        A store `api_url` carrying `?token=…` reaches stderr inside the exception
+        text, and a malformed `api_key` is echoed too (`Invalid header value
+        b'Bearer tt_…'`) — the PRIMARY credential. Masking `api_url` on the same
+        line while printing `{e}` raw made the line look already handled.
+
+        Mutation: print `{e}` unredacted and this REDs.
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_key": "tt_leakme0123456789",
+            "api_url": "https://api.example.test/?token=sup3rsecretpw",
+        }))
+        store.chmod(0o600)
+        with mock.patch(
+                "urllib.request.urlopen",
+                side_effect=ValueError(
+                    "unknown url type: "
+                    "'https://api.example.test/?token=sup3rsecretpw/v1/points'"
+                    " header b'Bearer tt_leakme0123456789'"),
+        ):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "sup3rsecretpw" not in err
+        assert "tt_leakme0123456789" not in err
+        assert "<api_url>" in err
+        assert "<api_key>" in err
+
+    def test_the_unreachable_arm_never_prints_a_url_credential(
+            self, tmp_path, capsys):
+        """The `URLError` arm prints the base too, so it must MASK it as well.
+
+        The success hint is covered by
+        `test_the_success_hint_never_prints_a_url_credential`, but the FAILURE
+        arms print the same base and had no witness: reverting this arm to
+        `{api_url}` left the whole file green (measured). A store-supplied
+        `api_url` may carry basic-auth credentials, and a connect failure is
+        exactly when a user pastes stderr into an issue.
+
+        Mutation: print `api_url` instead of
+        `_printable(_mask_display_target(api_url))` and this REDs.
+        """
+        from urllib.error import URLError
+
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:sup3rsecretpw@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=URLError("Connection refused")):
+            assert main(["create-point", "hello world"]) == 1
+        err = capsys.readouterr().err
+        assert "sup3rsecretpw" not in err, (
+            "the store's URL password reached stderr")
+        assert "***" in err, "the masked base must still be shown"
+
+    @pytest.mark.parametrize("body,kind", [
+        (b"[]", "list"),
+        (b"null", "NoneType"),
+        (b"<html>502 proxy</html>", "JSON"),
+        (b"\xff\xfe\x00binary", "JSON"),
+    ])
+    def test_a_2xx_body_the_verb_cannot_read_is_a_clean_error(
+            self, tmp_path, capsys, body, kind):
+        """An unreadable 2xx was a bare TRACEBACK out of the first-run verb.
+
+        `main()` has no backstop (`raise SystemExit(main())`), so `[].get` and a
+        `None` body crashed it, and a non-UTF-8 body (`UnicodeDecodeError` — a
+        `ValueError` but NOT a `JSONDecodeError`) escaped even the decode arm.
+
+        Every one of these is a 2xx, so the write MAY have landed: the message
+        must say so and name `--dedup`, or the user re-runs and manufactures the
+        duplicate Point this PR documents.
+
+        Mutation: delete the `isinstance(result, dict)` guard and the `[]`/`null`
+        cases RED; drop `UnicodeDecodeError` from the decode arm and the binary
+        case REDs with the traceback escaping.
+        """
+        class _Resp:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_Resp(body)):
+            rc = main(["create-point", "hello world"])  # must not raise
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert kind in err, f"the message must name what arrived: {err!r}"
+        assert "MAY have landed" in err, (
+            "a 2xx means it probably committed; say so")
+        assert "--dedup" in err, (
+            "the retry override must be named, or the user re-runs blindly")
+        assert "Traceback" not in err
+
+    def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
+            self, tmp_path, capsys):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": "10"})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        # the advertised delay is the HEADER the refusal points at
+        assert "Retry-After: 10" in err
+        # what changed: the failure does not mean nothing was written
+        assert "may have" in err and "completed on the server" in err
+        # the next action, and the cost of skipping it
+        assert "--dedup" in err
+        assert "duplicate" in err
+
+    def test_a_504_retried_with_dedup_is_told_it_is_safe(self, tmp_path, capsys):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": "10"})):
+            rc = main(["create-point", "hello world", "--dedup"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Re-running is safe" in err
+        # the duplicate warning belongs to the arm that did NOT opt in
+        assert "duplicate Point" not in err
+
+    def test_a_non_wait_bound_error_gets_no_retry_prose(self, tmp_path, capsys):
+        """A 422 is the server rejecting the body: retrying it is not the next
+        action, so the hint must stay quiet rather than advise a re-send."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(422)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "--dedup" not in err
+        assert "Retry-After" not in err
+        assert "re-sending" not in err
+
+    def test_a_retry_after_http_date_keeps_its_own_units(self, tmp_path, capsys):
+        """RFC 9110: `Retry-After = HTTP-date / delay-seconds`. The hint used to
+        append a bare `" s"`, so a proxy emitting an HTTP-date rendered as
+        `Retry-After: Wed, 21 Oct 2015 07:28:00 GMT s` — a nonsense delay a
+        first-run user cannot act on (#14424 review)."""
+        _seed_global(tmp_path)
+        when = "Wed, 21 Oct 2015 07:28:00 GMT"
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": when})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert when in err, "the header value must be echoed as supplied"
+        assert f"{when} s" not in err, (
+            "a seconds unit was appended to an HTTP-date — the load-bearing gap")
+
+    def test_a_refusal_with_no_retry_after_names_the_header_it_lacks(
+            self, tmp_path, capsys):
+        """COVERAGE PIN, not a mutation witness — measured, so nobody reads it as
+        one: this assertion **passes on the pre-fix code**, because the
+        header-less wording predates this change. It is here because the #14424
+        review named this arm as *untested* and an untested branch is one an
+        edit can silently break.
+
+        What it protects: a `503` from a proxy during a rolling deploy carries no
+        `Retry-After`, so "the server advertised N seconds" would be fabricated;
+        and, being a `503` rather than a wait-bound `504`, it must not inherit
+        the "may have completed" claim. The mutation that reds it is reverting
+        the `if retry_after:` branch to the header-only arm."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(503)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "no Retry-After" in err
+        assert "advertised Retry-After:" not in err, (
+            "invented a delay the response did not carry")
+        assert "does NOT mean nothing was written" not in err, (
+            "the 504 completion claim must not leak onto the 503 arm")
+
+    def test_a_refusal_without_retry_after_names_a_concrete_wait(
+            self, tmp_path, capsys):
+        """#14424 review P2-3: naming the missing header is not enough.
+
+        The measured 504 body (docs/evidence/14424-onboarding/README.md §1.1)
+        says only *"wait for the advertised delay before retrying"* — and "the
+        advertised delay" IS the header. So with the header absent, the pre-fix
+        fallback ("wait the delay its body names") sent the reader to the body
+        for a number the body does not contain: the same dead-end this hint
+        exists to close (AX rule #10183 — a surface must not refuse where the
+        next action is knowable). The fallback must name a concrete wait; 10 s
+        is what the deployed server advertises when it does send the header.
+
+        Mutation that reds it: restore the pre-fix fallback text.
+        """
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "no Retry-After" in err
+        # actionable: a stated wait the user can act on
+        assert "10 s" in err, "the fallback must name a concrete delay"
+        assert "its body names" not in err, (
+            "the body names no number — pointing at it yields no wait")
+        # and the 504 arm still says what changed about the write
+        assert "may have" in err and "completed on the server" in err
+
+    def test_an_unreachable_api_does_not_claim_nothing_was_written(
+            self, tmp_path, capsys):
+        """#14424 review: the `URLError` arm asserted "Nothing was sent, so
+        nothing was written". That is not a fact this error can establish —
+        `urlopen` follows redirects, so a 3xx answering this POST is already a
+        server-processed write and a failure on the SECOND hop arrives here;
+        and RFC 9110 only permits a POST retry when the client can determine the
+        original was never applied. The neighbouring `HTTPError` arm says "may
+        have landed" for the same reason; the two must not carry opposite
+        epistemics. Consequence of the old wording: "nothing was written" tells
+        the user to re-run WITHOUT `--dedup`, and the retry folds nothing."""
+        from urllib.error import URLError
+
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=URLError("Connection refused")):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Connection refused" in err, "the transport reason must survive"
+        assert "Nothing was sent" not in err, (
+            "the unprovable claim this test exists to remove")
+        assert "does not prove it failed to land" in err
+        assert "--dedup" in err, (
+            "the retry override must be named, or the user re-runs without it")
+
+    def test_a_rate_limit_refusal_does_not_claim_a_duplicate_risk(
+            self, tmp_path, capsys):
+        """The arms are NOT interchangeable: a 429 is an admission refusal — the
+        write never ran — so it must not inherit the 504 duplicate warning, which
+        would tell a caller to reach for a flag that changes nothing here."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(429, {"Retry-After": "30"})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Retry-After: 30" in err
+        assert "re-sending after that delay is safe" in err
+        assert "duplicate" not in err
+        assert "may have" not in err
+
+    def test_a_read_timeout_is_a_hint_not_a_traceback(self, tmp_path, capsys):
+        """The write landed and the RESPONSE stalled — modelled as such.
+
+        ⛔ The stall is raised from `read()`, NOT from `urlopen`: a raise from
+        `urlopen` models a SEND-phase failure, which `do_open` already converts
+        into `URLError` (`except OSError as err: raise URLError(err)`). The
+        documented failure is the one AFTER that — the request is fully sent and
+        `resp.read()` raises — which skips the `HTTPError` and `URLError` arms
+        entirely. Faking it from `urlopen` would pass this test while never
+        executing the path its own name claims.
+
+        Mutation: delete the `except (TimeoutError, OSError)` arm and this REDs
+        (the exception escapes `main`) — observed.
+        """
+        class _StalledResponse:
+            """Headers arrived, the body never did."""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def read(self):
+                raise TimeoutError("read timed out")
+
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_StalledResponse()) as urlopen:
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+
+        # The request really was dispatched before the stall — that is the whole
+        # point of the arm's claim, so assert it rather than assume it.
+        assert urlopen.call_count == 1
+        assert rc == 1
+        # what changed: the request had left the box before the stall
+        assert "MAY have landed" in err
+        # and the reconciliation path, not a raw stack trace
+        assert "/v1/points" in err or "--dedup" in err
+        assert "Traceback" not in err
+
+
 class TestConfigErrorCommandHandling:
     """D6 per-site _ConfigError handling: a corrupt/unreadable global config
     must never traceback — context falls back to local mode, create-point and

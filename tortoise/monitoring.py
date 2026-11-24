@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
 
 # #9494: the loaded-module snapshot. Imported HERE (not lazily) because the
 # observation must be taken when the process is still young — this module is
@@ -733,18 +733,28 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
-#   ``journal_collision``     the position row holds a record this write does
-#                             NOT continue — a different record, or (when this
-#                             write carries no `ts` to compare) a payload whose
+#   ``journal_collision``     the position row cannot be indexed by this write —
+#                             a different record type, a different capture time,
+#                             an identity the surviving row contradicts, or (for
+#                             a write with no `ts` to compare) a payload whose
 #                             derivation moved (#9318). ⛔ Unlike ``write_failed``
 #                             a REPLAY CANNOT heal it — the replay re-raises —
 #                             so the remedy is journal identity in the key
 #                             (#12894), not a replay. A same-capture payload
-#                             re-derivation is DRIFT and never reaches this
-#                             counter (#12904) — and neither does a DIFFERENT
-#                             record captured at the same instant, which that
-#                             same split admits silently (the mirror residual in
-#                             `record_projection.JournalPositionCollision`);
+#                             re-derivation whose identities do NOT contradict is
+#                             DRIFT and never reaches this counter (#12904), and
+#                             neither does a DIFFERENT
+#                             record captured at the same instant whose payloads
+#                             do NOT contradict — `agrees` (a shared node
+#                             coordinate), `one_sided` (one side names no
+#                             identity) or `none` (no COMMON comparable
+#                             identity) — which that same split reads as drift.
+#                             ⛔ A same-instant pair whose payloads name
+#                             CONTRADICTING identities DOES reach this counter
+#                             (#9318): a coordinate match is not identity, so
+#                             that pair is refused rather than absorbed — it is
+#                             a second record at the position, OR this record
+#                             re-keyed since, and the message still names both;
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
@@ -907,6 +917,367 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
     "create can decline once per leg.",
     ["decline"],
 )
+
+#: THE PROJECTION WORKER'S OWN FIVE FAMILIES (#14185), and why the record's
+#: existing counters cannot answer any of them.
+#:
+#: Once the record's fold runs on its own loop (`tortoise/projection_worker.py`)
+#: a write can be ACKNOWLEDGED while the record is still behind it, so the
+#: questions an operator now needs are about a QUEUE, and every one of them is
+#: invisible to `RECORD_WRITE_FAILURE_COUNT`: that counter answers "did a record
+#: row never reach Postgres?", and a queued-but-not-yet-folded record is not a
+#: failure — it is the healthy shape of a lagging projection, healed by the fold
+#: it is waiting for. Folding lag into the failure counter would make a working
+#: deployment read as a failing one on every burst, which is the
+#: `CACHE_LEG_FAILURE_COUNT` misattribution lesson ("the record's counters read
+#: perfectly healthy") pointed the other way.
+#:
+#: FIVE families, five different questions — none of them a sum of the others.
+#: The first FOUR are the LAG set (two absolute, one temporal, one that says which
+#: way an ACK went); the FIFTH, ``PROJECTION_WORKER_FAILURE_COUNT``, is the
+#: FAILURE channel and is described separately below, because it answers "did a
+#: deferred fold lose its row?" rather than "how far behind is the record?".
+#: ⛔ An earlier header said FOUR, and this file said FIVE further down — the
+#: count is a claim like any other, so it is enumerated here rather than asserted.
+#:
+#: * ``PROJECTION_QUEUE_DEPTH`` — items the loop still OWES: queued PLUS the one
+#:   being folded (a wedged fold must not report depth 0 and read as caught-up).
+#:   A GAUGE, because it can go down.
+#: * ``PROJECTION_PENDING_POSITIONS`` — the JOURNAL POSITIONS the record has not
+#:   taken yet, i.e. the lag in POSITIONS. It is the process-side reading of the
+#:   same quantity `record_projection.JournalCoverage.unprojected` measures
+#:   against the record (`record_reconcile`'s `unprojected_journal` verdict), so
+#:   the two can be compared when an operator asks whether the queue and the
+#:   record agree.
+#: * ``PROJECTION_OLDEST_PENDING_SECONDS`` — the lag in TIME: how old the item at
+#:   the head is. Positions alone cannot distinguish a burst of 500 fast folds
+#:   from 500 records stuck behind one wedged statement; this is the number that
+#:   can. ⛔ It is a CALLBACK gauge (``set_function``, registered immediately below
+#:   this family's definition as ``PROJECTION_OLDEST_PENDING_SECONDS.set_function(
+#:   _live_oldest_pending_seconds)`` — ⛔ cited by SYMBOL, not by line: the number
+#:   here was `1077` and the next merge moved it to `1078`), not
+#:   an event-published one: it is recomputed on collect, because the value drifts
+#:   with the clock and the loop that would push it is the thread a wedge blocks
+#:   (#14222 review cycle 5, ISSUE 1).
+#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that folded the record on
+#:   their OWN thread: the queue was FULL, the worker was STOPPING, the record
+#:   could not be COPIED for the queue, or ``submit`` FAULTED before it could
+#:   queue (see the reason vocabulary below).
+#:   ⛔ NOTHING IS DROPPED on any of the four — a dropped item would be a
+#:   silently short record — so the visible cost is a slower ACK, and this counter
+#:   is what makes it attributable rather than an unexplained latency.
+#:   ``reason`` is a closed vocabulary of FOUR, one per way a write FAILS TO REACH
+#:   the queue: ``queue_full`` (the bound in
+#:   ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
+#:   loop was being shut down, or a wedged consumer kept it from restarting —
+#:   `stop()` does not clear its thread after a timed-out join), ``uncopyable``
+#:   (the record's deep snapshot could not be made, so it was folded inline
+#:   rather than aliased) and ``queue_fault`` (``submit`` raised before it could
+#:   queue — thread/fd exhaustion in ``thread.start()``; the caller answers it
+#:   inline, so the row is still written and only the latency is lost).
+#:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
+#:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
+#:   depth and move no counter at all — those are FIVE of the SEVEN conditions
+#:   `live_write._submitted_to_worker` tests. ⛔ FIVE CONDITIONS, carried by TWO
+#:   gate STATEMENTS: `journal_skipped or record_sink is not None or not durable`
+#:   covers THREE of them and `tenant is None` the fourth, both BEFORE any queue
+#:   or counter is touched. The fifth structural condition is the UNIMPORTABLE
+#:   loop (`except` around the import — a loop that cannot be imported cannot
+#:   fold). The remaining TWO of the seven are the SWITCHES (the loop flag and the
+#:   record's own DSN), which are CONFIGURATION, not structural — ⛔ NOT "three
+#:   structural returns": an earlier cut of this block folded the switches into the
+#:   structural family ("the other three structural returns are the UNIMPORTABLE
+#:   loop and the two SWITCHES", which is 2 + 3 arithmetic mixing CONDITIONS with
+#:   GATE STATEMENTS), and that contradicts `live_write.py`'s own header: "FIVE OF
+#:   THE SEVEN CONDITIONS ARE STRUCTURAL — FOUR CORRECTNESS plus an unimportable
+#:   loop — AND THE OTHER TWO ARE THE SWITCHES". ⛔ FIVE
+#:   OF SEVEN, not "these two": this block used to stop at the two gates, which
+#:   left a reader believing a zeroed counter meant nothing had folded inline
+#:   (⛔ cited by TEXT, not by `file:line`: three citations here were five
+#:   lines off in round 14 — the numbers rot the moment a docstring above them
+#:   grows, the gate's text does not) (measured: armed loop, durable journal, no
+#:   carried tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
+#:   declines, so an operator reconciling "inline folds" against this counter will
+#:   find the structural arms missing from it — which is the correct shape (they
+#:   are the pre-#14185 path, not a degradation) and a wrong sentence if this
+#:   vocabulary is described as "every way an ACK folds on its own thread".
+#:
+#: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
+#: folds that did NOT WRITE A ROW. Unlike a lagging queue that is a real gap the
+#: journal heals (`tools/record_runner.py apply`), and unlike the inline path's
+#: failures it is counted by the LOOP rather than by `write_live_record`'s own
+#: door — the seam swallows its own armed failures and reports them through
+#: ``record_write_failures``, so a projection failing out of the loop is the one
+#: shape only the worker can see. ⛔ THE CLASSIFICATION READS THE OUTCOME, NOT
+#: ``None`` ALONE (#14222 review cycle 3): an ARMED REFUSAL also wrote nothing —
+#: ``circuit_open`` is the realistic one, where a record outage refuses every fold
+#: without a socket — and counting those as `projected` made this channel read
+#: ``armed: true, failures: {}`` ("caught up") through a total outage.
+#:
+#: ``reason`` vocabulary is CLOSED at three, one per observed answer:
+#:
+#:   ``projection_raised``     the fold raised. The journal holds the line.
+#:   ``record_no_outcome``     the callable answered NOTHING (no `RecordWrite`).
+#:                             Named for what was OBSERVED rather than for a cause
+#:                             it did not check: `write_live_record` answers
+#:                             ``None`` when unarmed, but a door's own `project`
+#:                             callable can answer ``None`` for its own reasons
+#:                             (the SDK's unimportable-record-half arm, #10000).
+#:                             ⛔ The SAME fact — nothing was observed — is what
+#:                             an outcome that cannot be READ produces (a raising
+#:                             property on the returned object), which is counted
+#:                             here rather than under a fourth name, so this
+#:                             vocabulary stays CLOSED at three answers.
+#:   ``projection_refused``    an ARMED refusal (`applied=False` with a
+#:                             ``refusal`` token that is not the seam's healthy
+#:                             ``no_durable_journal`` decline, #9231). Counted
+#:                             here as well as on `record_write_failures` on
+#:                             purpose: the two answer different questions ("was a
+#:                             row lost?" vs "did the LOOP's fold land?"), and an
+#:                             operator reading THIS loop's channel needs the
+#:                             second one to be true.
+#:
+#: ⛔ Each of these is counted HERE rather than only at the seam because the seam's
+#: unarmed arm is deliberately SILENT (no counter, no log — §2.0's byte-identical
+#: deployment), so without this the row would vanish with nothing observably
+#: wrong. A lane that scopes `TORTOISE_RECORD_DSN` for one run and restores it in
+#: a `finally` is the live shape.
+#:
+#: Single writers: ``record_projection_queue_state``,
+#: ``record_projection_worker_failure`` and ``record_projection_inline_fallback``,
+#: all called from ``tortoise.projection_worker`` (the #501/#3677 house shape).
+PROJECTION_QUEUE_DEPTH = Gauge(
+    "tortoise_record_projection_queue_depth",
+    "Record projections the projection worker still OWES — queued plus the one "
+    "being folded (#14185). Includes the in-flight item on purpose: a wedged "
+    "fold that reported depth 0 would read as a caught-up record.",
+)
+PROJECTION_PENDING_POSITIONS = Gauge(
+    "tortoise_record_projection_pending_positions",
+    "Journal positions queued for the record but not yet folded — the lag in "
+    "POSITIONS (#14185); the process-side reading of "
+    "`JournalCoverage.unprojected`",
+)
+PROJECTION_OLDEST_PENDING_SECONDS = Gauge(
+    "tortoise_record_projection_oldest_pending_seconds",
+    "Age of the OLDEST queued record projection — the lag in TIME (#14185)",
+)
+PROJECTION_WORKER_FAILURE_COUNT = Counter(
+    "tortoise_record_projection_worker_failures_total",
+    "Deferred record projections that did NOT WRITE A ROW on the projection "
+    "worker's loop (#14185) — raised, answered nothing, or were refused; the "
+    "journal holds the line, so a replay re-creates the ROW with no DERIVED "
+    "`embedding` (`object`/`subject` only; a vector the line CARRIED survives on "
+    "`point`/`source`/`event`)",
+    ["reason"],
+)
+PROJECTION_INLINE_FALLBACK_COUNT = Counter(
+    "tortoise_record_projection_inline_fallbacks_total",
+    "Writes that folded the record on their OWN thread — the queue was full, the "
+    "worker was stopping, the record could not be copied for the queue, or the "
+    "submit faulted before it could queue (#14185) — a slower ack, never a "
+    "dropped record",
+    ["reason"],
+)
+
+#: ⛔ THE TIME GAUGE IS COMPUTED AT COLLECT, NOT PUSHED (#14222 review cycle 5,
+#: ISSUE 1). ``Gauge.set_function`` makes every other method of this family a
+#: no-op and recomputes the value whenever the metric is collected, which is the
+#: only shape that stays truthful through a wedge: the loop that would push an
+#: update is the very thread that is blocked, and the case the family exists for
+#: — one record wedged behind a 30 s statement with nothing new arriving — is
+#: precisely the case in which no enqueue or completed fold ever happens. The
+#: callback imports lazily because `projection_worker` imports THIS module; the
+#: import is per collect and cheap (a `sys.modules` hit), and any failure answers
+#: 0.0 rather than breaking a scrape.
+def _live_oldest_pending_seconds() -> float:
+    """The age of the queue head, read when the metric is COLLECTED (#14185)."""
+    try:
+        from . import projection_worker
+    except Exception:      # noqa: BLE001, RUF100 — a scrape never fails on this
+        return 0.0
+    try:
+        return projection_worker.oldest_pending_seconds()
+    except Exception:      # noqa: BLE001, RUF100
+        return 0.0
+
+
+PROJECTION_OLDEST_PENDING_SECONDS.set_function(_live_oldest_pending_seconds)
+
+#: The families whose locks must be replaced in a forked child — see
+#: :func:`ensure_projection_metrics_fork_safe`.
+_PROJECTION_METRIC_FAMILIES = (
+    PROJECTION_QUEUE_DEPTH,
+    PROJECTION_PENDING_POSITIONS,
+    PROJECTION_OLDEST_PENDING_SECONDS,
+    PROJECTION_WORKER_FAILURE_COUNT,
+    PROJECTION_INLINE_FALLBACK_COUNT,
+)
+
+#: The pid these families' locks were last made valid for. A mismatch means this
+#: process is a forked child and inherited them.
+_PROJECTION_METRICS_PID = os.getpid()
+
+
+def _lock_holders(family) -> list:
+    """Every object under *family* that carries one of prometheus_client's locks.
+
+    TWO kinds, and both are inherited across ``fork()``:
+
+    * the FAMILY's own ``_lock`` — taken by ``Counter.labels()`` and by
+      ``_multi_samples()`` while a labelled family is collected;
+    * each ``MutexValue``'s ``_lock`` — taken by ``set``/``inc``/``get``, so it is
+      what a publish AND a collect touch.
+    """
+    holders = [family, *getattr(family, "_metrics", {}).values()]
+    values = [getattr(h, "_value", None) for h in holders]
+    return holders + [v for v in values if v is not None]
+
+
+def ensure_projection_metrics_fork_safe() -> bool:
+    """Replace prometheus_client's inherited locks after a ``fork()`` (#14222).
+
+    ⛔ ``prometheus_client`` IS NOT FORK-SAFE, and this is the whole finding: every
+    ``MutexValue`` and every LABELLED metric family owns a plain ``threading.Lock``.
+    ⛔ THE DISCRIMINATOR IS ``labelnames``, NOT THE METRIC TYPE (measured on
+    ``prometheus-client`` 0.26.0): ``MetricWrapperBase.__init__`` takes
+    ``self._lock`` only under ``if self._is_parent():``, and ``_is_parent()`` is
+    ``self._labelnames and not self._labelvalues``. So a LABELLED
+    ``Gauge``/``Counter``/``Histogram``/``Summary`` family carries one
+    (``Gauge(…, ['l'])``, ``Counter(…, ['l'])``, ``Histogram(…, ['l'])`` all
+    measured PRESENT) and an UNLABELLED one of those carries NONE (measured ABSENT
+    for all three) — and the three unlabelled ``Gauge``s this module repairs,
+    ``PROJECTION_QUEUE_DEPTH`` / ``PROJECTION_PENDING_POSITIONS`` /
+    ``PROJECTION_OLDEST_PENDING_SECONDS``, do not own one at all. ⛔ ``Info`` and
+    ``Enum`` are the exception: each sets ``self._lock = Lock()`` unconditionally in
+    its own ``_metric_init``, so an UNLABELLED ``Info``/``Enum`` does carry one —
+    this module defines neither, and the repair below reads
+    ``getattr(holder, "_lock", None)`` and so replaces whatever it finds. A child
+    that forked while a PEER THREAD held one inherits a lock with no owner, so the
+    child's next ``set``/``inc``/``get``/``labels``/``collect`` blocks FOREVER — and
+    ``contextlib.suppress`` cannot help, because a blocked lock is not an exception.
+    Measured on ``prometheus-client`` 0.26.0 with a peer holding
+    ``PROJECTION_QUEUE_DEPTH._value._lock`` at ``fork()``: the child blocked in
+    ``values.py``'s ``MutexValue.set`` from the ACK path and in ``get`` from
+    ``projection_worker_gauges()`` (a health read).
+
+    So the projection worker's own fork reset replaces the two locks it OWNS, and
+    this replaces the THIRD PARTY's — the same reasoning, one layer down, which is
+    what the earlier revision of this fix got wrong: dropping the publish from the
+    read path only moved the wedge onto the write and collect paths.
+
+    ⛔ PRIVATE ATTRIBUTES, deliberately and with the guard stated: ``_lock``,
+    ``_value`` and ``_metrics`` are what ``metrics.py``/``values.py`` use in 0.26.0.
+    Every attribute is read with ``getattr`` so a future release that renames one
+    degrades to "no replacement here" instead of raising inside an ACK or a
+    scrape. ``tests/test_14185_projection_worker.py`` pins the replacement by
+    HOLDING a lock across the reset, so a rename reds a test rather than silently
+    restoring the wedge.
+
+    Only the LOCKS are replaced: the inherited VALUES are left alone, because the
+    fork reset republishes them from the child's own state (and a read-only child's
+    stale values are a declared residual of the worker's, not this function's).
+
+    ⛔ THE DEFAULT REGISTRY'S OWN LOCK IS REPLACED TOO (round-12 review, P3), and it
+    is in this list rather than the call sites' for a structural reason:
+    ``registry.collect()`` opens with ``with self._lock:`` **before** it iterates a
+    single collector, so a child that forked while a peer held the REGISTRY lock
+    blocked on the scrape's FIRST statement — before any family's lock was touched,
+    which makes the family repair irrelevant to that wedge. ``collect()`` holds it
+    only to copy a dict (``register``/``unregister`` hold it to mutate), so
+    replacing it loses nothing, and the replacement is the same defensive shape as
+    the families above.
+
+    RETURNS whether this call replaced anything (``False`` = already valid here).
+    """
+    global _PROJECTION_METRICS_PID
+    pid = os.getpid()
+    if pid == _PROJECTION_METRICS_PID:
+        return False
+    seen: set = set()
+    replaced = 0
+    for family in _PROJECTION_METRIC_FAMILIES:
+        for holder in _lock_holders(family):
+            if id(holder) in seen:
+                continue
+            seen.add(id(holder))
+            lock = getattr(holder, "_lock", None)
+            if lock is None:
+                continue
+            try:
+                fresh = type(lock)()
+            except Exception:      # noqa: BLE001, RUF100
+                fresh = threading.Lock()
+            holder._lock = fresh
+            replaced += 1
+    registry_lock = getattr(REGISTRY, "_lock", None)
+    if registry_lock is not None:
+        # ⛔ THE FALLBACK IS NOT DECORATION (round-12 review, and this lane's own
+        # leg caught it): `type(lock)()` raises `TypeError: cannot create
+        # '_thread.lock' instances` for the raw lock `threading.Lock()` returns, so
+        # the families loop's `threading.Lock()` fallback is what actually builds
+        # every fresh lock. A registry block WITHOUT that fallback replaces the
+        # lock on NO fork at all — the TypeError either escapes the hook (CPython
+        # prints it as `Exception ignored in: ...` on stderr and SKIPS the rest of
+        # this function, `_PROJECTION_METRICS_PID` assignment included, rather than
+        # raising to the caller) or is caught by a bare `except: pass` and silently
+        # drops the replacement. A leg red-lined that second shape before this
+        # fallback existed; both outcomes are the same defect.
+        try:
+            fresh_registry_lock = type(registry_lock)()
+        except Exception:      # noqa: BLE001, RUF100
+            fresh_registry_lock = threading.Lock()
+        REGISTRY._lock = fresh_registry_lock
+        replaced += 1
+    _PROJECTION_METRICS_PID = pid
+    return replaced > 0
+
+
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
+    # ⛔ THE HOOK, NOT A CALL SITE, and the difference is a live wedge (#14222
+    # review round 11, P2-1). The repair above is reached from every
+    # projection-metric helper that publishes or reads these families — which
+    # covers the publish arm, the health read
+    # (`metrics()` -> `projection_worker_gauges`) and that function's own
+    # `collect()`. It does NOT cover the TEXT exposition: `/metrics` calls
+    # `generate_latest(REGISTRY)`, whose walk takes the same inherited locks
+    # (`_child_samples` -> `MutexValue.get` -> `with self._lock`, and
+    # `_multi_samples`' own `with self._lock`) but never passes through a helper
+    # here — so the first scrape from a child forked while a peer held one of
+    # these locks blocked FOREVER, on the one surface Prometheus actually reads.
+    #
+    # Registering the repair at `fork()` replaces the locks BEFORE any of our code
+    # runs in the child, so NO path can reach an inherited one — the scrape
+    # included — and a future collect entry point cannot rediscover the hole. It is
+    # the shape the field converges on (client_python#431's own first fix, and
+    # Gunicorn's `post_fork` re-init of process-sensitive telemetry), and the same
+    # one `projection_worker` already uses for its module lock.
+    #
+    # ⛔ The call sites stay: they are the belt to this suspender, and the function
+    # is idempotent by pid (it returns `False` once the process is valid), so a
+    # second call costs one `getpid()`. Removing them is a valid future cleanup
+    # ONLY together with a leg that proves the hook fires on every fork path —
+    # today `test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
+    # simulates the fork by moving the pid, which the hook cannot see.
+    #
+    # ⛔ Residual, stated rather than hidden — and stated at its TRUE width, because
+    # an earlier revision of this paragraph narrowed it into a falsehood (round-13
+    # review, P2): what is repaired is the REGISTRY lock and the five projection
+    # families. That is NOT "every lock this module's exposure path takes":
+    # `_Handler._handle_endpoint` touches `REQUEST_COUNT.labels(...).inc()` and
+    # `REQUEST_LATENCY.time()` BEFORE it calls `generate_latest`, and neither family
+    # is in `_PROJECTION_METRIC_FAMILIES` — so a child forked while a peer held one
+    # of THOSE blocks at the handler's first statement, before the scrape body runs.
+    # Nor is any other family's `MutexValue` safe: a child forked while a peer
+    # mutated some unrelated metric can still block when `generate_latest` walks to
+    # that family (the registry walk itself no longer blocks, because its lock IS
+    # replaced). Rebuilding every metric in the registry, or repairing every family
+    # the handler touches, would fork-bomb the values an operator is watching, so
+    # the scope stays the families this module documents plus the registry they are
+    # read through — and this paragraph names what that leaves open instead of
+    # claiming coverage it does not have.
+    os.register_at_fork(after_in_child=ensure_projection_metrics_fork_safe)
+
 
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
@@ -2385,9 +2756,10 @@ def record_record_write_failure(reason: str) -> None:
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
     * ``journal_collision`` — the record WAS reached and refused to file this
-      record under a journal position it does not CONTINUE (#9318): a different
-      record, or — when this write carries no ``ts`` for the capture time to be
-      compared — a payload whose DERIVATION moved. Neither unreachable nor
+      record under a journal position it cannot index (#9318): a different
+      record TYPE, a different CAPTURE TIME, an identity the surviving row
+      CONTRADICTS, or — when this write carries no ``ts`` for the capture time
+      to be compared — a payload whose DERIVATION moved. Neither unreachable nor
       misconfigured: the journal holds the
       record, and what the record cannot do is file it under that position — so
       the fix is not on this deployment at all. The population is any journal
@@ -2395,15 +2767,22 @@ def record_record_write_failure(reason: str) -> None:
       mark — a second durable journal under one tenant (two corpus roots, two
       SDKs with different ``event_log_path``), a journal RESTORE, a rotation, a
       truncation — plus any POSITION TWO RECORDS REACHED at different capture
-      times. ⛔ A payload re-derivation alone is NOT in this population (#12904
+      times, or at the SAME capture time with payloads whose identities
+      CONTRADICT (#9318: an equal instant is a coordinate, not identity).
+      ⛔ A payload re-derivation ALONE is NOT in this population (#12904
       P0-1): `recorded_at` is stamped at capture and survives a re-derivation,
-      so the same record re-derived at the same capture is DRIFT and replays
-      SILENTLY. ``replay`` heals every other failure; it cannot heal this
+      so the same record re-derived at the same capture whose identities do NOT
+      contradict — `agrees`, `one_sided` or `none` — is DRIFT and replays
+      SILENTLY. "Alone" is load-bearing: a re-derivation whose identities DID
+      move IS counted (every state OUTSIDE `_SILENT_IDENTITY_STATES` — `disagrees`,
+      plus anything a later edit leaves unenumerated, #9318), and so is
+      a `ts`-less one, where there is no capture time to compare. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
-      schema decision. A genuine REPLAY (same position, same content AND the
-      same ``recorded_at``) never reaches this counter: it compares the surviving
-      row's content and its capture time and stays silent;
+      schema decision. A genuine REPLAY (same position, same content — and, when
+      this write carries a ``ts``, the same ``recorded_at``; a ``ts``-less replay
+      compares no instant at all) never reaches this counter: the conflict query
+      selects no row and it stays silent;
     * ``circuit_open`` — a connect to the record failed within
       ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
       write locally: no socket, no timeout. The record is DEGRADED, not
@@ -2916,6 +3295,140 @@ def record_cache_leg_failure(reason: str) -> None:
 def cache_leg_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
     return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
+
+
+def record_projection_queue_state(*, depth: int, pending_positions: int) -> None:
+    """Publish the projection worker's two EVENT gauges (#14185).
+
+    Called from ``tortoise.projection_worker`` on every queue transition — an
+    enqueue and a completed fold — so the exported numbers are the loop's own
+    state rather than a sampler's guess. Both can go DOWN, which is what makes
+    them gauges: a depth and a count of positions.
+
+    ⛔ THE THIRD FAMILY IS NOT PUBLISHED HERE ANY MORE (#14222 review cycle 5,
+    ISSUE 1). ``PROJECTION_OLDEST_PENDING_SECONDS`` is a function of the CLOCK, so
+    a pushed value is only as fresh as its last publish — and the loop publishes
+    at exactly the two moments a wedge rules out (it is inside ``project``, with
+    nothing else waking it). It is registered with ``Gauge.set_function``
+    immediately below its own family definition and recomputed on COLLECT instead: the gauge then
+    represents current state, which is what a Prometheus gauge is for and what
+    makes an ``oldest_pending_seconds > N`` alert able to fire on a quiescent
+    wedge. Depths and positions stay event-published because they do not drift
+    with time.
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_QUEUE_DEPTH.set(depth)
+    PROJECTION_PENDING_POSITIONS.set(pending_positions)
+
+def record_projection_worker_failure(reason: str) -> None:
+    """Count one DEFERRED record projection that did not write a row (#14185).
+
+    Single writer: ``tortoise.projection_worker.ProjectionWorker._run``. ⛔ It is
+    NOT a value in ``RECORD_WRITE_FAILURE_COUNT``: the seam counts its own armed
+    failures there, so a worker-side raise reaching that family twice would
+    double-count one record, and a raise that the seam swallowed
+    (``write_live_record`` never raises for its own refusals) would never appear
+    at all — this counter is the only surface that sees the LOOP's own failures,
+    which is a different fact.
+
+    ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised),
+    ``record_no_outcome`` (the callable answered nothing) and
+    ``projection_refused`` (an armed refusal — nothing was written). ⛔ The last
+    two exist because `write_live_record`'s unarmed arm is deliberately silent and
+    because an armed refusal still writes no row, so this is the only surface that
+    can see a deferred fold that did not land (#14222 review cycles 2 and 3).
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_WORKER_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def projection_worker_failure_counts() -> dict[str, int]:
+    """In-process snapshot of ``PROJECTION_WORKER_FAILURE_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
+    return _collect_by_label(PROJECTION_WORKER_FAILURE_COUNT, "reason")
+
+
+def record_projection_inline_fallback(reason: str) -> None:
+    """Count one write that folded the record on its OWN thread (#14185).
+
+    Writers: ``tortoise.projection_worker.ProjectionWorker.submit`` for
+    ``queue_full`` / ``worker_stopping``, and the module-level
+    ``tortoise.projection_worker.submit`` for ``uncopyable`` / ``queue_fault`` —
+    the two declines that never reach the instance.
+    ``reason`` vocabulary: ``queue_full`` (the bound in
+    ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
+    loop was shutting down, or a wedged consumer kept it from being restarted),
+    ``uncopyable`` (the deep snapshot failed, so the item folds inline rather
+    than aliasing the caller's dict) or ``queue_fault`` (``submit`` raised before
+    it could queue — the caller's ``except Exception: return False`` still folds
+    inline, so nothing is lost).
+
+    ⛔ This is a LATENCY event, not a loss: nothing was dropped and nothing needs
+    a replay — the caller simply paid the fold it would have paid before #14185.
+    That is why it gets its own counter instead of riding the write-failure
+    family, whose non-zero means a row is missing.
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_INLINE_FALLBACK_COUNT.labels(reason=reason).inc()
+
+
+def projection_inline_fallback_counts() -> dict[str, int]:
+    """In-process snapshot of ``PROJECTION_INLINE_FALLBACK_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
+    return _collect_by_label(PROJECTION_INLINE_FALLBACK_COUNT, "reason")
+
+
+def projection_worker_gauges() -> dict[str, float]:
+    """The three projection-worker gauges, read WITHOUT a label (#14185).
+
+    They are unlabelled families, so ``_collect_by_label`` (which assumes one
+    sample per label value) cannot read them; this is the unlabelled analogue and
+    it filters on the exported sample suffix the same way ``_collect_by_label``
+    does. ⛔ **The filter is INERT today, and that is stated rather than implied**
+    (review round 11, P3): all three families are ``Gauge``s and
+    ``Gauge._child_samples`` yields exactly ONE sample — the ``…_created`` /
+    ``…_total`` suffixes come from ``Counter._child_samples``, so the promoted
+    exposition carries three lines and no ``_created``. An earlier revision said a
+    ``Gauge`` *does* export ``…_created``, which is false, so the guard read as
+    load-bearing work. It stays because the alternative is a reader that silently
+    reports a timestamp as a depth the day one of these families becomes a
+    ``Counter``.
+    """
+    ensure_projection_metrics_fork_safe()
+    out: dict[str, float] = {}
+    for key, metric in (
+        ("queue_depth", PROJECTION_QUEUE_DEPTH),
+        ("pending_positions", PROJECTION_PENDING_POSITIONS),
+        ("oldest_pending_seconds", PROJECTION_OLDEST_PENDING_SECONDS),
+    ):
+        for family in metric.collect():
+            for sample in family.samples:
+                if sample.name.endswith("_created") or sample.name.endswith("_total"):
+                    continue
+                out[key] = float(sample.value)
+    return out
+
+
+def _projection_worker_metrics() -> dict[str, object]:
+    """The ``metrics()`` key for the projection worker (#14185).
+
+    The ARMED flag is read through ``projection_worker.armed()`` rather than
+    through a second spelling of the variable name here: one flag, one reader —
+    so ``metrics()`` and the worker cannot disagree about whether the loop is
+    supposed to be running. ``armed: false`` means the gauges below are a
+    leftover from an earlier arming (or never moved), NOT a live reading, and
+    that is stated in the value rather than left to an operator to infer.
+    """
+    try:
+        from . import projection_worker
+    except Exception:
+        return {"armed": None, "error": "projection_worker_unimportable"}
+    return {
+        "armed": bool(projection_worker.armed()),
+        **projection_worker_gauges(),
+        "failures": projection_worker_failure_counts(),
+        "inline_fallbacks": projection_inline_fallback_counts(),
+    }
 
 
 def record_derived_embed_decline(scope: str, reason: str) -> None:
@@ -5641,7 +6154,7 @@ class HealthProbe:
         # so the cause was recorded and wiped inside ONE read. Measured 5/5
         # reads returning `db.error='probe in flight (0.0s)'`,
         # `start_error=None` — the exact signature this change exists to remove,
-        # on the one surface an operator reads (`hosted_api.py:8575-8580`).
+        # on the one surface an operator reads (`hosted_api.py:8648`).
         # `_run` clears it when a start actually LANDS.
         worker = threading.Thread(
             target=self._run, args=(seq,),
@@ -8357,6 +8870,23 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the measured shape (record 2 objects/3 points, cache 0/0) — so the
         # derived store gets its own key rather than a reason on the record's.
         "cache_leg_failures": cache_leg_failure_counts(),
+        # #14185: the PROJECTION WORKER's channel. Once the record's fold runs on
+        # its own loop, "is the record behind the journal?" is a queue question,
+        # and none of the counters above can answer it — a queued-but-not-yet-
+        # folded record was never lost, so `record_write_failures` correctly stays
+        # zero through a long lag. The lag is reported in POSITIONS (comparable
+        # with `record_reconcile`'s `unprojected_journal`) and in SECONDS (the
+        # only figure that distinguishes a fast burst from a wedged fold), plus
+        # the loop's own failures and the writes that folded the record on their OWN
+        # thread, BY REASON (``queue_full`` / ``worker_stopping`` / ``uncopyable`` /
+        # ``queue_fault`` — the four the counter's HELP declares). ⛔ NOT "because the
+        # queue was at its bound": only ``queue_full`` is that, and a reader of the old
+        # wording would size `TORTOISE_PROJECTION_QUEUE_MAX` up to fix an `uncopyable`
+        # record shape and a `queue_fault`'s thread exhaustion, which are not bound
+        # problems at all (round-15 review, P3). ⚠️ The ``armed`` key reports whether
+        # an operator armed the loop at all: ``{"armed": false}`` means these
+        # gauges are a leftover from a previous arming, not a live reading.
+        "record_projection_worker": _projection_worker_metrics(),
         # #13417: the DERIVED-entity vector's own channel. #13229 made a cold
         # write return without a vector instead of blocking on a 13.5 s model
         # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg

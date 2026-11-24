@@ -144,6 +144,7 @@ from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .search_engine import belief_value, VECTOR_LEG_BUDGET_MS  # #11702; #11691
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
+from .live import canonical_direction  # #7852 legacy alias → model value
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
@@ -175,6 +176,11 @@ from .read_stages import (
     STAGE_RETRIEVAL,
 )
 from .read_stages import mark as _mark_read_stage
+# #14186: the ONE embedder seam. Imported as a module (not as names) because the
+# seam is a live configuration — `resolve_backing()` is re-read per call, and a
+# `from .embed_seam import BACKING_INPROCESS` would freeze the comparison at
+# import time and make a mid-process backing switch invisible here.
+from . import embed_seam as _embed_seam
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -883,6 +889,30 @@ def _kind_invisible_char(kind: str) -> str | None:
         if _kind_non_identifier_char(probe, i):
             return probe[i]
     return None
+
+
+def _embedder_engine_kick_allowed() -> bool:
+    """Whether ENGINE INIT should kick the in-process encoder warm-up (#14186 F5).
+
+    ``False`` when the seam's backing is ``worker`` / ``external``: this process
+    runs no forward pass on those, so an eager load is a 432 MB copy nothing
+    consults — the RSS the ``worker`` backing exists to remove (#13674).
+
+    ⛔ FAILS SAFE, in the opposite direction from a skip: a seam that cannot be
+    imported answers ``True`` (warm), mirroring ``hosted_api._lifespan``'s
+    own arm, which keeps the pre-warm ON when the seam cannot be read. A silent
+    skip on an import error is a load that never happens on the configuration
+    that NEEDS it.
+
+    A function rather than an inline ``try`` so the three answers (worker ⇒ no,
+    inprocess ⇒ yes, unreadable seam ⇒ yes) are pinnable without building a graph.
+    """
+    try:
+        from .embed_seam import encodes_in_process
+
+        return encodes_in_process()
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable seam warms
+        return True
 
 
 def _kind_suggestion(kind: str) -> str:
@@ -5712,28 +5742,7 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: actually did. A caller prop of that name splatted into the call would bind
 #: the parameter and silently suppress the outcome (the capture would then treat
 #: every turn as unrecorded and fall back to the graph — the safe direction, but
-#: a silent one), so it is reserved like the rest.
-#: ``write_sink`` (#14111) is the third PER-CALL object the signature owns —
-#: and the SECOND append-only OUTCOME sink, after ``record_sink``, NOT a
-#: control on where the write lands. `_emit_event`'s only use of the parameter
-#: is `write_sink.append(write)`, on the far side of the chokepoint: the
-#: destination is already decided by the time the sink is filled, so nothing a
-#: caller puts here can redirect a write (the method's docstring says the same:
-#: "the CHOKEPOINT's own result, verbatim"). The harm a caller prop of that name
-#: does is REINTERPRETATION, not redirection — the prop binds the parameter at
-#: the splat, so the verdict goes to the CALLER's value instead of the sink the
-#: caller named. A list-valued prop silently absorbs the ``LiveWrite`` into
-#: caller data (measured); a NON-list prop raises ``AttributeError`` at the
-#: append, which the door's `except Exception` swallows as a WARNING after the
-#: write has already committed, so the emit's caller learns nothing. Both
-#: directions starve the sink the caller DID name — the same silent, safe-
-#: direction class as ``record_sink`` above, and the same reason to reserve it:
-#: a caller prop must never be reinterpreted as the internal sink.
-#: `_emit_event` cannot see it from inside for the same reason it cannot see any
-#: of these: the binding happens at the caller's splat, one frame up. Reserved
-#: here so the derivation in `tests/test_2296_document_created_journal.py`
-#: (which asserts the reserved sets COVER this signature) and the strip both
-#: stay true.
+#: a silent one), so it is reserved like the rest. ``write_sink`` (#14111) is the same KIND of name — an append-only OUTCOME sink, NOT a write target (one physical line on purpose: this file's line count is itself pinned by the doc corpus's ``sdk.py:`` cites, so a paragraph here moves every one of them and buys nothing one line does not). `live_write.write` settles the destination BEFORE the parameter is read and its only use is `write_sink.append(write)`, so no caller value can redirect a write: the harm is REINTERPRETATION — a caller prop binds the parameter at the splat, so the chokepoint's verdict lands in the CALLER's value instead of the sink the caller named, silently for a list and as an ``AttributeError`` at the append for anything else (after the journal line committed, so the door's ``except`` turns it into a WARNING). Proven by ``test_a_caller_write_sink_prop_is_not_bound_as_the_internal_sink``.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
                             "record_sink", "write_sink")
 
@@ -15525,9 +15534,33 @@ class TortoiseSDK:
             # EmbeddingModel.status() (``retrieval_legs()`` declared it too
             # until #4282 deleted that method); the cooldown
             # itself is unchanged (never sticky-off).
+            #
+            # ⛔ NOT WHEN THE ENCODER LIVES ELSEWHERE (#14186 review F5). With the
+            # seam's backing on ``worker``/``external`` this process runs no forward
+            # pass, so an eager in-process load is a 432 MB copy nothing consults —
+            # the RSS the ``worker`` backing exists to remove (#13674). This is the
+            # engine-init kick (thread ``tortoise-embedder-warmup``);
+            # ``hosted_api``'s lifespan pre-warm is gated the same way, and between
+            # them they were the two copies the documented migration left resident
+            # (``docs/infra-runbook.md`` §4.1.1e).
+            #
+            # ⛔ THE GATE IS HERE, NOT INSIDE ``start_warm_up``: the write/read
+            # readiness paths read that call's return value as "is a load in
+            # flight", so a skip there would turn a healthy LOCAL load into a
+            # decline on a deployment that still uses the in-process encoder for a
+            # residual path.
+            #
+            # ⛔ AND THE DECISION IS A FUNCTION, NOT AN INLINE IMPORT (review
+            # P3): folded into the blanket ``except`` below, a seam that could not
+            # be imported silently SKIPPED the warm-up — the mirror image of
+            # ``hosted_api._lifespan``, which keeps the pre-warm ON when the seam
+            # cannot be read. :func:`_embedder_engine_kick_allowed`
+            # fails SAFE (unreadable lever ⇒ warm) and is pinnable without
+            # building a graph.
             try:
                 from .embeddings import EmbeddingModel
-                EmbeddingModel.start_warm_up()
+                if _embedder_engine_kick_allowed():
+                    EmbeddingModel.start_warm_up()
             except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
                 pass
         return self._proj
@@ -29122,12 +29155,40 @@ class TortoiseSDK:
         # .predicate` verbs and the write path passes bare labels, so the
         # bare-vs-bare comparison is consistent. Namespaced enforcement
         # resolution (#2030) applies to the KIND arm of resolve_enforcement
-        # only; a namespaced relation label is out of scope here. (Epic §6
-        # scope: the "undeclared relation/kind-PAIR → warn-not-block"
-        # contract has NO kind-pair leg on the write path — this check
-        # covers the relation leg only; the kind-pair leg is an epic-level
-        # gap, out of #2030 scope.)
+        # only; a namespaced relation label is out of scope here. This block
+        # answers DECLAREDNESS only: the MECHANISM leg is the block below, and the
+        # kind-PAIR leg now EXISTS on this door — reached through
+        # `_relation_pair_notes` at the end of this method, which asks
+        # `relation_guards.relation_pair_verdict` (warn-not-block, #1934/#14263).
+        # ⛔ An earlier revision of this comment said the kind-pair leg was "an
+        # epic-level gap" with NO write-path leg; round-6 review (P3) caught it
+        # describing the gap this PR closes, in the comment a lane reads before
+        # touching this door.)
         warnings: list[dict] = []
+        # ── #14263 (review F3): ONE spelling resolution, on this door too ────
+        # A re-spelling of a DECLARED predicate (`HASPART`, `ASSIGNEDTO`,
+        # `grounded_in`) is `docs/ax/ax-principles.md` §1 Rule 1 class 1 —
+        # format variance, not a claim — so it is applied SILENTLY, as
+        # `_create_edge` applies it. ⛔ "as it has always applied it" would be
+        # FALSE (round-5 review, P3): NO door resolved the spelling before this
+        # PR — `projection/edges.py` raised `Unknown predicate` on a re-spelled
+        # declared verb — so `create_edge("HASPART", …)` accepting hasPart is a
+        # widening THIS change introduces, and §3.3 is where it is recorded.
+        # Resolving it HERE, before the
+        # `#1934` membership leg, is what makes one spelling reach all of them:
+        # the declaredness test, the direction/semantics resolution, the stored
+        # `label` property and the journal. Before this, THIS door and
+        # `_create_direct_edge` reported the write as `normalised`
+        # (`PairVerdict.predicate` in `relation_guards.py` promises "the spelling
+        # to WRITE") while storing the caller's spelling — so the graph then
+        # held two spellings of one declared relation, silently. The reference
+        # implementation for this case (SHACL) does not rewrite a lexical
+        # spelling as a side effect of reporting a validation result; where it
+        # IS applied it is applied consistently, which is the property this line
+        # restores across all three connect doors.
+        _declared_spelling = self._canonical_relation_spelling(label)
+        if _declared_spelling:
+            label = _declared_spelling
         if label:
             from tortoise.enforcement import emit_violation, warning_for_relation
             from tortoise.pack_registry import (
@@ -29808,6 +29869,21 @@ class TortoiseSDK:
         # contract — consumers may surface or ignore; the shape is stable).
         if warnings:
             result["warnings"] = warnings
+        # ── #14263: the relation-PAIR leg, on the operator doors ─────────────
+        # `label` is the DOMAIN verb (Layer 3); `op_type` is the MECHANISM
+        # (Layer 1) and is not a relation, so it is never the predicate. An
+        # operator write that names no `label` has nothing for this leg to
+        # judge and pays no graph read. Warn-not-block, exactly as the
+        # predicate and mechanism legs are: the operator has already landed.
+        _declaration_notes = self._relation_pair_notes(
+            predicate=label, source_id=source_id, target_ids=list(target_ids),
+            direction=direction)
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            result["relation_declaration"] = _declaration_notes[0]
+            result.setdefault("warnings", []).extend(
+                warning_shape(note) for note in _declaration_notes)
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
@@ -35717,6 +35793,18 @@ class TortoiseSDK:
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
         self._ingest_warnings = warnings
+        # ── #14263: the relation-PAIR leg's honest state, per connection ──────
+        # The doors (`_create_direct_edge`, `_create_operator`) already computed
+        # this and returned it; this router used to read ONE key (`created` /
+        # `id`) and rebuild the envelope from scratch, so the report was dropped
+        # on the surface that mints edges in BULK — the fail-silent class the
+        # issue was filed about, one layer above the writer (`69a9fae6c8`
+        # review, F2). It is NOT a §3.2 `warnings` key: that set is a CLOSED
+        # contract whose new members must land in the upstream-authored served
+        # skill mirror FIRST, so the report gets its own top-level field, always
+        # present (empty when nothing was reported) so the response key set stays
+        # stable. Shape and reasoning: INGEST_CONTRACT.md §3.3.
+        relation_declarations: list[dict] = []
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
@@ -36093,6 +36181,41 @@ class TortoiseSDK:
                 dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
+                # ── #14263 (review F1): the dedup KEY reads the token the
+                # writers STORE ─────────────────────────────────────────────
+                # The three connect doors resolve a declared re-spelling before
+                # they WRITE it (`_create_operator`, `_create_direct_edge`,
+                # `_create_edge`), but the resubmission probe below was handed
+                # the caller's RAW label, so the key asked the graph for a
+                # spelling the write had already normalised away. A retry of
+                # `label="DEPENDSON"` therefore MISSED the operator pass 1 wrote
+                # and minted a SECOND one over the same pair with the SAME
+                # canonical label — two live `IMPL` factors on one belief, the
+                # #9750 double-count class `_find_operator`'s own comment says
+                # this key exists to prevent (measured on a reified IMPL pair:
+                # raw spelling -> 2 operators, canonical -> 1, the only
+                # difference being the spelling). Resolving HERE, once, is the
+                # layer that makes key and writers agree: `_find_operator` has
+                # exactly one caller, this line's route, and the doors below
+                # canonicalise idempotently, so they receive the same token they
+                # would have resolved themselves. Unchanged when the predicate is
+                # not a declared relation under any spelling — the `#1934`
+                # predicate leg must still warn about THAT spelling.
+                _declared_label = self._canonical_relation_spelling(label)
+                _raw_label = label
+                if _declared_label:
+                    label = _declared_label
+                # ── the SECOND probe, for a graph written before that
+                # resolution existed (#14284 round-3 review, VGATE F-3) ──
+                # A build that predates `_canonical_relation_spelling`'s use on
+                # these doors stored the CALLER's token verbatim, so an operator
+                # written under `DEPENDSON` is keyed in a spelling this line has
+                # just replaced. Probing only the declared spelling would turn a
+                # retry that USED to exact-hit into the very miss F1 fixed — the
+                # same duplicate, on an older graph. So `_find_operator` is asked
+                # once more with the caller's token when the declared one misses;
+                # the caller's token is remembered in `_raw_label`, never used
+                # for the write (the doors resolve it themselves).
                 direction = conn.get("direction")
                 # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
                 # connection (route 'direct' — no reify/mitigation) is
@@ -36198,6 +36321,9 @@ class TortoiseSDK:
                         deduped["connections"] += 1
                     conn_result = {"direct_edge": op_type, "from": src,
                                    "to": dsts[0], "deduped": not created_flag}
+                    self._carry_relation_declaration(
+                        conn_result, edge_res, relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
                     # §6.1 descriptor: the ids["connections"] entry is the
                     # STABLE shape (no deduped — aggregated in
                     # deduped.connections) so identical-resubmission equality
@@ -36225,6 +36351,19 @@ class TortoiseSDK:
                 existing = self._find_operator(
                     op_type, [src, *dsts],
                     label=label, direction=direction)
+                if existing is None and _raw_label is not None \
+                        and _raw_label != label:
+                    # the legacy arm: a pre-resolution build wrote this row
+                    existing = self._find_operator(
+                        op_type, [src, *dsts],
+                        label=_raw_label, direction=direction)
+                # The door result of THIS pass, when one was written. The
+                # `exact` arm is a resubmission that mints nothing, so it has no
+                # fresh judgement to carry. ⛔ The `partial` (absorb) arm is NOT
+                # that case: it wires the targets the operator did not already
+                # hold, so it writes pairs and builds its own door result from
+                # their notes (round-5 review of PR #14284, P1 — see below).
+                door_result = None
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
                     # k=N boundary (cycle-15): re-apply promotion when the
@@ -36340,6 +36479,33 @@ class TortoiseSDK:
                     conn_result = {"operator_id": oid, "deduped": True}
                     self._append_warning(
                         f"operator_absorb_completed:{oid}:{completed}")
+                    # ── #14263 (round-5 review, P1): the arm that GROWS the
+                    # graph must report the pairs it grew. The completion loop
+                    # above is one bare-MERGE edge per input this operator did
+                    # not hold, so a resubmission that adds a target WRITES the
+                    # pair (source, target) — while `door_result` stayed None
+                    # here and `_carry_relation_declaration` never ran. §3.3 used
+                    # to justify that silence with "the partial-absorb arm
+                    # writes no edge", which is false, and the caller refining an
+                    # existing operator was never told the pair it had just
+                    # written was undeclared. Only the targets actually wired
+                    # are judged: a target the operator already held was not
+                    # written again, so re-reporting it would report a write
+                    # that did not happen.
+                    _absorbed_targets = list(dict.fromkeys(
+                        t for t in dsts if t not in written))
+                    _absorbed_notes = self._relation_pair_notes(
+                        predicate=label, source_id=src,
+                        target_ids=_absorbed_targets,
+                        direction=direction)
+                    if _absorbed_notes:
+                        from tortoise.relation_guards import warning_shape
+
+                        door_result = {
+                            "relation_declaration": _absorbed_notes[0],
+                            "warnings": [warning_shape(note)
+                                         for note in _absorbed_notes],
+                        }
                 elif existing is not None and existing.get("kind") == "decline":
                     # TWO+ candidates → decline + partial_operator_residue
                     # warning; the retry creates a fresh complete operator.
@@ -36352,6 +36518,7 @@ class TortoiseSDK:
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                    door_result = op
                 else:
                     op = self._create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
@@ -36359,6 +36526,11 @@ class TortoiseSDK:
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                    door_result = op
+                if door_result is not None:
+                    self._carry_relation_declaration(
+                        conn_result, door_result, relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
                 # §4.2 (A4): operator Points are stamped POST-WRITE keyed on the
                 # returned id (create_operator accepts no props). Stamp-when-
                 # absent covers the operator-path crash boundary too (position
@@ -36455,7 +36627,49 @@ class TortoiseSDK:
                         created["connections"] += 1
                     conn_result = {"relation": rel, "from": src, "to": dsts[0],
                                    "deduped": bool(existed and existed[0][0])}
-                ids["connections"].append(conn_result)
+                # ── #14263 (round-3 review, F1): the FIRST-CLASS relation route
+                # is a connect door too ───────────────────────────────────────
+                # `_relation_pair_notes`' docstring claims to be "the ONE reader
+                # every connect door shares … so a door cannot start seeing a
+                # pair the others miss" — and this route was the door it missed:
+                # it writes through `proj.create_edge` (the projection
+                # primitive), not through `sdk._create_edge`, so no verdict was
+                # computed and `relation_declarations` stayed empty for a
+                # `{"relation": …}` connection. That silence was REACHABLE with
+                # the shipped catalogs — `hasPart`, `dependsOn` and `ownedBy`
+                # are pack-declared AND in `_VALID_EDGE_PREDICATES`, the very
+                # allow-list `_check_connection` requires — and it contradicted
+                # §3.3's own sentence about `ownedBy`/`hasPart` edges "between
+                # declared pairs". Reported, never refused: the edge has already
+                # landed (`#1934`).
+                # ⚠️ Latent, stated rather than hidden: only `dsts[0]` is judged,
+                # so on the `extractedFrom` fan-out the later targets are not.
+                # Latent TODAY because `extractedFrom` is not pack-declared
+                # (``canonical_predicate`` narrows to ``[]`` before any read);
+                # it becomes a blind window the day a pack declares it.
+                _rel_notes = self._relation_pair_notes(
+                    predicate=rel, source_id=src, target_ids=[dsts[0]])
+                if _rel_notes:
+                    from tortoise.relation_guards import warning_shape
+
+                    self._carry_relation_declaration(
+                        conn_result,
+                        {"relation_declaration": _rel_notes[0],
+                         "warnings": [warning_shape(note)
+                                       for note in _rel_notes]},
+                        relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
+                # ⛔ The `ids` DESCRIPTOR keeps its documented §6.1 shape. The
+                # report belongs in `results` (granular) and
+                # `relation_declarations` (bulk) — the direct route keeps it out
+                # of `ids` for the same reason (see the STABLE-descriptor note
+                # on `ids["connections"]` there). `_carry_relation_declaration`
+                # mutates `conn_result` IN PLACE, so appending that object put
+                # `relation_declaration`/`warnings` inside `ids` — a shape change
+                # no client asked for (round-4 review, F2).
+                ids["connections"].append(
+                    {key: value for key, value in conn_result.items()
+                     if key not in ("relation_declaration", "warnings")})
             if results is not None:
                 results.append({"section": "connections", "index": i,
                                 "ref": conn.get("ref"), "item": conn,
@@ -36481,6 +36695,7 @@ class TortoiseSDK:
             "ids": ids,
             "nudges": nudges,
             "warnings": warnings,
+            "relation_declarations": relation_declarations,
         }
         if results is not None:
             out["results"] = results
@@ -36944,6 +37159,16 @@ class TortoiseSDK:
             f"MERGE (a)-[r:{rel_type}]->(b)",
             params={"src": source_id, "tgt": target_id},
         )
+        # ── #14263 (review F3): the declared spelling is what this door WRITES ─
+        # A re-spelling of a declared predicate is Rule 1 class 1 — silent — and
+        # the module's `PairVerdict.predicate` contract says the DECLARED one is
+        # "the spelling to WRITE". Applied here so the stored `label`, the
+        # `DirectEdgeCreated` journal descriptor that replays it and the reply
+        # all agree on ONE token (this door reported `normalised` and stored the
+        # caller's spelling before).
+        _declared_spelling = self._canonical_relation_spelling(label)
+        if _declared_spelling:
+            label = _declared_spelling
         attrs = {"direction": direction}
         if confidence is not None:
             attrs["confidence"] = float(confidence)
@@ -36997,8 +37222,24 @@ class TortoiseSDK:
         # Epic 903-C4 (#1242): a new direct edge changes the factor graph —
         # invalidate warm-start seeds on the endpoints' edges.
         self._get_ep().invalidate_messages([source_id, target_id])
-        return {"direct_edge": op_type, "from": source_id, "to": target_id,
-                "created": created, "deduped": not created}
+        result = {"direct_edge": op_type, "from": source_id, "to": target_id,
+                  "created": created, "deduped": not created}
+        # ── #14263: the relation-PAIR leg ────────────────────────────────────
+        # `label` is the Layer-3 DOMAIN verb and the only thing a pack declares
+        # a kind pair for; `op_type` (IMPL/NAND) is the Layer-1 MECHANISM and
+        # carries no endpoints in any declaration. A write with no `label`
+        # therefore has no declared pair to judge and pays no graph read.
+        # Warn-not-block: the edge has already landed (#1934).
+        _declaration_notes = self._relation_pair_notes(
+            predicate=label, source_id=source_id, target_ids=[target_id],
+            direction=direction)
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            result["relation_declaration"] = _declaration_notes[0]
+            result["warnings"] = [warning_shape(note)
+                                  for note in _declaration_notes]
+        return result
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
@@ -37451,6 +37692,85 @@ class TortoiseSDK:
         acc = getattr(self, "_ingest_warnings", None)
         if acc is not None:
             acc.append(entry)
+
+    def _carry_relation_declaration(self, conn_result: dict, door_result: dict,
+                                    collector: list, *, connection, source) -> None:
+        """Fold a connect door's relation-PAIR report into the ingest envelope (#14263).
+
+        ``_create_direct_edge`` and ``_create_operator`` each return
+        ``relation_declaration`` (the FIRST reported target) plus ``warnings``
+        (every reported target, one entry each); ``_ingest``'s relation route
+        (which reaches no connect door) hands this helper the same two keys
+        built inline from ``_relation_pair_notes``. This router reads only the
+        write-receipt keys, so before this helper existed the leg's cost was
+        paid and its verdict was dropped — on the surface that mints edges in
+        bulk, which is the surface `#14263` exists for.
+
+        Three renderings, ONE judgement each, never a second opinion:
+
+        * ``conn_result["relation_declaration"]`` — per connection, so a granular
+          caller sees it beside the id the write produced;
+        * ``conn_result["warnings"]`` — the same entries the door returned;
+        * ``collector`` (``out["relation_declarations"]``) — the bulk rollup,
+          each entry stamped with the connection's ``ref`` (or index), its
+          ``fromId`` and the ``toId`` it is about. The convergence here is
+          deliberate: a validation report attaches per-result entries to ONE
+          top-level report, and each result names its focus node — a fact with
+          no focus node is not actionable.
+
+        ⛔ NEVER raises and never blocks: a door that reported nothing, or a
+        malformed entry, simply contributes nothing. The write has already
+        landed (`#1934`) and this is reporting, not gating.
+
+        ⚠️ **Residual, stated rather than hidden.** The operator route's
+        ``exact`` (dedup hit) arm mints nothing and calls no door, so it carries
+        no judgement here — the same reason ``ids["connections"]`` is stable
+        across a resubmission: a resubmission that writes nothing has no new
+        state to report. ⛔ The ``partial`` (absorb) arm is NOT covered by that
+        residual and must not be moved back under it (round-5 review, P1): it
+        completes the input set with one bare-MERGE edge per target the operator
+        did not hold, so it DOES write, and it hands this helper a result built
+        from ``_relation_pair_notes`` for exactly the targets it wired.
+        """
+        entries = list(door_result.get("warnings") or ())
+        if not entries:
+            return
+        # ⛔ The judgement is set only when the door actually reported ONE
+        # (round-4 review, F1 — still open at `d6c0d707bd`). `entries` is *any*
+        # warning the door returned, and two producers put a dict in that list
+        # that has nothing to do with this leg: `#1934`'s
+        # `undeclared_relation` (`enforcement.warning_for_relation`) and
+        # `mechanism_mismatch`. Neither carries `relation_declaration`, so the
+        # unconditional assignment below published
+        # ``conn_result["relation_declaration"] = None`` — a present key holding
+        # null where §3.3 says an absent judgement contributes NOTHING. A client
+        # written against that contract (`entry["outcome"]`) then raises
+        # `TypeError` on a bundle that reports no pair fact at all, i.e. on the
+        # honest-answer path this leg exists to create. Every other surface in
+        # this diff is omit-when-absent; this is the one nullable scalar.
+        _declaration = door_result.get("relation_declaration")
+        if _declaration is not None:
+            conn_result["relation_declaration"] = _declaration
+        conn_result["warnings"] = entries
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            declaration = entry.get("relation_declaration")
+            if not isinstance(declaration, dict):
+                continue
+            item = dict(declaration)
+            item["connection"] = connection
+            # ⛔ The ids follow the JUDGED orientation, matching ``from``/``to``
+            # (round-3 review, F2): on a `direction="<-"` write the relation
+            # runs target -> source, so pairing the argument order with the
+            # judged kinds named a different node than the kinds did.
+            if declaration.get("direction") == "<-":
+                item["fromId"] = declaration.get("target")
+                item["toId"] = source
+            else:
+                item["fromId"] = source
+                item["toId"] = declaration.get("target")
+            collector.append(item)
 
     def _reapply_operator_promotion(self, op_id: str) -> None:
         """k=N boundary (cycle-15): re-apply promotion to a NULL-status
@@ -46974,7 +47294,48 @@ class TortoiseSDK:
         # encoder bug or a shape error is not the flag's contract.
         query_vec = None
         _vec_reason: str | None = None
-        if strategies.get("vector") and query and query.strip():
+        # ── #14186: WHICH BACKING ENCODES THIS QUERY ────────────────────────
+        # The acquire ladder below is a bound on a LOCAL model LOAD (`#13528`):
+        # it waits at most `READ_EMBED_BUDGET_S`, then declines so the read's
+        # dense leg is declared rather than parked. With a worker or external
+        # backing there is no local load to bound and no local model to acquire
+        # — running the ladder anyway would (a) load a 432 MB model this process
+        # no longer uses and (b) DECLINE the read on a budget for a model that
+        # was never going to be consulted, which is a false degradation. So the
+        # seam is asked directly on that path, through the SAME decline
+        # vocabulary (`encode_failed`), and the stage timeline still attributes a
+        # breach inside it to `embed_encode` — the step that is actually slow.
+        _seam_backing = _embed_seam.resolve_backing()
+        _seam_remote = _seam_backing != _embed_seam.BACKING_INPROCESS
+        if strategies.get("vector") and query and query.strip() and _seam_remote:
+            _mark_read_stage(STAGE_EMBED_ENCODE)
+            _declined = False
+            try:
+                query_vec = _embed_seam.encode_query(_dense_query)
+                # The backing produced no vector. Recorded with the term the local
+                # encode arm already uses rather than a new one: the leg trace's
+                # reason vocabulary is read by operators and pinned by rows, and a
+                # synonym for "the encode produced nothing" would split one
+                # population into two.
+                _declined = query_vec is None
+            except Exception:  # noqa: BLE001, RUF100
+                _declined = True
+            if _declined:
+                # ⛔ #5275 STILL BINDS ON THIS PATH. ``_unavailable`` raises iff
+                # ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is armed — an armed process
+                # must never be handed a keyword-only read. With a remote backing
+                # the local ``get()`` ladder is never reached, and that ladder is
+                # the only place the flag used to decide this; skipping it here
+                # would turn the flag's named refusal into the designed-absence
+                # degrade with no error and no signal, which is exactly the
+                # ``#2985`` shape #5275 was opened for.
+                from .embeddings import EmbeddingModel
+
+                EmbeddingModel._unavailable(
+                    context="read: the configured embed backing declined",
+                    kind=EmbeddingModel.absent_reason())
+                _vec_reason = "encode_failed"
+        elif strategies.get("vector") and query and query.strip():
             from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel
             from .exceptions import EmbedderUnavailableError
             # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
@@ -47049,7 +47410,14 @@ class TortoiseSDK:
             elif model is not None:
                 _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
-                    query_vec = model.encode([_dense_query])[0].tolist()
+                    # #14186: the encode routes through the seam. For the
+                    # in-process backing this is the pre-#14186 call exactly
+                    # (`EmbeddingModel.get()` + `ensure_embed_threads()` +
+                    # `model.encode([text])`), now with the query coalesced
+                    # behind the backing's bounded window.
+                    query_vec = _embed_seam.encode_query(_dense_query)
+                    if query_vec is None:
+                        _vec_reason = "encode_failed"
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
         if _vec_reason is not None and status_trace is not None:
@@ -49607,17 +49975,33 @@ class TortoiseSDK:
             return None
         from .embeddings import EmbeddingModel
         from .exceptions import EmbedderUnavailableError
+        # ⛔ #14186 review F5: with a worker or external backing there is no
+        # LOCAL encoder to acquire, so ``get()`` must not decide this pass at
+        # all. An ARMED ``get()`` with no local model RAISES (#5275), which made
+        # an armed process with a remote backing refuse a read the remote encoder
+        # can serve — #5275 inverted, because the refusal guards an absence that
+        # does not apply to this deployment. The flag's contract is honoured where
+        # the local model is actually the encoder; on the remote path the seam's
+        # own decline ladder carries it.
+        if _embed_seam.resolve_backing() == _embed_seam.BACKING_INPROCESS:
+            try:
+                model = EmbeddingModel.get()
+            except EmbedderUnavailableError:
+                raise  # #5275: REQUIRED — fail loud, never a silent fallback
+            except Exception:  # noqa: BLE001, RUF100
+                model = None
+            # Only the in-process backing reads ``model is None`` as "no dense
+            # leg": the seam carries its own encoder on the other backings.
+            if model is None:
+                return None
         try:
-            model = EmbeddingModel.get()
-        except EmbedderUnavailableError:
-            raise  # #5275: REQUIRED — fail loud, never a silent fallback
-        except Exception:  # noqa: BLE001, RUF100
-            model = None
-        if model is None:
-            return None
-        try:
-            # THE bounded extra embed: one composed string, one vector.
-            expanded_vec = model.encode([composed])[0].tolist()
+            # THE bounded extra embed: one string, one vector — and on a remote
+            # backing a SECOND round trip for this read: the primary encode above
+            # has RETURNED, so this opens its own batch. What the seam buys is
+            # coalescing with OTHER readers' tickets, not that batch (#14186).
+            expanded_vec = _embed_seam.encode_query(composed)
+            if expanded_vec is None:
+                return None
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "C2 dense expansion encode failed — keeping the original "
@@ -58465,7 +58849,12 @@ class TortoiseSDK:
             # mark the capture MERGE writes and the fold restores, so the record
             # read can see a missing tail.
             "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
-            "s.turn_max_index",
+            "s.turn_max_index, "
+            # #14232: APPENDED (sess[13]/sess[14]) — the in-flight extraction
+            # phase pair. Appended LAST for the reason this projection's header
+            # gives: `list_sessions` and this read build dicts POSITIONALLY, so a
+            # column inserted earlier silently re-binds every column after it.
+            "s.capture_extraction_phase, s.capture_extraction_phase_at",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -58633,7 +59022,10 @@ class TortoiseSDK:
             # parity contract consumes the shared declaration, so this key is
             # part of the SDK read by construction rather than a second
             # opinion).
-            "extraction": session_extraction_status(sess[7], sess[8]),
+            # #14232: sess[13]/sess[14] — column 12 of THIS read is
+            # `turn_max_index`, so the phase pair follows it.
+            "extraction": session_extraction_status(
+                sess[7], sess[8], phase=sess[13], phase_at=sess[14]),
             # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
             # sess[9..11] — they follow #3520's columns, which hold 7 and 8.
             "client_captured_at": sess[9],
@@ -61943,6 +62335,246 @@ class TortoiseSDK:
 
     # ── Typed structural edges (epic #888 W2, reification rule v3.5 §8) ──
 
+    #: The labels that can carry an ontology KIND, in the order the endpoint
+    #: probe sweeps them. The four epistemic labels plus ``Source`` (a
+    #: ``:Source`` carries ``documentKind``/``sourceKind`` and is an
+    #: ``aboutDocument`` / ``references`` target, so it is a real endpoint of a
+    #: connect write). Kept as a module-level tuple beside the readers that use
+    #: it rather than inlined, so a label added here moves every reader at once.
+    _ENDPOINT_KIND_LABELS: tuple[str, ...] = (
+        "Point", "Subject", "Object", "Event", "Source")
+
+    def _endpoint_kind_map(self, ids) -> dict[str, tuple[str | None, str | None]]:
+        """Each node's ``(label, declared ontology KIND)``, or ``(None, None)``.
+
+        The read half of the relation-PAIR leg (#14263). One batched,
+        label-ANCHORED query per label present — never a bare ``MATCH (n)
+        WHERE n.id IN $ids``, which would discard the per-(label, id) index
+        (the same rule ``_create_direct_edge`` follows for its endpoint probe).
+        The sweep stops as soon as every id is accounted for, so a two-endpoint
+        structural edge costs the one query its first label resolves.
+
+        The LABEL comes back with the kind because a pack may declare an
+        endpoint as a label rather than a kind — ``packs/dev`` declares
+        ``ownedBy | core:goal -> Subject``, and ``Subject`` there is ":Subject",
+        not one kind. Without it every such write would be reported as an
+        undeclared pair, which would make the honest-state report untrustworthy
+        on exactly the doors it exists for.
+
+        The kind slots are read in the ontology's own order and the FIRST
+        non-null wins: a node carries exactly one of them, and ``coalesce``
+        keeps this a single expression rather than eight round trips. ``kind``
+        is read last and only on these labels, matching
+        ``pack_state.graph_kind_namespaces``' label scope (``kind`` is a generic
+        slot that ``:Graph``/``:Pipeline`` also own).
+
+        ⛔ NEVER RAISES and never refuses a write. An unknown node, a node with
+        no kind, a node whose kind is blank, and a failed query all answer
+        ``None`` — which the verdict reads as *unresolved* and abstains on
+        (``#12060`` R4: a write must not depend on what we could read).
+        """
+        out: dict[str, tuple[str | None, str | None]] = {
+            i: (None, None) for i in ids if isinstance(i, str)}
+        want = {i for i in out if i}
+        if not want:
+            return out
+        try:
+            proj = self._get_proj()
+        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+            return out
+        for label in self._ENDPOINT_KIND_LABELS:
+            if not want:
+                break
+            try:
+                rows = proj.g.query(
+                    f"MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, coalesce(n.pointKind, n.objectKind, "
+                    "n.subjectKind, n.eventKind, n.documentKind, "
+                    "n.actionKind, n.sourceKind, n.kind)",
+                    params={"ids": sorted(want)},
+                ).result_set
+            except Exception:  # noqa: BLE001, RUF100
+                continue
+            for row in rows:
+                try:
+                    node_id, kind = row[0], row[1]
+                except Exception:  # noqa: BLE001, RUF100
+                    continue
+                if node_id not in want:
+                    continue
+                out[node_id] = (
+                    label,
+                    kind.strip() if isinstance(kind, str) and kind.strip() else None)
+                want.discard(node_id)
+        return out
+
+    def _canonical_relation_spelling(self, predicate) -> str | None:
+        """The DECLARED spelling of ``predicate``, or ``None`` (#14263).
+
+        The ONE resolution the three connect doors share — ``_create_edge``,
+        ``_create_direct_edge`` and ``_create_operator`` (and ``_ingest``'s
+        resubmission key, which resolves the token it hands the dedup probe the
+        same way) — so a re-spelling
+        cannot be normalised by one door and stored verbatim by another (the
+        `69a9fae6c8` review, F3). ``None`` means either "no predicate" or "not a
+        declared relation, under any spelling": the caller's own spelling must
+        then survive **unchanged**, because the `#1934`/`#7551` predicate leg
+        still has to warn about it — a gate never rewrites what it is about to
+        report as undeclared.
+
+        ⛔ NEVER RAISES and never refuses a write: an unreadable declaration set
+        answers ``None``, which leaves the caller's spelling alone. Failing here
+        would make a write depend on a read this guard cannot guarantee.
+        """
+        if not predicate or not isinstance(predicate, str):
+            return None
+        try:
+            from tortoise.relation_guards import canonical_predicate
+
+            return canonical_predicate(predicate)
+        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+            return None
+
+    def _relation_pair_notes(self, *, predicate, source_id, target_ids,
+                             direction=None) -> list[dict]:
+        """AX blocks for edges whose KIND PAIR no installed pack declares (#14263).
+
+        The ONE reader every connect door shares — ``_create_edge`` (the
+        structural arm, and so ``link_entities``' plain-edge arm),
+        ``_create_direct_edge``, ``_create_operator``, and ``_ingest``'s
+        FIRST-CLASS relation route (which writes through the projection
+        primitive, so it reaches no connect door and has to ask this reader
+        itself — the round-3 review's F1) — so a door cannot start seeing a pair
+        the others miss (the ``#12067`` "one reader, shared" rule, for the same
+        reason).
+
+        Returns the reported AX payloads (``relation_guards.UNDECLARED_PAIR`` /
+        ``REVERSED_PAIR``), in target order; ``[]`` when there is nothing to
+        say. Callers attach them to the reply and extend ``warnings``;
+        ⛔ **no caller may turn one into a refusal** — ``#1934`` is
+        warn-not-block and ``docs/ax/ax-principles.md`` §1 Rule 2's admission
+        test makes the refusal unwritable where no correction exists.
+
+        **Two narrowings keep this off the hot path.** (1) The predicate must be
+        OR SPELL a pack-declared relation at all — every structural predicate
+        the packs do NOT declare (``related``, ``references`` …) and every
+        invented verb abstains BEFORE any graph read, because the
+        ``#1934``/``#7551`` predicate leg already owns those and a pair check has
+        no premise for them. ⛔ ``hasPart`` is NOT in that set despite being a
+        structural predicate: a pack declares it (``dev:theme -> dev:epic``), so
+        it is judged like any other declared verb — it was named here once as an
+        example of the abstaining class, which was false. (2) Only endpoints
+        whose id resolves are read, and only when (1) allowed it.
+
+        ``predicate`` is the DOMAIN verb: the ``label`` on the operator paths
+        (the mechanism ``op_type`` is not a relation) and the ``relation`` on
+        the structural path. An absent label means the caller named no domain
+        relation, so there is nothing for this leg to judge.
+
+        ``direction`` is the door's RESOLVED Layer-1 direction token, and it is
+        what lets the judged pair follow the relation instead of the argument
+        order. ``"<-"`` declares the REVERSE orientation — the relation runs
+        target → source — so the pair to judge is ``(target, source)``. Without
+        it the leg answered ``reversed_pair`` for a write that WAS the declared
+        orientation: measured at the head before this parameter existed,
+
+            _create_operator("IMPL", db, [api], label="dependsOn",
+                             direction="<-")
+            -> relation_declaration.outcome == "reversed_pair"
+               direction="<-" direction_basis="explicit"
+
+        while `dependsOn` is declared exactly ``dev:api -> dev:database`` — so
+        the reply told the caller the pack declares only the reverse of the pair
+        it had in fact declared. A false statement in an agent-facing reply is
+        the one thing this module exists not to produce, so it is fixed here
+        rather than disclosed (`69a9fae6c8` review's UNVERIFIED note).
+        ``"<->"``/``"-"``/absent/forward are judged as asked: those either
+        declare both orientations (where the asked one is the one to check) or
+        declare none (where the argument order is all there is).
+        """
+        if not predicate or not isinstance(predicate, str) or not target_ids:
+            return []
+        try:
+            from tortoise.relation_guards import (
+                canonical_predicate,
+                declared_relation_pairs,
+                relation_pair_verdict,
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            return []
+        try:
+            declared = declared_relation_pairs()
+            if declared is None:
+                return []
+            # Narrowing (1): no declared pair for this predicate (under any
+            # spelling) → this leg has no premise. No graph read is paid.
+            canonical = canonical_predicate(predicate, declared)
+            if canonical is None:
+                return []
+            ids = [source_id, *target_ids]
+            kinds = self._endpoint_kind_map(ids)
+            notes: list[dict] = []
+            for target_id in target_ids:
+                src_label, src_kind = kinds.get(source_id, (None, None)) \
+                    if isinstance(source_id, str) else (None, None)
+                tgt_label, tgt_kind = kinds.get(target_id, (None, None)) \
+                    if isinstance(target_id, str) else (None, None)
+                # The judged pair follows the RELATION, not the argument
+                # order: `direction="<-"` declares the reverse orientation, so
+                # the relation runs target -> source and the declared pair to
+                # compare against is `(target, source)`. Every other token
+                # (`->`, `<->`, `-`, absent) is judged as asked — the first two
+                # declare the asked orientation among others, the last two
+                # declare none, and in both the argument order is all there is.
+                if direction == "<-":
+                    f_kind, t_kind = tgt_kind, src_kind
+                    f_label, t_label = tgt_label, src_label
+                else:
+                    f_kind, t_kind = src_kind, tgt_kind
+                    f_label, t_label = src_label, tgt_label
+                verdict = relation_pair_verdict(
+                    predicate, f_kind, t_kind,
+                    from_label=f_label, to_label=t_label,
+                    declared=declared)
+                if verdict.reportable and verdict.payload is not None:
+                    # The TARGET id travels with the judgement. A multi-target
+                    # operator write reports one judgement per target, and
+                    # `relation_declaration` is only the FIRST of them — without
+                    # the id, the other rows in `warnings` could not be
+                    # attributed to the target they are about, and a fact with
+                    # no focus node is not actionable (`69a9fae6c8` review, P3
+                    # on the prior review's finding 3).
+                    note = dict(verdict.payload)
+                    note["target"] = target_id
+                    # The orientation the pair was judged in travels, but ONLY
+                    # when it differs from the argument order: on a
+                    # `direction="<-"` write the judged ends are
+                    # (target, source), so a rollup that stamps `fromId` from
+                    # the connection's arguments would name a different node
+                    # than ``from`` does (round-3 review, F2).
+                    #
+                    # ⛔ EVERY OTHER TOKEN IS WITHHELD, including the one the
+                    # doors RESOLVE before this leg runs (round-4 review, F3).
+                    # `_create_operator` canonicalizes an absent direction to
+                    # the per-op_type default and `_create_direct_edge` fills
+                    # the same default in, so emitting `direction` whenever it
+                    # is not ``None`` published `"bidirectional"` /
+                    # `"unidirectional"` for a write where the caller declared
+                    # nothing — a value this file's own direction chain calls
+                    # *"NEITHER … a declaration"*, stamped into the stable
+                    # machine-readable block with no `direction_basis` beside it
+                    # to say how it was reached. Absence here is therefore NOT
+                    # "no direction declared" (read the operator/edge for that);
+                    # it is "the judged orientation is the argument order",
+                    # which is the single fact a consumer orients on, and the
+                    # only one §3.3 documents.
+                    if canonical_direction(direction) == "<-":
+                        note["direction"] = direction
+                    notes.append(note)
+            return notes
+        except Exception:  # noqa: BLE001, RUF100 — never raise into a write
+            return []
+
     def _create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
         """Create a typed structural edge (epic #888 W2, PR #912).
 
@@ -61962,7 +62594,9 @@ class TortoiseSDK:
         aboutEvent, aboutDocument, aboutSource, aboutAction
         (``from``/``to`` are Python keywords — mapped to from_id/to_id).
 
-        Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+        Returns {edge: {relation, from, to}, created: bool, nudges: [...]} — plus
+        ``relation_declaration`` and ``warnings`` when the pair leg has a
+        reportable verdict (see ``_relation_pair_notes``).
 
         ⚠️ **A derivation ``references`` edge minted HERE carries no
         ``sourceVersion`` anchor, and nothing will add one later.** ``references``
@@ -62010,13 +62644,69 @@ class TortoiseSDK:
         # successful write rather than created-only (`_EdgeHandlers.create_edge`
         # returns `MERGE … RETURN count(*) > 0`, truthy on a dedup hit, which is
         # what closes the crash window between the write and its record).
-        created = proj.create_edge(from_id, to_id, relation)  # validates relation
-        return {
+        # ── #14263: the packs' BUSINESS LOGIC at this door ───────────────
+        # Two things happen here, and the AX doc (docs/ax/ax-principles.md §1)
+        # decides the reporting class of each:
+        #
+        # 1. RE-SPELLING a declared predicate (`HASPART` / `grounded_in`) is
+        #    format variance — Rule 1 class 1 — so it is applied SILENTLY. A
+        #    receipt here would ask the caller to re-express what we already
+        #    understood. The declared spelling is what gets WRITTEN, so the
+        #    stored edge, its replay record and the pack's own census finally
+        #    agree on one token.
+        # 2. An edge whose KIND PAIR no installed pack declares is a claim about
+        #    what the graph now contains, so it is ECHOED (Rule 1 class 2) and
+        #    the write still lands (#1934 warn-not-block; AX Rule 2's admission
+        #    test makes a refusal unwritable where no correction exists).
+        #
+        # ⛔ Order matters only for the silent leg: the normalised spelling must
+        # be the one `proj.create_edge` validates AND the one the reply reports.
+        # One resolution, shared with `_create_direct_edge` and `_create_operator`
+        # (`_canonical_relation_spelling`), so these three doors cannot disagree
+        # about whether a re-spelling is applied.
+        _asked_relation = relation
+        _canonical = self._canonical_relation_spelling(relation)
+        if _canonical:
+            relation = _canonical
+        _declaration_notes = self._relation_pair_notes(
+            predicate=relation, source_id=from_id, target_ids=[to_id])
+        try:
+            created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        except ValueError as _exc:
+            # ⛔ The closed-set refusal must name what the CALLER wrote, not our
+            # spelling of it (round-3 review, P3). ``_VALID_EDGE_PREDICATES``
+            # validates the token it is HANDED, and this door now hands it the
+            # resolved spelling — so ``link_entities("CONTAINS", …)`` raised
+            # ``Unknown predicate: contains``, a token the caller never sent,
+            # on the one refusal whose AX Rule 2 job is to say exactly what
+            # failed. Only that exact refusal is rewritten; every other
+            # ``ValueError`` keeps its own text.
+            if _asked_relation and _asked_relation != relation:
+                _prefix = f"Unknown predicate: {relation}"
+                _text = str(_exc)
+                if _text.startswith(_prefix):
+                    # keep the corrective TAIL (the structural-verb list and the
+                    # "use create_operator" advice) — only the token changes.
+                    raise ValueError(
+                        f"Unknown predicate: {_asked_relation}"
+                        + _text[len(_prefix):]) from None
+            raise
+        result = {
             "edge": {"relation": relation, "from": from_id, "to": to_id},
             "created": created,
             "nudges": self._nudge_candidates(
                 relation, exclude_ids=[from_id, to_id]),
         }
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            # The stable field a client branches on (one shape, everywhere),
+            # plus the #1934 `warnings` entry a consumer that only reads that
+            # list already knows how to surface. One judgement, two renderings.
+            result["relation_declaration"] = _declaration_notes[0]
+            result["warnings"] = [warning_shape(note)
+                                 for note in _declaration_notes]
+        return result
 
     # ── Query Helpers ─────────────────────────────────────────────
 

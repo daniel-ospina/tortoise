@@ -48,6 +48,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -146,8 +147,63 @@ CAPTURE_REFUSAL_STAMP_MAX = 32
 QUOTA_EXCEEDED_CODE = "quota_exceeded"
 COHORT_COST_CAP_CODE = "cohort_cost_cap"
 _REFUSAL_CODES = (QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE)
+#: #14350 (D1): the server's machine-readable CAPACITY category
+#: (``hosted_api._CAPTURE_CAPACITY_CODE``). Declared here for the same reason as
+#: the two 402 categories above: this client ships independently of the server,
+#: so it names the category rather than matching prose, and the Pi leg names the
+#: same string.
+#:
+#: ⛔ Why a CAPACITY refusal is special at all. Every other refusal in this
+#: module is a verdict about the ENTRY (its harness is malformed, its org is out
+#: of quota, the network failed) and so it is charged to the entry's ``attempts``.
+#: A capacity refusal is a verdict about the BOX, in the same instant, for every
+#: entry: the server is simply running ``_CAPTURE_MAX_IN_FLIGHT`` captures right
+#: now. Charging it to the entry is what turned a 908-entry backlog into
+#: ``attempts`` 10–17 — one saturated pass charged EVERY entry, and exponential
+#: backoff then pushed most of them hours out, so the head stopped falling while
+#: every surface reported a drain in progress (#14342 §7.3).
+CAPTURE_CAPACITY_CODE = "capture_capacity_saturated"
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 6 * 60 * 60
+#: #14350: how many times ONE pass yields to a capacity refusal before it gives
+#: up and lets the next opportunity continue.
+#:
+#: The drain runs DETACHED (``session-start.sh`` backgrounds it with ``nohup``),
+#: so waiting costs the box nothing but the claim — but an unbounded wait would
+#: hold the claim for as long as the box is busy, which is the opposite of what a
+#: lease is for. Three yields honour the server's own ``retry_after`` (30 s) up to
+#: three times, ≈90 s of politeness, after which the pass ends and reports
+#: ``capacity_stopped``. The head has still not RISEN (nothing was charged and no
+#: backoff was armed), so monotone progress is preserved either way; the next
+#: SessionStart resumes from the same oldest entry.
+DRAIN_CAPACITY_YIELDS = 3
+#: #14350: the drain's EXPLICIT in-flight ceiling.
+#:
+#: ONE POST at a time, per box. This is the ceiling the epic asks for, and it is
+#: a *cap on how much of the server's capture budget the drain may hold*, not a
+#: throughput knob: the server admits ``_CAPTURE_MAX_IN_FLIGHT`` = 8 concurrent
+#: captures for the whole box (live captures + every drainer), so a drainer
+#: holding c slots leaves 8 − c for the user. At c = 1 a live capture is refused
+#: only when seven OTHER live captures are in flight; at c = N (N concurrent
+#: drains — the pre-#14350 shape) the drain alone can take all eight, which is the
+#: measured refusal this issue starts from. One POST at a time is also what makes
+#: the ceiling OBSERVABLE: the value is a property of the loop below, not of a
+#: pool, so no configuration can raise it without editing this file.
+#:
+#: ⛔ WHAT IT ACTUALLY BOUNDS, stated because the first version of this comment
+#: overstated it (#14423 review, P2). It is **1 POST per PASS**, and the claim is
+#: what makes that "per box": every UNTARGETED pass takes the spool claim first, so
+#: concurrent untargeted passes cannot overlap at all. A TARGETED pass
+#: (``only_session_id`` — the live session's own shutdown filing) takes no claim on
+#: purpose, so it can POST while the claim holder is awaiting one; the box's real
+#: worst case is therefore **2** in flight, not 1, and it is 2 only in that
+#: overlap. That is the number this constant should be read as: it is a per-pass
+#: ceiling, and the claim — not this constant — is what serialises the passes.
+#: ⚠️ No test asserts the per-pass property itself: the constant is read by no code
+#: (it is a stated ceiling), and the loop below issues one POST at a time by
+#: construction. The test pins the value and the claim serialisation, and this
+#: note is where the difference is written down rather than implied away.
+DRAIN_MAX_IN_FLIGHT = 1
 # `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
 # backoff saturates (30 * 2**10 > 6 h) long before, and a corrupt stored value
 # of 10**400 would otherwise try to materialise an astronomically large int.
@@ -500,6 +556,12 @@ def outcome_recorded(body) -> bool:
 
 @dataclass
 class FlushSummary:
+    #: POSTs this pass made. ⚠️ It counts EVENTS, not distinct entries: a pass
+    #: that yields three times on a capacity refusal and retries the SAME entry
+    #: reports ``attempted == 4`` for one capture. Read it with
+    #: ``capacity_yields``/``deferred`` beside it — the counter is honest about
+    #: what it counts, and a reader who takes it for "entries touched" is the one
+    #: making an inference the number never made.
     attempted: int = 0
     filed: int = 0
     deferred: int = 0
@@ -547,6 +609,46 @@ class FlushSummary:
     #: drain's own line names.
     unrecorded: int = 0
     unrecorded_sessions: list[str] = field(default_factory=list)
+    #: #14350 (D1): this pass did NOT run because another drainer holds the
+    #: spool's claim (`tortoise.drain_claim`). The correct answer for the second
+    #: of two concurrent drains — every entry it would have attempted is still on
+    #: the spool and the HOLDER is working the same list. Distinct from every
+    #: other zero-progress state (`held_by_backoff` = refused earlier, `terminal`
+    #: = never retried, `held_back` = the live session) because it is the only one
+    #: that is another PROCESS's doing.
+    held_by_claim: bool = False
+    #: #14350: the pass ENDED early because the server refused a POST for CAPACITY
+    #: (``capture_capacity_saturated``). Nothing was charged to the entry's
+    #: ``attempts`` and no backoff was armed — that is the difference between this
+    #: and a per-entry deferral, and it is what keeps the head monotone.
+    capacity_stopped: bool = False
+    #: #14350: the identity of that refusal (``{"status", "code"?,
+    #: "retry_after"?, "detail"?}``), so the drain line and the durable status
+    #: record can name the cause instead of counting a deferral.
+    capacity: dict | None = None
+    #: #14350: how many times this pass yielded and retried the same entry before
+    #: stopping (``DRAIN_CAPACITY_YIELDS`` is the ceiling). Published so a busy
+    #: box's drain says it politeness-waited rather than looking stuck.
+    capacity_yields: int = 0
+    #: #14350: the operator line naming WHO holds the claim when this pass gave up
+    #: (``held_by_claim``). A count alone cannot be acted on — the pid and the
+    #: lease expiry are what tell a human whether to wait or investigate.
+    claim_holder: str | None = None
+    #: #14350: the pass STOPPED because it no longer held the claim (a peer took
+    #: it over after our refresh was missed). Recorded rather than raised: the
+    #: correct response is to stop being the second drainer, which the pass has
+    #: already done.
+    lost_claim: bool = False
+    #: #14350: the claim could not be CREATED, so this pass ran WITHOUT the
+    #: cross-process exclusion. Never a silent state — see
+    #: `tortoise.drain_claim.DrainClaimUnavailable` — and never a silent WORRY
+    #: either: `claim_unavailable_reason` is what the operator line prints, because
+    #: `DrainClaimUnavailable` covers more than one cause (an unwritable root, and an
+    #: obstruction at the claim path that `acquire` refused to delete) and a
+    #: hard-coded "unwritable spool root" sentence is false for the second (review
+    #: finding).
+    claim_unavailable: bool = False
+    claim_unavailable_reason: str | None = None
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -783,6 +885,123 @@ def quota_refusal(outcome: PostOutcome) -> dict | None:
     return refusal
 
 
+def capacity_refusal(outcome: PostOutcome) -> dict | None:
+    """The CAPACITY refusal this failed POST represents, or ``None`` (#14350).
+
+    The sibling of :func:`quota_refusal`, and typed for the same reason: the
+    server publishes ``detail.code = "capture_capacity_saturated"``
+    (``hosted_api._CAPTURE_CAPACITY_CODE``) precisely so a capture client — which
+    ships independently of the server's prose — can name the condition without
+    matching a message.
+
+    ⛔ What the caller does with this is the whole point of D1, and it is NOT
+    what it does with a quota refusal. A quota refusal is about the ORGANIZATION
+    and is reported (then deferred on the entry's backoff clock, unchanged). A
+    CAPACITY refusal is about the BOX at this instant and is evidence about
+    NOTHING on the spool — so the drain must not charge it to the entry's
+    ``attempts``, and must not arm a backoff from it. It stops the pass instead
+    (see :func:`flush_spool`); ``attempts`` then measures what it is for, the
+    entry's own refusals, which is what makes the epic's ``attempts ≤ 3``
+    falsifiable at all.
+
+    Naming: the server's own category is copied through when it sent one, and
+    the class is named when it did not — ``code`` is always
+    ``capture_capacity_saturated`` because that is what this function just decided
+    the refusal IS; ``detail`` keeps the server's bytes for the operator.
+    ``retry_after`` is parsed out of the body when the server sent one (the drain
+    honours it instead of inventing a cadence), and every field beyond ``status``
+    and ``code`` is OPTIONAL — read it with ``.get``.
+    """
+    if outcome.ok:
+        return None
+    detail = outcome.detail if isinstance(outcome.detail, str) else ""
+    status = outcome.status
+    typed = CAPTURE_CAPACITY_CODE in detail
+    # ⛔ THE STATUS IS THE TRIGGER, THE CODE IS THE NAME. Narrowing this to a
+    # server that emits the category would leave the measured defect alive on
+    # every deployment that does not send one (an older server, an upstream
+    # limiter, a proxy): the entry would be charged for a condition that says
+    # nothing about it, which is exactly the shape this change removes. A 429 IS
+    # a saturation signal by construction.
+    if status != 429 and not typed:
+        return None
+    # ⛔ THE SERVER'S OWN CATEGORY WINS WHEN IT SENT ONE. The capture lane has a
+    # SECOND 429 — ``ingest_rate_limited`` (``hosted_api._ingest_rate_limited``) —
+    # and relabelling it ``capture_capacity_saturated`` would name a category the
+    # server never sent, disagreeing with its own ``/health`` counter about the same
+    # refusal (found in review). The status still makes it BOX-level for the
+    # charging rule, which is the part that matters here; the code only NAMES it.
+    refusal: dict = {
+        "status": status if status is not None else 429,
+        "code": _parsed_refusal_code(detail) or CAPTURE_CAPACITY_CODE,
+    }
+    retry_after = _retry_after_seconds(detail)
+    if retry_after is not None:
+        refusal["retry_after"] = retry_after
+    if detail:
+        refusal["detail"] = detail
+    return refusal
+
+
+def _parsed_refusal_code(detail: str) -> str | None:
+    """The server's machine-readable ``detail.code``, or ``None``.
+
+    TOTAL: an unparseable body, a JSON scalar, a missing/nested/absent code, or a
+    non-string value all answer ``None`` (the caller then names the class itself).
+    Deliberately narrow to a STRING code — an operator-readable line and a durable
+    status field both embed it, so a dict or a number would corrupt their grammar.
+    """
+    if not detail:
+        return None
+    try:
+        parsed = json.loads(detail)
+    except (ValueError, TypeError):
+        return None
+    node: object = parsed
+    for _ in range(2):  # {"detail": {...}} and {"detail": {"detail": {...}}}
+        if not isinstance(node, dict):
+            return None
+        code = node.get("code")
+        if isinstance(code, str) and code:
+            return code
+        node = node.get("detail")
+    return None
+
+
+def _retry_after_seconds(detail: str) -> float | None:
+    """The server's ``Retry-After`` value from a refusal body, or ``None``.
+
+    TOTAL over every shape: an unparseable body, a JSON scalar, a nested
+    ``detail`` object, a string, a negative or non-finite number — each answers
+    ``None`` (the caller then falls back to its own bounded cadence) rather than
+    raising inside the drain's per-entry guard.
+    """
+    if not detail:
+        return None
+    try:
+        body = json.loads(detail)
+    except (ValueError, TypeError):
+        return None
+    candidates = [body]
+    if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+        candidates.append(body["detail"])
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("retry_after")
+        number = None
+        if isinstance(value, bool):
+            number = None
+        elif isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            with contextlib.suppress(ValueError):
+                number = float(value)
+        if number is not None and math.isfinite(number) and number >= 0:
+            return number
+    return None
+
+
 def backoff_delay(attempts: int) -> int:
     """Exponential backoff for attempt N (1-based), capped at RETRY_MAX_SECONDS."""
     exponent = max(0, attempts - 1)
@@ -851,6 +1070,34 @@ def _log_has_complete_records(path: Path) -> bool:
         return False
 
 
+TURNS_OK = "ok"
+TURNS_ABSENT = "absent"
+TURNS_UNREADABLE = "unreadable"
+
+
+def _read_turns_state(root: Path, session_id: str) -> tuple[list[dict], str]:
+    """``read_spool_turns`` plus WHY it is empty (#12487).
+
+    ``read_spool_turns`` returns ``[]`` for an ABSENT log, an EMPTY log and a log
+    it could not open — and ``write_spool_entry`` needs to tell those apart for
+    the same reason it needs it for the meta: "nothing stored" and "stored bytes
+    I could not see" cannot share one decision. In particular a RESYNC (see
+    ``write_spool_entry``'s unusable-meta arm) may move a stored log aside, and
+    moving a log this process cannot read is a way to hide a conversation from
+    every surface that could deliver it.
+
+    One read, two answers: :func:`read_spool_turns` is the turns half of this.
+    """
+    path = _log_path(root, session_id)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return [], TURNS_ABSENT
+    except OSError:
+        return [], TURNS_UNREADABLE
+    return _parse_turns(data), TURNS_OK
+
+
 def read_spool_turns(root: Path, session_id: str) -> list[dict]:
     """Rebuild the conversation from the write-ahead turn log.
 
@@ -870,16 +1117,11 @@ def read_spool_turns(root: Path, session_id: str) -> list[dict]:
     torn trailing line fails `json.loads` and is SKIPPED while every intact turn
     before it survives.
     """
-    path = _log_path(root, session_id)
-    try:
-        data = path.read_bytes()
-    except OSError:
-        # An unreadable log (a directory in its place, EACCES, a partial-disk
-        # error) must not escape the drain: the entry is reported and recorded,
-        # keeping `session drain`'s always-exit-0 contract. `_flush_one` decides
-        # whether that report may unlink: a log that exists with bytes is KEPT
-        # (`transcript_torn`), never deleted.
-        return []
+    return _read_turns_state(root, session_id)[0]
+
+
+def _parse_turns(data: bytes) -> list[dict]:
+    """The tolerant decode + per-line filter — ONE reading for both states."""
     text = data.decode("utf-8", errors="replace")
     turns: list[dict] = []
     for line in text.splitlines():
@@ -912,6 +1154,62 @@ def read_spool_meta(root: Path, session_id: str) -> dict | None:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         # `UnicodeDecodeError` is a `ValueError` — see `read_spool_turns`.
         return None
+
+
+#: The three states of an entry's meta from a WRITER's seat (#12487).
+#: ``ok`` — read and usable. ``absent`` — nothing on disk for this session.
+#: ``unusable`` — SOMETHING IS ON DISK and it could not be read (EACCES/EIO/
+#: EISDIR, a non-UTF-8 body) or could not be used as a meta (invalid JSON, no
+#: usable ``session_id``).
+PRIOR_META_OK = "ok"
+PRIOR_META_ABSENT = "absent"
+PRIOR_META_UNUSABLE = "unusable"
+
+
+def _read_prior_meta(root: Path, session_id: str) -> tuple[dict | None, str]:
+    """The prior meta AND why it is not there — absent is not unusable (#12487).
+
+    :func:`read_spool_meta` answers ``None`` for BOTH, which is the right answer
+    for a READER (nothing usable either way) and the WRONG one for the WRITER: a
+    fresh snapshot and an entry whose bytes it could not use are different
+    states, and ``write_spool_entry`` treated them alike by building the new
+    entry over ``stored = []``. Measured on this head, with an unreadable meta
+    beside a six-turn log, one snapshot carrying a single turn:
+
+    * the write returned ``written: True`` with NO discard record;
+    * the turn log fell from **6 lines to 1** — every stored turn outside the
+      snapshot's own window destroyed, because ``stored`` was assumed empty, and
+      ``extends`` was therefore False so the log was REWRITTEN, not appended;
+    * ``filed_key``, ``attempts`` and ``next_attempt_at_ms`` were all wiped, so
+      an ALREADY-FILED session read as undelivered and would be re-POSTed
+      (#4714's amplification class).
+
+    The lesson is #11802's, one arm over: *a refusal to hand over bytes is not
+    evidence about their content*, and it is not evidence about their ABSENCE
+    either — a rename into a writable directory needs no read permission on the
+    target, so the writer can destroy a file it could not open.
+
+    ``absent`` is only ever concluded from ``ENOENT``. A meta that parsed but
+    carries no usable ``session_id`` is ``unusable`` rather than absent for the
+    same reason: it IS on disk, and replacing it is a decision the writer is not
+    entitled to make. The repairing scan (:func:`list_spool_metas`) is the
+    surface that quarantines a genuinely corrupt entry — it keeps the turn log
+    as an ``.orphan`` and records the reason (#7708).
+    """
+    try:
+        raw = _meta_path(root, session_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, PRIOR_META_ABSENT
+    except (OSError, UnicodeDecodeError):
+        return None, PRIOR_META_UNUSABLE
+    try:
+        meta = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, PRIOR_META_UNUSABLE
+    if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
+            or not meta["session_id"]:
+        return None, PRIOR_META_UNUSABLE
+    return meta, PRIOR_META_OK
 
 
 def _entry_bytes(root: Path, session_id: str) -> int:
@@ -957,6 +1255,38 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _unreadable_entry_bytes(root: Path, stems: list[str]) -> int:
+    """Bytes on disk for entries whose meta this process could NOT read (#12483).
+
+    A retained-unreadable entry (#11802) has no parsed meta, so it is in neither
+    ``len(metas)`` nor ``sum(_entry_bytes(...))`` — and its turn log keeps its
+    live ``.turns.jsonl`` name, so :func:`_orphan_paths` does not see it either.
+    Nothing counted it, and the BYTE CEILING therefore stopped enforcing: with a
+    5,000-byte turn log beside one filed entry, ``entries/`` held 5,228 bytes
+    while ``spool_saturated(max_total_bytes=1000)`` returned False — writes kept
+    being admitted past the ceiling with no refusal and no ``capture:
+    SATURATED``. #11802 traded a destroy for uncounted growth; this is the
+    accounting half that makes the trade honest.
+
+    ⛔ NOTHING HERE IS EVICTABLE, and that is the point. ``prune_spool`` may only
+    evict FILED entries and orphans; an entry with no readable meta cannot be
+    ranked, its delivered-ness is unknowable, and its class is REVERSIBLE (fix
+    the access — the same rule #10175 states for a saturated spool with nothing
+    reclaimable). So these bytes count toward ``total`` and never toward the
+    reclaimable credit: a spool pushed over its ceiling by them REFUSES new work
+    rather than growing silently, exactly like an all-undelivered backlog.
+
+    ``stat()`` needs no read permission, so an EACCES meta still contributes its
+    size — which is the only reason this reading is possible at all.
+    """
+    d = _entries_dir(root)
+    total = 0
+    for stem in stems:
+        total += _file_size(d / f"{stem}.meta.json")
+        total += _file_size(d / f"{stem}.turns.jsonl")
+    return total
 
 
 def _turn_log_has_content(root: Path, session_id: str) -> bool:
@@ -1117,18 +1447,31 @@ def _bounds_stamp(bounds: Bounds) -> str:
 
 
 def _cheap_spool_scan(root: Path) -> tuple[int, int] | None:
-    """``(meta-name count, bytes)`` from ONE ``scandir``, reading NO file.
+    """``(entry count, bytes)`` from ONE ``scandir``, reading NO file.
 
     The write path asks ``spool_saturated`` on EVERY turn — synchronously from
     the Pi hook's ``turn_end`` — and the real predicate ``json.loads`` every
     meta (measured 1.4 s at 20 000 entries, the ceiling this PR raises 20x).
     That cost is only necessary once the spool is actually NEAR a ceiling, so
     this answers the common case first: both numbers here are UPPER BOUNDS on
-    what ``_saturated_for_metas`` computes (the meta count is read from the
-    names alone, so it can only over-count a spool carrying corrupt metas, and
-    the byte total sums EVERY regular file in ``entries/``, so it can only
-    over-count the live entries plus orphans), which makes "under both ceilings
+    what ``_saturated_for_metas`` computes, which makes "under both ceilings
     here" a proof of "not saturated there".
+
+    ⛔ THE COUNT IS EXACT, AND THAT MATTERS (#14347 review, cycle 4, P1; cycle
+    5, P2). The real count is ``len(metas) + unreadable + corrupt + stray_logs``
+    (``_scan_spool``'s return). Every ``*.meta.json`` NAME lands in exactly one
+    of parsed/unreadable/corrupt, so the meta-name count IS the first three
+    terms — it is not merely an upper bound on them. The fourth term is a
+    byte-bearing ``<key>.turns.jsonl`` with no sibling meta, the shape the writer
+    produces when it stores the log BEFORE the meta and the meta write fails; a
+    count read from meta names alone cannot see it, so it is added here from the
+    same walk (``stray_stems - meta_stems``), and the zero-byte case is skipped
+    because the real predicate skips it too. That keeps the fast exit EXACT
+    rather than declining it: returning ``None`` whenever such a log existed
+    worked, but nothing reaps a meta-less log (``prune_spool`` reaps metas and
+    ``.orphan`` only), so one abandoned session left every later turn paying the
+    full parse — measured 137.7 ms -> 690.5 ms per ``_admission_saturated`` on a
+    5 000-entry spool.
 
     Returns ``None`` — never a guess — for anything this scan cannot bound: an
     unreadable directory, a dirent whose stat fails, or a non-regular dirent
@@ -1140,14 +1483,22 @@ def _cheap_spool_scan(root: Path) -> tuple[int, int] | None:
         with os.scandir(_entries_dir(root)) as entries:
             names = 0
             total = 0
+            meta_stems: set[str] = set()
+            stray_stems: set[str] = set()
             for entry in entries:
                 if not entry.is_file(follow_symlinks=False):
                     return None
-                total += entry.stat(follow_symlinks=False).st_size
+                size = entry.stat(follow_symlinks=False).st_size
+                total += size
                 if entry.name.endswith(".meta.json"):
                     names += 1
+                    meta_stems.add(entry.name[: -len(".meta.json")])
+                elif entry.name.endswith(".turns.jsonl") and size > 0:
+                    stray_stems.add(entry.name[: -len(".turns.jsonl")])
     except OSError:
         return None
+    if stray_stems:
+        names += len(stray_stems - meta_stems)
     return names, total
 
 
@@ -1484,14 +1835,14 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     """All spool metas, with two DISTINCT non-meta outcomes (#11802).
 
     - ``meta_unreadable`` — the meta could not be READ (``EACCES``/``EIO``/
-      ``EISDIR``, or an ``ENOENT`` that raced another drain's unlink). Nothing is
-      concluded about the entry and NOTHING IS DESTROYED: the record is
+      ``EISDIR``, an ``ENOENT`` that raced another drain's unlink, or bytes that
+      are not UTF-8 — #12484, see :func:`_scan_spool`). Nothing is concluded
+      about the entry and NOTHING IS DESTROYED: the record is
       ``retained: True``, the meta and its turn log stay exactly where they are,
       and the next drain retries.
     - ``corrupt_entry`` — the bytes WERE read and are not a usable meta (invalid
-      JSON, valid JSON with no usable ``session_id``, or bytes that are not
-      UTF-8). This keeps the #7708 repair path: record it, quarantine the turn
-      log, remove the meta.
+      JSON, or valid JSON with no usable ``session_id``). This keeps the #7708
+      repair path: record it, quarantine the turn log, remove the meta.
 
     Sharing one repair between them reported a permission refusal as data
     corruption and destroyed sessions the draining process was never allowed to
@@ -1510,6 +1861,42 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     ``count_pending_captures`` states. An unreadable ``entries/`` is still a
     recorded discard even when ``repair=False``: it is not a change to an entry,
     and a spool that cannot be listed must never read as an empty one.
+
+    ⛔ The retained entries this function does NOT return are still ON DISK, so a
+    caller that counts bytes must ask :func:`_scan_spool` for them (#12483).
+    """
+    metas, discards, _unreadable = _scan_spool(root, repair=repair)
+    return metas, discards
+
+
+def _scan_spool(
+    root: Path,
+    *,
+    repair: bool = True,
+) -> tuple[list[dict], list[dict], list[str]]:
+    """`list_spool_metas` + the stems of the entries it could NOT read (#12483).
+
+    ⛔ WHY THE THIRD ELEMENT EXISTS. A meta this process cannot read is RETAINED
+    (#11802) — and a retained entry that nothing COUNTS is the same accounting
+    hole the old destroying behaviour used to hide: both ceilings compute the
+    spool's size from PARSED metas, so an unreadable entry is in neither
+    ``len(metas)`` nor the byte sum, and its turn log keeps its live
+    ``.turns.jsonl`` name so ``_orphan_paths`` does not see it either. Measured
+    (#12483): one filed entry plus one unreadable meta with a 5,000-byte turn
+    log held **5,228 bytes** in ``entries/``, and
+    ``spool_saturated(root, Bounds(max_total_bytes=1000))`` returned **False** —
+    writes kept being admitted past the byte ceiling with no refusal and no
+    ``capture: SATURATED``.
+
+    The ceilings therefore need the ONE fact the parsed-meta list cannot carry,
+    and recovering it with a second walk of ``entries/`` would re-pay the cost the
+    health line already consolidates into one scan (#10479, measured 2,221 ms per
+    line at 20,000 entries). So the stems come back from the scan that already
+    looked at every meta.
+
+    The stems are collected whether or not ``repair`` is on: collecting is not a
+    mutation, and the health line — which must not mutate — is one of the two
+    readers that need them. Only the LEDGER RECORD is gated on ``repair``.
     """
     metas: list[dict] = []
     discards: list[dict] = []
@@ -1517,6 +1904,12 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     # it is recorded ONCE per distinct unreadable SET (the aggregate after this
     # loop) rather than once per file per scan.
     unreadable: list[tuple[str, str]] = []
+    # Stems whose meta was READ but is unusable (not JSON, wrong shape, no
+    # session_id). Separate from `unreadable` because the LEDGER distinguishes
+    # them ("cannot read or decode" vs "meta is not valid JSON") — but both are
+    # entries this scan cannot see through, so both are handed back to the
+    # callers that must COUNT them.
+    corrupt: list[str] = []
     d = _entries_dir(root)
     # `Path.is_dir()` is True for a mode-000 directory and `Path.glob` SWALLOWS
     # the EACCES its `scandir` hits — so the old `is_dir()` + glob returned an
@@ -1530,17 +1923,22 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     # call instead: ENOENT is a fresh install, any other OSError is recorded.
     try:
         with os.scandir(d) as entries:
-            names = sorted(e.name for e in entries if e.name.endswith(".meta.json"))
+            # ONE walk, both classes: the meta names this loop reads AND the turn
+            # logs a meta-less entry leaves behind (#14347 review, cycle 3,
+            # finding 3). A second `scandir` for the log names would undo the
+            # one-scan consolidation #10479 measured at 20 000 entries.
+            all_names = sorted(e.name for e in entries)
     except FileNotFoundError:
         # A fresh install: absent is not a failure.
-        return metas, discards
+        return metas, discards, []
     except OSError as exc:
         discards.append(record_discard(root, {
             "session_id": "spool",
             "reason": DISCARD_SPOOL_UNREADABLE,
             "detail": f"cannot list {d}: {exc}",
         }))
-        return metas, discards
+        return metas, discards, []
+    names = [name for name in all_names if name.endswith(".meta.json")]
     for name in names:
         path = d / name
         # ⛔ READING and PARSING are two different diagnoses and must not share
@@ -1549,42 +1947,71 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
         # them made this function report "meta is not valid JSON" about files
         # the process never opened, and — worse — act on it destructively.
         try:
-            raw: str | None = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8")
         except OSError as exc:
             # Every errno in this arm is the same class: the entry was not read,
             # so nothing may be concluded about it. ENOENT here is a race with
             # another drain's unlink — wrong MOMENT, not wrong bytes.
             # Collected, not recorded: see the aggregate after this loop.
-            if repair:
-                unreadable.append((name[: -len(".meta.json")], str(exc)))
+            unreadable.append((name[: -len(".meta.json")], str(exc)))
             continue
         except UnicodeDecodeError as exc:
-            # The bytes were read in full; they are just not UTF-8. That is a
-            # property of the CONTENT, so it takes the corrupt path below — but
-            # the detail must SAY that, not claim a JSON failure `json.loads`
-            # never reached (the same false-reason class #11802 is about).
-            raw = None
-            decode_error: str | None = str(exc)
-        else:
-            decode_error = None
+            # The bytes were read in full — they are just not UTF-8 — and that
+            # used to take the CORRUPT path below, which QUARANTINES the turn
+            # log and UNLINKS the meta (#12484). The two legs share one
+            # ``entries/`` directory and the Pi leg's reader
+            # (``readFileSync(path, "utf8")``) never throws: Node substitutes
+            # U+FFFD, `JSON.parse` succeeds and the entry is FILED. So whichever
+            # leg touched the file first decided whether the session was
+            # delivered or DESTROYED, on the same bytes.
+            #
+            # A content classification cannot be the thing that decides a
+            # DELIVERY, so undecodable bytes are a READ-class refusal now: the
+            # entry is RETAINED (#11802's stance — never destroy what you could
+            # not correctly read), it is COUNTED against both ceilings
+            # (:func:`_unreadable_entry_bytes`, #12483), and a leg that can use
+            # the bytes may still file it. Nothing about the second-order
+            # complaint survives either: the record says "cannot read or decode"
+            # and carries the codec's own message, instead of claiming a JSON
+            # failure `json.loads` never reached.
+            #
+            # ⚠️ STATED: this does NOT make the two legs agree on FILING. The Pi
+            # leg files such an entry (with U+FFFD in the id) and this leg
+            # retains it, because filing it here would be unsafe — every read
+            # below derives its path from the meta's ``session_id``, so a
+            # recovered-with-replacement id addresses a DIFFERENT file name than
+            # the one on disk, `read_spool_turns` would return nothing, and
+            # ``_flush_one`` would then record ``transcript_empty`` and UNLINK
+            # the log. Retention is the only disposition that cannot lose the
+            # bytes; what it removes is the DESTRUCTIVE divergence.
+            unreadable.append((name[: -len(".meta.json")],
+                               f"meta is not valid UTF-8: {exc}"))
+            continue
         meta = None
-        if raw is not None:
-            try:
-                meta = json.loads(raw)
-            except json.JSONDecodeError:
-                meta = None
+        try:
+            meta = json.loads(raw)
+        except json.JSONDecodeError:
+            meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
+            stem = path.name[: -len(".meta.json")]
+            # ⛔ COLLECTED WHATEVER `repair` IS — the same rule the read class
+            # above follows, for the same reason (#14347 review, cycle 2,
+            # finding 2). A corrupt meta is an entry that occupies disk and that
+            # `len(metas)` cannot see, so a read-only scan that silently dropped
+            # it UNDER-COUNTED the ceiling it was asked about. That is how the
+            # write path's admission probe, once it stopped repairing, would have
+            # lost a class: `repair=False` returned it to nobody and the bytes
+            # stopped enforcing. Collecting is not a mutation; only the ledger
+            # record and the quarantine below are.
+            corrupt.append(stem)
             if not repair:
                 continue
-            stem = path.name[: -len(".meta.json")]
             discards.append(record_discard(root, {
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_CORRUPT,
                 "detail": ("meta has no usable session_id" if meta is not None
-                           else (f"meta is not valid UTF-8: {decode_error}"
-                                 if decode_error is not None
-                                 else "meta is not valid JSON")) + f": {path}",
+                           else "meta is not valid JSON") + f": {path}",
             }))
             # The corrupt META is removed (the ledger line is its evidence), but
             # the turn log is QUARANTINED, not deleted (#7708): the transcript
@@ -1624,7 +2051,7 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     # enumerate all of them from the ledger — they read the count here and list
     # `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
     # ledger is not an audit trail, it is a second problem.
-    if unreadable:
+    if unreadable and repair:
         stems = sorted(stem for stem, _msg in unreadable)
         stamp = _stem_set_stamp(stems)
         _stem, example = unreadable[0]
@@ -1649,13 +2076,35 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 # permission, or run as the uid that owns the file), and each
                 # entry keeps its ONLY copy of the session id and retry state.
                 "retained": True,
-                "detail": (f"cannot read {len(unreadable)} spool meta(s): {example}"
-                           " — left in place and retryable; the bytes were never"
-                           " seen, so these are NOT corrupt entries"),
+                "detail": (f"cannot read or decode {len(unreadable)} spool meta(s):"
+                           f" {example}"
+                           " — left in place and retryable; nothing was"
+                           " concluded about these entries, so they are NOT"
+                           " corrupt entries"),
             },
             stamp=stamp,
         ))
-    return metas, discards
+    # ── #14347 review, cycle 3, finding 3: a META-LESS turn log is an entry ──┐
+    # The writer stores the log BEFORE the meta (`write_spool_entry`) and
+    # `_remove_entry_files` unlinks the meta FIRST, so an ENOSPC or a failed
+    # second unlink leaves a byte-bearing `<key>.turns.jsonl` with no meta — and
+    # such a file is in neither `metas` (no meta), `unreadable` (built from
+    # `*.meta.json` names) nor `_orphan_paths` (matches only `.orphan`). Nothing
+    # counted it, so BOTH ceilings were blind to bytes demonstrably on disk:
+    # #12483's false PASS, one state over. It goes into the THIRD element with
+    # the unreadable stems, because that element is exactly "stems the ceilings
+    # must count but no parsed meta can" — and NOT into `unreadable`, which the
+    # ledger describes as "cannot read or decode N spool meta(s)" (it is absent,
+    # not unreadable, and the ledger may not lie in either direction).
+    meta_stems = {name[: -len(".meta.json")] for name in names}
+    stray_logs = [
+        name[: -len(".turns.jsonl")] for name in all_names
+        if name.endswith(".turns.jsonl")
+        and name[: -len(".turns.jsonl")] not in meta_stems
+        and _file_size(d / name) > 0
+    ]
+    return metas, discards, sorted(
+        [stem for stem, _msg in unreadable] + corrupt + stray_logs)
 
 
 # #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
@@ -1898,8 +2347,46 @@ def write_spool_entry(
     meta_path = _meta_path(root, snapshot.session_id)
     log_path = _log_path(root, snapshot.session_id)
 
-    prior = read_spool_meta(root, snapshot.session_id)
-    stored = read_spool_turns(root, snapshot.session_id) if prior else []
+    prior, prior_state = _read_prior_meta(root, snapshot.session_id)
+    # #12487: `prior is None` has TWO causes and only one of them is safe to
+    # treat as a fresh session. When the meta is UNUSABLE the turn log is still
+    # addressable — its path comes from the CALLER's session id, not from the
+    # meta — so the stored turns are read anyway and the decision below is made
+    # on what is actually on disk.
+    # ⛔ AN ABSENT META IS NOT AN EMPTY ENTRY (#14347 review, cycle 3, finding
+    # 3). This function writes the LOG first and the meta second, and
+    # `_remove_entry_files` unlinks the meta first — so an ENOSPC (the normal
+    # condition on the box this PR exists for) or a failed second unlink leaves a
+    # byte-bearing `.turns.jsonl` with no meta. Reading that as a fresh session
+    # REPLACED the log with no record and no `.orphan`, and its bytes are none of
+    # `metas`, `unreadable` or `orphans` — so BOTH ceilings were blind to them:
+    # exactly #12483's false PASS, one state over. The log path comes from the
+    # CALLER's session id, so the stored turns are as addressable here as they
+    # are in the UNUSABLE arm.
+    stray_log_bytes = _file_size(log_path)
+    meta_absent = prior_state == PRIOR_META_ABSENT
+    unusable = (prior_state == PRIOR_META_UNUSABLE
+                or (meta_absent and stray_log_bytes > 0))
+    # ⛔ `prior is not None` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
+    # In the UNUSABLE arm `prior` is None BY DEFINITION while the entry — meta
+    # AND turn log — is still occupying bytes. Every question that is really
+    # about disk occupancy (is this write a REPLACEMENT? does the stored content
+    # sit over `max_entry_bytes`?) must ask THIS, not the readability of the
+    # meta. Asking the wrong one counted a growth of an unreadable entry TWICE
+    # (once through `unreadable_bytes`, once through the un-replaced projection),
+    # so the writer refused at ~half the byte ceiling while the health line —
+    # which does not project — reported the same spool healthy.
+    entry_on_disk = prior_state != PRIOR_META_ABSENT or stray_log_bytes > 0
+    # ONE spelling of "why this prior cannot be used": every record below names
+    # what is actually on disk, so no arm can describe an ABSENT meta as one it
+    # "could not read" (the ledger may not lie in either direction).
+    prior_desc = (
+        f"the stored meta ({meta_path.name}) is ABSENT and a"
+        f" {stray_log_bytes}-byte turn log ({log_path.name}) is the only record"
+        " of this entry" if meta_absent else
+        f"the stored meta ({meta_path.name}) could not be read or used")
+    stored, stored_state = (_read_turns_state(root, snapshot.session_id)
+                            if entry_on_disk else ([], TURNS_ABSENT))
     new_digest = content_digest(snapshot.turns)
 
     # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload) —
@@ -1938,6 +2425,52 @@ def write_spool_entry(
     ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
+    # ⛔ THE LOG AXIS IS NOT NESTED INSIDE THE META AXIS (#14347 review, cycle 3,
+    # finding F1). `stored_state` is computed above for EVERY on-disk entry, but
+    # its only reader used to sit inside `if unusable:` below — so a READABLE
+    # meta beside an UNREADABLE turn log skipped the guard entirely, `stored ==
+    # []` made `extends` False, and the write reached
+    # `_atomic_write(log_path, log_text)`. `os.replace` needs only DIRECTORY
+    # write permission, so a mode-`000` log was REPLACED by the snapshot with
+    # `written: True` and NO record at all. Measured on the pre-fix head: log 6
+    # lines -> 1, `discards == []`, no `.orphan`.
+    #
+    # This is #11802's recorded rule — "a read refusal is not a corruption;
+    # nothing is concluded about the entry and NOTHING IS DESTROYED" — applied
+    # one axis over, and it is the same shape the external comparables take for
+    # an unreadable SOURCE (restic: an *incomplete* snapshot, exit 3, never a
+    # valid-empty replacement; Borg: never repair from an unverified source).
+    # So the refusal runs whenever the state is KNOWN, not only when the meta
+    # also failed: refuse, retain, leave the entry byte-identical.
+    if entry_on_disk and stored_state == TURNS_UNREADABLE:
+        # The record says which of the two files could NOT be read. Both arms
+        # share `DISCARD_META_UNREADABLE` ("the stored state could not be read",
+        # retained, reversible) because a new reason would have to be mirrored
+        # into the retention set and the Pi leg for no behavioural gain; the
+        # `detail` is what a reader needs, and it is exact in both arms.
+        what = (
+            f"{prior_desc} — and that turn log could not be read either"
+            if unusable else
+            f"the stored turn log could not be read (its meta"
+            f" {meta_path.name} could)"
+        )
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": capture_key(snapshot.session_id, snapshot.turns),
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (
+                f"{what}, so this snapshot was REFUSED and the entry left"
+                " byte-identical: nothing can be concluded about what is on"
+                " disk, and a resync would hide a conversation that some other"
+                " uid may still be able to deliver"
+            ),
+        }, stamp=(f"unusable-meta:{snapshot.session_id}" if unusable
+                 else f"unreadable-turns:{snapshot.session_id}")))
+        return {"written": False,
+                "bytes": _entry_bytes(root, snapshot.session_id),
+                "discards": discards}
+
     extends = (
         len(stored) > 0
         # The log must end at a record boundary, or a torn append would fuse the
@@ -1951,10 +2484,103 @@ def write_spool_entry(
         )
     )
 
+    # The stored turns and BYTES this write would QUARANTINE if it is admitted —
+    # resolved here so the disposition can be decided BEFORE the guards and
+    # APPLIED after them (#14347 review F3).
+    divergent_turns = 0
+    divergent_bytes = 0
+    # ⛔ NOTHING ABOUT THE DISPOSITION IS RECORDED YET (#14347 review, cycle 3,
+    # finding 2). The admission guard ~250 lines below can still REFUSE this
+    # write, and a record emitted here asserted what the write DID — "the write
+    # APPENDED N new turn(s)" — for a write that was refused and never happened
+    # (measured: `written: False` beside a record claiming the append). The
+    # disposition is CARRIED and recorded on the admitted path, once the write it
+    # describes has actually happened.
+    unusable_disposition: str | None = None
+    appended_turns = 0
+    if unusable:
+        # ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
+        # (#12487). Measured on this head, with an unreadable meta beside a
+        # six-turn log and one snapshot carrying a single turn: the write
+        # returned `written: True` with no record, the log fell from 6 lines to
+        # 1, and `filed_key`/`attempts`/`next_attempt_at_ms` were wiped — because
+        # `stored` was assumed empty, so `extends` was False and the log was
+        # REWRITTEN from the snapshot alone.
+        #
+        # THREE DISPOSITIONS, decided by what is actually knowable:
+        #
+        # 1. THE LOG CANNOT BE READ EITHER — nothing about this entry is known,
+        #    and a resync would MOVE a conversation no surface could then
+        #    deliver. REFUSE; the state is reversible (fix the access) and the
+        #    entry is left byte-identical. This is #12487's own case.
+        # 2. THE SNAPSHOT EXTENDS THE STORED LOG — an append adds only turns that
+        #    were not on disk, so it cannot destroy anything. ADMIT it, and write
+        #    the meta fresh (repairing the entry). The retry/filing state is the
+        #    one thing that cannot be carried (it lived in the unreadable meta);
+        #    the server's capture key makes the resulting re-POST idempotent, and
+        #    the alternative — never spooling this live session again — turns one
+        #    corrupt byte into an ongoing silent loss.
+        # 3. THE SNAPSHOT DIVERGES (shorter, a branch, a compaction, a torn
+        #    tail) — it cannot be appended and it replaces stored turns the
+        #    entry cannot be reconciled with. RESYNC by QUARANTINING the stored
+        #    log to `.orphan` (its bytes are PRESERVED for forensics and still
+        #    counted by the byte ceiling — `_orphan_paths`) and writing the fresh
+        #    snapshot. Never an overwrite: the old bytes stay on disk.
+        #
+        # The record is stamped by SESSION, not by `entries/` state: an admitted
+        # append rewrites the meta, which moves the directory mtime on every
+        # turn, so a per-state stamp would re-record per turn forever (#4714's
+        # amplification class).
+        # (disposition 1 — the log cannot be read either — is enforced ABOVE,
+        # outside this arm: the log axis is an axis, not a sub-case of the meta
+        # one. See `if entry_on_disk and stored_state == TURNS_UNREADABLE`.)
+        if extends:
+            unusable_disposition = "append"
+            appended_turns = len(snapshot.turns) - len(stored)
+        else:
+            # ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can
+            # still REFUSE this write, and a refusal has to leave the entry
+            # byte-identical — that is the module's own stated contract ("A
+            # refused write therefore repairs nothing itself"). Quarantining
+            # here renamed the stored log to `.orphan` BEFORE the decision, so a
+            # REFUSED write had already moved the only addressable copy of the
+            # transcript the refusal text promised was "kept". The disarm and the
+            # record are deferred to the admitted path; refusing here is not a
+            # no-op, it is a mutation.
+            divergent_turns = len(stored)
+            # ⛔ THE GATE IS "THE LOG HAS BYTES", NOT "THE LOG PARSED TO
+            # TURNS" (#14347 review, cycle 2, finding 1). `stored` is the PARSED
+            # list, so a log that HAS bytes but parses to ZERO turns — a torn
+            # first append, a foreign/partial format — left
+            # `divergent_turns == 0`, skipped the quarantine entirely, and was
+            # OVERWRITTEN by the full-snapshot `_atomic_write` below:
+            # `written: True`, no discard record, no `.orphan`. Measured. That is
+            # #12487's own signature, reintroduced by gating a BYTE decision on
+            # a PARSE result.
+            divergent_bytes = _file_size(log_path)
+            stored = []
+            extends = False
+            if divergent_bytes == 0:
+                # ⛔ THE FOURTH STATE — and it is NOT disposition 3 (#14347
+                # review, cycle 11, finding 2). The meta is unusable and there is
+                # NO stored turn log at all, so nothing diverges and nothing can
+                # be quarantined: the `if divergent_bytes:` quarantine below is
+                # skipped, `quarantine_note` stays None, and the write proceeded
+                # with NO record — while both sibling arms RECORD that the entry's
+                # retry/filing state could not be carried ("it lived in the
+                # unreadable meta"). Measured on both legs at `0bd9cec63fb2`
+                # (unreadable meta carrying `filed_key: "K"`, no log):
+                # `written: True, discards: []` and the meta's `filed_key` gone.
+                # No transcript bytes are at risk here (there are none), so the
+                # write is right and the SILENCE is the defect — this is #4714's
+                # amplification class: a loss nobody can see.
+                unusable_disposition = "fresh"
+
     if extends:
         log_text = "".join(_serialise_turn(t) for t in snapshot.turns[len(stored):])
     else:
         log_text = "".join(_serialise_turn(t) for t in snapshot.turns)
+
     appended_bytes = len(log_text.encode("utf-8"))
     log_bytes_after = (_file_size(log_path) if extends else 0) + appended_bytes
 
@@ -2105,9 +2731,33 @@ def write_spool_entry(
         # bound — the reviewer's 1032-byte conversation, destroyed by one
         # oversized turn — the entry is legal and fileable, and all this write
         # needs is to be refused.
-        if prior is not None:
+        if entry_on_disk:
             on_disk = _entry_bytes(root, snapshot.session_id)
             if on_disk > bounds.max_entry_bytes:
+                if prior is None:
+                    # The entry is on disk and over the bound, but its META cannot
+                    # be read — so it cannot be marked terminal either (#14347
+                    # review F2, consequence 4). This used to fall into the
+                    # FRESH arm below, which recorded `retained: False` /
+                    # `bytes: 0` about an entry that is demonstrably on disk.
+                    # Refuse it: retained, counted, and reversible once the bytes
+                    # are readable again (`--retry-terminal` needs a meta).
+                    discards.append(_record_refusal(root, {
+                        "session_id": snapshot.session_id,
+                        "capture_key": meta["capture_key"],
+                        "reason": DISCARD_ENTRY_TOO_LARGE,
+                        "retained": True,
+                        "detail": (
+                            f"{detail}, and the content already on disk"
+                            f" ({on_disk} bytes) is also over that bound, so this"
+                            f" entry can never be filed — and {prior_desc}, so it"
+                            " cannot be marked terminal either. The write is"
+                            " REFUSED and the entry left byte-identical"
+                            " (a retained refusal, never a reported loss)"
+                        ),
+                    }))
+                    return {"written": False, "bytes": on_disk,
+                            "discards": discards}
                 # The stored entry can never be filed: RETAINED and marked
                 # terminal, exactly like a permanent HTTP refusal
                 # (`_quarantine_entry`, #7708). This branch used to be the one
@@ -2176,11 +2826,50 @@ def write_spool_entry(
     # in both directions: a new entry could cross the byte ceiling on its own, and
     # an EXISTING entry could grow past it with no eviction path at all (measured
     # 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
+    replaces_session_id = snapshot.session_id if entry_on_disk else None
     if _admission_saturated(
         root, bounds,
         session_id=snapshot.session_id,
         projected_bytes=entry_bytes,
-        replaces_session_id=(snapshot.session_id if prior else None),
+        # #14347 review F2: an entry that occupies disk is a REPLACEMENT, whether
+        # or not its meta was readable. Passing `None` for the unusable arm made
+        # the byte total count the entry twice (its retained bytes, then the full
+        # projected entry instead of the delta), which refused growths the health
+        # line called healthy.
+        replaces_session_id=replaces_session_id,
+        # …and a REPLACEMENT adds no COUNT either — the count term now CARRIES
+        # the classes that used to be invisible to it (#14347 review, cycle 5,
+        # finding 1). The cycle-2 F4 operand was `prior is None`, written when
+        # `_saturated_for_metas` counted `len(metas)` alone: back then an entry
+        # whose meta could not be read was in NEITHER that list NOR anything
+        # else, so it had to be added by hand. `parsed_count` became
+        # `len(metas) + unreadable_count` in the same commit, so the same entry
+        # is now counted by BOTH operands and the write path over-counts by one:
+        # a spool holding one readable plus one read-refused entry at
+        # `max_entries=2` reported `draining` and refused the refused entry's own
+        # growth — permanently, because `_refused_at_current_state` replays the
+        # stamp and the projection only grows. Measured: same spool, same
+        # snapshot, only the meta's readability differing → unreadable ⇒
+        # `written: False ['spool_saturated']`, readable ⇒ `written: True
+        # ['spool_count_exceeded']` (prune evicted the filed entry).
+        #
+        # The correct question is the POST-WRITE entry count, and it is the same
+        # question whether or not the meta was readable: an entry already on disk
+        # is already in one of the counted classes, so it adds 0; only a session
+        # that is not there at all adds 1.
+        adds_entry=(not entry_on_disk),
+        # ⛔ THE BYTES THIS WRITE IS ABOUT TO QUARANTINE ARE NOT IN THE
+        # PROJECTION (#14347 review, cycle 2, finding 3). The resync renames the
+        # stored log to `.orphan` AFTER this decision, so those bytes appear in
+        # the post-write total but in neither `entry_bytes` nor
+        # `_entry_bytes(replaces)` — an admitted resync could land the spool over
+        # `max_total_bytes` and the `prune_spool` on the SAME call would then
+        # evict the orphan it had just promised to keep (measured: QUARANTINED
+        # followed one line later by `evicted a quarantined log`). Counting them
+        # here refuses that resync BEFORE the rename instead of admitting it and
+        # then reaping what it preserved. They are NOT reclaimable credit: credit
+        # would say "prune may delete them", which is the outcome being avoided.
+        pending_orphan_bytes=divergent_bytes,
     ):
         discards.append(_record_refusal(root, {
             "session_id": snapshot.session_id,
@@ -2190,7 +2879,7 @@ def write_spool_entry(
             "detail": (
                 f"spool is at its ceiling (max_entries={bounds.max_entries},"
                 f" max_total_bytes={bounds.max_total_bytes}) with NOTHING"
-                f" evictable — this {'session GROWTH' if prior else 'NEW session'}"
+                f" evictable — this {'session GROWTH' if entry_on_disk else 'NEW session'}"
                 " was REFUSED rather than evicting an UNDELIVERED entry; the"
                 " turns the spool already holds are kept, and any newer turn is"
                 " still in the harness session log"
@@ -2199,10 +2888,65 @@ def write_spool_entry(
             # answered from this stamp instead of re-parsing every meta
             # (`_refused_at_current_state`).
         }, bounds=bounds, projected_bytes=entry_bytes,
-            replaces_session_id=(snapshot.session_id if prior else None)))
+            replaces_session_id=replaces_session_id))
         return {"written": False,
-                "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
+                "bytes": (_entry_bytes(root, snapshot.session_id)
+                          if entry_on_disk else 0),
                 "discards": discards}
+
+    quarantine_note: str | None = None
+    if divergent_bytes:
+        # ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
+        # diverge arm above (cycle-2 finding 1): a byte-bearing log that parses
+        # to zero turns must still be quarantined, never overwritten.
+        #
+        # ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
+        # F3/F4). Above the guards it mutated the spool before the decision, so a
+        # refusal had already moved the only addressable copy of the transcript.
+        # And `_quarantine_log` returns None for TWO outcomes — "nothing to keep"
+        # and "the rename FAILED" — so accepting None blindly fell through to
+        # `_atomic_write` over the still-present log: a DESTRUCTION disclosed as a
+        # retention (`retained: True`). A log that still has bytes after a failed
+        # quarantine is the third disposition — REFUSE, entry byte-identical.
+        quarantined = _quarantine_log(log_path)
+        if quarantined is None and _file_size(log_path) > 0:
+            discards.append(_record_refusal(root, {
+                "session_id": snapshot.session_id,
+                "capture_key": meta["capture_key"],
+                "reason": DISCARD_META_UNREADABLE,
+                "retained": True,
+                "detail": (
+                    f"{prior_desc}, and its stored turn log could not be"
+                    f" moved aside ({divergent_turns} parsed turn(s) still at"
+                    f" {log_path.name}) — so this snapshot was REFUSED and the"
+                    " entry left byte-identical: writing it would overwrite the"
+                    " very turns this path exists to preserve"
+                ),
+            }, stamp=f"unusable-meta-unquarantinable:{snapshot.session_id}"))
+            return {"written": False,
+                    "bytes": _entry_bytes(root, snapshot.session_id),
+                    "discards": discards}
+        # ⛔ THE RECORD IS CARRIED, NOT EMITTED (#14347 review, cycle 3, finding
+        # 2): it says the entry WAS rewritten, and the write below can still
+        # fail — a write failure must not leave that claim on the ledger. It is
+        # emitted after the write, under its OWN stamp, because this disposition
+        # and the append one are two different EVENTS about one session and the
+        # shared stamp suppressed the second (a session that appends on turn N
+        # and diverges later had its quarantine record swallowed, leaving the
+        # earlier "APPENDED … and overwrote nothing" as the ledger's account of
+        # turns that had in fact left the queue).
+        #
+        # The stored log is described by BOTH its bytes and its parsed turns: the
+        # gate is the bytes, so a byte-bearing/zero-parse log must not report
+        # "the stored 0 turn(s) were quarantined" about 22 bytes of transcript.
+        quarantine_note = (
+            f"this snapshot diverges from the stored log, so the stored turn"
+            f" log ({divergent_bytes} byte(s), {divergent_turns} parsed turn(s))"
+            f" was QUARANTINED to"
+            f" {quarantined.name if quarantined is not None else '(none)'}"
+            " — preserved on disk for forensics and still counted against"
+            " the byte ceiling — and the entry was rewritten from this"
+            " snapshot; the retry/filing state could not be carried forward")
 
     try:
         if extends:
@@ -2217,13 +2961,58 @@ def write_spool_entry(
     except OSError as exc:
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
+        # When the quarantine already ran, its bytes are STILL PRESERVED — that
+        # fact must survive into the ledger too, or the only visible record of a
+        # failed write is one that says nothing about the transcript that left
+        # the live queue moments earlier.
         discards.append(record_discard(root, {
             "session_id": snapshot.session_id,
             "capture_key": meta["capture_key"],
             "reason": DISCARD_WRITE_FAILED,
-            "detail": str(exc),
+            "detail": (f"{exc}; {quarantine_note}" if quarantine_note is not None
+                       else str(exc)),
         }))
         return {"written": False, "bytes": 0, "discards": discards}
+
+    # ⛔ THE DISPOSITION RECORD IS EMITTED HERE — AFTER THE WRITE IT DESCRIBES
+    # (#14347 review, cycle 3, finding 2). Emitted above the admission guard, a
+    # saturated spool returned `[<"the write APPENDED N new turn(s)">,
+    # <spool_saturated refusal>]` for a write that never happened; emitted before
+    # `_atomic_write`, a failed write left "the entry was rewritten" standing.
+    # Each disposition carries its OWN stamp: they share `(session_id, reason)`,
+    # and the dedupe key is that pair plus the stamp, so one stamp made the
+    # second disposition's record a suppressed repeat of the first.
+    if unusable_disposition == "append":
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (f"{prior_desc}; the write APPENDED {appended_turns} new"
+                       " turn(s) and overwrote nothing; the entry's retry/filing"
+                       " state could not be carried forward (it lived in the"
+                       " unreadable meta), so the entry may re-POST once"),
+        }, stamp=f"unusable-meta-append:{snapshot.session_id}"))
+    elif unusable_disposition == "fresh":
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (f"{prior_desc}; the entry had NO stored turn log, so there"
+                       " was nothing to append to or quarantine; the meta was"
+                       " rewritten from the snapshot and the entry's retry/filing"
+                       " state could not be carried forward (it lived in the"
+                       " unreadable meta), so the entry may re-POST once"),
+        }, stamp=f"unusable-meta-fresh:{snapshot.session_id}"))
+    elif quarantine_note is not None:
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": f"{prior_desc}; {quarantine_note}",
+        }, stamp=f"unusable-meta-diverge:{snapshot.session_id}"))
 
     discards.extend(prune_spool(root, snapshot.session_id, bounds))
     _sweep_stale_temp_files(root)
@@ -2336,12 +3125,41 @@ def _attempts(meta: dict) -> int:
     return min(max(0, int(as_float)), _MAX_ATTEMPTS)
 
 
+def _live_unreadable_stems(root: Path, stems: list[str]) -> list[str]:
+    """The unreadable stems that are STILL ENTRIES after the scan that found them.
+
+    ``_scan_spool(repair=True)`` unlinks a corrupt meta and renames its turn log
+    to ``.orphan`` INSIDE the scan, yet still reports the stem. A COUNT taken from
+    that third element therefore counts an entry the same call deleted, and the
+    two readers of the element disagreed: ``prune_spool`` has excluded those stems
+    since #14347 review cycle 6 ("a count overage that ceased to exist inside the
+    same call"), while ``spool_saturated`` wired the raw list straight into
+    ``unreadable_count`` — so the public predicate answered SATURATED for a spool
+    its own repair had just left able to admit a capture, and answered the
+    opposite on the next call (#14347 review, cycle 11, finding 1). Measured at
+    ``0bd9cec63fb2``: 2 readable undelivered + 1 corrupt meta at
+    ``max_entries=3`` → ``True``, then ``False``.
+
+    One definition, both readers. With ``repair=False`` nothing is unlinked, so
+    every stem still has its meta and this is a no-op — the health line must keep
+    counting the corrupt entry it can still SEE (it describes the spool it reads).
+    """
+    entries_dir = _entries_dir(root)
+    return [
+        stem for stem in stems
+        if (entries_dir / f"{stem}.meta.json").exists()
+        or (entries_dir / f"{stem}.turns.jsonl").exists()
+    ]
+
+
 def spool_saturated(
     root: Path,
     bounds: Bounds = DEFAULT_BOUNDS,
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
     repair: bool = True,
 ) -> bool:
     """Is the spool at a ceiling with NOTHING EVICTABLE left to reclaim?
@@ -2395,11 +3213,19 @@ def spool_saturated(
     One spool directory, two legs: the Pi leg's ``spoolSaturated`` is the twin
     and states the same rule.
     """
-    metas, _ = list_spool_metas(root, repair=repair)
+    metas, _, unreadable = _scan_spool(root, repair=repair)
     return _saturated_for_metas(
         root, metas, bounds,
         projected_bytes=projected_bytes,
-        replaces_session_id=replaces_session_id)
+        replaces_session_id=replaces_session_id,
+        adds_entry=adds_entry,
+        pending_orphan_bytes=pending_orphan_bytes,
+        unreadable_bytes=_unreadable_entry_bytes(root, unreadable),
+        # The COUNT population is filtered by what the scan left on disk; the BYTES
+        # are not, because a stem whose meta is still present must still weigh.
+        # Both readers of the third element share ONE definition (see
+        # `_live_unreadable_stems`; #14347 review, cycle 11, finding 1).
+        unreadable_count=len(_live_unreadable_stems(root, unreadable)))
 
 
 def _saturated_for_metas(
@@ -2409,6 +3235,10 @@ def _saturated_for_metas(
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
+    unreadable_bytes: int = 0,
+    unreadable_count: int = 0,
 ) -> bool:
     """The ceiling arithmetic of :func:`spool_saturated`, over an ALREADY-READ scan.
 
@@ -2426,16 +3256,47 @@ def _saturated_for_metas(
     # class is byte-evictable only (see the docstring above).
     reclaimable_orphan_bytes = sum(_file_size(p) for p in orphans)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #12483: a RETAINED-UNREADABLE entry occupies bytes and can never be
+    # evicted, so it is added to the total and NOT to the reclaimable credit
+    # (`unreadable_bytes`). Without this the byte ceiling stopped enforcing the
+    # moment an entry became unreadable — measured 5,228 bytes in `entries/`
+    # against `max_total_bytes=1000` with the predicate answering False.
+    total += unreadable_bytes
+    # Orphan bytes are the only credit prune may spend, so they are in the total
+    # AND in `reclaimable_orphan_bytes` (subtracted at every comparison below).
     total += reclaimable_orphan_bytes
+    # …and the SAME argument holds for the COUNT ceiling (#12483 said "both
+    # ceilings"; only the byte axis was fixed first). An unreadable entry is not
+    # in `len(metas)`, so counting only parsed metas let writes be admitted past
+    # `max_entries` without limit — measured: 6 unreadable metas with
+    # `Bounds(max_entries=3)` answered not-saturated. They are permanent (no meta
+    # to rank, never evicted) so they belong in the FLOOR as well as the total,
+    # exactly like the byte term.
+    total += pending_orphan_bytes
+    parsed_count = len(metas) + unreadable_count
+    # `adds_entry` is the COUNT answer and `replaces_session_id` is the BYTE
+    # answer, and they are NOT the same question (#14347 review, cycle 2,
+    # finding 4). The caller's answer is the POST-WRITE entry count:
+    # `adds_entry=True` only when the session is not on disk at all — the write
+    # path passes `not entry_on_disk` (#14347 review, cycle 5, finding 1), so an
+    # unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is NOT
+    # `prior is None`: that operand was written when `parsed_count` was
+    # `len(metas)` alone, and it now double-counts the unreadable class, which
+    # `unreadable_count` above already carries. The default keeps every other
+    # caller's behaviour.
+    if adds_entry is None:
+        adds_entry = replaces_session_id is None
     if projected_bytes is None and replaces_session_id is None:
         # STRICT: the question is whether ADDING an entry would cross the ceiling,
         # so a spool exactly AT the count ceiling is already saturated.
-        over_count = len(metas) >= bounds.max_entries
+        over_count = parsed_count >= bounds.max_entries
         over_bytes = total - reclaimable_orphan_bytes >= bounds.max_total_bytes
+        strict = True
+        count = parsed_count
         if not over_count and not over_bytes:
             return False
     else:
-        count = len(metas) + (0 if replaces_session_id is not None else 1)
+        count = parsed_count + (1 if adds_entry else 0)
         if replaces_session_id is not None:
             # A GROWTH replaces this entry's bytes instead of adding a second
             # copy of them, and adds no count.
@@ -2443,6 +3304,7 @@ def _saturated_for_metas(
         total += projected_bytes or 0
         over_count = count > bounds.max_entries
         over_bytes = total - reclaimable_orphan_bytes > bounds.max_total_bytes
+        strict = False
         if not over_count and not over_bytes:
             return False
     # Over a ceiling that the ORPHAN credit could not absorb. Only a FILED entry
@@ -2452,9 +3314,44 @@ def _saturated_for_metas(
     # UNLINKS it. The entry being written can never reclaim ITSELF: `prune_spool`
     # is told to keep it (`keep_session_id`), so counting it would admit a write
     # nothing can make room for.
-    return not any(
-        _entry_is_filed(m) and m.get("session_id") != replaces_session_id
-        for m in metas)
+    #
+    # ⛔ BUT "A FILED ENTRY EXISTS" IS NOT "ROOM CAN BE MADE" (#12483). Two
+    # classes are permanent by design: an UNDELIVERED entry (never evicted) and a
+    # retained-UNREADABLE one (no meta to rank, and the state is reversible).
+    # Once those two alone carry the spool over a ceiling, evicting the filed
+    # class cannot bring it back under — so admitting the write spends FILED
+    # entries for room that does not exist, one write at a time, while the spool
+    # keeps reporting "not saturated". The FLOOR below is the spool's size AFTER
+    # evicting everything it is allowed to evict; if the floor is still over, the
+    # answer is REFUSED (the #10175 rule: refuse new work, never destroy the
+    # queue to admit it).
+    filed = [m for m in metas
+             if _entry_is_filed(m) and m.get("session_id") != replaces_session_id]
+    floor_bytes = total - sum(_entry_bytes(root, m["session_id"]) for m in filed) \
+        - reclaimable_orphan_bytes
+    # ⛔ THE STRICT ARM'S FLOOR MUST CARRY THE `+1` THE WRITER WILL ADD (#14347
+    # review, cycle 6, finding 1). `strict` means "no projection was offered",
+    # and every caller of that arm is asking the question about a NEW capture —
+    # `capture_health_line` above all — so the post-write count is
+    # `parsed_count + 1`, exactly as `_admission_saturated` computes it for a
+    # fresh session. Without the `+1` the floor is one short of the writer's, and
+    # the two disagree whenever `parsed_count - len(filed) == max_entries` with at
+    # least one filed entry: measured, three readable undelivered + one FILED at
+    # `max_entries=3` gave health `DRAINING (3 queued)` while the writer refused
+    # every NEW capture with `spool_saturated`. The writer is right (after prune
+    # evicts the filed entry the count is 4, still over a ceiling of 3, so room
+    # cannot be made and #10175 requires the refusal) — the health line was the
+    # false PASS, the #2100 class this whole predicate exists to prevent.
+    # The byte axis is deliberately NOT given the same `+1`: a new capture's
+    # bytes are unknown to a caller that offered no projection, and the `>=`
+    # comparison against the ceiling is the conservative stand-in for them.
+    floor_count = count + (1 if strict else 0) - len(filed)
+    if over_bytes and (floor_bytes >= bounds.max_total_bytes if strict
+                       else floor_bytes > bounds.max_total_bytes):
+        return True
+    if over_count and floor_count > bounds.max_entries:
+        return True
+    return not filed
 
 
 def _admission_saturated(
@@ -2464,6 +3361,8 @@ def _admission_saturated(
     session_id: str,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
 ) -> bool:
     """Is THIS write refused? The write path's entry point to ``spool_saturated``.
 
@@ -2498,14 +3397,37 @@ def _admission_saturated(
     cheap = _cheap_spool_scan(root)
     if cheap is not None:
         names, total = cheap
-        added = 0 if replaces_session_id is not None else 1
+        added = 0 if (adds_entry is False or
+                      (adds_entry is None and replaces_session_id is not None)) else 1
         if (names + added <= bounds.max_entries
-                and total + (projected_bytes or 0) <= bounds.max_total_bytes):
+                and total + (projected_bytes or 0)
+                + pending_orphan_bytes <= bounds.max_total_bytes):
             return False
+    # ⛔ THE PROBE MUST NOT REPAIR (#14347 review, cycle 2, finding 2). This used
+    # to fall through to `spool_saturated`'s DEFAULT `repair=True`, so the write
+    # path called the repairing scanner directly — and on a spool near a ceiling a
+    # write that was then REFUSED had ALREADY had this session's meta unlinked and
+    # its turn log renamed to `.orphan`, which the next `prune_spool` evicts. The
+    # refusal text said "the turns the spool already holds are kept" about turns
+    # the probe had just moved. `spool_saturated`'s own docstring states the rule
+    # this call site broke: "A refused write therefore repairs nothing itself".
+    # A read-only probe is also why the corrupt-meta class now comes back from
+    # `_scan_spool` regardless of `repair` — with the repair off, an uncounted
+    # class is an unenforced ceiling.
+    #
+    # ⚠️ STATED CONSEQUENCE: with `repair=False` a CORRUPT meta counts as
+    # permanent (its `.orphan`-able log is not yet an orphan), so admission is
+    # more conservative than the post-repair state. That refusal loses nothing —
+    # the entry is intact, the conversation is still in the harness session log,
+    # and the DRAIN (`flush_spool`) still repairs and prunes, which unblocks it.
+    # Conservative-and-intact beats admitted-and-destroyed.
     return spool_saturated(
         root, bounds,
         projected_bytes=projected_bytes,
-        replaces_session_id=replaces_session_id)
+        replaces_session_id=replaces_session_id,
+        adds_entry=adds_entry,
+        pending_orphan_bytes=pending_orphan_bytes,
+        repair=False)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
@@ -2546,15 +3468,69 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     same ``loss`` vocabulary the live entries use (#6388).
     """
     discards: list[dict] = []
-    metas, _ = list_spool_metas(root)
+    metas, _, unreadable = _scan_spool(root)
     orphans = _orphan_paths(root)
     ranked = sorted(
         (m for m in metas if m.get("session_id") != keep_session_id),
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
-    count = len(metas)
+    # #14347 review, cycle 6, finding 2: this scan REPAIRS, so a CORRUPT meta is
+    # already unlinked and its log already renamed to `.orphan` by the time we get
+    # here — that stem is in the third element but is NO LONGER AN ENTRY. Counting
+    # it made prune evict one filed entry per corrupt meta for a count overage that
+    # ceased to exist inside the same call (measured: ceiling 2, two filed + one
+    # corrupt → one filed evicted, post-count 1; the readable-undelivered control
+    # landed at 2). Its bytes are already correct (`_unreadable_entry_bytes` reads
+    # 0 for it) and its log is credited as an orphan; only the COUNT was stale.
+    # A stem that still has its meta OR its live turn log is still an entry —
+    # one definition, shared with `spool_saturated` (`_live_unreadable_stems`).
+    count = len(metas) + len(_live_unreadable_stems(root, unreadable))
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #12483: the retained-unreadable class is on disk and can never be evicted
+    # (see `_unreadable_entry_bytes`), so it counts here too — otherwise the
+    # eviction loop spends the filed class trying to reach a ceiling it cannot.
+    total += _unreadable_entry_bytes(root, unreadable)
+    # ⛔ THE COUNT TERM MUST NAME THE SAME POPULATION AS THE PREDICATE THAT SET
+    # THE CEILING (#14347 review, cycle 5, finding 2). `_saturated_for_metas`
+    # counts `len(metas) + unreadable_count`; `count` here was `len(metas)`
+    # alone, so with K retained-unreadable/stray entries the spool settled at
+    # `max_entries + K` — every admitted write spent one filed entry and the
+    # predicate's own ceiling was never reached. Measured: 3 filed + 1
+    # chmod-000 entry at `max_entries=3` → `prune_spool` returned `[]`, the
+    # predicate said not-saturated, and the write was admitted with
+    # `spool_count_exceeded` while the post-write count was STILL 4. The
+    # unreadable class is not evictable (the loop only ever spends filed
+    # entries), so it belongs in the ceiling test and never in the decrement.
     total += sum(_file_size(path) for path in orphans)
+    # ⛔ DO NOT SPEND THE FILED CLASS FOR ROOM THAT CAN NEVER BE MADE (#12483).
+    # The PERMANENT classes — an undelivered entry (never evicted) and a
+    # retained-unreadable one (no meta to rank) — cannot shrink, so if their
+    # bytes ALONE carry the spool over `max_total_bytes`, evicting filed entries
+    # and orphans cannot bring it back under and destroying them buys nothing.
+    # The floor is constant while this loop runs (each eviction subtracts the
+    # same bytes it removes from the evictable pool), so one check up front is
+    # the whole test: below the floor, the loop reaches the ceiling; above it,
+    # there is nothing to do and the spool reports SATURATED.
+    #
+    # ⛔ THE LOOP BELOW HONOURS THE SAME FLOOR (#14347 review, cycle 3, finding
+    # 1). The COUNT axis is rightly not folded into the early return — a count
+    # overage IS relievable by a filed entry even when the byte ceiling is not —
+    # but the loop's own break must then stop on the COUNT alone once the byte
+    # term is unreachable. Without that, a spool breaching BOTH ceilings evicted
+    # EVERY filed entry to relieve one count slot (measured: 5 filed 100-byte
+    # entries + one 2,000-byte undelivered entry at max_entries=3,
+    # max_total_bytes=1000 lost all 5) and was still over the byte ceiling
+    # afterwards — the same #10175 violation this floor exists to prevent.
+    evictable_bytes = sum(_entry_bytes(root, m["session_id"]) for m in ranked
+                          if _entry_is_filed(m))
+    evictable_bytes += sum(_file_size(path) for path in orphans)
+    bytes_reachable = (total > bounds.max_total_bytes
+                       and total - evictable_bytes <= bounds.max_total_bytes)
+    if count <= bounds.max_entries and not bytes_reachable:
+        # Nothing to relieve, or nothing that could relieve it. The count axis is
+        # NOT folded in here: a count overage IS relievable by a filed entry even
+        # when the byte ceiling is not.
+        return discards
     # The quarantined-log pass runs AFTER the filed-entry pass below, never
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on
     # the wire), while an orphan's delivered-ness is unknowable — so the certain
@@ -2565,7 +3541,13 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # entry is never evicted at all (capture-loss). The record names the class in
     # the same `loss` vocabulary the live entries use (#6388).
     for meta in ranked:
-        if count <= bounds.max_entries and total <= bounds.max_total_bytes:
+        # #14347 review, cycle 3, finding 1: `bytes_reachable` False means no
+        # eviction can bring the byte term under the ceiling (the permanent
+        # classes alone are over it), so a loop still testing
+        # `total <= max_total_bytes` never stops on that axis and spends the
+        # whole filed class for a count overage that needed one eviction.
+        if count <= bounds.max_entries and (total <= bounds.max_total_bytes
+                                            or not bytes_reachable):
             break
         # ⛔ ONLY a FILED entry is evictable. Its content is already on the wire,
         # so dropping it costs nothing a reader cannot re-fetch; an UNDELIVERED
@@ -2601,7 +3583,7 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         count -= 1
         total -= size
     for orphan in orphans:
-        if total <= bounds.max_total_bytes:
+        if total <= bounds.max_total_bytes or not bytes_reachable:
             break
         size = _file_size(orphan)
         discards.append(record_discard(root, {
@@ -2780,7 +3762,7 @@ def _unrecorded_from_metas(metas: list[dict]) -> list[str]:
     return found
 
 
-def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
+def _health_scan(root: Path) -> tuple[int, list[dict], int, int] | None:
     """ONE read-only pass over `entries/`: the pending count AND the metas.
 
     A health line needs two answers from the same directory — "how many captures
@@ -2797,10 +3779,35 @@ def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
     A meta this leg cannot parse is still counted as PENDING — it may be waiting,
     and folding it into "nothing to do" is how a box that could file nothing came
     to report ``capture: OK``. It is EXCLUDED from the saturation metas because
-    `list_spool_metas(repair=False)` skips it; that is the same asymmetry the two
-    separate walks had, preserved on purpose.
+    it is not in the parsed set; that is the same asymmetry the two separate
+    walks had, preserved on purpose.
+
+    ⛔ THE THIRD ELEMENT IS WHY THAT EXCLUSION IS NO LONGER A HOLE (#12483). A
+    meta this leg cannot READ is retained and never evicted, so its BYTES still
+    count against the byte ceiling — returned here so the health line reaches the
+    same SATURATED verdict the write path reaches, without a second walk. A meta
+    it can read but not USE (invalid JSON, no ``session_id``) is COUNTED as well
+    (#14347 review F3): :func:`_scan_spool` collects those stems BEFORE its
+    ``repair`` gate, so a read-only probe still sees the class it would otherwise
+    drop — and this scan passes ``repair=False``, so it quarantines nothing; the
+    repairing scan (the drain) is what moves such an entry, and its log then
+    counts as an orphan. The test that pins it is
+    ``test_the_ONE_health_scan_answers_both_questions_the_same_way``
+    (``unreadable_count == 3``: read-refused + corrupt + no-``session_id``).
+
+    It also carries a byte-bearing turn log whose META is ABSENT (#14347 review,
+    cycle 3, finding 3): the writer stores the log first, so an ENOSPC leaves
+    exactly that shape, and its bytes belong to no other class.
+
+    ⛔ THE FOURTH ELEMENT IS THE COUNT HALF OF THE SAME ARGUMENT (#12483 said
+    "both ceilings"). `len(metas)` cannot see either unreadable class, so a health
+    line that counted only parsed metas described a spool of THREE entries as
+    having none — and the write path, which now counts them, disagreed with it
+    about one directory. The stems are returned rather than their count because
+    the fourth element is also their identity, and one number derived from one
+    list cannot drift.
     """
-    metas, discards = list_spool_metas(root, repair=False)
+    metas, discards, unreadable = _scan_spool(root, repair=False)
     if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
         return None
     try:
@@ -2813,7 +3820,8 @@ def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
     pending = max(0, on_disk - len(metas)) + sum(
         1 for m in metas
         if _terminal_marker(m) is None and not _entry_is_filed(m))
-    return pending, metas
+    return (pending, metas, _unreadable_entry_bytes(root, unreadable),
+            len(unreadable))
 
 
 class CaptureHealth(NamedTuple):
@@ -2846,6 +3854,12 @@ def _refusal_label(reason: object) -> str:
     """
     if not reason or reason in (QUOTA_EXCEEDED_CODE, "402"):
         return "quota"
+    if reason == CAPTURE_CAPACITY_CODE:
+        # #14350: the BOX is at its capture ceiling — a different sentence from
+        # every quota cause, and the right one: nothing about the org's allowance
+        # is involved, and the operator's action is "wait / reduce concurrency",
+        # not "buy a plan".
+        return "capture capacity"
     return str(reason)
 
 
@@ -2970,7 +3984,7 @@ def _spool_health_line(
         return CaptureHealth(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
-    queued, scan_metas = scan
+    queued, scan_metas, unreadable_bytes, unreadable_count = scan
     # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
     # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
     # carries them, and no second walk over `entries/` is needed.
@@ -2986,7 +4000,9 @@ def _spool_health_line(
     # same arithmetic (`_saturated_for_metas`) the write path runs. READ-ONLY by
     # construction: a health line must not quarantine, record or unlink the spool
     # it is describing.
-    saturated = _saturated_for_metas(root, scan_metas, bounds)
+    saturated = _saturated_for_metas(root, scan_metas, bounds,
+                                     unreadable_bytes=unreadable_bytes,
+                                     unreadable_count=unreadable_count)
     status = recorded.get("status") if recorded is not None else None
     blocked_status = (
         status
@@ -3078,6 +4094,12 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
     spool and the credential on each line, never stored.
     """
     quota = summary.quota
+    # ⛔ `capacity_stopped`, NOT `capacity is not None`: the dict remembers that a
+    # refusal HAPPENED during the pass, and a pass that yielded once and then filed
+    # everything was recorded as `blocked`/429 anyway — a cause the box no longer
+    # had (found in review). The record states the box's state at the END of the
+    # pass; the console line below tells the same story from the same flag.
+    capacity = summary.capacity if summary.capacity_stopped else None
     if quota is not None:
         status = quota.get("status")
         record: dict = {
@@ -3089,6 +4111,28 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
         if status is not None:
             record["status"] = status
         detail = quota.get("detail")
+        if isinstance(detail, str) and detail:
+            record["detail"] = detail[:500]
+        write_capture_status(root, record)
+    elif capacity is not None:
+        # #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
+        # server's own 429 so `capture: BLOCKED (n queued, 429 capture capacity
+        # saturated)` names the cause — the same durable half the quota arm gets,
+        # for the same reason: the hook that fired this drain throws its stderr
+        # away, so a console line alone leaves the next process to re-POST to find
+        # out why nothing moved. Self-healing on both ends: a later pass with a
+        # free slot writes `ok`, and `capture_health` clears it when the queue
+        # empties.
+        status = capacity.get("status")
+        record = {
+            "version": 1,
+            "state": "blocked",
+            "reason": capacity.get("code") or (str(status) if status is not None else None),
+            "updated_at": _now_iso(),
+        }
+        if status is not None:
+            record["status"] = status
+        detail = capacity.get("detail")
         if isinstance(detail, str) and detail:
             record["detail"] = detail[:500]
         write_capture_status(root, record)
@@ -3110,8 +4154,10 @@ def flush_spool(
     only_session_id: str | None = None,
     exclude_session_id: str | None = None,
     bounds: Bounds = DEFAULT_BOUNDS,
+    claim_ttl_s: float | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> FlushSummary:
-    """One replay opportunity.
+    """One replay opportunity — SERIALIZED against every other drainer (#14350).
 
     For every spooled session whose content has not been filed, attempt one
     POST. Transient failures back off; a permanent 4xx is recorded and the
@@ -3124,13 +4170,174 @@ def flush_spool(
     ``now`` is epoch MILLISECONDS (the same unit as the Pi leg — the two legs
     share one spool directory, so a seconds value written by one would read as
     "in backoff until the year 57000" to the other).
+
+    ── #14350 (D1): WHY THIS PASS IS SERIALIZED AND WHAT ITS CEILING IS ────
+
+    **One drainer per spool.** An UNTARGETED pass takes the spool's claim
+    (:mod:`tortoise.drain_claim`, honoured by both legs) and returns immediately —
+    ``held_by_claim``, zero POSTs — when another process holds it. Every
+    ``SessionStart`` backgrounds a drain, ``SessionEnd`` takes a final flush and
+    ``agent_end`` another, so on a busy box N drains used to run at once against ONE
+    server ceiling of 8 captures; that is the self-feeding shape #14342 §7.3
+    measured (908 entries, ``attempts`` 10–17). A TARGETED pass does not, and
+    ``""`` counts as untargeted on BOTH sides of that split — the claim here and
+    the ``_flush_one`` filter (`if only_session_id and …`) — so an empty id can
+    never mean "drain the whole spool, unclaimed" (review finding: it did).
+
+    ⛔ **A TARGETED pass does NOT take the claim, deliberately.**
+    ``session capture`` and the SessionEnd flush file ONE named session, and
+    ``session-start.sh`` already excludes the live session from the drain for
+    the same reason: delaying a session's own filing behind a whole-spool drain
+    is a product regression, not contention control. One POST is the most a
+    targeted pass can hold, so the ceiling is respected without the claim.
+
+    **The ceiling is ``DRAIN_MAX_IN_FLIGHT`` = 1 POST at a time** — a cap on how
+    much of the BOX's shared capture budget this process may hold (8 − 1 = 7
+    slots stay available to the user's live captures), enforced by construction:
+    the loop below is sequential. It is not a throughput knob and it cannot be
+    raised by configuration.
+
+    **A capacity refusal ends the pass and charges nobody.** ``_flush_one``
+    returns with ``summary.capacity_stopped`` when the server answers
+    ``capture_capacity_saturated``: no ``attempts`` increment, no backoff. This
+    pass then yields (honouring the server's own ``retry_after``, at most
+    ``DRAIN_CAPACITY_YIELDS`` times) and retries THE SAME entry, because the
+    refusal is about the box and the entry's turn has not come. When the yields
+    are spent the pass ends cleanly: the head has not risen, nothing was charged,
+    and the next opportunity resumes from the same oldest entry.
+
+    **Monotone by construction.** Entries are attempted oldest-first, a pass
+    never re-orders them, and the only thing that can end a pass early leaves
+    every entry's state untouched — so the pending head can only fall or hold.
+    What made it OSCILLATE before was capacity charges inflating ``attempts``,
+    exponential backoff pushing most of the spool out of the window, and the
+    next pass therefore starting on a different (younger) subset.
     """
     now_ms = time.time() * 1000.0 if now is None else now
     summary = FlushSummary()
+    claim = None
+    if not only_session_id:
+        from tortoise.drain_claim import DEFAULT_TTL_S as _CLAIM_TTL_S
+        from tortoise.drain_claim import (
+            DrainClaimUnavailable,
+            acquire,
+            claim_path,
+            holder,
+        )
+        try:
+            claim = acquire(
+                root, leg="python",
+                ttl_s=_CLAIM_TTL_S if claim_ttl_s is None else claim_ttl_s)
+        except DrainClaimUnavailable:
+            # ⛔ NOT NECESSARILY "nobody", AND NOT NECESSARILY "unwritable root" EITHER.
+            # `DrainClaimUnavailable` covers three causes and they want DIFFERENT
+            # answers; collapsing them was the review finding here:
+            #   * a REGULAR file at the claim path that we could not read — a
+            #     transient local error (EMFILE, EIO, EACCES after a mode drift) on
+            #     something that COULD be a live holder. Honour it: `held_by_claim`,
+            #     nothing attempted. This is the fail-closed direction.
+            #   * something that CANNOT be a claim record — a non-empty directory, a
+            #     FIFO, a device. `acquire` clears the clearable obstructions and
+            #     refuses to delete unknown content, so what lands here is the
+            #     unclearable rest. Running unclaimed cannot create a second drainer
+            #     (there is no claim to violate) while reporting contention names a
+            #     holder that does not exist and wedges the spool FOREVER — which
+            #     #14350's own rule forbids ("a stale claim is re-verifiable, not a
+            #     permanent block").
+            #   * NOTHING at the path — the root cannot hold a 60-byte claim file, so
+            #     it cannot hold a spool entry either. Run unclaimed and say so: the
+            #     pass can only report the broken spool, and refusing to run would
+            #     hide that report (the false-PASS direction this codebase treats as
+            #     the worse error).
+            try:
+                mode = os.lstat(claim_path(root)).st_mode
+            except FileNotFoundError:
+                summary.claim_unavailable = True
+            except OSError:
+                # The path cannot even be STAT'ed, which means the root itself is
+                # unusable: this pass can only report the broken spool (nothing in it
+                # is listable either), so there is nothing to serialize. That is the
+                # false-PASS arm, kept as the documented decision.
+                summary.claim_unavailable = True
+            else:
+                if stat.S_ISREG(mode):
+                    summary.held_by_claim = True
+                    summary.claim_holder = (
+                        "a claim file exists at this spool but could not be read "
+                        "(pid unknown) — nothing attempted")
+                    return summary
+                summary.claim_unavailable = True
+                summary.claim_unavailable_reason = (
+                    f"{claim_path(root)} exists and is not a claim record "
+                    "(not a regular file) and could not be cleared — this pass ran "
+                    "WITHOUT the one-drainer exclusion")
+        if claim is None and not summary.claim_unavailable:
+            # Another drainer owns this box's spool. Every entry this pass would
+            # have attempted is still on disk and THAT process is working the
+            # same oldest-first list, so doing nothing is the whole fix. The
+            # durable status is NOT written either: this pass observed nothing,
+            # and overwriting the holder's record with an empty one would erase
+            # the last thing actually known about the box.
+            summary.held_by_claim = True
+            # ONE read: `holder()` re-reads the claim file, so calling it twice
+            # meant a holder that released in between made the second call return
+            # None and `None.line(root)` raise AttributeError — on the routine
+            # contention path, where the hook's stderr is discarded (review finding).
+            held = holder(root)
+            summary.claim_holder = held.line(root) if held is not None else None
+            return summary
+    try:
+        return _flush_claimed(
+            root, post, summary, now_ms=now_ms,
+            only_session_id=only_session_id,
+            exclude_session_id=exclude_session_id,
+            bounds=bounds, claim=claim,
+            sleep=time.sleep if sleep is None else sleep)
+    finally:
+        if claim is not None:
+            with contextlib.suppress(Exception):
+                claim.release()
+
+
+def _flush_claimed(
+    root: Path,
+    post: PostFn,
+    summary: FlushSummary,
+    *,
+    now_ms: float,
+    only_session_id: str | None,
+    exclude_session_id: str | None,
+    bounds: Bounds,
+    claim,
+    sleep: Callable[[float], None],
+) -> FlushSummary:
+    """`flush_spool`'s loop, under the claim (`flush_spool` owns acquire/release)."""
     metas, discards = list_spool_metas(root)
     summary.discarded.extend(discards)
-    for meta in sorted(metas, key=_age_key):
+    queue = sorted(metas, key=_age_key)
+    index = 0
+    while index < len(queue):
+        meta = queue[index]
         sid = meta.get("session_id", "")
+        # The lease is refreshed BEFORE the attempt, amortised to one write per
+        # third of the TTL (`renew_if_due`): a live-but-slow pass must never be
+        # mistaken for a dead holder, and a killed one must be reclaimable within
+        # one TTL. `False` means the claim is no longer ours — a peer took it over
+        # after our last refresh, so continuing would make us the second drainer
+        # this whole mechanism exists to prevent.
+        # ⛔ `renew` refuses an EXPIRED record (a holder that overran must not
+        # overwrite the successor that took over), and one step of the pass is
+        # unbounded BETWEEN acquisition and the first refresh: the whole-spool scan
+        # above. A scan longer than the TTL therefore expired our OWN lease and this
+        # pass would attempt nothing, forever — the permanent stall the claim exists
+        # to prevent, with a message blaming a peer that does not exist (#14423
+        # merge-gate review). `reclaim` re-arms it with the same compare-and-swap, and
+        # only while the record on disk is OURS: a real takeover still wins and still
+        # stops us. `lost_claim` is set only when NEITHER answers.
+        if (claim is not None and not claim.renew_if_due()
+                and not (callable(getattr(claim, "reclaim", None)) and claim.reclaim())):
+            summary.lost_claim = True
+            break
         try:
             _flush_one(root, meta, sid, summary, post, now_ms, only_session_id,
                        exclude_session_id, bounds)
@@ -3155,12 +4362,69 @@ def flush_spool(
                     now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
                 _write_meta(root, retry_meta)
             summary.deferred += 1
+        if summary.capacity_stopped:
+            # The refusal is about the BOX, so it refused this entry — the same
+            # entry is retried after yielding, never skipped past: skipping it
+            # would let a busy box starve the OLDEST capture indefinitely.
+            #
+            # ⛔ A pass that does NOT hold the claim must never yield. Such a pass
+            # is a TARGETED one (`capture --session`, the SessionEnd flush), and it
+            # runs inside a hook budget — `session-end.sh` sets `"timeout": 60` —
+            # so three 30 s yields outlive the budget and the hook is KILLED
+            # mid-pass, which is worse than the refusal it was waiting out, and it
+            # does it three times per capture. One POST, one refusal, return: the
+            # detached drain is the only component that politeness-waits.
+            if claim is None:
+                break
+            if summary.capacity_yields >= DRAIN_CAPACITY_YIELDS:
+                break
+            summary.capacity_yields += 1
+            sleep(_capacity_yield_seconds(summary.capacity))
+            # ⛔ Renew AFTER the wait, not only before the attempt: three yields
+            # plus a POST whose transport bound (30 s) expired can approach the
+            # lease, and a claim that expires mid-wait could be taken over while
+            # this process still considers itself the drainer. `renew()` re-reads
+            # the token, so a lost claim is detected HERE rather than at the next
+            # loop turn — and the pass then stops instead of becoming the second
+            # drainer.
+            # Same rule as the top of the loop: a lease that lapsed during OUR own
+            # work (here, a bounded run of capacity yields) is re-armed when the record
+            # on disk is still ours; a real takeover still stops us.
+            if (claim is not None and not claim.renew()
+                    and not (callable(getattr(claim, "reclaim", None))
+                             and claim.reclaim())):
+                summary.lost_claim = True
+                break
+            summary.capacity_stopped = False
+            continue  # same index: retry THIS entry
+        index += 1
     # agent-infra#2100: record the box's state durably AFTER the loop, so every reader (the
     # drain line, `tortoise session health`, `pr-doctor`) sees the same answer
     # whether or not it observed the failing POST itself.
     with contextlib.suppress(Exception):
         _record_capture_status(root, summary)
     return summary
+
+
+def _capacity_yield_seconds(capacity: dict | None) -> float:
+    """How long to yield after a capacity refusal: the server's own number, bounded.
+
+    The server publishes ``retry_after`` (30 s at ``hosted_api``'s ceiling), and
+    honouring it instead of inventing a cadence is the point — but an absent, or
+    absurd, value must still yield for something, and the value is capped at
+    ``RETRY_BASE_SECONDS`` so a hostile/corrupt body cannot park the drain for
+    hours (which would hold the claim that long).
+    """
+    reported = None
+    if isinstance(capacity, dict):
+        value = capacity.get("retry_after")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if math.isfinite(number) and number >= 0:
+                reported = number
+    if reported is None:
+        return float(RETRY_BASE_SECONDS)
+    return min(max(reported, 0.0), float(RETRY_BASE_SECONDS))
 
 
 def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
@@ -3244,10 +4508,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # The leak this guards is a probe LINGERING — a detached codex/cursor worker
     # spooling one after verify's cleanup has run — and the next thing that
     # would file it is an automatic `session drain`. So: refuse only when the
-    # caller named no session (`only_session_id is None` == a drain), and always
-    # allow a targeted filing, where the caller knows which session it means.
+    # caller named no session — `not only_session_id`, which is the SAME predicate
+    # the claim and the filter above use — and always allow a targeted filing, where
+    # the caller knows which session it means. ⛔ The predicate used to be
+    # `only_session_id is None`, which made `""` a THIRD case: untargeted for the
+    # claim and for the filter, but "targeted" here, so an empty id drained the
+    # whole spool INCLUDING probes while the docstring above claimed the split held
+    # "on BOTH sides" (review finding). One predicate, three call sites.
     # The refusal is non-destructive: verify's own cleanup removes what it made.
-    if only_session_id is None and is_probe_session_id(sid):
+    if not only_session_id and is_probe_session_id(sid):
         summary.held_back += 1
         summary.probe_refusals.append({
             "session_id": sid,
@@ -3557,6 +4826,29 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # into ``capture: BLOCKED (n queued, 402 quota)``.
         summary.quota = quota
         summary.quota_refusals += 1
+    capacity = capacity_refusal(outcome)
+    if capacity is not None:
+        # #14350 (D1): THE BOX, NOT THE ENTRY. Nothing below runs.
+        #
+        # This is the whole convergence fix in three lines. Charging a capacity
+        # refusal to the entry is what made the backlog feed itself: one
+        # saturated pass charged EVERY pending entry, and `backoff_delay` is
+        # exponential (30 s → 6 h), so the spool's whole population drifted out
+        # of the attempt window and `attempts` reached 10–17 on a 908-entry
+        # backlog (#14342 §7.3). The refusal says only that eight captures are
+        # in flight on this box right now; the spool's bytes are exactly as
+        # fileable as they were one millisecond ago.
+        #
+        # So: no `attempts` increment, no `next_attempt_at_ms`, no write at all
+        # to this entry — and the PASS STOPS (`flush_spool` reads
+        # `capacity_stopped` after this returns). Stopping matters as much as
+        # not charging: the remaining entries are all refused by the same
+        # condition, so attempting them buys nothing and spends one server-side
+        # refusal each (which `/health` counts as `capture_capacity_saturated`).
+        summary.capacity = capacity
+        summary.capacity_stopped = True
+        summary.deferred += 1
+        return
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta

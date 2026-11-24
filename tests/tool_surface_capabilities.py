@@ -348,6 +348,20 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     # `test_the_container_write_is_declared_weight_bearing` pins that BOTH halves of
     # this win — the site weighs AND the name is declared — stay).
     "create_entity",
+    # ⛔ #11609 lane P7 (#14237 review F1): the relation-decided `link_entities` arm DOES
+    # create a Point — an epistemic relation (`supports`/`refutes`/
+    # `mutuallySupportive`/`mutuallyExclusive`) routes through `SEMANTICS_MECHANISMS` to
+    # `create_operator` — that is the LIVE rule (#14237 N2). `operator=True` is NOT a path
+    # this helper sees: the handler takes an explicit `operator=true` (like any LIST
+    # target) to its OPERATOR arm, which passes `abuse_weight=1` directly. Its `_quota_gated`
+    # site passes `abuse_weight=_link_entities_scalar_abuse_weight`, a CALLABLE for the
+    # same reason `create_entity`'s is: a plain edge (`performs`, `ownedBy`, `IMPL`) writes
+    # no Point and must record 0, or a linking burst of the most ordinary call this door
+    # serves trips R1. Without this row the partition reds on a site that legitimately
+    # weighs (`wrap_site_violations` → `_quota_gated(link_entities)@…: abuse_weight=True`),
+    # and the tempting green is the fail-open one — dropping the weight to match the
+    # declaration — which `test_abuse_integration.py` forbids in so many words.
+    "link_entities",
 })
 
 # #11609 lane C: four retired methods are still SERVED, through doors that call the
@@ -423,12 +437,23 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # `update_knowledge` above.
 
     "_create_edge": "tortoise_create_edge",
-    # ⛔ #14169 (#11609 P7) added the second `_quota_gated(sdk.link_entities, …)` wrap
-    # site — the relation-decided arm of `tortoise_link_entities` — and did NOT re-key
-    # this map, so the forward arm ("unmapped _quota_gated wrap sites") redded `main`
-    # while the door's own write classification stayed green: exactly the drift this
-    # map exists to catch, caught. The key is the WRAP SITE's method; the label is the
-    # live door, which `_ms.WRITE_TOOL_NAMES` already classifies as a write.
+    # ⛔ #14169 (#11609 P7) added the `_quota_gated(sdk.link_entities, …)` wrap site
+    # — the SECOND of the two wrappers inside `tortoise_link_entities` (its operator
+    # arm wraps `sdk._create_operator`; this one is the relation-decided arm, at
+    # `mcp_server.py:7925`) — and did not re-key this map, so the forward arm redded
+    # `main` on "unmapped _quota_gated wrap sites: ['link_entities']" while the door's
+    # write classification stayed green. That is the drift this map exists to catch,
+    # caught: the key is the WRAP SITE's method, the label is the live door, and
+    # `tortoise_link_entities` is already in `WRITE_TOOL_NAMES` (the fourth arm),
+    # so nothing about the door changed — only the binding was unchecked. The method
+    # has exactly ONE wrap site, so the forward and inverse arms constrain the same
+    # site; a "second site for link_entities" is NOT what landed.
+    # ⛔ ONE ENTRY ONLY. The fold of `origin/main` `ff2218b6a7` brought main's own
+    # `link_entities` entry in beside this one — the two sides had added the same pair
+    # with different comments, so the merge produced a literal duplicate key, which is
+    # SILENT to every test in the tree and visible only to `ruff` (`F601 Dictionary
+    # key literal "link_entities" repeated`). The second copy's unique rationale is
+    # folded into this comment; the second `("link_entities", …)` pair is deleted.
     "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
@@ -1629,6 +1654,19 @@ def wrap_site_violations(mcp_src: str | None = None) -> list[str]:
     return out
 
 
+@lru_cache(maxsize=8)
+def _reach_index(source: str | None) -> dict[str, frozenset[str]]:
+    """tool name -> the operations its handler reaches, for the served set.
+
+    Cached because building it is one AST pass PER TOOL (~9 s over 112 entries), and
+    `write_surface_map_violations` is called with several candidate maps by the same test.
+    """
+    return {
+        entry.name: frozenset(handler_operations(entry.name, source).operations)
+        for entry in served_registry()
+    }
+
+
 def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
                                  entries=None, mcp_src: str | None = None) -> list[str]:
     """The declared write-surface map is live BOTH ways: every wrap site is
@@ -1653,6 +1691,31 @@ def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
     dead = set(mapping.values()) - live
     if dead:
         out.append(f"write-surface map names non-existent tools (update the map): {sorted(dead)}")
+    # ⛔ THE VALUE IS GRADED, not just the key (`#14249` review P2-1). `live` and
+    # `WRITE_TOOL_NAMES` only prove the mapped name EXISTS and is write-classified — so
+    # pointing a method at any live write tool left this gate GREEN, while the entry's own
+    # comment claimed the pair is what makes the wrap site checkable. Measured before this
+    # arm existed: `"link_entities": "tortoise_create_point"` passed every clause here.
+    #
+    # The association is the SOURCE's own: the mapped TOOL's handler must reach the mapped
+    # method. ⛔ NOT `entry.sdk_method == m` — six of the 28 entries map a method their tool
+    # does not DECLARE (`_annotate_operator` -> `tortoise_operator_action`,
+    # `_index_directory` -> `tortoise_index_files`), so an sdk_method arm would red six
+    # correct rows (measured). ⛔ AND NOT "the module-level function enclosing this wrap
+    # site" — one method has wrap sites in SEVERAL tools (`update_knowledge` sits in
+    # `tortoise_update_point`/`tortoise_update`/`tortoise_update_entity`) and the map records
+    # one canonical tool, so that rule reds four correct rows (measured).
+    #
+    # ⛔ AND THE INDEX IS BUILT ONCE AND CACHED. Reaching per entry re-parses
+    # `mcp_server.py` 28 times and measurably blew this gate's 300 s pytest timeout
+    # (`test_guard4_rename_simulation_fails_loudly`: 308 s, `#14249` review P2-1's first
+    # attempt). One pass over the served registry is 8.9 s measured, paid once per process.
+    reach = _reach_index(mcp_src)
+    wrong_door = {m: t for m, t in mapping.items()
+                  if t in live and m not in reach.get(t, frozenset())}
+    if wrong_door:
+        out.append("write-surface map pairs a method with a tool whose handler never "
+                   f"reaches it (wrong door): {sorted(wrong_door.items())}")
     missing = {mapping[m] for m in (wrapped & set(mapping))} - _ms.WRITE_TOOL_NAMES
     if missing:
         out.append(f"write tools missing from WRITE_TOOL_NAMES: {sorted(missing)}")

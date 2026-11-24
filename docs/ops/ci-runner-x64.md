@@ -62,7 +62,7 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   select this box. What the repo refuses **as a default** is not a spelling but a CLASS — any
   POOL-ONLY label: `self-hosted`, and equally the bare custom `self-hosted-x64` above, since no
   GitHub-hosted runner carries either. The `test-slow` pin's
-  header in `.github/workflows/python-ci.yml:2181` is "Do NOT change it back to `ubuntu-latest`, and
+  header in `.github/workflows/python-ci.yml:2187` is "Do NOT change it back to `ubuntu-latest`, and
   never to `self-hosted`", and the reason is recorded at `:2151-2181` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
@@ -895,8 +895,8 @@ The lever is carried by **both emitter STEPS** on `python-ci.yml`'s `changes` jo
 (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, where its output OVERRIDES
 the push matrix) — and by nothing else. Scoped to ONE step the variable is silently absent on the
 other and the PR surface never splits (measured on head `3db8f7d78`, where only the push step
-carried it); `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
-discovers the emitters from their `run:` commands, so a third one cannot miss the lever either.
+carried it); `tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env` DISCOVERS
+the emitters from their `run:` commands and requires each to carry it, so a third cannot miss it.
 
 ⛔ **Not job scope, and that is a pin, not a preference.** An earlier cut of this lever sat on the
 `changes` JOB; that job also owns the capstone pre-registration gate step, and
@@ -972,7 +972,7 @@ Why it was taken: `ubuntu-latest` is answered by **0 of the pool's 12 runners** 
 and job queue waits in run `41320964047` were 15.3, 17.8, 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0
 **minutes** while 10 of 12 pool runners sat idle. The required legs cannot absorb that fix: a
 `self-hosted` pin on them removes the GitHub-hosted half of the race, which the refusal recorded at
-`python-ci.yml:2181` and above forbids.
+`python-ci.yml:2187` and above forbids.
 
 The residual recorded there is a WAIT, which is only one of its two modes — both measured on this
 job itself:
@@ -986,7 +986,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5551`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5594`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to NON-REQUIRED jobs whose red

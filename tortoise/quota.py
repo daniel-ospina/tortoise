@@ -773,11 +773,15 @@ def resolve_org_limits(org_id: str) -> dict:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
     from tortoise.supabase_control import (  # noqa: I001
         _QUOTA_SELECT,
-        _ORG_ADDITIVE_0015_TIER,
-        _ORG_ADDITIVE_2040_TIER,
-        _ORG_ADDITIVE_BILLING_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_IMPORT_TIER,
+        # #13998: ONE ordered ladder, imported rather than re-spelled here
+        # (`_ORG_ADDITIVE_TIERS` in supabase_control, newest migration first). It
+        # carries BOTH columns that ride `_QUOTA_SELECT` beyond the base set —
+        # the #13998 capacity-notice mark and #2406's onboarding marker — so a
+        # schema one migration behind degrades just the new column instead of
+        # 400ing every rung down to the terminal base-only read (#1832's class).
+        # Pinned by
+        # `tests/test_13998_capacity_notice.py::test_every_quota_select_ladder_uses_the_one_shared_tuple`.
+        _ORG_ADDITIVE_TIERS,
         _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
@@ -794,11 +798,7 @@ def resolve_org_limits(org_id: str) -> dict:
         # #1832 class).
         row = _orgs_row_fail_soft(
             get_control_plane(), org_id, select=_QUOTA_SELECT,
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER],
+            additive_tiers=list(_ORG_ADDITIVE_TIERS),
         )
         if row is None:
             raise OrgNotFoundError(
@@ -1695,6 +1695,79 @@ QUOTA_STATE_TIMEOUT = 3.0
 QUOTA_STATE_WORKER_NAME = "tortoise-quota-state-worker"
 
 
+#: Character bound on a reason string that came from somewhere we did not
+#: compose (an exception's text, a driver's message).
+#:
+#: ⛔ IT IS GENEROUS ON PURPOSE (#13526). The old call sites used a bare
+#: ``str(exc)[:160]``, and a blind slice does not shorten a sentence, it
+#: CORRUPTS it: the allowance gate composes its refusal as ``"… The hard stop
+#: is 153 MB measured (1.5x the cap) because this figure is an ESTIMATE whose
+#: sampling error is UNMEASURED …"``, and 160 characters lands inside the
+#: figure — so ``health.quota.error`` published ``"The hard stop is 15"``, an
+#: order of magnitude low and with nothing saying anything had been removed, on
+#: the one field the write mandate tells a lane to read before it writes.
+#: Measured on the deployed graph, 2026-11-24.
+QUOTA_REASON_MAX_CHARS = 2000
+
+#: What a CUT reason ends with. A truncated sentence that does not say so is
+#: read as the whole of it, which is how ``"… is 15"`` became a threshold.
+QUOTA_REASON_TRUNCATION_MARK = " …[truncated]"
+
+
+def bounded_reason(text: str,
+                    limit: int = QUOTA_REASON_MAX_CHARS) -> str:
+    """``text``, cut only if it must be — and SAYING SO when it is (#13526).
+
+    The bound still exists (an exception's text is not ours to trust with a
+    health payload's size). What changed is that the bound is wide enough to
+    carry the gate's own composed refusals WHOLE, and that exceeding it leaves
+    an explicit marker instead of a silent cut in the middle of a number.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + QUOTA_REASON_TRUNCATION_MARK
+
+
+def _dimension_unit(name: str | None) -> str | None:
+    """The declared unit of ``name``, or ``None`` when it cannot be resolved.
+
+    ⛔ BEST EFFORT, NEVER A RAISE (#13526). A refusal's figures are worth more
+    with a unit beside them — a bare ``153`` is the number the brief rules out
+    as a diagnosis — but this report must answer even when the registry cannot
+    be read, so an unresolvable unit is ``None`` rather than an exception on the
+    health path. The unit is TAKEN from the gate's own registry (which takes it
+    from ``cost_dimensions``), never restated here: two copies of a unit is how
+    a unit factor goes wrong (``allowance_gate`` review round 2).
+    """
+    if not name:
+        return None
+    try:
+        from .allowance_gate import DIMENSIONS
+
+        for dim in DIMENSIONS:
+            if dim.dimension == name:
+                return dim.unit
+    except Exception:  # noqa: BLE001, RUF100 — a unit is not worth a raise
+        _logger.debug("quota state: dimension unit unresolved for %r", name)
+    return None
+
+
+#: The ruled-dimension refusal facts, in their NOT-KNOWN shape.
+#:
+#: ⛔ PRESENT ON EVERY STATE (#13526), not only on a refusal: a consumer must be
+#: able to read ``quota["dimension"]`` without first proving which arm built the
+#: block, or the field is one more thing that has to be guessed from prose. On
+#: every state except a ruled-dimension refusal they are the honest ``None`` —
+#: ``None`` means "no dimension refused this write", never "refused with zero".
+_NO_DIMENSION_FACTS: dict[str, object] = {
+    "dimension": None,
+    "dimension_used": None,
+    "dimension_limit": None,
+    "dimension_unit": None,
+    "dimension_estimated": None,
+}
+
+
 def quota_state_unavailable(resource: str, reason: str,
                             *, state: str = "unknown") -> dict:
     """The ONE unmeasured shape: every number ``None``, a named reason.
@@ -1704,20 +1777,48 @@ def quota_state_unavailable(resource: str, reason: str,
     (#3253 / #9548): an unread counter and a zero are different facts.
     """
     return {"resource": resource, "state": state, "points_used": None,
-            "points_limit": None, "points_remaining": None, "error": reason}
+            "points_limit": None, "points_remaining": None, "error": reason,
+            **_NO_DIMENSION_FACTS}
 
 
-def quota_state_refused(resource: str, reason: str) -> dict:
-    """The ONE fail-closed-REFUSAL shape: ``closed``, numbers unknown, reason set.
+def quota_state_refused(resource: str, reason: str, *,
+                        dimension: str | None = None,
+                        used: int | float | None = None,
+                        limit: int | float | None = None,
+                        unit: str | None = None,
+                        estimated: bool | None = None) -> dict:
+    """The ONE fail-closed-REFUSAL shape: ``closed``, the reason set — plus the
+    refused dimension's own figures when the gate carried them (``None`` else).
 
-    Used when the gate refuses before measuring anything (a missing/unreadable
-    limit, an allowance seam that refuses or cannot be read, a limits resolution
-    that raises). The gate really would refuse in these states, so ``closed`` is
-    measured rather than inferred — and ``unknown`` stays reserved for this
-    report's own inability to finish.
+    Used when the gate refuses before this REPORT could measure the points count
+    (a missing/unreadable limit, an allowance seam that refuses or cannot be
+    read, a limits resolution that raises). The gate really would refuse in these
+    states, so ``closed`` is measured rather than inferred — and ``unknown``
+    stays reserved for this report's own inability to finish.
+
+    ⛔ So ``points_*`` is ``None`` here while ``dimension_used`` may be a NUMBER
+    (#13526): a ruled-dimension refusal happens AFTER the gate measured that
+    dimension and BEFORE any point count, and the two facts are not in
+    conflict. The summary line used to say "numbers unknown", which stopped
+    being true the moment the dimension's figures were carried.
+
+    ⛔ THE RULED-DIMENSION FACTS ARE CARRIED AS FIELDS, NOT ONLY AS PROSE
+    (#13526). ``QuotaExceededError`` already carries ``resource``/``used``/
+    ``limit``/``estimated`` — the values the gate COMPARED — because a refusal
+    that exists only as prose "is not a distinguishable state" (this module's
+    docstring, #4614). This arm used to throw them away and publish a bounded
+    slice of the message instead, which on the deployed graph produced a block
+    whose only numbers were three ``null``s and whose only threshold was the
+    string ``"The hard stop is 15"`` — while the exception it was built from
+    held ``graph_storage`` / 329 / 153 / ``True``. ``resource`` stays the
+    resource that was ASKED ABOUT (the door), so ``points_*`` keeps its meaning;
+    ``dimension*`` names the ruled dimension that actually refused.
     """
     return {"resource": resource, "state": "closed", "points_used": None,
-            "points_limit": None, "points_remaining": None, "error": reason}
+            "points_limit": None, "points_remaining": None, "error": reason,
+            "dimension": dimension, "dimension_used": used,
+            "dimension_limit": limit, "dimension_unit": unit,
+            "dimension_estimated": estimated}
 
 
 def count_resource_now(org_id: str, resource: str, sdk=None, **_) -> int:
@@ -1756,7 +1857,7 @@ def run_bounded_quota_state(compute, resource: str = "points",
     except Exception as exc:  # noqa: BLE001, RUF100 — backlog full must not raise
         return quota_state_unavailable(
             resource, f"the quota-state worker refused the submission "
-                      f"({type(exc).__name__}: {str(exc)[:120]})")
+                      f"({type(exc).__name__}: {bounded_reason(str(exc))})")
     try:
         return future.result(timeout=budget)
     except TimeoutError:
@@ -1774,7 +1875,7 @@ def run_bounded_quota_state(compute, resource: str = "points",
     except Exception as exc:  # noqa: BLE001, RUF100 — health must always answer
         return quota_state_unavailable(
             resource, f"the quota-state computation failed "
-                      f"({type(exc).__name__}: {str(exc)[:160]})")
+                      f"({type(exc).__name__}: {bounded_reason(str(exc))})")
 
 
 def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
@@ -1782,7 +1883,9 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     """Report the ENFORCED quota boundary WITHOUT raising (#11892 option 3).
 
     Returns ``{"resource", "state", "points_used", "points_limit",
-    "points_remaining", "error"}`` where ``state`` is one of:
+    "points_remaining", "error", "dimension", "dimension_used",
+    "dimension_limit", "dimension_unit", "dimension_estimated"}`` where
+    ``state`` is one of:
 
     - ``"open"`` — a write of this resource would be ADMITTED;
     - ``"closed"`` — ``enforce_org_limit`` would REFUSE it right now. ⛔ This
@@ -1885,16 +1988,36 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses in this state
         return _refused(
             f"the allowance gate is unavailable ({type(exc).__name__}: "
-            f"{str(exc)[:120]}) and the write gate treats that as a refusal")
+            f"{bounded_reason(str(exc))}) and the write gate treats that as a refusal")
     try:
         enforce_allowances(limits, org_id=org_id, resource=resource)
     except (QuotaExceededError, QuotaCheckError) as exc:
         _logger.error(
             "quota state: the allowance gate refuses (reporting closed): "
             "team=%s resource=%s error=%r", org_id, resource, exc)
-        return _refused(
+        # ⛔ THE REFUSAL'S OWN FACTS TRAVEL WITH IT (#13526). Hoisting ``exc``'s
+        # structured fields OUT of the exception and into the block is the whole
+        # fix: they are the values the gate compared, they are already on the
+        # exception (#4614), and a report that flattens them back into prose
+        # publishes ``points_used: null`` + ``limit`` nowhere for a tenant who
+        # is over a cap. ``QuotaCheckError`` carries none of them (it is a fault,
+        # not a measured refusal), so its four fields stay ``None`` — and its
+        # message stays BOUNDED here, because a fault's text is not ours to
+        # trust with a health payload's size.
+        facts: dict[str, object] = {}
+        if isinstance(exc, QuotaExceededError):
+            facts = {
+                "dimension": exc.resource,
+                "used": exc.used,
+                "limit": exc.limit,
+                "unit": _dimension_unit(exc.resource),
+                "estimated": exc.estimated,
+            }
+        return quota_state_refused(
+            resource,
             f"the ruled-dimension allowance gate raises for this write "
-            f"({type(exc).__name__}: {str(exc)[:160]})")
+            f"({type(exc).__name__}: {bounded_reason(str(exc))})",
+            **facts)
     except Exception as exc:  # noqa: BLE001, RUF100 — never escape the contract
         # ⛔ `closed`, not `unknown` (fresh review of #12426, round 5). An
         # UNEXPECTED raise here is not this report's own machinery failing in
@@ -1913,7 +2036,7 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
             "closed): team=%s resource=%s error=%r", org_id, resource, exc)
         return _refused(
             f"the allowance gate failed in an unexpected way "
-            f"({type(exc).__name__}: {str(exc)[:160]}), which the write path "
+            f"({type(exc).__name__}: {bounded_reason(str(exc))}), which the write path "
             f"surfaces as an error rather than a completed write")
     # ── 2. limit next, count last — the gate's own ORDER (it raises on a
     # missing/unreadable limit BEFORE it counts), so a data fault never costs a
@@ -1955,7 +2078,8 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
         # `points_limit: None` is what says "unlimited", so `points_used: None`
         # is not ambiguous with a failed read.
         return {"resource": resource, "state": "open", "points_used": None,
-                "points_limit": None, "points_remaining": None, "error": None}
+                "points_limit": None, "points_remaining": None, "error": None,
+                **_NO_DIMENSION_FACTS}
     try:
         runner = count_runner or _bounded_resource_count
         used = runner(org_id, resource, sdk=sdk, timeout=timeout)
@@ -1964,7 +2088,7 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
         # from here its answer is genuinely unknown (it may still land).
         return _unavailable(
             f"the {resource!r} count did not finish inside its budget "
-            f"({str(exc)[:120]}); the gate has no such timeout, so its own "
+            f"({bounded_reason(str(exc))}); the gate has no such timeout, so its own "
             f"answer is unknown from here")
     except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses in this state
         _logger.error(
@@ -1972,7 +2096,7 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
             "team=%s resource=%s error=%r", org_id, resource, exc)
         return _refused(
             f"the {resource!r} count raises for org {org_id} "
-            f"({type(exc).__name__}: {str(exc)[:160]}) and the gate refuses on a "
+            f"({type(exc).__name__}: {bounded_reason(str(exc))}) and the gate refuses on a "
             f"failed count (fail-closed, #686)")
     if not isinstance(used, int) or isinstance(used, bool):
         # A non-numeric count is not a count. The gate would raise a bare
@@ -1985,10 +2109,11 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
                 "points_limit": limit,
                 # A live over-cap tenant is the case this exists for, so clamp: a
                 # negative "remaining" is not a headroom, it is a subtraction.
-                "points_remaining": 0, "error": None}
+                "points_remaining": 0, "error": None,
+                **_NO_DIMENSION_FACTS}
     return {"resource": resource, "state": "open", "points_used": used,
             "points_limit": limit, "points_remaining": limit - used,
-            "error": None}
+            "error": None, **_NO_DIMENSION_FACTS}
 
 
 def reset_quota_state_worker() -> None:

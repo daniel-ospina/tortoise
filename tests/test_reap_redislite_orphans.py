@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -1076,6 +1075,73 @@ def test_a_non_utf8_process_name_cannot_kill_the_run(reaper):
         setter.wait(timeout=30)
 
 
+#: Shells usable as the `argv0`-wrapper stand-in, in PREFERENCE ORDER. `bash` and
+#: `dash` are plain, non-multicall binaries; `/bin/sh` is LAST because on a busybox
+#: box it IS a multicall applet — the very #14335 failure this fixture avoids.
+_ARGV0_STAND_IN_SHELLS = ("/bin/bash", "/bin/dash", "/bin/sh")
+
+
+def _argv0_stand_in_source() -> Path:
+    """The binary to copy to `redis-server` — see the fixture's own docstring.
+
+    A SHELL, for the three properties the stand-in needs: it does not dispatch on
+    `argv[0]`, it needs no data files beside itself, and with `argc == 1` it reads
+    its program from stdin and blocks on the open pipe.
+
+    An interpreter was the previous stand-in and is not relocatable (#14335): a
+    python-build-standalone copy dies `No module named 'encodings'`, and a
+    wrapper-script interpreter loses the custom `argv[0]` to its shebang exec.
+
+    Asserted, NOT skipped ON ANY BOX THAT REACHES IT: this file's frozen manifest declares no
+    `allow-skipped` budget, so a box with no suitable shell reds here instead of passing
+    silently. ⚠️ BOTH of this helper's callers are platform-gated (each needs a
+    plain-ELF shell), so on a box whose platform gate excludes them — macOS ships Mach-O and no
+    `/bin/dash` — this refusal is not reached and those rows skip by design; the guarantee
+    above is about the boxes that DO run them, and is not a claim the gate contradicts. (The
+    file's THIRD platform gate, `test_a_non_utf8_process_name_cannot_kill_the_run`, never calls
+    this helper — it uses `sys.executable` — so it is not a caller.)
+
+    A candidate qualifies only if it resolves to a REAL SHELL and is a plain
+    **ELF regular file**. The two checks exclude two DIFFERENT hazards, and an
+    earlier revision credited the ELF test with both (#14287 review, P3):
+
+      * the ELF test excludes only the WRAPPER-SCRIPT hazard. A `bash` that is a
+        `#!/bin/sh` shim keeps `comm == redis-server` for a sample and then lets
+        its shebang `exec` replace it, so the fixture passes its `seen` loop and
+        the dwell guard, then reds with a census-shaped message — #14335
+        re-worded.
+      * the BASENAME test excludes the MULTICALL hazard. Busybox is itself an ELF
+        regular file, so the magic test ACCEPTS it; on a box with neither
+        `/bin/bash` nor `/bin/dash` an Alpine-style `/bin/sh` resolves to
+        `/bin/busybox`, which dispatches on `basename(argv[0])`, exits at once,
+        and redded the shard with the misleading "fixture child exited" message
+        instead of the deliberate refusal below. Requiring the resolved name to be
+        a real shell makes that box take the refusal instead.
+    """
+    for candidate in _ARGV0_STAND_IN_SHELLS:
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        # ⛔ A REAL SHELL BY NAME, not merely an ELF file: `busybox` is an ELF
+        # regular file AND a multicall applet, so the magic test alone accepts the
+        # very binary #14335 is about (#14287 review, P3).
+        if resolved.name not in {"bash", "dash", "sh"}:
+            continue
+        try:
+            if resolved.read_bytes()[:4] == b"\x7fELF":
+                return resolved
+        except OSError:
+            continue
+    raise AssertionError(
+        f"none of {list(_ARGV0_STAND_IN_SHELLS)} is a plain ELF binary — a wrapper "
+        "script's shebang exec replaces the custom argv[0] mid-run, and a busybox "
+        "multicall applet is #14335 itself. The argv0-wrapper fixture needs a "
+        "self-contained shell, and refusing here is deliberate: a skip in this "
+        "file is a gate evasion, not an absorbable substrate limit (#14335)"
+    )
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux-only")
 def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     """The kernel's own answer, no seams: a live `argc == 1` server shape.
@@ -1085,14 +1151,110 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     `redis-server`, so `/proc/<pid>/comm` is `redis-server` while
     `/proc/<pid>/cmdline` holds a string that does not end in it. The pre-fix
     filter drops this process; the inventory must list it.
+
+    ⛔ THE SOURCE BINARY MUST NOT BE A MULTICALL APPLET (#14335). This fixture
+    copies a binary to the name `redis-server` and relies on the copy still
+    RUNNING under that name. That held for a standalone `cat` and it is false on
+    `ubuntu-26.04`, where coreutils is uutils' multicall binary: it dispatches on
+    the basename of `argv[0]` and refuses an applet it does not know, so the copy
+    exited at once (`coreutils: unknown program 'redis-server'`, in the job's own
+    stderr) and the test enumerated a ZOMBIE — `/proc` keeps the dead child's
+    `comm` but empties its `cmdline`, so `socket_dir` read `None` and a required
+    shard false-redded on every PR. The copy must therefore be a binary that
+    does not dispatch on `argv[0]` — the next paragraph says what qualifies, and
+    why the INTERPRETER was tried first and then abandoned.
+
+    ⛔ THE COPY MUST BE A PLAIN, SELF-CONTAINED, NON-MULTICALL BINARY (#14335).
+    It has to run under the name `redis-server`, stay ALIVE with `argc == 1`, and
+    not dispatch on `argv[0]`. Two candidates fail one of those on real boxes:
+      * a MULTICALL applet — `cat` from uutils' coreutils on `ubuntu-26.04`
+        refuses an applet name it does not know. That is the original #14335 red.
+      * the INTERPRETER, which this fixture used instead, is not relocatable. A
+        python-build-standalone build — what `uv sync` installs, the documented
+        dev path on a fresh cell — finds `encodings` from its INSTALL PREFIX, so
+        a bare copy dies `ModuleNotFoundError: No module named 'encodings'`; and
+        a WRAPPER-SCRIPT interpreter (`/usr/local/bin/python3.12` is 54 bytes of
+        `#!/bin/sh` + `exec /opt/freestyle/python/bin/python3 "$@"`) cannot
+        carry the name at all, because the shebang exec DISCARDS the custom
+        `argv[0]` and `comm` would read `python3`.
+    A SHELL satisfies all three: it does not dispatch on a name (an unknown
+    `argv[0]` is simply normal shell mode), it needs no data files beside itself,
+    and with `argc == 1` it reads its program from stdin and BLOCKS on the open
+    pipe — the exact shape under test.
+    The source is therefore a shell, and `/bin/sh` is deliberately not the first
+    choice: on a busybox box `/bin/sh` IS a multicall applet, i.e. #14335 again.
+    ⛔ NEITHER the interpreter NOR a skip is an option here. This file's frozen
+    manifest (`config/ci-expected-nodeids/platform-gated.txt`) declares no
+    `allow-skipped` budget — "a skip here is a gate evasion and must red rather
+    than be absorbed" — so a substrate limitation must be REMOVED, not skipped.
     """
+    # ⛔ THE BINARY MUST SURVIVE AN ARBITRARY `argv[0]`, and `cat` does not.
+    # GNU coreutils' *multi-call* build dispatches on `basename(argv[0])`, so a
+    # copy of it renamed `redis-server` REFUSES and exits: the failing run's own
+    # output carries the child's message, `coreutils: unknown program
+    # 'redis-server'` ("Captured stderr call"), and a SIGTERM never prints
+    # anything. The child is then a ZOMBIE — `comm` still reads `redis-server`
+    # (the kernel sets `comm` from the EXEC'D FILENAME), `/proc/<pid>/cmdline` is
+    # EMPTY — so `_iter_proc_inventory` returns its documented KEEP row with
+    # `socket_dir: None` and the assertion below fails as `None == …`, i.e. on a
+    # fixture that never ran. Reproduced locally by copying `/bin/true` as
+    # `redis-server`: same row (`socket_dir: None`), same ASSERTION text — though
+    # `/bin/true` prints nothing, so the child's message is a property of the
+    # multi-call binary and not of every exiting one. `sh`/`dash`/`bash` are real
+    # ELFs that read stdin with `argc == 1` and do not dispatch on their own name,
+    # so they carry the shape this test needs on the hosts this suite runs on —
+    # and if one ever does dispatch by name, the liveness guard below names the
+    # fixture instead of blaming the reaper.
+    # BOTH sides of the 2026-11-23 merge of `origin/main` fixed this fixture, and
+    # they are complementary rather than duplicative: main (#14335/#14347, landed
+    # independently) picked the shell by `shutil.which` and added a stability
+    # window; this branch added `_argv0_stand_in_source()`, which additionally
+    # REFUSES a busybox applet and a wrapper script by name. The helper is the
+    # strictly stronger selector (it is main's choice PLUS the two exclusions the
+    # #14287 review asked for), so it supplies `source`; the guard below keeps
+    # main's window, whose message names the fixture binary that exited.
+    source = _argv0_stand_in_source()
     binary = tmp_path / "redis-server"
-    binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
+    binary.write_bytes(source.read_bytes())
     binary.chmod(0o755)
-    gone = tmp_path / "gone-socket-dir"
-    line = f"{binary} unixsocket:{gone}/redis.socket"
+    # ⛔ AND THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
+    # process and this repo's own cleanup kills it (#14347 CI red, measured).
+    # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
+    # (`python-ci.yml` ×4, `ci.yml`, `post-merge-validation.yml`) on shared
+    # self-hosted runners whose own orphan gate measures `other_suites=10`. A
+    # process named `redis-server` whose socket dir is ABSENT is classified
+    # `REAP — socket dir … is gone`, so a leg booting while this test runs
+    # SIGTERMs it; the dead child's `/proc/<pid>/cmdline` is then EMPTY, the
+    # inventory returns its row with `socket_dir: None` (the documented KEEP
+    # arm), and the assertion below fails as `None == …` — the same end state
+    # the coreutils arm above produces, from the opposite direction. With
+    # the dir present the same row classifies `KEEP — could be a concurrent
+    # leg's live instance` (age ~0s), so no reaper can take it. Nothing this
+    # test asserts changes: identity is still `comm`, and the socket dir is
+    # still read out of the one-element `argv[0]` line.
+    sockdir = tmp_path / "socket-dir"
+    sockdir.mkdir()
+    # ⛔ THE FIRST TOKEN IS A LAUNCHER, NOT THE BINARY, ON PURPOSE (PR #14287
+    # review follow-up). This row must witness the KERNEL-NAME identity path, and
+    # the binary-first shape does not: `_split_one_arg_line` tokenises
+    # `<bin>/redis-server unixsocket:<dir>/…` into an `argv[0]` that still ENDS in
+    # `redis-server`, so `_redis_identity` answers `"argv[0]"` and never reaches
+    # `/proc/<pid>/comm`. Measured: with that shape, `_redis_identity`'s `comm`
+    # and `exe` fallbacks replaced by `return None` left this row GREEN — the
+    # kernel-name branch, which is what a wrapper-exec'd server relies on, was
+    # graded only by rows that STUB the `/proc` readers. A launcher-named first
+    # token cannot match `_IS_REDIS` (end-anchored), so the row below resolves
+    # through `comm` for real. Nothing else moves: the process is still exec'd as
+    # `binary`, the socket dir still EXISTS (the #14347 constraint above), and it
+    # is still read out of the split line.
+    launcher = tmp_path / "launcher"
+    line = f"{launcher} redis-server unixsocket:{sockdir}/redis.socket"
     child = subprocess.Popen(
-        [line], executable=str(binary), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
+        [line],
+        executable=str(binary),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         seen = False
@@ -1106,6 +1268,27 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
                 break
             time.sleep(0.02)
         assert seen, "the fixture process never came up with comm == redis-server"
+        # ⛔ ALIVE, NOT A CORPSE — AND NOT MERELY "NOT YET DEAD" (#14335). The
+        # runner failure enumerated a process that had already exited: `comm`
+        # survives death, `cmdline` does not, so `child.pid in rows` stayed true
+        # while `socket_dir` was None — the test could not tell "a live server the
+        # inventory listed" from "a reaped child it listed anyway".
+        # A STABILITY WINDOW, not a single poll: a stand-in that exits at once can
+        # still answer `poll() is None` before its exit lands — measured with a
+        # copy of `/bin/true`, which exits in ~2 ms. A bare poll reads "alive" and
+        # the assertion below then reds as `assert None == '/tmp/…'`, i.e. exactly
+        # the confusing red this guard exists to replace. A fixture that BLOCKS on
+        # stdin is still running after the window; one that dies at once is not.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert child.poll() is None, (
+            f"the fixture binary ({source}) exited (rc={child.returncode}) instead of "
+            "staying alive on stdin, so the inventory below could only enumerate a "
+            "CORPSE — a zombie keeps its `comm` but loses its `cmdline`, which is how "
+            "this fixture false-redded on uutils' multicall coreutils (#14335). The "
+            "stand-in binary must stay alive for the row it asserts to mean anything"
+        )
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
         # Written against the rows ALONE, so the pre-fix tree fails on the FACT
@@ -1113,13 +1296,111 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
         rows_list = inventory.rows if hasattr(inventory, "rows") else inventory
         rows = {row["pid"]: row for row in rows_list}
         assert child.pid in rows, (
-            "a live wrapper-exec'd server must be enumerated from the kernel's "
-            f"name, not from argv[0] — inventory held {sorted(rows)}"
+            "a live server whose argv[0] carries the WHOLE command line — so that "
+            "element does not END in `redis-server` — must still be enumerated; "
+            f"the pre-fix filter dropped it — inventory held {sorted(rows)}"
         )
-        assert rows[child.pid]["socket_dir"] == str(gone)
+        assert rows[child.pid]["socket_dir"] == str(sockdir)
+        # ⛔ THE RESOLUTION PATH, NOT JUST THE ROW (#14287 review). `comm` is what the
+        # kernel set at execve() from the executed file's name (proc(5)), so it is the
+        # one source a wrapper cannot disguise from its own argv; asserting it here is
+        # what makes the `comm`/`exe` fallbacks load-bearing in this fixture instead of
+        # unreachable behind the `argv[0]` fast path.
+        assert rows[child.pid]["identified_by"] == "comm", (
+            "identity must resolve from /proc/<pid>/comm — argv[0] here is a "
+            f"launcher name and must not match; got {rows[child.pid]['identified_by']!r}"
+        )
+        # …and the fixture is not itself reapable litter. This is the half that
+        # makes the fix above non-vacuous: drop the `sockdir.mkdir()` and this
+        # row REDs with `REAP — socket dir … is gone`, i.e. it names the state
+        # in which the repo's own cleanup is entitled to kill the fixture
+        # mid-assertion — the shape that flaked this test on CI.
+        assert reaper.classify(rows[child.pid], reaper.DEFAULT_MAX_AGE_MINUTES * 60.0)[0] is False, (
+            "the fixture must never be a reap candidate, or a concurrent leg's "
+            "cleanup can SIGTERM it mid-assertion (#14347)"
+        )
     finally:
         child.kill()
         child.wait(timeout=30)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="the stand-in must be a plain-ELF shell (macOS ships Mach-O, and has no /bin/dash)",
+)
+def test_argv0_stand_in_selection_rejects_both_hazards(monkeypatch, tmp_path):
+    """`_argv0_stand_in_source` skips the two hazards, and refuses when bereft.
+
+    ⛔ THIS TEST EXISTS BECAUSE THE GUARDS WERE UNPINNED (#14287 review). On a box
+    with a normal `/bin/bash`, BOTH guards in the helper are inert: every shipped
+    candidate is already a real ELF shell, so deleting either guard left the
+    suite at 58 passed. A guard that no row can redden is dead weight — the next
+    reader sees "the multicall hazard is handled" and no revert can contradict
+    it. Each hazard is therefore INJECTED here, so the row that pins it fails by
+    behaviour rather than by inspection.
+
+    Asserted, never skipped ON THE RUNNERS: this file's frozen manifest declares no
+    `allow-skipped` budget, and the point of the row is to be able to fail. ⚠️ The
+    decorator above gates it off non-Linux boxes — its real dependency is
+    `_argv0_stand_in_source()` requiring a plain-ELF shell, NOT `/proc` (this row
+    never reads `/proc`, unlike the two rows that carry the `/proc` reason), because
+    on macOS every candidate is Mach-O and the helper would refuse and red.
+    """
+    # An ELF regular file named `busybox` — accepted by the magic test alone, and
+    # the very binary #14335 is about. `comm` of a copy is `busybox`, not a shell.
+    multicall = tmp_path / "busybox"
+    multicall.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    multicall.chmod(0o755)
+    # A `#!/bin/sh` shim NAMED bash: passes the basename guard, fails the magic
+    # test, and if accepted would lose the custom argv[0] to its shebang exec.
+    shim = tmp_path / "bash"
+    shim.write_text("#!/bin/sh\nexec /bin/dash \"$@\"\n")
+    shim.chmod(0o755)
+    # The control: a real shell, last in preference order, so both hazards must be
+    # stepped over before it is reached.
+    # ⛔ TAKE IT FROM THE BOX'S OWN ANSWER, NOT A HARDCODED PATH (#14287 review, P2).
+    # `Path("/bin/dash")` is Debian-only, and `_ARGV0_STAND_IN_SHELLS` itself treats
+    # dash as OPTIONAL — so on macOS or a dash-less Linux (Fedora/RHEL/Arch/NixOS)
+    # this row raised `FileNotFoundError` before pinning either guard, redding a
+    # required shard on a box the rest of this file deliberately supports. Deriving
+    # the control from `_argv0_stand_in_source()` keeps both guards discriminating:
+    # the basename guard still rejects the `busybox` fixture and the ELF guard still
+    # rejects the shim.
+    real = tmp_path / "dash"
+    real.write_bytes(_argv0_stand_in_source().read_bytes())
+    real.chmod(0o755)
+
+    hazard_order = (str(multicall), str(shim), str(real))
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", hazard_order
+    )
+    assert _argv0_stand_in_source() == real.resolve(), (
+        "both guards must be stepped over: `busybox` is an ELF multicall applet "
+        "and `bash` here is a wrapper script — accepting either re-creates the "
+        "#14335 red this fixture exists to avoid"
+    )
+
+    # Delete the basename guard's effect: with `busybox` first and no control,
+    # accepting it is exactly what a revert of that guard does.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(multicall),)
+    )
+    with pytest.raises(AssertionError, match=r"none of .* is a plain ELF binary"):
+        _argv0_stand_in_source()
+
+    # …and the ELF guard's effect, alone.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(shim),)
+    )
+    with pytest.raises(AssertionError, match=r"none of .* is a plain ELF binary"):
+        _argv0_stand_in_source()
+
+    # The refusal is a RED on a box with no usable shell — never a skip.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(tmp_path / "absent"),)
+    )
+    with pytest.raises(AssertionError, match="refusing here is deliberate"):
+        _argv0_stand_in_source()
 
 
 # ── the workflow shape: the blind, host-global reap must not come back ──────

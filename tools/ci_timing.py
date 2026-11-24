@@ -2335,9 +2335,10 @@ def _balance_cut_parens(text: str) -> str:
 # (measured at `a91123c76`, the sha this paragraph was written at: 1 row of 1222
 # did — `test_source_staleness_sweep_5038.py` — and re-derive it AT YOUR HEAD, do
 # not trust the figure, because a refresh re-emits notes and moves it: the map
-# held 1236 rows at `7e6d1d8da`). The guard that judges the written map joins a
-# row's tail with its continuations before it judges a note
-# (`tests/test_ci_selection.py::_durations_row_comments`).
+# held 1236 rows at `7e6d1d8da`). The guard that judged the written map joined a
+# row's tail with its continuations before it judged a note
+# (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test cut,
+# 2026-11-23 — `_row_continuation_lines` is the surviving reader).
 #
 # ⛔ …but “under a row” is NOT “belongs to that row”, and the difference is the
 # whole of `_row_continuation_lines`' third condition. See its docstring: this
@@ -2353,7 +2354,9 @@ def _balance_cut_parens(text: str) -> str:
 # `_balance_cut_parens` — seeing an unclosed `(` and no `)` — deleted the OPENER,
 # leaving `never ran cannot appear in an artifact), so this is the LOCAL wall …`.
 # That reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623), which is a P3 note-damage defect and not a wrong weight.
+# legs (run 41395489623) — that arm was CUT in the B7 cut, 2026-11-23, so the
+# consequence now is note damage a reader has to notice — a P3 note-damage defect
+# and not a wrong weight.
 #
 # So the renderer joins the span before it touches it (`_joined_note_tail`) and
 # re-emits it per the shape of the change (see `render_refreshed_manifest`):
@@ -2405,10 +2408,10 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        "note" would delete the header with it.
 
     2. A blank line does not end a note and any other non-comment line does. This
-       mirrors the READER that judges a written map
-       (`tests/test_ci_selection.py::_durations_row_comments`): a writer reasoning
-       about a different span than the guard is how a cut came to orphan a
-       parenthesis the guard was counting.
+       mirrors the READER that judged a written map
+       (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test
+       cut, 2026-11-23): a writer reasoning about a different span than the guard is
+       how a cut came to orphan a parenthesis the guard was counting.
 
     3. ⛔ The block must actually CONTINUE the row's sentence — its first line must
        not OPEN a note (`_starts_a_new_note`). This is the condition YAML cannot
@@ -2436,16 +2439,16 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        **36 rows lost their block, 349 lines were folded into row lines**. The text
        survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
        off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
-       `_durations_rows_stating_a_stale_watchdog_floor`) — a swallowed block carrying
+       `_durations_rows_stating_a_stale_watchdog_floor` — BOTH CUT in the B7 test cut,
+       2026-11-23, so this is now a by-hand hazard) — a swallowed block carrying
        one of those claim shapes is judged against the wrong row's value, i.e. a
        false red or a false green in a required leg.
 
        So: a block that opens a note is NOT this row's note. It is not joined, not
        appended into, and not dropped — the row line is rewritten and the block is
        left byte-identical. `test_a_note_block_that_opens_of_its_own_is_never_this_rows`
-       pins the behaviour on a synthetic map;
-       `tests/test_ci_selection.py::test_the_cap_block_is_not_read_as_the_row_aboves_note`
-       pins it on the real one.
+       pins the behaviour on a synthetic map (the arm that pinned it on the REAL
+       map was cut in the B7 test-bureaucracy cut, 2026-11-23).
     """
     out: list[int] = []
     for j in range(index + 1, len(lines)):
@@ -2492,8 +2495,9 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 # implement it: a row that carries a MEASUREMENT may not also carry the note of a
 # row no sweep has collected.
 #
-#   tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
+#   (the `test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value`
+#   arm was cut in the B7 test-bureaucracy cut, 2026-11-23)
 #
 # The map's own rule for it is stated above `durations:` — "a row's comment is kept
 # only while the value AND its stated basis are unchanged" — and the 2026-10-26
@@ -3827,6 +3831,26 @@ def _dedupe_history(rows: list[dict]) -> list[dict]:
     return out
 
 
+# ⛔ THE PUBLISHED ID IS THE RAW ONE, AND THAT IS A CORRECTION OF A CORRECTION
+# (#14366 cycle-4 review, P1 — measured, not argued). A previous round "decoded"
+# the pytest escapes out of the published nodeid on the premise that the escaped
+# form is not a test id. The premise is FALSE, and the fix made the artifact
+# WORSE: pytest prints and stores the ESCAPED id, and it is the one that collects.
+#
+#   $ pytest tests/test_7949_capstone_measure.py -q --collect-only | grep -c u2014
+#   25                                   # ESCAPED; a real em dash appears 0 times
+#   $ pytest '<…[`config/ci-surfaces.yml` \u2014 155 lines of rows]' --collect-only
+#   1 test collected                     # the ESCAPED form collects
+#   $ pytest '<…[`config/ci-surfaces.yml` — 155 lines of rows]' --collect-only
+#   no tests collected                   # the DECODED form collects NOTHING
+#
+# pytest's own durable nodeid agrees: `.pytest_cache/v/cache/lastfailed` keys on
+# `…[x\\u2014y]`. So `candidate_flakes()["test"]` is published VERBATIM — it is
+# the lookup key, it is what a reader pastes to reproduce the flake, and it is
+# also exactly what the history rows it was derived from carry, which is what
+# keeps the two joinable. Display-only escaping stays in `_md_display_text`.
+
+
 def candidate_flakes(history: list[dict]) -> list[dict]:
     """Nodeid failed in an earlier sample, absent from the failed list of the
     next sample (i.e. it passed next time) → flake candidate. Checks up to the
@@ -3890,6 +3914,8 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
             if listed_failed_at_or_after(nodeid, newer.get("sample_time"), newer):
                 continue
             out.append({
+                # ⛔ VERBATIM, never decoded — the escaped form IS the id pytest
+                # printed and the only one that collects. See the block above.
                 "test": nodeid,
                 "failed_at": older.get("sample_time"),
                 "passed_at": newer.get("sample_time"),
@@ -3904,6 +3930,73 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 
 # --- rendering --------------------------------------------------------------
+
+# ⛔ A markdown TABLE CELL cannot hold a control byte OR a pipe, and a nodeid is
+# parametrize-controlled (#14366 cycle-4 review, P2). `tests/test_attest_census.py`
+# parametrizes `"a\nb|c"`, so a flake row for such a test would put a RAW NEWLINE
+# inside the table row (it splits in two) or, worse, a `|` that silently turns a
+# 3-column row into a 4-cell one — `MD056/table-column-count`, the required `docs`
+# check red. Measured: escaping the `|` turns `MD056 … [Expected: 3; Actual: 4]`
+# into `0 issues in 0 files`.
+#
+# ⛔ The BACKSLASH is NOT escaped, and that is a deliberate departure from the
+# `tools/attest_census.py` precedent: this helper's output goes INSIDE a code span
+# (`_md_code_span`), where a backslash is LITERAL. Escaping it would publish
+# `\\u2014` for an id whose escape sequence is `\u2014` — i.e. it would corrupt
+# every escaped nodeid, which is most of the ones this table carries. `|` still
+# has to be escaped even inside a span, because a GFM table splits cells BEFORE it
+# parses inline content (measured: `\|` inside a span → `0 issues in 0 files`,
+# the bare `|` → `MD056 … [Expected: 3; Actual: 4]`).
+#
+# ⚠️ The one shape this trades away: an id carrying a literal backslash
+# immediately before a pipe (`\|`) would lose its cell — escaping only the pipe
+# yields `\\|`, which GFM reads as a literal backslash then a separator. No
+# committed id has that shape, and paying it is cheaper than corrupting every
+# `\uXXXX` id, which is the COMMON case here.
+_CONTROL_DISPLAY = {"\t": "\\t", "\r": "\\r", "\n": "\\n"}
+
+
+def _md_display_text(text: str) -> str:
+    """`text` escaped so a markdown table cell cannot break or gain a cell."""
+    out: list[str] = []
+    for ch in text:
+        named = _CONTROL_DISPLAY.get(ch)
+        if named is not None:
+            out.append(named)
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append(f"\\x{ord(ch):02x}")
+        elif ch == "|":
+            out.append("\\|")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _md_code_span(text: str) -> str:
+    """`text` as a CommonMark code span its own content cannot close.
+
+    A test NODEID is parametrize-controlled and may itself carry backticks —
+    `…guard[<lambda>-`_HOLD_NONE` (the clause is negated)]`. Wrapping that in a
+    single-backtick span closes the span at its first inner backtick, so the
+    remainder re-opens a span whose leading space is MD038 (`no-space-in-code`).
+    Measured on the 2026-11-23 render: **19 new MD038 findings, against ZERO on
+    the same file at the previous head**, which redded the REQUIRED `docs` check
+    on a data-only refresh — the renderer had simply never been fed a nodeid
+    containing a backtick (this week's flake list is mostly
+    `test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-…]` — the arm
+    itself was CUT in the B4 test cut, 2026-11-23; the id is kept as the frozen
+    fixture the renderer must survive).
+
+    CommonMark: a span opened with N backticks is closed only by a run of
+    EXACTLY N, so N = (longest run in the content) + 1 always holds. Content
+    that begins or ends with a backtick is padded with one space on each side —
+    the documented way to embed an edge backtick, and the renderer strips it.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
 
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
               run_id: str, history: list[dict], flakes: list[dict],
@@ -4015,7 +4108,16 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
             passed_run = f.get("passed_run_id")
             cell = (f"{f['passed_at']} (`{passed_run}`)" if passed_run
                     else f"{f['passed_at']}")
-            lines.append(f"| `{f['test']}` | `{f['run_id']}` | {cell} |")
+            # ⛔ `_md_code_span`, never a bare `…`: the nodeid is
+            # parametrize-controlled and can contain backticks, which a
+            # single-backtick span cannot hold (19 MD038 findings on the
+            # 2026-11-23 render, `docs` red). See the helper's docstring.
+            # ⛔ `_md_display_text` INSIDE the span: the id may carry a control
+            # byte or a pipe, either of which breaks this table row (see
+            # `_md_display_text`). The JSON keeps the id verbatim.
+            lines.append(
+                f"| {_md_code_span(_md_display_text(f['test']))} | "
+                f"`{f['run_id']}` | {cell} |")
     else:
         # Asterisk, not underscore: MD049 (`consistent`) keys on the document's
         # FIRST emphasis, and the `*candidate flake*` blockquote above it is

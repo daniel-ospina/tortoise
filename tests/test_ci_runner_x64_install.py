@@ -4323,18 +4323,18 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: Every citation whose target sits AT OR BELOW the insert moved DOWN by 25; the ones above it did
 #: not. Re-derive each from the workflow, never offset the old number by the insert's size.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4816", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4808-4810", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3230", ("cache: pip",)),
+    ("python-ci.yml:4838", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2957-2964", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4828-4830", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3242", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
     # adding it here is what puts a new citation under the pin instead of beside it. Each span is
     # anchored on `path:` as well as `uses:`, so a bare `uses: actions/cache@v4` line (there are
     # several in this workflow) cannot satisfy it from the wrong step.
-    ("python-ci.yml:2942-2946", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
-    ("python-ci.yml:2985-2987", ("actions/cache@v4", "path: ~/.cache/huggingface")),
-    ("python-ci.yml:3547-3549", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:2950-2954", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
+    ("python-ci.yml:2995-2997", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:3563-3565", ("actions/cache@v4", "path: ~/.cache/huggingface")),
 )
 
 #: The citation shape the completeness arm below reads — a line number or a line RANGE.
@@ -4380,6 +4380,391 @@ def _unregistered_wall_clock_citations(
 #: rather than on a line in the middle of it. Pinned by SENTENCE, like the refs in the runbook pin
 #: below, so a number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
 _REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
+
+#: A DE-NUMBERED pointer: a `(file, marker, declaration)` triple for a `python-ci.yml` claim a graded
+#: file makes in PROSE, where the number it used to carry could not be expressed at all.
+#:
+#: `.github/workflows/ci.yml` cited the `#11057 review P2` note inside python-ci.yml's own
+#: `actions/checkout` step — the insertion that put that file's gate at `fetch-depth: 0` — as
+#: `python-ci.yml:4234-4244`. That number was WRONG WHEN IT WAS WRITTEN (it landed on
+#: `- uses: actions/checkout@v4`), and `_refusal_citation_problems` could not catch it as a second
+#: target: its single anchor is the `test-slow` refusal paragraph's OPENER, so EVERY
+#: `python-ci.yml:<n>` in these two files must be that line — a legitimate second citation target has
+#: no spelling that satisfies it. Deleting the number was therefore the only way to get the arm green,
+#: and it took the last GRADED pointer to that note with it (measured at `158ac4115e`: `ci.yml`'s
+#: graded `python-ci.yml` population went from two cites to one, and nothing else in the repo reads
+#: the note).
+#: ⛔ A prose pointer is only better than a stale number if it RESOLVES. This register is what makes
+#: it checkable: `_de_numbered_cite_problems` proves the sentence's claims one by one — the pointer
+#: names the marker and states the `fetch-depth` claim in its OWN comment block; the marker occurs
+#: exactly once in python-ci.yml; and the note sits inside an `actions/checkout` step whose own `with:`
+#: declares the depth the sentence claims. Rewording the note, deleting it, repeating it, or changing
+#: that checkout back to a shallow one reds here, which is the unverified state a number alone cannot
+#: detect.
+#: ⚠ No LIVE line number is restated in this note on purpose — that is exactly the rot this register
+#: replaces (three attempts to keep a live number in `_REFUSAL_CITATION_SITES`' own note went stale on
+#: the next merge). The `4234-4244` above is quoted as HISTORY, not as a claim: it is there to explain
+#: why the number could not stay, and it is graded by nothing. What is graded is the pointer below.
+_DE_NUMBERED_CITE_MARKERS: tuple[tuple[str, str, str], ...] = (
+    (".github/workflows/ci.yml", "#11057 review P2", "fetch-depth: 0"),
+)
+
+#: A workflow STEP is a YAML LIST ITEM: it opens at a `- ` line and closes at the next `- ` line of
+#: equal or shallower indent. ⛔ Structural, NOT key-based: a step's first key may be `name:`, `id:`,
+#: `env:` or `if:` — all ordinary — and a `- uses: actions/checkout` spelled inside a `run: |` heredoc
+#: is NOT a step. A key-based scan gets both of those wrong in opposite directions (false PASS on the
+#: first, false RED on the second), which is why the resolver below reads indentation, never keys.
+_STEP_ITEM_RE = re.compile(r"^(\s*)-\s")
+_CHECKOUT_USES_RE = r"uses:\s*actions/checkout@"
+
+#: A de-numbered POINTER's shape: a backticked `python-ci.yml` whose possessive is followed by the
+#: construct a citation must resolve against (`'s own checkout step`, `'s note`). Scoped this tightly
+#: ON PURPOSE — `ci.yml` names `python-ci.yml` 17 times and only ONE of them is a pointer; the other
+#: sixteen are prose references (`carries the stack`, `scopes it`) and a `uses: …@v0.1.3` caller, so a
+#: completeness arm over every bare mention would red a correct record.
+_DE_NUMBERED_POINTER_RE = r"`python-ci\.yml`'s\s+(?:own\s+)?(?:checkout\s+)?(?:step|note)"
+
+#: Where the pointer's SENTENCE ends. ⛔ An abbreviation is not a sentence end: `e.g.` inside the
+#: cited clause cuts the piece before the depth it states, and the pin then reports a false RED whose
+#: message ("no longer states the claim") is untrue. `re` has no variable-length lookbehind, so the
+#: abbreviations this repo actually writes are listed explicitly; a NEW one is a one-line addition,
+#: not a redesign.
+#: ⚠ MEASURED COVERAGE of the contradiction check that stands behind this list — it refuses a piece
+#: carrying MORE THAN ONE VALUE for the key, so it catches an absorbed second claim only when that
+#: claim states a DIFFERENT depth. Absorption carrying the SAME value stays GREEN (the piece then
+#: holds one value, and it is the other subject's) — a residual, recorded rather than papered over:
+#: closing it needs subject attribution, not a substring rule.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<=[.;])\s+")
+
+
+def _enclosing_step(workflow: list[str], note: int) -> tuple[int, int] | None:
+    """The `(start, end)` of the workflow STEP that encloses line index `note`, or None.
+
+    `start` is the nearest preceding `- ` line shallower than the note itself, and `end` is the next
+    `- ` line at or shallower than `start`'s indent.
+    """
+    note_indent = len(workflow[note]) - len(workflow[note].lstrip())
+    start = None
+    for j in range(note - 1, -1, -1):
+        m = _STEP_ITEM_RE.match(workflow[j])
+        if m and len(m.group(1)) < note_indent:
+            start = j
+            break
+    if start is None:
+        return None
+    step_indent = len(workflow[start]) - len(workflow[start].lstrip())
+    for j in range(start + 1, len(workflow)):
+        m = _STEP_ITEM_RE.match(workflow[j])
+        if m and len(m.group(1)) <= step_indent:
+            return start, j
+    return start, len(workflow)
+
+
+def _comment_block(lines: list[str], index: int) -> tuple[int, int]:
+    """The `(start, end)` of the contiguous `#` comment block that contains line `index`."""
+
+    def _is_comment(k: int) -> bool:
+        return bool(re.match(r"\s*#", lines[k]))
+
+    start = index
+    while start > 0 and _is_comment(start - 1):
+        start -= 1
+    end = index + 1
+    while end < len(lines) and _is_comment(end):
+        end += 1
+    return start, end
+
+
+def _comment_prose(block: list[str]) -> str:
+    """A `#` comment block as ONE line of prose: `#` markers dropped, line wraps collapsed.
+
+    ⛔ WHY THIS EXISTS. Every pointer in this register is matched with `_DE_NUMBERED_POINTER_RE`,
+    whose `\\s+` happily spans a line break — but a PER-LINE scan can never see that, and a wrapped
+    pointer is how prose wraps the moment the paragraph is reflowed. Measured before this helper
+    existed: a NEWLY written pointer wrapped after `python-ci.yml`'s own` was invisible to BOTH arms
+    (the register arm found no pointer at all and the completeness arm scanned line-by-line), so an
+    unregistered prose claim was added with every gate green. The same shape is why #10275's check
+    normalises whitespace before concluding a surface is clean.
+
+    The `#` marker must go with the wrap: a reflow puts `# ` BETWEEN the words, and leaving it in
+    turns `own` / `checkout step` into `own # checkout step`, which the regex still cannot join.
+    """
+    return " ".join(line.strip().lstrip("#").strip() for line in block).strip()
+
+
+def _comment_runs(lines: list[str]) -> list[tuple[int, int]]:
+    """Every maximal run of `#`-comment lines, as `[lo, hi)` half-open spans.
+
+    ⛔ THE REGISTER'S CANDIDATE SET IS BUILT FROM THESE, not from line-wise regex hits. Building it
+    from hits made a WRAPPED pointer invisible as a candidate: the regex's ``\\s+`` spans a line break,
+    but a per-line scan cannot see that, so a second pointer wrapped across two `#` lines was never
+    enumerated — while the completeness arm excused its block (the prose names the covered marker).
+    Measured: the unwrapped second pointer reds the register, the wrapped one left BOTH arms green.
+    One definition of "a block that carries a pointer", shared by both arms.
+    """
+    runs: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines):
+        is_comment = line.lstrip().startswith("#")
+        if is_comment and start is None:
+            start = i
+        elif not is_comment and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(lines)))
+    return runs
+
+
+def _declaration_re(indent: int, declaration: str) -> re.Pattern[str]:
+    """The regex for `declaration` as a key at the given indent, whose line may carry a comment.
+
+    ⛔ Anchored on the KEY and the VALUE, with the tail allowed to be a comment or quoted digits: this
+    repo writes `fetch-depth: 0   # PR base SHA must be present for the diff` (`.github/workflows/
+    ci.yml:89`), so a bare end-of-line anchor would red a correct depth-0 checkout. The indent is what
+    keeps the match inside the cited step's own `with:` mapping instead of anywhere in the block.
+    """
+    key, _, value = declaration.partition(":")
+    return re.compile(
+        rf"\s{{{indent}}}{re.escape(key)}:\s*['\"]?{re.escape(value.strip())}['\"]?\s*(?:#.*)?$"
+    )
+
+
+def _cited_declaration_index(workflow: list[str], marker: str, declaration: str) -> int | None:
+    """Index of the line where the CITED checkout's own `with:` declares `declaration`, or None.
+
+    ONE implementation for the pin and for its control: a control that located the line by a rule of
+    its own could mutate a line the pin never read, and "still green after the mutant" would then
+    prove nothing. None covers every reason the pin cannot find it — zero or several marker notes, no
+    enclosing step, no `with:` key, no declaration — because the pin does not need to tell them apart
+    to refuse.
+
+    ⛔ The search is bounded to the `with:` MAPPING: it stops at the first non-blank line shallower
+    than the mapping's children, so an `env:` child, a `run: |` heredoc line at that indent, or a
+    deeper nested step cannot satisfy it from the wrong place.
+    """
+    notes = [i for i, line in enumerate(workflow) if marker in line]
+    if len(notes) != 1:
+        return None
+    span = _enclosing_step(workflow, notes[0])
+    if span is None:
+        return None
+    start, end = span
+    key_indent = len(workflow[start]) - len(workflow[start].lstrip()) + 2
+    with_at = next(
+        (k for k in range(start, end) if re.match(rf"\s{{{key_indent}}}with:\s*$", workflow[k])),
+        None,
+    )
+    if with_at is None:
+        return None
+    pattern = _declaration_re(key_indent + 2, declaration)
+    for k in range(with_at + 1, end):
+        line = workflow[k]
+        if not line.strip():
+            continue
+        if (len(line) - len(line.lstrip())) < key_indent + 2:
+            break
+        if pattern.match(line):
+            return k
+    return None
+
+
+def _de_numbered_cite_problems(
+    text: str,
+    workflow: list[str],
+    markers: tuple[tuple[str, str, str], ...] = _DE_NUMBERED_CITE_MARKERS,
+) -> list[str]:
+    """Every de-numbered `python-ci.yml` pointer in `text` that does not resolve to what it names.
+
+    Three claims, because a prose pointer carries three and each can rot silently: the citing file
+    must still carry the pointer and its sentence must still STATE the declaration it is graded
+    against (else a rewrite to the opposite assertion reads green), the marker must occur exactly
+    ONCE in python-ci.yml (else "which occurrence does the sentence cite?" is unanswerable, and
+    excusing either one turns a rotted citation green), and it must sit inside the
+    `actions/checkout` step whose own `with:` declares it.
+    """
+    problems: list[str] = []
+    lines = text.splitlines()
+    for rel, marker, declaration in markers:
+        candidates: list[tuple[int, int, str]] = []
+        for lo, hi in _comment_runs(lines):
+            prose = _comment_prose(lines[lo:hi])
+            if not re.search(_DE_NUMBERED_POINTER_RE, prose):
+                continue
+            candidates.append((lo, hi, prose))
+        if not candidates:
+            problems.append(
+                "no longer carries the de-numbered `python-ci.yml` pointer this register covers — "
+                "the claim behind the sentence is then unverified, which is the state the deleted "
+                "line number was criticised for"
+            )
+            continue
+        # ⛔ Scoped to the POINTER'S OWN SENTENCE, never the file and never the whole comment block.
+        # The file is too wide (`ci.yml` spells `fetch-depth: 0` seven times elsewhere) AND so is the
+        # block: this pointer's paragraph also says "… This job checks out at `fetch-depth: 0`", the
+        # same VALUE for a DIFFERENT subject, 20 lines of one `#` run. A block test therefore stays
+        # green over an opposite-claim rewrite of the cited clause — measured. So the block is split
+        # into sentences and ONE piece must carry the pointer, the marker AND the declaration.
+        # ⛔ THE POINTER IS SELECTED BY THE MARKER ITS SENTENCE NAMES, never by position in the file.
+        # `pointers[0]` was the first form, and it graded exactly ONE pointer per file however many
+        # the file carried: a SECOND pointer in another paragraph stayed ungraded — and because this
+        # loop then resolved the FIRST one, rotting the original's cited clause to the opposite depth
+        # left BOTH arms green (measured). Selecting by marker makes a second pointer that names the
+        # same marker ambiguous (it cannot tell which the register covers) and leaves a second
+        # pointer naming a DIFFERENT note to the completeness arm, which is that arm's job.
+        #
+        # ⛔ AND THE COUNT IS ON WRAP-NORMALISED PROSE, like the completeness arm: a second pointer
+        # that is WRAPPED is still a second pointer, and a line-wise count does not see it — so the
+        # duplicate this branch exists to refuse would be excused, the fail-open shape cycle 3 closed
+        # for the UNWRAPPED case. ONE definition of "a pointer", shared by both arms.
+        blocks: list[tuple[int, int, str]] = []
+        multi = False
+        for lo, hi, prose in candidates:
+            if len(re.findall(_DE_NUMBERED_POINTER_RE, prose)) > 1:
+                problems.append(
+                    f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
+                    "de-numbered pointer — the register's marker cannot say which one this entry "
+                    "covers, so a second pointer is registered nothing"
+                )
+                multi = True
+                break
+            blocks.append((lo, hi, prose))
+        if multi:
+            continue
+        naming: list[tuple[int, int, str]] = []
+        for lo, hi, prose in blocks:
+            sentences = [
+                piece
+                for piece in _SENTENCE_SPLIT_RE.split(prose)
+                if re.search(_DE_NUMBERED_POINTER_RE, piece)
+            ]
+            if any(marker in piece for piece in sentences):
+                naming.append((lo, hi, sentences[0] if sentences else ""))
+        if len(naming) > 1:
+            problems.append(
+                f"the {marker!r} marker is named by {len(naming)} de-numbered pointers in "
+                f"{rel} (comment blocks {[lo + 1 for lo, _hi, _s in naming]}) — the register "
+                "cannot tell which one this entry covers"
+            )
+            continue
+        if not naming:
+            problems.append(
+                f"no de-numbered pointer in {rel} names the {marker!r} marker in its own sentence — "
+                "the citation then resolves to no note at all"
+            )
+            continue
+        lo, hi, _prose = naming[0]
+        sentence = naming[0][2]
+        # ⛔ PUNCTUATION-INDEPENDENT CONTRADICTION CHECK. The split is punctuation-based, so a rewrite
+        # that swaps the terminal `;` for a comma MERGES the next sentence into this piece — and that
+        # next sentence states the SAME key for a DIFFERENT subject ("… This job checks out at
+        # `fetch-depth: 0`"). A substring test then reads the wrong subject's value as this note's
+        # and reports GREEN over a cited clause that now claims a different depth. Two values for one
+        # key in one sentence is not a claim this pin can grade, whichever one it happens to contain.
+        _key = declaration.partition(":")[0]
+        _values = set(re.findall(rf"{re.escape(_key)}:\s*['\"]?(\d+)", sentence))
+        if len(_values) > 1:
+            problems.append(
+                f"the pointer at {rel}:{lo + 1} states more than one value for `{_key}` "
+                f"in its own sentence {sorted(_values)} — the cited note's depth must be stated "
+                "once, or this pin cannot tell which value is the cited one"
+            )
+            continue
+        if declaration not in sentence:
+            problems.append(
+                f"the pointer at {rel}:{lo + 1} no longer states the `{declaration}` claim "
+                "in its own sentence (the piece this pin grades ends at the first `.` or `;` that "
+                "is not part of an abbreviation) — it would then grade a claim the sentence does "
+                "not make"
+            )
+            continue
+        notes = [i for i, line in enumerate(workflow) if marker in line]
+        if not notes:
+            problems.append(
+                f"names the {marker!r} marker, and python-ci.yml no longer carries any line with it"
+            )
+            continue
+        # ⛔ FAIL CLOSED ON AMBIGUITY. The marker is the register's only identity for the note, so a
+        # second line carrying it makes the question unanswerable — and excusing either occurrence
+        # turns a rotted citation green (measured: a duplicate mention inside the `changes` job's
+        # depth-0 checkout masked the cited step going shallow).
+        if len(notes) != 1:
+            problems.append(
+                f"the {marker!r} marker occurs {len(notes)}x in python-ci.yml "
+                f"(lines {[n + 1 for n in notes]}) — the register cannot tell which occurrence the "
+                "sentence cites; give the duplicate a distinct tag"
+            )
+            continue
+        note = notes[0]
+        span = _enclosing_step(workflow, note)
+        if span is None:
+            problems.append(
+                f"the {marker!r} note at python-ci.yml:{note + 1} is not inside any workflow step"
+            )
+            continue
+        start, end = span
+        key_indent = len(workflow[start]) - len(workflow[start].lstrip()) + 2
+        if not (
+            re.match(rf"\s*-\s+{_CHECKOUT_USES_RE}", workflow[start])
+            or any(
+                re.match(rf"\s{{{key_indent}}}{_CHECKOUT_USES_RE}", line)
+                for line in workflow[start + 1: end]
+            )
+        ):
+            problems.append(
+                f"the {marker!r} note at python-ci.yml:{note + 1} is not inside an "
+                f"`actions/checkout` step (the step opens at python-ci.yml:{start + 1})"
+            )
+            continue
+        if _cited_declaration_index(workflow, marker, declaration) is None:
+            problems.append(
+                f"the {marker!r} note at python-ci.yml:{note + 1} sits in a checkout step whose own "
+                f"`with:` does not declare `{declaration}` — that is the claim the sentence makes"
+            )
+    return problems
+
+
+def _unregistered_de_numbered_pointers(
+    text: str, markers: tuple[tuple[str, str, str], ...] = _DE_NUMBERED_CITE_MARKERS
+) -> list[tuple[int, str]]:
+    """Every `python-ci.yml` prose POINTER in `text` that no register entry covers.
+
+    The register loop is one-directional — it resolves each REGISTERED pointer — so a pointer this
+    file GAINS is an unchecked claim that reds nothing. That is the hole the wall-clock doc's
+    `_unregistered_wall_clock_citations` closes in the other direction, and the reason is the same:
+    the PR whose whole purpose was correcting citations added three outside the register.
+
+    ⛔ Coverage is STRUCTURAL — the pointer's own `#` comment block must name a registered marker —
+    and not a proximity window: the arm and the register must agree on ONE definition of coverage.
+    A ±N-line window (this arm used ±5, then ±1) disagrees with the register the moment the paragraph
+    is rewrapped, and it then demands a register entry that already exists. The window also excused a
+    new pointer written in the SAME paragraph, which is the likeliest place one appears.
+
+    ⛔ SCANNED PER BLOCK, ON WRAP-NORMALISED PROSE (`_comment_prose`), not per line. A pointer
+    WRAPPED across two `#` lines is still a pointer — and the per-line scan this replaced missed a
+    newly written one entirely, which is a silent gap in the direction this arm exists to cover: the
+    register arm reds a rewrap of the KNOWN pointer (its line-wise pointer list empties), but a NEW
+    wrapped pointer beside it was graded by nothing (measured, then closed here).
+    """
+    covered = {marker for _rel, marker, _decl in markers}
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    seen_blocks: set[tuple[int, int]] = set()
+    for i, line in enumerate(lines):
+        if not re.match(r"\s*#", line):
+            continue
+        lo, hi = _comment_block(lines, i)
+        if (lo, hi) in seen_blocks:
+            continue
+        seen_blocks.add((lo, hi))
+        prose = _comment_prose(lines[lo:hi])
+        m = re.search(_DE_NUMBERED_POINTER_RE, prose)
+        if m is None or any(marker in prose for marker in covered):
+            continue
+        # Report the line the pointer STARTS on, so the message points at the sentence to fix and
+        # not merely at the paragraph it lives in.
+        out.append((lo + 1, " ".join(m.group(0).split())))
+    return out
 
 
 def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
@@ -4563,19 +4948,22 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
-    # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
+    # `.github/workflows/ci.yml` and `.github/actionlint.yaml` both cite the same refusal
     # paragraph, and neither file is read by any gate — the identical "no gate reads it, so it drifts
     # green" hole that put `batch-integration.md` in this pin one round earlier. When that citation
     # was written the number landed on the `Do NOT change it back` prohibition, ~30 lines past the
     # paragraph's OPENER that the checker requires — written from a remembered offset, not derived —
     # and every insert above it since has moved it further. Both sentences are load-bearing:
-    # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
-    # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
+    # the `ci.yml` one is why the #10237 canary exists at all (the required legs CANNOT be routed to
+    # the pool), and the `actionlint.yaml` one is the only record of why declaring a label is not a way
     # to make a required leg schedulable.
     #
     # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
-    # No line number is restated in this note on purpose: the checker below resolves the citation
-    # from the FILE and compares it to the sentence, so trust the red rather than this prose.
+    # No line number is restated in this note on purpose: the two it used to carry had ALREADY moved
+    # when this revision was written (the earlier `ci.yml` spelling now lands on a DIFFERENT step's
+    # definition, not on the #10237 canary comment that carries the cite), so a restated address here
+    # would be the same drift one level up. The checker below resolves the citation from the FILE and
+    # compares it to the sentence — trust the red, not this prose.
     workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
     for rel in _REFUSAL_CITATION_SITES:
         text = (REPO_ROOT / rel).read_text()
@@ -4592,6 +4980,343 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     assert _refusal_citation_problems(
         "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
+
+    # ── The DE-NUMBERED pointer: prose instead of a number, and it must still RESOLVE ─────────────
+    # `ci.yml` used to carry `python-ci.yml:4234-4244` for the `#11057 review P2` note — the head of
+    # the sentence above it. The number was wrong when written (it landed on
+    # `- uses: actions/checkout@v4`) and the arm above CANNOT express a second citation target: its
+    # only anchor is the refusal paragraph's opener, so every `python-ci.yml:<n>` in these files must
+    # be that line. Deleting the number was the only way to green the arm — and it deleted the last
+    # GRADED pointer to that note (measured at `158ac4115e`: two graded cites in `ci.yml` -> one).
+    # ⛔ The register below is what keeps a prose pointer from being the weaker option: it resolves
+    # the marker and the construct the sentence attributes to it, so the claim is CHECKED instead of
+    # merely reworded. Mutation: reword the note in python-ci.yml, or flip ITS OWN checkout back to
+    # `fetch-depth: 1` -> RED naming the note's own line.
+    for rel, marker, declaration in _DE_NUMBERED_CITE_MARKERS:
+        text = (REPO_ROOT / rel).read_text()
+        problems = _de_numbered_cite_problems(text, workflow_lines, ((rel, marker, declaration),))
+        assert not problems, (
+            f"{rel}'s de-numbered pointer to `python-ci.yml` does not resolve: " + "; ".join(problems)
+        )
+        # ── COMPLETENESS, the reverse direction: a pointer this file GAINS must join the register ──
+        # Same hole the wall-clock doc's `_unregistered_wall_clock_citations` closes: the loop above
+        # only resolves REGISTERED pointers, so a new prose pointer is an unchecked claim. Scoped to
+        # the pointer SHAPE, not to every `python-ci.yml` mention — `ci.yml` names the file 17 times
+        # and fifteen of those are prose references or a `uses:` caller, not citations.
+        unregistered = _unregistered_de_numbered_pointers(text, ((rel, marker, declaration),))
+        assert not unregistered, (
+            f"{rel} carries a de-numbered pointer {unregistered} that no register entry covers. "
+            "Add it to `_DE_NUMBERED_CITE_MARKERS` — a prose pointer outside the register is an "
+            "unchecked claim, which is the state the deleted line number was criticised for."
+        )
+
+    # Non-vacuity, executable, every branch — a green on the real files must not be this checker
+    # matching nothing. Each mutant is applied to ONE variable (the citing text, or ONE line of the
+    # workflow), never to the whole workflow: a file-wide replace would prove "some declaration
+    # exists", never "the CITED step's", and would be blind to the exact false pass it must catch.
+    for _rel, _marker, _declaration in _DE_NUMBERED_CITE_MARKERS:
+        _citing = (REPO_ROOT / _rel).read_text()
+        _entry = ((_rel, _marker, _declaration),)
+        assert _de_numbered_cite_problems(
+            _citing.replace(_marker, "_11057 review P2_"), workflow_lines, _entry
+        ), "the de-numbered pin no longer sees a citing file that stopped naming the marker"
+        # The POINTER'S OWN SENTENCE, not the file and not its 20-line comment block: the block also
+        # says "… This job checks out at `fetch-depth: 0`", the same VALUE for a DIFFERENT subject,
+        # so a block-wide replace reds for the wrong reason and a block-wide CHECK stays green over
+        # the clause rewritten to the opposite claim (which is how this control was cycle-3 wrong).
+        # ⛔ MUTATED IN PLACE, with the split's separators CAPTURED: re-joining bare pieces strips the
+        # `          # ` prefixes that sit inside the separators, which de-comments the paragraph and
+        # shrinks the comment block — the mutant then red-ed for THAT reason, and a revert to the
+        # block-scoped check left this control green. A control has to corrupt the claim, nothing else.
+        _lines = _citing.splitlines()
+        _pointer_at = next(
+            i for i, line in enumerate(_lines) if re.search(_DE_NUMBERED_POINTER_RE, line)
+        )
+        _lo, _hi = _comment_block(_lines, _pointer_at)
+        _block = "\n".join(_lines[_lo:_hi])
+        _segments = _SENTENCE_SPLIT_RE.split(_block)
+        _separators = _SENTENCE_SPLIT_RE.findall(_block)
+        _piece_at = next(
+            k for k, piece in enumerate(_segments) if re.search(_DE_NUMBERED_POINTER_RE, piece)
+        )
+        _segments[_piece_at] = _segments[_piece_at].replace(_declaration, "fetch-depth: 1")
+        _mutated_block = "".join(
+            piece + (_separators[k] if k < len(_separators) else "")
+            for k, piece in enumerate(_segments)
+        )
+        assert len(_mutated_block.splitlines()) == _hi - _lo, (
+            "the sentence mutant changed the block's line count — it is no longer corrupting only "
+            "the claim, so a red would prove nothing about the sentence scope"
+        )
+        _mutated = _lines[:_lo] + _mutated_block.splitlines() + _lines[_hi:]
+        assert _de_numbered_cite_problems("\n".join(_mutated), workflow_lines, _entry), (
+            "the de-numbered pin no longer sees its OWN sentence rewritten to make the OPPOSITE "
+            "claim — it would grade a claim the sentence no longer makes"
+        )
+        # …and the mutation corrupts ONLY the cited claim: the block STILL states `fetch-depth:` for
+        # the other subject, so the red above is the sentence scope doing its work, not the paragraph
+        # losing the key wholesale.
+        # ⚠ What this control does NOT claim: that widening the check to the BLOCK quietly passes. It
+        # does not — the block carries BOTH values (`… its default `fetch-depth: 1`` and `… This job
+        # checks out at `fetch-depth: 0``), so a block-scoped version reds on the REAL file through
+        # the two-values branch, i.e. the register loop's first assertion. That is why the scope
+        # assertion here is `count(…) > 1` on BOTH sides rather than "the block contains the
+        # declaration": the latter is true of the mutant for a reason that has nothing to do with
+        # scope (the single-piece replace leaves the other sentence's occurrence in place), so it
+        # could not fail if the scope regressed.
+        assert _block.count("fetch-depth:") > 1, (
+            "the pointer's comment block no longer states `fetch-depth:` for more than one subject — "
+            "the reason this claim check is SENTENCE-scoped is gone, so re-derive the scope instead "
+            "of keeping this control"
+        )
+        assert _mutated_block.count("fetch-depth:") > 1, (
+            "the sentence mutant stripped every `fetch-depth:` from the block, so a block-scoped "
+            "check would red for the wrong reason and this control would not isolate the scope"
+        )
+        assert _de_numbered_cite_problems(
+            _citing, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
+        ), "the de-numbered pin no longer sees a python-ci.yml that reworded the note"
+        _decl_at = _cited_declaration_index(workflow_lines, _marker, _declaration)
+        assert _decl_at is not None, (
+            "the pin's own locator no longer finds the cited checkout's declaration — the mutants "
+            "below would then mutate a line nothing reads"
+        )
+        _shallow = list(workflow_lines)
+        _shallow[_decl_at] = _shallow[_decl_at].replace(_declaration, "fetch-depth: 1")
+        assert _de_numbered_cite_problems(_citing, _shallow, _entry), (
+            "the de-numbered pin no longer sees THE CITED checkout back on a shallow fetch — that "
+            "is the claim the sentence makes, and it would report green without measuring it"
+        )
+        # A SECOND line carrying the marker makes "which occurrence does the sentence cite?"
+        # unanswerable, and excusing either occurrence turns a rotted citation GREEN — so the pin
+        # fails closed on ambiguity rather than picking one.
+        _duplicated = list(workflow_lines)
+        _first_note = next(i for i, line in enumerate(_duplicated) if _marker in line)
+        _duplicated.insert(_first_note + 1, f"{' ' * 10}# {_marker}")
+        assert _de_numbered_cite_problems(_citing, _duplicated, _entry), (
+            "the de-numbered pin no longer refuses an AMBIGUOUS marker — with two occurrences it "
+            "could excuse the one that rotted"
+        )
+        # ── The two shapes cycle 3 fixed WITHOUT a control: reverting either left the suite green.
+        # (a) `_declaration_re` must accept the values this repo actually writes — a trailing comment
+        # (`ci.yml:89` is `fetch-depth: 0   # PR base SHA …`) and a quoted `'0'`. A stricter match
+        # reds a correct depth-0 checkout.
+        _decl_indent = " " * (len(workflow_lines[_decl_at]) - len(workflow_lines[_decl_at].lstrip()))
+        for _decorated in (
+            f"{_declaration}   # PR base SHA must be present for the diff",
+            _declaration.replace("0", "'0'"),
+        ):
+            _accepting = list(workflow_lines)
+            _accepting[_decl_at] = f"{_decl_indent}{_decorated}"
+            assert not _de_numbered_cite_problems(_citing, _accepting, _entry), (
+                f"a correctly-declared depth-0 checkout written as `{_decorated}` now REDS — the "
+                "declaration match is stricter than the values this repo writes"
+            )
+        # (b) The declaration search must be bounded to the `with:` MAPPING. Unbounded, a sibling
+        # `env:` child satisfies it and the checkout it names can be shallow — the exact false PASS
+        # cycle 3 closed.
+        _sibling_env = [
+            "      - uses: actions/checkout@v4",
+            "        with:",
+            "          path: checkout-dir",
+            "        env:",
+            f"          {_declaration}",
+            f"        # {_marker}",
+        ]
+        assert _de_numbered_cite_problems(_citing, _sibling_env, _entry), (
+            "the declaration search is no longer bounded to the `with:` mapping — a sibling `env:` "
+            "key satisfies it, so a checkout cited for depth 0 can be shallow"
+        )
+        # (c) TWO pointers in ONE punctuation piece: the register's marker is its only identity, so
+        # the second pointer is registered nothing. Without this branch that shape is GREEN and the
+        # completeness arm sees nothing (both pointers sit in a block that names the marker).
+        _two_pointers = [
+            "# The required legs CANNOT be routed here: `python-ci.yml:2151` — refused.",
+            "# `" + _declaration + "` is the same call; #9075 review r6 P1 made it too. The"
+            " `python-ci.yml`'s own checkout step,",
+            f"# and `python-ci.yml`'s own note, the one the {_marker} marker names.",
+        ]
+        assert any(
+            "more than one de-numbered pointer" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_two_pointers), workflow_lines, _entry)
+        ), (
+            "the pin no longer refuses TWO de-numbered pointers in one comment block — the "
+            "register's marker cannot say which of them it covers"
+        )
+        # …and nothing else catches that shape: the block names the marker, so the completeness arm
+        # is silent on it. That is why the branch (and this message) has to exist.
+        assert _unregistered_de_numbered_pointers("\n".join(_two_pointers), _entry) == [], (
+            "the completeness arm unexpectedly covers the double-pointer shape — the register branch "
+            "above is then redundant, or the check is no longer the one this control exercises"
+        )
+        # …and a second pointer in a SEPARATE block, naming the SAME marker, must red TOO. Grading
+        # `pointers[0]` graded one pointer per file however many it carried, so this shape stayed
+        # green — and rotted the FIRST pointer's cited clause to the opposite depth behind it. The
+        # entry must be resolvable by the MARKER its sentence names, not by position in the file.
+        _separate = [
+            *_lines,
+            "",
+            "    # Another paragraph, added later, about the same note.",
+            f"    # `python-ci.yml`'s own checkout step, the one the {_marker} marker names, and",
+            f"    # it states `{_declaration}`.",
+        ]
+        assert any(
+            "is named by 2 de-numbered pointers" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_separate), workflow_lines, _entry)
+        ), (
+            "a SECOND de-numbered pointer naming the same marker in another comment block is "
+            "accepted — the entry is then graded against whichever pointer the file lists first, and "
+            "a rewrite of the other one's cited clause reads green"
+        )
+        # …and again with that second pointer WRAPPED across two `#` lines. Building the candidate
+        # set from line-wise regex hits made this shape invisible while the completeness arm excused
+        # the block (its prose names the covered marker) — MEASURED: the unwrapped second pointer
+        # reds, the wrapped one left BOTH arms green. Candidates come from `_comment_runs` +
+        # wrap-normalised prose, and the sentences are split from that prose, so both shapes red here.
+        _separate_wrapped = [
+            *_lines,
+            "",
+            "    # Another paragraph, added later, about the same note.",
+            "    # `python-ci.yml`'s own",
+            f"    # checkout step — the one the {_marker} note names, stating `{_declaration}`.",
+        ]
+        assert any(
+            "is named by 2 de-numbered pointers" in problem
+            for problem in _de_numbered_cite_problems(
+                "\n".join(_separate_wrapped), workflow_lines, _entry
+            )
+        ), (
+            "a WRAPPED second de-numbered pointer naming the same marker in another comment block "
+            "is accepted — the candidate set is built from line-wise hits, so a reflow hides it"
+        )
+        # (d) The completeness arm's coverage must be STRUCTURAL (the pointer's own comment block),
+        # not a proximity window: `#`-only lines between the marker and the pointer are what a rewrap
+        # of that paragraph produces, and a ±N-line window reds the REGISTERED pointer once the rewrap
+        # is N lines wide — with a remedy (add a register entry) that is already applied. Measured at
+        # N=1 and N=5 below, with the rewrap grown to match each: the WINDOW'S WIDTH and the REWRAP'S
+        # WIDTH are different quantities, so a control that inserts one line and then talks about ±5
+        # tests neither the shape it names nor the arm it claims to.
+        _rewrapped = _lines[:]
+        _rewrapped.insert(_pointer_at, " " * 10 + "#")
+        assert _unregistered_de_numbered_pointers("\n".join(_rewrapped), _entry) == [], (
+            "a rewrap between the marker and the pointer makes the completeness arm call the "
+            "REGISTERED pointer unregistered — a false RED with no correct operator action"
+        )
+        # (g) A NEWLY written pointer WRAPPED across two `#` lines is still a pointer. This arm used
+        # to scan LINE-BY-LINE, and a per-line scan cannot join `own` / `checkout step` — MEASURED on
+        # that arm: `[]`, so an unregistered prose claim was added with every gate green (the
+        # cycle-6 residuals named it; `_comment_prose` closes it). The first assertion is what makes
+        # this control DISCRIMINATE: no single line carries the pointer, so a revert to the per-line
+        # scan cannot leave this green.
+        _wrapped_pointer = [
+            "# The required legs CANNOT be routed here: `python-ci.yml:2151` — refused.",
+            "# See `python-ci.yml`'s own",
+            "# checkout step for the same rule.",
+        ]
+        assert not any(
+            re.search(_DE_NUMBERED_POINTER_RE, wrapped_line) for wrapped_line in _wrapped_pointer
+        ), "control (g) is vacuous — one line carries the whole pointer, so a per-line scan sees it"
+        assert _unregistered_de_numbered_pointers("\n".join(_wrapped_pointer), _entry), (
+            "a pointer WRAPPED across two comment lines is invisible to the completeness arm — "
+            "a NEWLY written unregistered prose claim would then pass with every gate green"
+        )
+        # (h) …and the REGISTER arm's ambiguity branch has the same blind spot, one block over: a
+        # WRAPPED second pointer inside a block that already names the marker is silent to the
+        # completeness arm BY DESIGN (coverage is per block), so a line-wise count would excuse the
+        # duplicate entirely — the fail-open shape cycle 3 closed for the unwrapped case.
+        _wrapped_duplicate = _lines[:]
+        _wrapped_duplicate[_pointer_at] = (
+            _wrapped_duplicate[_pointer_at] + " See `python-ci.yml`'s own"
+        )
+        _wrapped_duplicate.insert(_pointer_at + 1, " " * 10 + "# note for the same rule.")
+        # The mutant is vacuous unless the SECOND pointer is itself invisible line-by-line: the
+        # line-wise total must still be ONE (the registered one), while the prose total is two.
+        assert sum(
+            len(re.findall(_DE_NUMBERED_POINTER_RE, wrapped_line))
+            for wrapped_line in _wrapped_duplicate
+        ) == 1, (
+            "control (h) is vacuous — the second pointer is not wrapped, so a line-wise count sees "
+            "both and the ambiguity branch is not the one under test"
+        )
+        assert any(
+            "more than one de-numbered pointer" in problem
+            for problem in _de_numbered_cite_problems(
+                "\n".join(_wrapped_duplicate), workflow_lines, _entry
+            )
+        ), (
+            "a WRAPPED second pointer in a covered block is excused — the register's marker cannot "
+            "say which pointer it covers when only a line-wise count is taken"
+        )
+        # …and the claim above is about a WINDOW, so the window is what this control runs. A prose
+        # note that says "±N" while the control only exercises N=1 is the defect the cycle-6 review
+        # measured: mutate the arm back to ±5 and the module stayed green. Both widths are run here,
+        # against a re-implementation of the windowed arm, so the sentence is true of what is tested.
+        def _windowed_unregistered(
+            near: int, text_lines: list[str], covered: frozenset[str]
+        ) -> list[tuple[int, str]]:
+            _covered = covered
+            _wl = text_lines
+            _out: list[tuple[int, str]] = []
+            for _i, _line in enumerate(_wl):
+                _m = re.search(_DE_NUMBERED_POINTER_RE, _line)
+                if _m is None:
+                    continue
+                _near = "\n".join(_wl[max(0, _i - near): _i + near + 1])
+                if not any(mk in _near for mk in _covered):
+                    _out.append((_i + 1, _m.group(0)))
+            return _out
+
+        for _gap in (1, 5):
+            _gapped = _lines[:]
+            for _j in range(_gap):
+                _gapped.insert(_pointer_at, " " * 10 + "#")
+            assert _unregistered_de_numbered_pointers("\n".join(_gapped), _entry) == [], (
+                f"a {_gap}-line rewrap makes the STRUCTURAL completeness arm call the REGISTERED "
+                "pointer unregistered — that arm is not structural after all"
+            )
+            assert _windowed_unregistered(
+                _gap, _gapped, frozenset(mk for _r, mk, _d in _entry)
+            ), (
+                f"a ±{_gap}-line proximity window does NOT red the REGISTERED pointer after a "
+                f"{_gap}-line rewrap — the window's width and the rewrap's width are not the same "
+                "quantity, so this control must grow the rewrap with the window"
+            )
+        # (e) The abbreviation list in `_SENTENCE_SPLIT_RE`: `e.g.` inside the cited clause must not
+        # cut the sentence before the depth it states. Remove the lookbehinds and this REDS with a
+        # message that is untrue ("no longer states the claim").
+        _eg = _lines[:]
+        _eg[_pointer_at] = _eg[_pointer_at].replace("checkout step,", "checkout step, e.g. the one,")
+        assert not _de_numbered_cite_problems("\n".join(_eg), workflow_lines, _entry), (
+            "an `e.g.` inside the cited clause cuts the sentence before the depth it states — the "
+            "abbreviation lookbehinds in `_SENTENCE_SPLIT_RE` are gone or no longer cover it"
+        )
+        # (f) The punctuation-INDEPENDENT contradiction check: rewriting the cited clause's terminal
+        # `;` as a comma MERGES the next sentence — same key, DIFFERENT subject, different value — and
+        # a substring test then reads the wrong subject's value as the cited one.
+        _merged = _lines[:]
+        _merged[_pointer_at + 1] = (
+            "          # `fetch-depth: 1` — #9075 review r6 P1 made the same call, and this job"
+        )
+        assert any(
+            "more than one value" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_merged), workflow_lines, _entry)
+        ), (
+            "a comma-merged following sentence carrying a DIFFERENT value for the same key is "
+            "accepted — the contradiction check is what keeps the cited note's depth unambiguous"
+        )
+    # …and the completeness arm's own non-vacuity: emptied of its register it must SEE the pointer
+    # (so a green is not it matching nothing), and with the register restored it must see NONE.
+    _rel, _marker, _declaration = _DE_NUMBERED_CITE_MARKERS[0]
+    _citing = (REPO_ROOT / _rel).read_text()
+    _seen = _unregistered_de_numbered_pointers(_citing, ())
+    assert len(_seen) == 1 and _seen[0][1].endswith("checkout step"), (
+        "the completeness arm does not see the registered pointer once the register is emptied — "
+        f"it would stay green over an unregistered one, which is the hole it exists to close ({_seen})"
+    )
+    assert _unregistered_de_numbered_pointers(_citing) == [], (
+        "the completeness arm still flags the REGISTERED pointer — its green on the real file would "
+        "then be a coincidence of the window size, not the register"
+    )
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
     # This doc cites `python-ci.yml:<n>` for its cost arguments (the postgres-extra install row,

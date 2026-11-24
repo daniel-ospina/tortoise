@@ -2507,6 +2507,31 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 # raise `KeyError: 'module'`).
 ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 
+# Code points that pass every category test and still render as nothing (round-19 P3, round-20 P3).
+_BLANK_RENDERING = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
+def _stated_reason(text: str) -> bool:
+    """Does *text* say something a reader can read? — the surface tool's copy of the rule.
+
+    `str.strip()` answers a different question: ZWSP (`\u200b`), LRM (`\u200e`) and BOM
+    (`\ufeff`) are not `isspace()`, so each survived it and rendered as nothing. A reason counts
+    when one of its characters is neither a separator (`Zs`/`Zl`/`Zp`), a control (`Cc`), nor a
+    format/zero-width character (`Cf`) (round-19 review, P2 — measured on all three waiver flags).
+    """
+    import unicodedata
+
+    # ⛔ THE SAME DENY-SET AS `archive_surface._is_a_stated_reason` (round-20 review, P3 — measured):
+    # this copy was left behind when the archive one learned them, so the Hangul fillers and
+    # `U+2800` passed HERE while being refused THERE — the "two definitions of one rule" shape this
+    # file keeps having to remove, one predicate over.
+    return any(
+        not ch.isspace()
+        and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
+        and ch not in _BLANK_RENDERING
+        for ch in text)
+
+
 REMOVAL_WAYS = (
     "an `archive/MANIFEST.json` entry of the matching kind — RESTORE THE DECLARATION FIRST "
     "if it is already deleted (restore `tortoise/tool_registry.py` AND "
@@ -3292,7 +3317,13 @@ def shrink_problems(
             committed_rename_record=True,
             flag="--allow-surface-shrink",
         )
-        out = [str(p) for p in problems]
+        # ⛔ KEEP THE KIND (round-19 review, P3 — measured): `str()` threw `RemovalProblem.kind`
+        # away, so `cmd_check` could not ask the question `cmd_cut` asks by kind and re-derived it
+        # from message TEXT — a filter strictly narrower than `cut`'s, on the path CI actually runs,
+        # so two `no-record` rows (`… has no departure record: … states the rename`, `… is in
+        # REMOVED_SDK_METHODS … but its code is NOT archived`) printed no route at all.
+        # `RemovalProblem` IS a `str`, so every existing `in`/equality assertion is unaffected.
+        out = list(problems)
         # ⛔ A WAIVER THAT WAIVES NOTHING IS A FALSE RECORD, and `removal_report` cannot report
         # every shape of it: it only grades a waiver against a removal it met, so a waiver
         # naming a symbol that never left the surface falls through silently — worse than no
@@ -3455,7 +3486,11 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # checked against a removal, which is exactly when it should be refused.
     accounting: dict[tuple[str, str], str] = {}
     allowed = [str(s) for s in (getattr(args, "allow_removal", None) or [])]
+    # ⛔ AND HERE TOO (round-19 review, P2): a ZWSP reason passed `not reason` and was recorded as
+    # the justification of a green cut, the same hole the two `check` paths just closed.
     reason = str(getattr(args, "allow_removal_reason", "") or "").strip()
+    if not _stated_reason(reason):
+        reason = ""
     if allowed and not reason:
         print("::error::--allow-removal requires --allow-removal-reason")
         print("REFUSED a removal override without a stated reason is an unexplained deletion; "
@@ -4662,10 +4697,12 @@ def cmd_check(args: argparse.Namespace) -> int:
         # over a finding whose remedy is "drop the flag", sending the operator to write an archive
         # entry for a row that never left. The structural findings above have their own remedies,
         # and a route block under them would be noise.
+        # …and by KIND, the same predicate `cmd_cut` uses — not by substring, which missed two
+        # `no-record` rows that genuinely need the freeze route (round-19 review, P3).
         _needs_a_record = [
             p
             for p in _shrink_problems
-            if "DROPPED with no record" in str(p) or "is archived but absent" in str(p)
+            if getattr(p, "kind", "") in ("no-record", "incomplete-record")
         ]
         if _needs_a_record:
             print("\nAccount for the row(s) above reported as dropped by exactly one of:")
@@ -4882,9 +4919,13 @@ def main() -> int:
         # typed the flag believes they recorded a justification; silence would leave them with a
         # removal nobody explained, which is the shape both refusals below exist to name.
         reason_given = args.allow_surface_shrink_reason is not None
+        # ⛔ "STATED" IS THE PREDICATE, NOT `.strip()` (round-19 review, P2 — measured): ZWSP/LRM/
+        # BOM are not `isspace()`, so `.strip() or None` accepted them and the green line echoed
+        # `reason: ` (nothing). Same rule the archive tool now applies to its own waiver.
+        _waiver_reason = (args.allow_surface_shrink_reason or "").strip()
         args.allow_surface_shrink_reason = (
-            args.allow_surface_shrink_reason or ""
-        ).strip() or None
+            _waiver_reason if _stated_reason(_waiver_reason) else None
+        )
         if bool(args.allow_surface_shrink) != bool(args.allow_surface_shrink_reason) or (
             reason_given and not args.allow_surface_shrink
         ):

@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Measure what a `:GraphEvent` row ACTUALLY costs a FalkorDB graph (#13094).
 
-WHY THIS EXISTS. `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` §5.1 is explicit
-that the residency half of its own census is **UNMEASURED**: `#13083` measured the
+WHY THIS EXISTS. The #13083 census said in terms that its own residency half was
+**UNMEASURED** (that census document was deleted on 2026-11-23, `#11081` audit row
+B2; the statement is kept here as the reason this instrument exists): `#13083` measured the
 PAYLOAD per node exactly (12,768 B over 67 `:GraphEvent` rows) and measured nothing
 about what those rows cost the SERVER, because the only per-graph figure it trusted
 was run-dependent drift. `#13094` needs the other number — *does moving this shape
@@ -16,15 +17,23 @@ WHAT IS MEASURED, and what the number means:
 * `INFO memory` `used_memory` at THREE populations — the slope between them is the
   per-node cost, and the slope is what is quoted. A single delta from an empty
   graph would fold in the two indexes' fixed cost and report a constant as a
-  slope, which is the #13083 §5.1 error in the other direction.
+  slope, which is the error #13083 refused to make in the other direction.
 
-The SCHEMA IS PRODUCTION'S: the three DDL statements below are `event_store.
-ensure_event_schema`'s verbatim (`tortoise/event_store.py:410`, `:415`, `:421`), so
-the measurement includes the `event_id` index, the `seq` index and the unique
-constraint a production graph carries. A measurement against an un-indexed graph
-would understate the residency of the exact shape this issue is about.
+The SCHEMA IS PRODUCTION'S *intent*: the three DDL statements below are `event_store.
+ensure_event_schema`'s (`tortoise/event_store.py:410`, `:415`, `:421`), with ONE
+divergence the production path cannot avoid — `:415` sends the module command
+`GRAPH.CONSTRAINT CREATE …` through `g.query()`, which does not parse it, so the
+constraint is never created in production at all; here it is issued the module way
+(`execute_command`) against THIS probe graph, which is the only form that runs. The
+measurement therefore covers the `event_id` index, the `seq` index and the unique
+constraint when this script RUNS IT. ⚠️ THE TWO COMMITTED JSONs BESIDE IT PREDATE
+THIS CORRECTION: both record the constraint REFUSED (`schema[1].installed == false`,
+the graph-key-slot defect below), so their slopes were measured WITHOUT it —
+re-run before quoting a coverage claim from them.
+A measurement against an un-indexed graph would understate the
+residency of the exact shape this issue is about.
 
-The PAYLOAD is the census's own size: `#13083` §4 measured 12,768 B over 67
+The PAYLOAD is the census's own size: the `#13083` census measured 12,768 B over 67
 `:GraphEvent` nodes ≈ 190 B each, which is the `PointAdded`-with-actor shape below.
 
 READ-ONLY AGAINST PRODUCTION — this script never runs there. It REQUIRES
@@ -50,23 +59,50 @@ import sys
 
 GRAPH_PREFIX = "probe_13094"
 
-#: `event_store.ensure_event_schema`'s three statements, verbatim (`:410`, `:415`,
-#: `:421`), each with HOW it must be issued. The measurement is meaningless without
-#: them — see the module docstring.
+#: `event_store.ensure_event_schema`'s three statements (`:410`, `:415`, `:421`), each
+#: with HOW it must be issued. ⛔ The two `CREATE INDEX` spellings are production's
+#: verbatim; the module command is NOT — it is re-keyed to the probe graph's own key
+#: below, because the graph slot is what production gets wrong. The measurement is
+#: meaningless without them — see the module docstring.
 #:
-#: ⚠️ The third one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
+#: ⚠️ The SECOND one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
 #: CONSTRAINT` is a module command, and `ensure_event_schema` sends it through
 #: `g.query()` inside a `try/except` that only logs (its own comment: *"FalkorDB
-#: #664 crash reports on string-property unique constraints"*). So on THIS server
-#: the constraint is REFUSED and production runs without it too — which is why the
+#: #664 crash reports on string-property unique constraints"*). So in production the
+#: constraint is NEVER created and the store runs without it — which is why the
 #: script records per-statement whether it was installed or refused instead of
-#: claiming a schema it may not have.
+#: claiming a schema it may not have. It therefore issues the module command the way
+#: the module command is actually issued, against its own probe graph.
 SCHEMA_STATEMENTS: tuple[tuple[str, str], ...] = (
     ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)"),
-    ("command", "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
+    # ⛔ THE TOKEN AFTER `CREATE` IS THE **GRAPH KEY**, NOT A CONSTRAINT NAME.
+    # `event_store.py:415` writes `GRAPH.CONSTRAINT CREATE tortoise_ge_uid …` and
+    # sends it through `g.query()`, which cannot parse a module command at all, so
+    # that spelling never reaches a server that could interpret it. Issued the way
+    # the module command DOES run — `execute_command` — the same tokens put
+    # `tortoise_ge_uid` in the graph slot and MINT THAT GRAPH, which carries no
+    # `event_id` index; the `missing supporting exact-match index` this script used
+    # to record was that freshly made graph failing its own precondition, NOT a
+    # server limit on an indexed graph (#14183 review round 9, measured). With the
+    # probe graph's own key here, an immediate constraint on an indexed graph is
+    # ACCEPTED (`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs
+    # alike; there is no asynchronous-index race to allow for.
+    ("command", "GRAPH.CONSTRAINT CREATE {graph} UNIQUE NODE GraphEvent "
                 "PROPERTIES 1 event_id"),
     ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"),
 )
+
+def command_tokens(statement: str, graph: str) -> list[str]:
+    """The module command's argv, with the probe graph's key substituted as ONE token.
+
+    ⛔ `GRAPH.CONSTRAINT CREATE <arg> …` takes the GRAPH KEY where a reader expects a
+    constraint name, so the key is substituted into the template's own token list
+    rather than re-split out of a formatted string — a graph key carrying whitespace
+    would otherwise shift every following argument by one (#14183 review round 9,
+    finding 6).
+    """
+    return [graph if token == "{graph}" else token for token in statement.split()]
+
 
 PAYLOAD = json.dumps({
     "id": "01J8ZK3M4N5P6Q7R8S9T0V1W2X",
@@ -78,8 +114,10 @@ PAYLOAD = json.dumps({
 def _payload(width: int | None) -> str:
     """The measured payload, padded (or not) to `width` bytes.
 
-    `#13083` §4 measured **12,768 B over 67** `:GraphEvent` nodes ≈ **190 B each**
-    on real tenant data, so `190` is the faithful figure and the default. The
+    the `#13083` census measured **12,768 B over 67** `:GraphEvent` nodes ≈ **190 B each**
+    on its FIXED SYNTHETIC corpus (never tenant data — the census says so in as many
+    words), so `190` is the faithful figure and the default, stated for the corpus it
+    was measured on. The
     unpadded shape above is 88 B — the two are both reported so the slope can be
     read against the payload it was measured with, rather than assumed
     payload-independent.
@@ -130,10 +168,13 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
             payload_bytes: int | None = 190) -> dict:
     db = _connection(uri)
     if not graph.startswith(GRAPH_PREFIX):
-        raise SystemExit(
-            f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
-            f"name must start with {GRAPH_PREFIX!r} so a production graph can "
-            f"never be measured by accident")
+        # exit 2, the code `tools/graphevent_home.py` uses for "could not run" —
+        # a REFUSAL is not a measurement, and `1` is reserved for a produced
+        # verdict in the sibling verb.
+        print(f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
+              f"name must start with {GRAPH_PREFIX!r} so a production graph can "
+              f"never be measured by accident", file=sys.stderr)
+        raise SystemExit(2)
     with contextlib.suppress(Exception):
         # an absent graph is the desired state
         db.connection.execute_command("GRAPH.DELETE", graph)
@@ -142,14 +183,18 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
     baseline_used = _used_memory(db)
     applied = []
     for kind, statement in SCHEMA_STATEMENTS:
+        # a `command` statement carries the probe graph's key, so the module command
+        # addresses the graph it measured instead of minting one named after what
+        # looks like a constraint name.
+        issued = statement.format(graph=graph)
         try:
             if kind == "cypher":
-                g.query(statement)
+                g.query(issued)
             else:
-                db.connection.execute_command(*statement.split())
-            applied.append({"statement": statement, "installed": True})
+                db.connection.execute_command(*command_tokens(statement, graph))
+            applied.append({"statement": issued, "installed": True})
         except Exception as exc:  # the same tolerance production has
-            applied.append({"statement": statement, "installed": False,
+            applied.append({"statement": issued, "installed": False,
                             "refused": f"{type(exc).__name__}: {exc}"})
     g.query("MATCH (n:Warmup) DETACH DELETE n")
     after_schema = _used_memory(db)
@@ -169,6 +214,11 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
         "graph": graph,
         "payload_bytes_per_event": len(payload),
         "schema": applied,
+        # ⛔ A RUN WHOSE SCHEMA WAS REFUSED IS NOT A MEASUREMENT OF PRODUCTION'S
+        # SCHEMA (#14183 review round 9, finding 6): the earlier cuts recorded the
+        # refusal and published the slope anyway, which is how a false `why` reached
+        # the census. `main()` exits 2 on this flag instead.
+        "schema_complete": all(entry["installed"] for entry in applied),
         "used_memory_baseline": baseline_used,
         "used_memory_after_schema": after_schema,
         "schema_bytes": after_schema - baseline_used,
@@ -186,9 +236,9 @@ def _slope(points: list[dict]) -> float | None:
     """Bytes per node from the LAST two populations — the marginal cost.
 
     Two neighbouring populations, not the first and the last: the graph's own
-    fixed cost (key tables, the two indexes above, the unique constraint) is
-    paid once and would otherwise be divided into every node and reported as if
-    it recurred. The marginal figure is the one that answers "does removing these
+    fixed cost (key tables, the two indexes above, and the unique constraint where
+    the server accepts it) is paid once and would otherwise be divided into every
+    node and reported as if it recurred. The marginal figure is the one that answers "does removing these
     rows give the memory back?".
     """
     if len(points) < 2:
@@ -205,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sizes", type=int, nargs="+", default=[20000, 40000, 60000])
     parser.add_argument("--payload-bytes", type=int, default=190,
                         help="pad the synthetic payload to this width (default 190, "
-                             "#13083 §4's measured average)")
+                             "the #13083 census's measured average)")
     parser.add_argument("--keep", action="store_true",
                         help="leave the measurement graph in place")
     args = parser.parse_args(argv)
@@ -214,8 +264,26 @@ def main(argv: list[str] | None = None) -> int:
         print("TORTOISE_DB_URI is not set — this measurement needs its own graph",
               file=sys.stderr)
         return 2
-    print(json.dumps(measure(uri, args.graph, args.sizes, args.keep,
-                             args.payload_bytes), indent=2))
+    try:
+        result = measure(uri, args.graph, args.sizes, args.keep, args.payload_bytes)
+    except Exception as exc:  # every "could not run" is exit 2, never 1
+        # `1` is RESERVED for a produced verdict ("ran, and the answer is no"), so an
+        # unreachable server, a refused query or a server without `GRAPH.MEMORY` must
+        # not reach the shell as a bare traceback: Python's own uncaught-exception
+        # exit is 1, which would read as a measurement nobody made (#14183 review
+        # round 11, measured: `ConnectionError` -> EXIT=1).
+        print(f"could not run: {exc!r} — 2 is \"could not run\", never a measurement",
+              file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2))
+    if not result["schema_complete"]:
+        refused = [entry["statement"] for entry in result["schema"]
+                   if not entry["installed"]]
+        print("\nREFUSED: the schema statement(s) below did not install, so this run's "
+              "population does not carry the schema it claims and its slope must NOT be "
+              "quoted. 2 is \"could not run\", never a measurement:\n  "
+              + "\n  ".join(refused), file=sys.stderr)
+        return 2
     return 0
 
 
