@@ -2963,6 +2963,28 @@ def _operator_alert_isolation(monkeypatch):
         "operator-alert pool did not drain")
 
 
+@pytest.fixture(autouse=True)
+def _abuse_alert_delivery_isolation():
+    """Clear the abuse notification delivery ledger between tests (#14407).
+
+    ``notify._delivery`` is a PROCESS-wide bound: one message per
+    ``(kind, subject)`` per window (24h for an incident class, 6h for an
+    activity digest). Left shared, the first test to notify ``abuse_flag`` for
+    ``t1`` would silently swallow an unrelated test's expected message — a
+    latent cross-test collision rather than anything a test asked for, exactly
+    the hazard the #3968 ``MemoryStorage`` singleton taught on the storage side.
+
+    No test asserts the pre-bound behaviour by ACCIDENT: a test that means to
+    pin the bound resets the ledger itself and drives its own clock (see
+    ``tests/test_14407_alert_delivery.py``).
+    """
+    import tortoise.notify as notify
+
+    notify.reset_abuse_delivery_for_tests()
+    yield
+    notify.reset_abuse_delivery_for_tests()
+
+
 @pytest.fixture
 def real_operator_alert_store(monkeypatch, _operator_alert_isolation):
     """OPT OUT of ``_operator_alert_isolation`` for the builder-under-test.

@@ -485,8 +485,8 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     `every read surface hides` — a replacement absolute that is wider than the
     code, the same defect one commit later. A replacement that is wider than
     the code is the same error, not a smaller one, on the page whose subject is
-    precision about this word. `docs/ONTOLOGY.md:1174` states the bounded
-    version ("readers … must continue to honour") and `:1182` scopes the
+    precision about this word. `docs/ONTOLOGY.md:1176` states the bounded
+    version ("readers … must continue to honour") and `:1184` scopes the
     exclusion to the DEFAULT query surfaces, so this pin holds the page to the
     ontology: every read treats the row as ENDED, the default query surfaces
     drop it, and the addressed/history reads still show it.

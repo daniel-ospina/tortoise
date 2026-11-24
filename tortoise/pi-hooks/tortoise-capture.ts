@@ -1,4 +1,4 @@
-// tortoise-hook-version: 33
+// tortoise-hook-version: 34
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -1448,6 +1448,17 @@ export interface FlushSummary {
    *  path too, which is a false diagnosis of a real fault (#14423 cycle-7 review,
    *  P1 — the Pi leg had no such cause at all). */
   claimUnavailableReason?: string;
+  /** ⛔ Whether THIS pass HELD the drain claim, so a pass that attempts NOTHING
+   *  still clears a stale `claim_unavailable` fact. `attempted > 0` is not a
+   *  proxy: a pass over an empty or backoff-only spool holds the claim, attempts
+   *  nothing, and is exactly the pass that must clear it (#14423 cycle-8 review).
+   *  The Python leg passes the same thing explicitly.
+   *
+   *  ⛔ IT LIVES ON THE PASS SUMMARY, NOT ON `CaptureStatus` (#14480 review, F3):
+   *  `status.json` never carries it, so declaring it on the durable record
+   *  advertised a per-pass field no pass ever writes — and left
+   *  `claim_unavailable`'s own doc block attached to the wrong field. */
+  claimHeld?: boolean;
   /** #14350: the CAPACITY refusal that ended this pass, if any. Nothing was
    *  charged to the entry's `attempts` and no backoff was armed — that is the
    *  difference between this and a per-entry deferral, and it is what keeps the
@@ -1500,6 +1511,16 @@ export interface CaptureStatus {
   detail?: string;
   /** Entries queued when the state was recorded (advisory, never the authority). */
   queued?: number;
+  /** ⛔ The last pass ran WITHOUT the one-drainer claim, and here is what stopped
+   *  it from taking one. DURABLE on purpose, and decorated onto whatever state the
+   *  pass earned: a pass that ran unclaimed may have filed nothing, so no other
+   *  rule in `recordOutcome` writes at all, and the reason would reach only stderr
+   *  — which the firing path discards (`nohup … >/dev/null 2>&1 &`). Without this
+   *  field the box reports `capture: OK`/`DRAINING` while N drainers POST into the
+   *  same ceiling (#14423 cycle-7 review, P1). Mirrors the Python leg's
+   *  `claim_unavailable` / `claim_unavailable_reason` fields exactly. */
+  claim_unavailable?: boolean;
+  claim_unavailable_reason?: string;
   updated_at: string;
 }
 
@@ -4502,6 +4523,7 @@ export async function flushSpool(
   // here: ANY `None` from `acquire` becomes `held_by_claim` (`capture_spool.py`).
   const race: { raced: boolean; obstruction?: string } = { raced: false };
   const claim = acquireDrainClaim(dir, { leg: "pi", state: race });
+  const heldClaim = claim !== undefined;
   if (!claim) {
     const record = readDrainClaim(dir);
     if (record) {
@@ -4563,7 +4585,12 @@ export async function flushSpool(
     return summary;
   }
   try {
-    return await flushSpoolPass(cfg, opts, claim);
+    const summary = await flushSpoolPass(cfg, opts, claim);
+    // The claim was HELD for this pass. Recorded on the summary so whoever writes
+    // the durable fact knows it may CLEAR a stale `claim_unavailable` — a pass over
+    // an empty spool attempts nothing and would otherwise clear nothing.
+    summary.claimHeld = heldClaim;
+    return summary;
   } finally {
     try {
       claim.release();
@@ -5369,18 +5396,184 @@ export function takedownClaim(
  *
  * `true` means the bytes really were `expected` and the claim is gone. `false`
  * means we displaced somebody else's NEW claim — a third process installed it
- * between our rename and our write — so it is restored by `linkSync` (which
- * cannot replace a claim a FOURTH process has since installed; on `EEXIST` the
- * displaced holder loses and stops at its next refresh — the safe direction).
+ * between our rename and our write — so it is restored by `linkSync`, which
+ * cannot replace a claim a FOURTH process has since installed.
+ *
+ * ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST — stated accurately, because the
+ * earlier version of this sentence ("the displaced holder … stops at its next
+ * refresh — the safe direction") was FALSE, and a false sentence is worse than no
+ * sentence: the displaced holder's claim file is GONE, so it keeps draining until
+ * its next `renew` tells it the claim is not ours — up to `ttlMs / 3` away. Two
+ * drainers can coexist for that window, and it is BOUNDED BY THE LEASE rather than
+ * unbounded, which is the only claim this code makes. The failure is therefore
+ * WARNED rather than swallowed: a silently deleted live claim is exactly the class
+ * this module exists to make visible. Mirrors `drain_claim._dispose_quarantine`.
  *
  * ⚠️ EXPORTED AS THE TEST SEAM — see `takedownClaim`.
  */
 export function disposeQuarantine(
   quarantine: string, raw: string, path: string, expected: string,
+  //: TEST seams with the module defaults, for the same reason `restoreQuarantine`
+  //: takes them: the failure arms cannot be built portably otherwise.
+  link: (from: string, to: string) => void = linkSync,
+  move: (from: string, to: string) => void = renameSync,
 ): boolean {
   if (raw !== expected) {
-    try { linkSync(quarantine, path); } catch { /* a fourth holder has it */ }
+    try {
+      link(quarantine, path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EEXIST") {
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code}); its holder keeps draining until its next refresh (up to ttl/3)`,
+        );
+      } else {
+        // ⛔ THE ONLY OTHER COPY (review, cycle 16, P1): the rename vacated `path`, so on a
+        // non-EEXIST failure this quarantined file is all that is left of a live
+        // holder's claim. Deleting it turns "restore failed" into "claim destroyed"
+        // and frees the path for the next `linkSync`. It is not merely spared: while
+        // the path is still FREE the object is renamed BACK (`renameSync` needs no
+        // hard link — `tox-dev/filelock#843`), and only when that also fails is the
+        // copy left in place (BOUNDED — the `*.tmp-*` shape is swept by mtime).
+        let pathFree = false;
+        try { lstatSync(path); } catch { pathFree = true; }
+        if (pathFree) {
+          try {
+            move(quarantine, path);
+            return false;
+          } catch (renameErr) {
+            warn(
+              `a displaced drain claim could not be restored at ${path} ` +
+                `(${code ?? String(err)}; rename: ${
+                  (renameErr as NodeJS.ErrnoException)?.code ?? String(renameErr)
+                }) and is PRESERVED at ${quarantine}; its holder keeps draining ` +
+                "until its next refresh (up to ttl/3)",
+            );
+            return false;
+          }
+        }
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code ?? String(err)}) — the path is OCCUPIED, so the copy is ` +
+            `PRESERVED at ${quarantine}; its holder keeps draining until its next ` +
+            "refresh (up to ttl/3)",
+        );
+        // ⛔ AND THE WARNING MUST BE TRUE: this arm used to warn `PRESERVED` and then
+        // FALL THROUGH to the `unlinkSync` below, destroying the only copy of the
+        // displaced holder's claim — the code contradicting its own sentence, which is
+        // this PR's subject. The Python twin returns inside the same arm
+        // (`_dispose_quarantine`), so the fall-through was also a leg divergence
+        // (review, cycle 16, P1).
+        return false;
+      }
+    }
+    // ⛔ FALLING THROUGH IS REACHABLE TWO WAYS, AND ONLY ONE IS A SUCCESSFUL LINK.
+    // ⚠️ Dated rather than round-cited on purpose: the finding was raised by the
+    // confirmation review at `08fd0891`, and a `(review, cycle N, Pn)` tag that names no
+    // row of this record is exactly the dead citation the record itself polices:
+    //   • `linkSync` SUCCEEDED — the displaced claim is back at the path, so this copy
+    //     is a duplicate and is swept;
+    //   • `linkSync` failed EEXIST — a newer claim already holds the path, so this copy
+    //     of a SUPERSEDED claim is swept. The Python twin's `except FileExistsError`
+    //     arm does the same ("the displaced record's bytes are gone, and the only
+    //     honest thing left is to say so"), and its warning never says PRESERVED.
+    // The two PRESERVED arms above both RETURN, which is what keeps THAT warning true.
     try { unlinkSync(quarantine); } catch { /* best effort */ }
+    return false;
+  }
+  try { unlinkSync(quarantine); } catch { /* best effort */ }
+  return true;
+}
+
+/**
+ * Put a quarantined object BACK, never replacing a newer one.
+ *
+ * `linkSync` is the create-if-absent arbiter, so a claim a peer installs while this
+ * object sits in quarantine SURVIVES at the path and only the quarantined copy is
+ * dropped; `renameSync` would replace it, the "both processes win" hazard
+ * `takedownClaim` exists to avoid.
+ *
+ * This is the disposal for the one object neither leg can judge: a REGULAR file at
+ * the claim path whose bytes could not be read. It is a possible holder (the
+ * doctrine is "an unprovable read is ALIVE"), so it is honoured rather than
+ * deleted — see the call site in `clearUnusableClaimPath` (#14480 review, F3).
+ *
+ * ⛔ THE FAILURE PATH MUST NOT DELETE THE OBJECT EITHER. The first cut unlinked the
+ * quarantine on ANY `linkSync` failure but `EEXIST`, and the claim path had already
+ * been VACATED by the caller's `rename` — so the peer's record existed nowhere
+ * while the peer still believed it held, and this process won the next `linkSync`:
+ * the two-holder window this mechanism exists to close, with the only copy of the
+ * evidence destroyed and the warning on a stderr a session discards (#14480
+ * cycle-17 review, P3).
+ *
+ * A filesystem that refuses hard links (`EPERM`/`EXDEV`/`EMLINK`/`ENOSYS`) is the
+ * reachable case, and it has a restore that needs no link: `rename` the object back
+ * **while the claim path is still free** — the fallback `filelock`'s stale break
+ * takes for exactly this reason (`tox-dev/filelock#843`). `rename` replaces, so it
+ * is used ONLY after `lstat` says the path is empty.
+ *
+ * Returns `true` when the object is back at `path` or a NEWER object holds it, and
+ * `false` when it could not be put back — in which case the quarantined copy is
+ * LEFT IN PLACE, never unlinked. Mirrors `drain_claim._restore_quarantine`.
+ * ⛔ The `link` and `move` parameters are TEST seams with the module defaults: a
+ * filesystem that refuses hard links cannot be built portably in a test, and the
+ * arm that matters is what happens when it does. `move` is the same seam the
+ * caller already takes for its own `rename`, so a test can stand inside the
+ * restore's fallback too.
+ */
+export function restoreQuarantine(
+  quarantine: string,
+  path: string,
+  link: (from: string, to: string) => void = linkSync,
+  move: (from: string, to: string) => void = renameSync,
+): boolean {
+  try {
+    link(quarantine, path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // EEXIST is the normal case: a newer object already holds the path, and that is
+    // a holder either way. ANY other errno means the object we could not read could
+    // NOT be put back — and since the rename already vacated `path`, the quarantined
+    // file is then the ONLY copy of a live holder's claim.
+    //
+    // ⛔ SO IT IS NOT DELETED (review, cycle 16, P1). This used to warn and then `unlinkSync`
+    // unconditionally, which destroyed that only copy and answered `held` over an
+    // EMPTY path: the next `linkSync` wins and two holders coexist for up to
+    // `ttl/3`, silently — the window the quarantine rule exists to close, with the
+    // moved-aside evidence gone too. `link(2)` lists
+    // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and
+    // ENOSPC/EDQUOT on a spool directory is the ordinary case, not the exotic one.
+    if (code === "EEXIST") {
+      try { unlinkSync(quarantine); } catch { /* best effort */ }
+      return true;
+    }
+    let pathFree = false;
+    try { lstatSync(path); } catch { pathFree = true; }
+    if (pathFree) {
+      // No hard link on this filesystem, and the path is still free: put the
+      // object BACK rather than strand a live holder's record.
+      try {
+        move(quarantine, path);
+        return true;
+      } catch (renameErr) {
+        warn(
+          `an unreadable drain claim could not be restored at ${path} ` +
+            `(${code ?? String(err)}; rename: ${
+              (renameErr as NodeJS.ErrnoException)?.code ?? String(renameErr)
+            }) and is PRESERVED at ${quarantine}; it is honoured as a holder, so ` +
+            "this pass must not run beside it",
+        );
+        return false;
+      }
+    }
+    warn(
+      `an unreadable drain claim could not be restored at ${path} ` +
+        `(${code ?? String(err)}) — the path is OCCUPIED, so it is not replaced — ` +
+        "and the " +
+        `copy is PRESERVED at ${quarantine}; it is honoured as a holder, so this ` +
+        "pass must not run beside it",
+    );
     return false;
   }
   try { unlinkSync(quarantine); } catch { /* best effort */ }
@@ -5407,29 +5600,134 @@ export function disposeQuarantine(
  * Mirrors that function, which discriminates on `S_ISDIR` and `unlink`s EVERYTHING
  * else.
  *
- * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
- * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a
- * device that raises `ENOTDIR` (POSIX `rmdir(2)`). The `catch` then answered
- * `false`, the caller answered `undefined` = "somebody else holds it", and NOTHING
- * on this leg could ever remove the object: every later pass reported "another
- * drainer holds this spool … pid unknown" with zero POSTs, forever — the exact
- * permanent block #14350 forbids, clearable only by a PYTHON drain. The Python
- * twin never had this arm wrong (#14423 cycle-6 review, P1).
+ * ⛔ THE OBJECT IS MOVED ASIDE ATOMICALLY, AND THE OBJECT THAT LANDED IN THE
+ * QUARANTINE IS WHAT THIS CALL JUDGES. The `lstat` → re-read `(dev, ino)` → `unlink`
+ * version this replaces NARROWED the check-then-unlink window without closing it:
+ * between the re-read and the `unlink` a peer can replace the object with its own
+ * VALID claim, and the `unlink` — which is by NAME, not by inode — deletes that
+ * claim, after which this process wins the next `link` and two holders coexist for
+ * up to `ttl/3`, silently (#14423 cycle-9 review, P2). An inode compare is not sound
+ * evidence on its own either: ext4/xfs hand a freed inode straight to the next file,
+ * so "same dev+ino" can be a DIFFERENT live lockfile — the `filelock` advisory
+ * GHSA-fq56-3cx3-fjxp admits two holders exactly that way. `rename` has neither
+ * problem: exactly one contender can move the file, the CONTENT THAT WAS THERE is
+ * what lands in the quarantine, and the judgement is over bytes this call provably
+ * owns the moment of. Same arbiter as `takedownClaim` (and the Python twin
+ * `drain_claim._clear_unusable_claim_path`), and the consensus outside this repo:
+ * `flufl.lock`, git's lockfile API, and the eviction protocol that renames a stale
+ * lock to a unique path and reports a race rather than unlinking.
  */
-function clearUnusableClaimPath(path: string): boolean {
+//: The answers `clearUnusableClaimPath` must be able to give — a BOOLEAN could
+//: not, and collapsing two of them into `false` was a live two-drainer hole
+//: (#14423 cycle-8 review, P1): `GONE` (the object vanished under us — a peer
+//: released or replaced it) must make the caller RETRY, never answer "cannot be
+//: cleared", because that sent `flushSpool` down the unclaimed-pass arm while the
+//: peer's claim sat on disk. `REFUSED` is what "unclearable" actually means.
+//: `HELD` is the fourth: the object moved aside turned out to be a REGULAR file, so
+//: a peer's claim appeared in the window and was put back — there IS a holder to
+//: honour, which is CONTENTION, not "unavailable" (#14480 review, F2: reporting it
+//: as unavailable named an unwritable root that was perfectly writable).
+export type ClaimPathClear = "gone" | "refused" | "done" | "held";
+
+/**
+ * Exported for its own unit tests, which drive the `rename` seam below: the
+ * judged-object-property and the `ENOENT`-means-`gone` answer are the two
+ * properties this function exists for, and neither can be observed without
+ * interleaving.
+ * ⛔ The `rename` parameter is a TEST seam with the module default — the same
+ * interleave the Python leg's tests drive by monkeypatching `os.rename`.
+ */
+export function clearUnusableClaimPath(
+  path: string,
+  rename: (from: string, to: string) => void = renameSync,
+  //: The restore's `link` seam, for the same reason `rename` is a seam: a
+  //: filesystem that refuses hard links cannot be built in a test, and the arm
+  //: that matters is what the restore does when the link is refused.
+  link: (from: string, to: string) => void = linkSync,
+  //: The junk-disposal seam, for the same reason `rename` and `link` are seams: a
+  //: filesystem whose `unlink` refuses (`EIO`/`EACCES`/`EROFS`) cannot be built in
+  //: a test, and the arm that matters is what the clear answers when only the
+  //: ASIDE copy cannot be deleted (#14480 review at `1a0c29c3`, P2).
+  unlink: (target: string) => void = unlinkSync,
+): ClaimPathClear {
+  let before: ReturnType<typeof lstatSync>;
   try {
-    const st = lstatSync(path);
-    if (st.isDirectory()) {
-      rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
-      return true;
-    }
-    // A symlink is unlinked AS A LINK (never followed), and a FIFO, a socket or a
-    // device too: it is an object, not content, so `unlink` is the correct removal.
-    unlinkSync(path);
-    return true;
-  } catch {
-    return false;
+    before = lstatSync(path);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
   }
+  if (before.isFile()) return "refused";  // a possible holder: never remove one here
+  if (before.isDirectory()) {
+    try {
+      rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+      return "done";
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
+    }
+  }
+  // Everything else — a symlink, a FIFO, a socket, a device — is MOVED ASIDE
+  // first. `rename` is the CAS: after it, whatever this call is about to drop is
+  // whatever it can see, and no peer can swap it out from under the decision.
+  // ⚠️ The `.tmp-` infix is load-bearing: the scratch sweeper collects abandoned
+  // `*.tmp-*` files under the spool root by mtime.
+  const quarantine = `${path}.tmp-clear-${process.pid}-${randomToken()}`;
+  try {
+    rename(path, quarantine);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
+  }
+  let landedRegular = false;
+  let landedRaw: string | undefined;
+  try {
+    landedRegular = lstatSync(quarantine).isFile();
+    landedRaw = landedRegular ? readFileSync(quarantine, "utf8") : undefined;
+  } catch {
+    landedRaw = undefined;
+  }
+  if (landedRaw !== undefined) {
+    // ⛔ A PEER'S CLAIM LANDED IN THE WINDOW. It was not a claim when we looked and
+    // it is one now, so it is put BACK (`linkSync` cannot replace a newer object)
+    // and the answer is `held`: there is a holder to honour, which is not the same
+    // thing as an unclearable path.
+    disposeQuarantine(quarantine, landedRaw, path, "<not a claim we judged>");
+    return "held";
+  }
+  if (landedRegular) {
+    // ⛔ A REGULAR FILE WE COULD NOT READ IS A POSSIBLE HOLDER, NOT JUNK.
+    // `landedRaw` is `undefined` for TWO different facts and only one of them says
+    // "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption)
+    // and *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES`
+    // after a mode drift). The second is a PEER'S CLAIM that arrived in the window;
+    // `unlink`ing it lets this process win the next `linkSync`, so two holders
+    // coexist for up to `ttlMs / 3` — silently. That is the class the `filelock`
+    // advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the doctrine
+    // `acquireDrainClaim` states below: a regular claim we could not read is
+    // HONOURED (`undefined` = somebody holds it) and never unlinked
+    // (#14480 review, F3). The Python twin carries the same branch, and the
+    // restore itself never deletes the object it promised to honour: a refused
+    // `linkSync` renames it back while the path is free, and preserves it
+    // otherwise (cycle-17 review, P3).
+    restoreQuarantine(quarantine, path, link, rename);
+    return "held";
+  }
+  try {
+    unlink(quarantine);
+  } catch (error) {
+    // ⛔ `refused` here would be a lie, and an expensive one (review at
+    // `1a0c29c3`, P2 — reproduced on the Python twin: `refused` while the claim
+    // path was already free). The `rename` above VACATED the claim path; the only
+    // thing this `unlinkSync` was for is the aside copy of junk nobody could ever
+    // hold. `refused` makes `acquireDrainClaim` record an obstruction, and
+    // `flushSpool` then runs the WHOLE PASS UNCLAIMED — the two-drainer window this
+    // module exists to close — over a spool root that is perfectly writable, with a
+    // durable reason that is not true. `done` is the measured answer, and the
+    // leftover is collected by the same `*.tmp-*` mtime sweep the comment above the
+    // rename names, so it is bounded.
+    warn(`the cleared obstruction at ${path} could not be deleted from the ` +
+      `quarantine (${(error as Error)?.message ?? error}); the claim path is FREE ` +
+      `and the leftover is left to the scratch sweeper`);
+  }
+  return "done";
 }
 
 /**
@@ -5488,6 +5786,16 @@ export function acquireDrainClaim(
     takedown?: (
       path: string, token: string,
     ) => { quarantine: string; raw: string } | undefined;
+    /** ⛔ TEST SEAM for the OBSTRUCTION CLEAR's window — the same reason `takedown`
+     *  exists above. `clearUnusableClaimPath` takes a `rename` seam already, and a
+     *  test can only stand inside the window that opens between the caller's look
+     *  and the removal by SUPPLYING that seam through `acquireDrainClaim`'s call.
+     *  Without it the primitive can be pinned but the DISPOSITION cannot: the
+     *  `held` arm is the whole difference between "somebody holds it, do nothing"
+     *  and "run the pass UNCLAIMED beside a live claim", and the Python twin's
+     *  end-to-end test (`test_a_peer_claim_landing_in_the_clear_window_is_NOT_an
+     *  _unclaimed_pass`) had no Pi counterpart (#14480 review, F2). */
+    clearClaimPath?: (path: string) => ClaimPathClear;
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5563,10 +5871,36 @@ export function acquireDrainClaim(
         if (mode.isFile()) return undefined;
         // A directory, symlink, FIFO/socket or device: corruption, not a holder.
         // Leaving it would `EEXIST` every future attempt — a permanent block.
-        if (!clearUnusableClaimPath(path)) {
+        const cleared = (opts.clearClaimPath ?? clearUnusableClaimPath)(path);
+        if (cleared === "refused") {
           if (opts.state) opts.state.obstruction = path;
           return undefined;
         }
+        if (cleared === "held") {
+          // A peer's claim appeared in the window and was put back: there IS a
+          // holder, so answer CONTENTION (no obstruction marker). Reporting it as
+          // an obstruction ran the pass UNCLAIMED beside a live claim.
+          //
+          // ⛔ "HELD" WITH NOTHING AT THE PATH IS A FAILED RESTORE (review, cycle 16,
+          // P1): the object is the only copy and now sits in the quarantine, so the
+          // caller's `readDrainClaim` arm finds no record and would fall through to
+          // its UNCLAIMED arm. Mark the lost race instead, so the caller fails CLOSED
+          // and does not name a holder it cannot see.
+          if (!existsSync(path)) markRaced();
+          return undefined;
+        }
+        // `gone` / `done`: the path changed, so RETRY — the next tick either installs
+        // our claim or judges whatever a peer put there.
+        // ⛔ AND IT IS A LOST RACE, so it is MARKED like every other one. This was
+        // the only lost-race arm that did not: two exhausted attempts that way left
+        // `state` empty and the path empty, so `flushSpool` read it as "this root
+        // cannot hold a claim", ran the whole pass UNCLAIMED, and stamped
+        // `claimUnavailable` with the default reason — "the spool root cannot hold
+        // a claim" — which is FALSE (the root is fine; the object moved). The
+        // Python twin fails closed in the same state (`acquire` → `None` →
+        // `held_by_claim`). Reachability is narrow (two consecutive vanishes), which
+        // is why this stayed a P3 rather than a P1 (#14480 review, F4).
+        markRaced();
         continue;
       }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
@@ -5845,10 +6179,34 @@ export function countPendingEntries(dir: string): number | undefined {
 }
 
 /** Read the recorded per-box status. Absent/corrupt reads as `undefined` (the
- *  health line then falls back to what the spool itself proves). */
+ *  health line then falls back to what the spool itself proves).
+ *
+ *  ⛔ `lstatSync` FIRST, AND ONLY A REGULAR FILE IS READ — the Python twin
+ *  (`capture_spool.read_capture_status`) carries the same gate for the same
+ *  reason. This read sits on the DRAIN path: `recordOutcome` calls it while the
+ *  one-drainer claim is HELD, and `flushSpool` releases the claim only after
+ *  the pass returns, so a FIFO (or a socket) at `status.json` used to block
+ *  `open(2)` FOREVER *inside the claimed section* — the spool stayed claimed
+ *  until its lease was judged stale, and `captureHealthLine` blocked on the same
+ *  path, so the health line hung instead of reporting the box. It is the object
+ *  class `readDrainClaim` already gates on the CLAIM file (cycle-5 P1), applied
+ *  to the status file this PR is what put on the drain path (#14480 review, P1).
+ *
+ *  ⚠️ STATED RESIDUAL: `lstatSync` → `readFileSync` is a REPLACE WINDOW, and CERT C
+ *  `FIO32` ("Prevent Blocking on Special Files") names it — the check and the open
+ *  are two syscalls, so an object swapped for a FIFO between them still blocks. The
+ *  race-free form is `open(O_RDONLY|O_NONBLOCK)` then `fstat` the FD (what `xz`'s
+ *  `file_io.c` does). Not adopted HERE deliberately: `readDrainClaim` gates the CLAIM
+ *  file the same way and the two legs of this feature must be one mechanism. The
+ *  exposure is a local writer replacing the box's own `status.json` with a FIFO,
+ *  which is already a box-takeover primitive. `fifo(7)` and CERT `FIO32` are the
+ *  sources.
+ */
 export function readCaptureStatus(dir: string): CaptureStatus | undefined {
+  const path = statusPathFor(dir);
   try {
-    const parsed = JSON.parse(readFileSync(statusPathFor(dir), "utf8")) as CaptureStatus;
+    if (!lstatSync(path).isFile()) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as CaptureStatus;
     return parsed && typeof parsed === "object" ? parsed : undefined;
   } catch {
     return undefined;
@@ -6066,28 +6424,236 @@ function healthScan(
   };
 }
 
+/**
+ * ⛔ ONLY A PASS THAT **HELD** THE CLAIM MAY **CLEAR** THE DURABLE EXCLUSION FACT —
+ * every other write CARRIES IT FORWARD. One function, because the rule is one rule.
+ *
+ * The rule was written as "a pass that holds the claim self-heals it", but the code
+ * cleared it on ANY `attempted > 0` write, and the pass that writes most often never
+ * asks for the claim at all: a TARGETED (live) pass takes no claim by design, so it
+ * reports neither `claimUnavailable` nor `claimHeld`, and its fresh `ok` record — a
+ * record with no claim field — DELETED the fact. The record is the SHARED
+ * `<spool>/status.json`, so a targeted pass on this leg erased the warning the Python
+ * leg's reader renders, reproducing exactly the false PASS the durable field exists to
+ * remove (#14480 review, F1).
+ *
+ * @param next      the record this pass EARNED (quota/capacity/`ok`), or null when it
+ *                  earned none — an empty or backoff-only spool writes nothing.
+ * @param previous  what is on disk now.
+ * @param summary   the pass's own claim observations.
+ * @returns the record to write, or null for "write nothing".
+ */
+export function applyClaimPolicy(
+  next: CaptureStatus | null,
+  previous: CaptureStatus | undefined,
+  summary: Pick<FlushSummary, "claimUnavailable" | "claimUnavailableReason" | "claimHeld">,
+): CaptureStatus | null {
+  const hadFact = Boolean(
+    previous?.claim_unavailable || previous?.claim_unavailable_reason);
+  if (summary.claimUnavailable) {
+    // ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line — a pass that
+    // ran WITHOUT the one-drainer claim may have filed nothing, so every rule above
+    // can write nothing, and the reason reached only stderr, which the firing path
+    // DISCARDS (`session-start.sh`: `nohup … >/dev/null 2>&1 &`). The box then
+    // reports `capture: OK`/`DRAINING` while N drainers POST into the same ceiling
+    // (#14423 cycle-7 review, P1). Decorated rather than replacing, so a
+    // quota-blocked box with a broken claim path keeps BOTH facts.
+    return {
+      ...(next ?? previous ?? { version: 1, state: "ok" }),
+      claim_unavailable: true,
+      claim_unavailable_reason: (summary.claimUnavailableReason
+        || "the spool root cannot hold a claim").slice(0, 300),
+      updated_at: new Date().toISOString(),
+    } as CaptureStatus;
+  }
+  if (summary.claimHeld) {
+    // ⛔ A PASS THAT HELD THE CLAIM CLEARS THE FACT EVEN IF IT ATTEMPTED NOTHING.
+    // `attempted > 0` gates the `ok` record (an empty spool must not erase a recorded
+    // refusal), which left the claim fields STRANDED: a pass holding the claim over an
+    // empty/backoff-only spool wrote nothing, so the operator kept reading
+    // `NO drain exclusion (<path>)` for an obstruction already removed (#14423
+    // cycle-8 review, P2 — reproduced). One write, and only when there is something to
+    // clear; `state`/`reason`/`status` are untouched, so quota-survives-an-empty-pass
+    // still holds.
+    if (next === null && hadFact) next = { ...previous } as CaptureStatus;
+    if (hadFact && next) {
+      delete next.claim_unavailable;
+      delete next.claim_unavailable_reason;
+      next.updated_at = new Date().toISOString();
+    }
+    return next;
+  }
+  if (next && hadFact) {
+    // The pass did not ask for the claim (the targeted/live pass) and did not report
+    // the exclusion as unavailable, so it has NO standing to clear the fact: carry it
+    // onto the record it earned. `updated_at` stays this pass's, because the state
+    // half of the record IS this pass's observation.
+    next.claim_unavailable = true;
+    // ⛔ `null` IS CARRIED BY NEITHER LEG: the Python twin tests `is not None`, so a
+    // JSON `null` there is "no reason" — testing `!== undefined` here carried it and
+    // made the same shared record render differently on the two legs (#14480 review,
+    // P3).
+    if (previous?.claim_unavailable_reason !== undefined
+      && previous?.claim_unavailable_reason !== null) {
+      next.claim_unavailable_reason = previous.claim_unavailable_reason;
+    }
+  }
+  return next;
+}
+
+/** The operator-line term for the one claim arm that blocks PERMANENTLY — the
+ *  Python twin's `_UNREADABLE_CLAIM_TEXT`, byte for byte, because the cross-leg
+ *  parity test compares the FULL rendered line. */
+const UNREADABLE_CLAIM_TEXT = "a regular file exists but could not be read";
+
+/** Whether a REGULAR file sits at the claim path that this process cannot READ.
+ *
+ *  This is the one arm that blocks the drain PERMANENTLY. A regular claim file we
+ *  cannot read is HONOURED, never taken over (`acquireDrainClaim`): a transient
+ *  local error and a mode-`000` file are indistinguishable, so "unprovable reads as
+ *  ALIVE" is the fail-closed answer. The consequence is that every pass returns
+ *  `heldByClaim` with NO holder identity, nothing is attempted, and the spool stops
+ *  moving until a human looks — and until now nothing told the human: the line read
+ *  `capture: DRAINING (n queued)`, which describes a WORKING drain (#14480 review,
+ *  P2; the Python twin is `drain_claim.claim_path_unreadable`).
+ *
+ *  ⛔ A LIVE PROBE, NOT A DURABLE FACT. The other claim-axis fact
+ *  (`claim_unavailable`) is about a PAST pass, so it has to be recorded; this one is
+ *  a property of the spool root at READ time, so the health line can simply ask. A
+ *  probe cannot go stale: the term disappears the moment the file is cleaned up or
+ *  its mode is fixed, and a dead lock (pid recycled, lease long expired) can never
+ *  keep the warning alive.
+ *
+ *  Only a REGULAR file is opened (`lstatSync` first — opening a FIFO or a socket is
+ *  the block this module already removed from the claim read), and `ENOENT` is
+ *  answered `false`: a claim released between the two syscalls is not a stall.
+ *
+ *  ⛔ AND THAT IS A REPLACE WINDOW, NOT AN ABSOLUTE — stated rather than implied,
+ *  because the sibling status gate (`readCaptureStatus`) carries the identical
+ *  `lstat` → open exposure and states it: an object swapped for a FIFO between the
+ *  two syscalls IS opened and this call then blocks. CERT C `FIO32` names exactly
+ *  this TOCTOU and prescribes `O_RDONLY|O_NONBLOCK` then `fstat`/`S_ISREG` on the
+ *  FD; deliberately not adopted here, so this probe and the status gate stay ONE
+ *  mechanism with one stated residual, and because the box owner is by definition
+ *  the only writer that could perform the swap (the confirmation review AT `bcb52e1d` —
+ *  dated rather than round-cited, because the over-claiming sentence did not exist at any
+ *  head cycle 19 reviewed; the earlier wording promised more than two syscalls can).
+ */
+export function claimPathUnreadable(dir: string): boolean {
+  const claimPath = drainClaimPathFor(dir);
+  try {
+    if (!lstatSync(claimPath).isFile()) return false;
+  } catch {
+    return false;
+  }
+  let fd: number;
+  try {
+    fd = openSync(claimPath, "r");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
+  }
+  try {
+    closeSync(fd);
+  } catch {
+    /* the answer is already known */
+  }
+  return false;
+}
+
+/**
+ * Append the claim-axis facts to WHICHEVER verdict was chosen.
+ *
+ * ⛔ A TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review, F1). The
+ * claim axis is a fact about the SPOOL ROOT — true whatever the queue is doing — so
+ * a `SATURATED` box whose claim path is broken must read BOTH, exactly as a
+ * quota-blocked one must. Applying it only to the final `DRAINING`/`OK` verdict
+ * dropped it on the four early returns, and the case the durable fact exists for (a
+ * capacity 429 with a backlog: `state: blocked` AND a broken claim path) is one of
+ * those early returns. Mirrors `capture_spool._with_claim_term` byte for byte — the
+ * cross-leg parity test compares the FULL rendered line.
+ *
+ * ⛔ TWO TERMS, TWO DIFFERENT KINDS OF FACT, and they must not be merged:
+ *
+ *  * `NO drain exclusion` — DURABLE and about a PAST pass: a pass ran without the
+ *    one-drainer claim, and the reason reaches no one unless it is recorded (the
+ *    firing hook discards stderr).
+ *  * `drain claim UNREADABLE` — LIVE and about the PRESENT state: every pass honours
+ *    a holder it cannot name and attempts nothing, so the spool stops moving until a
+ *    human looks. That residual had no surface at all (#14480 review, P2), and it is
+ *    probed rather than recorded because a recorded copy could outlive the
+ *    condition.
+ *
+ * Order is fixed so the rendered line is byte-identical on both legs.
+ */
+function withClaimTerm(
+  health: CaptureHealth,
+  recorded: CaptureStatus | undefined,
+  dir: string,
+): CaptureHealth {
+  const terms: string[] = [];
+  if (recorded?.claim_unavailable) {
+    const reason = recorded.claim_unavailable_reason;
+    // ⛔ BYTE-IDENTICAL TO THE PYTHON LEG'S TERM, for EVERY value the record can
+    // hold — not only for the shapes this leg happens to write. The Python twin
+    // gates on `isinstance(reason, str) and reason`, so a non-string reason (a
+    // hand-edited or foreign `status.json` — the two legs share this file) renders
+    // `…, NO drain exclusion` there and used to render `…, NO drain exclusion (5)` /
+    // `([object Object])` here. This PR's own claim is byte-identical words on both
+    // legs for every verdict (#14480 review, P3).
+    const suffix = typeof reason === "string" && reason ? ` (${reason})` : "";
+    terms.push(`NO drain exclusion${suffix}`);
+  }
+  if (claimPathUnreadable(dir)) {
+    terms.push(`drain claim UNREADABLE (${UNREADABLE_CLAIM_TEXT})`);
+  }
+  if (!terms.length) return health;
+  return { ...health, line: `${health.line}, ${terms.join(", ")}` };
+}
+
 function spoolHealthLine(
   dir: string,
   opts: { apiKey?: string; bounds?: SpoolBounds } = {},
 ): CaptureHealth {
+  // ⛔ THE RECORD IS READ BEFORE THE SCAN, so the durable claim fact reaches the
+  // `UNREADABLE` return too: `status.json` sits in the spool ROOT, not in
+  // `entries/`, so a spool whose entries cannot be listed still has a readable
+  // record — and dropping the fact on the one verdict that says "I cannot even
+  // look" is the wrong way round (#14480 review, F1).
+  let recorded = readCaptureStatus(dir);
+  const previous = recorded;
   const scan = healthScan(dir);
   if (scan === undefined) {
     // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
     // a false pass on the acceptance's own surface, and it would also let the
     // self-heal below destroy a durable block marker that a later, readable
     // process still needs.
-    return {
+    return withClaimTerm({
       state: "unreadable",
       queued: 0,
       line: `capture: UNREADABLE (cannot list ${entriesDir(dir)})`,
-    };
+    }, recorded, dir);
   }
   const queued = scan.pending;
-  let recorded = readCaptureStatus(dir);
   if (queued === 0 && recorded && recorded.state !== "ok") {
     // Self-healing: the block is over (or another leg filed everything). Never
     // keep a stale verdict on disk that no evidence supports.
-    recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString() };
+    // ⛔ EXCEPT the claim axis: it is a fact about the SPOOL ROOT, not about the
+    // queue, so an empty spool does not make it untrue — erasing it here would make
+    // the next capture on a broken box report a healthy drain.
+    // ⛔ KEY-EXISTENCE, NOT TRUTHINESS — the Python twin's self-heal keeps every
+    // claim-axis key the record CARRIES (`{k: v for k, v in previous.items() if k in
+    // (…)`), whatever the value. Copying only the TRUTHY ones made this leg drop a
+    // `claim_unavailable: false` and a JSON `null` reason that Python keeps, so the
+    // ONE shared `status.json` came out different depending on which leg last ran a
+    // health line (#14480 review, P3 — same class as `withClaimTerm`'s suffix).
+    const keep: Partial<CaptureStatus> = {};
+    if (previous && "claim_unavailable" in previous) {
+      keep.claim_unavailable = previous.claim_unavailable;
+    }
+    if (previous && "claim_unavailable_reason" in previous) {
+      keep.claim_unavailable_reason = previous.claim_unavailable_reason;
+    }
+    recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString(), ...keep };
     writeCaptureStatus(dir, recorded);
   }
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
@@ -6131,7 +6697,7 @@ function spoolHealthLine(
   // and a ceiling filled by TERMINAL entries (never retried, never counted) read
   // `OK (0 queued)` — byte-identical to a healthy box.
   if (blockedStatus !== undefined && queued > 0) {
-    return {
+    return withClaimTerm({
       state: "blocked",
       queued,
       status: blockedStatus,
@@ -6141,14 +6707,14 @@ function spoolHealthLine(
       // `blocked` alone would name the status and lose the cause, so the
       // marker's own recorded category is reported when it has one.
       line: `capture: BLOCKED (${queued} queued, ${blockedStatus} ${refusalLabel(recorded.reason)})`,
-    };
+    }, recorded, dir);
   }
   if (saturated) {
     // `queued` is the PENDING count, so a ceiling filled by terminal entries
     // reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
     // retried, and nothing new will be admitted. `session drain` names the
     // terminal count and `--retry-terminal` re-arms them.
-    return opts.apiKey === ""
+    return withClaimTerm(opts.apiKey === ""
       ? {
           state: "saturated",
           queued,
@@ -6158,22 +6724,28 @@ function spoolHealthLine(
           state: "saturated",
           queued,
           line: `capture: SATURATED (${queued} queued, refusing new captures)`,
-        };
+        }, recorded, dir);
   }
   if (opts.apiKey === "") {
     // The count is NOT dropped here: a keyless box is exactly the box whose
     // spool grows forever (nothing can file it), so the backlog must stay
     // visible on the line that explains why.
-    return {
+    return withClaimTerm({
       state: "inactive",
       queued,
       line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
-    };
+    }, recorded, dir);
   }
-  if (queued > 0) {
-    return { state: "draining", queued, line: `capture: DRAINING (${queued} queued)` };
-  }
-  return { state: "ok", queued, line: "capture: OK (0 queued)" };
+  const verdict = queued > 0
+    ? { state: "draining" as const, queued, line: `capture: DRAINING (${queued} queued)` }
+    : { state: "ok" as const, queued, line: "capture: OK (0 queued)" };
+  // ⛔ AND THE LINE CARRIES IT, byte-identical to the Python leg's
+  // (`_spool_health_line`): the record is the only place a pass that filed nothing
+  // can be heard, so the one line every operator reads is where it must land. A
+  // divergence here is invisible to everyone but a human who ran the other leg.
+  // It goes through `withClaimTerm` like every earlier verdict: the term is an
+  // ADDED FACT, not a precedence state.
+  return withClaimTerm(verdict, recorded, dir);
 }
 
 /**
@@ -6441,15 +7013,22 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
   const recordOutcome = (summary: FlushSummary): void => {
     try {
       const previous = readCaptureStatus(spoolDir);
+      // ⛔ BUILT, THEN WRITTEN ONCE AT THE TAIL — the Python twin's shape, for the
+      // Python twin's reason (#14480 review, F1). Every arm below used to write the
+      // file immediately, so whether the durable claim fact survived depended on
+      // which arm had run; one of them wrote a record with no claim field at all and
+      // therefore deleted the fact. A single write point is what makes the claim
+      // policy ONE rule instead of a property of four call sites.
+      let next: CaptureStatus | null = null;
       if (summary.quota) {
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "blocked",
           reason: summary.quota.code ?? `${summary.quota.status}`,
           status: summary.quota.status,
           ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
           updated_at: new Date().toISOString(),
-        });
+        };
       } else if (summary.attempted > 0 && !summary.capacity) {
         // Some POST was ATTEMPTED and none of them was refused for quota, so the
         // recorded cause is superseded: the marker is the LAST OBSERVED
@@ -6465,11 +7044,11 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // server accepted a capture, not proof the allowance lifted. The window
         // is one pass wide: a still-exhausted quota refuses the NEXT attempt
         // and re-marks it in the same pass that attempted it.
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "ok",
           updated_at: new Date().toISOString(),
-        });
+        };
       }
       if (summary.capacity) {
         // #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
@@ -6479,7 +7058,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // console line alone leaves the next process to re-POST to find out why
         // nothing moved. Self-healing: a later pass with a free slot writes `ok`,
         // and the health line clears it when the queue empties.
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "blocked",
           reason: summary.capacity.code ?? `${summary.capacity.status}`,
@@ -6488,8 +7067,13 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
             ? { detail: summary.capacity.detail.slice(0, 500) }
             : {}),
           updated_at: new Date().toISOString(),
-        });
+        };
       }
+      // ⛔ THE CLAIM POLICY IS ONE EXPORTED FUNCTION, not four call sites: see
+      // `applyClaimPolicy` for the rule and for the review finding (F1) that made it
+      // a rule. The build above only decides which STATE the pass earned.
+      next = applyClaimPolicy(next, previous, summary);
+      if (next) writeCaptureStatus(spoolDir, next);
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
       // as the last thing the lane logged is the misdiagnosis the supersede
@@ -6806,6 +7390,12 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       reportFlush(summary, "session_shutdown", { continuing: false });
       // The general pass is the LATER evidence, so it writes last (a quota
       // refusal it saw must win over the live session's 2xx).
+      // The targeted (live) pass takes NO claim by design, so it cannot CLEAR a
+      // recorded exclusion — and that is now ENFORCED by `applyClaimPolicy` (the fact
+      // is carried forward), not merely implied by this write ORDER: the general pass
+      // below usually overwrites the record afterwards, but a claim-less leg with a
+      // general pass that writes nothing would have left the erasure standing
+      // (#14480 review, F1).
       if (liveSummary) recordOutcome(liveSummary);
       recordOutcome(summary);
     } catch (err) {

@@ -72,6 +72,46 @@ it, so what bounds the breach alert is ``_claim_notify`` alone (once per
 the decision, and a failure there is debug-only. Stated because the old
 sentence claimed a guarantee its artifact no longer provides.
 (The notify-only rules R3/R4/R8 have no flag to persist.)
+
+Notification DELIVERY (#14407) is bounded separately from those ATTEMPTS, because
+an attempt bound is not a delivery bound and the two had drifted apart: the push
+was emitted per DETECTION here while the incident was create-once, so ONE open
+incident re-paged a human every window (24 messages/day for R1) with no issue
+reference, and `abuse_flag` filed nothing at all. `notify.notify_abuse` now owns
+the delivery contract: a state change files an incident and is pushed once when
+the episode opens, then at most one reminder per 24h **while the delivery window
+holds** (the episode-end release re-arms it for the RULE-episode kinds, and the
+kind-agnostic per-outcome releases re-arm ANY kind — the scopes below say where
+each fires, and the emitted reminder says so too); a
+measurement (#10156's ACTIVITY register) files nothing by design and is
+DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
+incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2) of the
+#3146 recovery window, not the first clean one. ⛔ THAT GATE IS THE STORE PATH'S: with a
+store, `resolve_incident_state` NORMALLY answers SKIPPED_WINDOW on the first clean
+window, so nothing is closed and nothing is re-armed there yet. That is the default
+path, not a universal: a resolve leg that raises or answers `CloseCooldown` leaves
+`skipped_window` false and the ledger IS popped at that episode end (measured 6
+crossings = 6 messages, with ONE incident kind on record), and
+`ALERT_RECOVERY_STREAK=1` closes and re-arms per crossing (measured 6 issues / 12
+pushes). ⛔ `skipped_window` is ONE flag for the whole CALL, not per kind, so that
+pop is conditional a second way: a raise on one episode kind does NOT release the
+ledger when ANOTHER episode kind answers `SKIPPED_WINDOW` in the same call
+(reproduced: raise for one, `SKIPPED_WINDOW` for the other — the ledger stays
+armed). With NO incident channel there is
+no `SKIPPED_WINDOW` gate to hold the release, so `notify.resolve_abuse_episode`
+re-arms the local ledger on the FIRST confirmed episode end — the bound in that shape
+is the EPISODE, and the 24h window is the ceiling only for a continuously breaching
+org — or for a new episode FOLDED into a window whose predecessor's end the engine
+could not observe (the out-of-band residual: no episode end ever arrives, so the
+armed window still bounds it). ⛔ WHICH shape applies DECIDES that bound, so do not
+restate it as the flat "the bound is the WINDOW" — a previous cut of this paragraph
+did, two lines after saying the opposite. What holds in EVERY shape is narrower: the window is what a
+message SPENDS, and an episode end (or any per-outcome release) is what re-arms
+it — never a mute.
+The in-process claim below stays as the ATTEMPT bound (it self-heals a store
+failure, which an episode-scoped claim could not), so the honest ceiling across
+replicas is N replicas x 1 attempt per window, and at most one delivery per
+(kind, subject) inside an armed window — plus the episode's opening push.
 """
 from __future__ import annotations
 
@@ -243,6 +283,29 @@ def _int_env(name: str, default: int) -> int:
 #: in ``embeddings.py`` and ``_DEV_PEPPER_WARNED`` in ``auth.py``).
 _WINDOW_WARNED: set[tuple[str, str | None]] = set()
 _WINDOW_WARN_LOCK = threading.Lock()
+
+#: Cap on the in-process set of episode ends whose incident resolution FAILED and
+#: is awaiting a retry on a later clean window (#14407). A retry hint, never an
+#: authority: the store holds the incident, and the runbook's manual close remains
+#: the fallback for a close that cannot succeed.
+_MAX_PENDING_EPISODE_RESOLVES = 4096
+#: How long an episode-end close that keeps failing stays on the retry list
+#: (#14407): 25h, i.e. one full incident-delivery window plus slack. A CALL-COUNT
+#: cap cannot work here — the store refuses retries for `close_cooldown_min` after
+#: a failure while the retry branch fires on every clean evaluation, so any count
+#: is spent inside one cooldown. Each retry costs the same incident reads as the
+#: first attempt, so an unbounded retry is a read tax on the request path.
+_EPISODE_RESOLVE_RETRY_TTL_S = 90_000.0
+#: NOTE the coupling with `ALERT_RECOVERY_STREAK` (`incident_kinds.resolve_streak_for`):
+#: the recovery window needs that many clean observations, and this retry now offers
+#: one per `_EPISODE_RESOLVE_RETRY_BACKOFF_S`, i.e. <=25 inside the TTL. An operator
+#: who raises the streak past ~24 makes the window unreachable by the automatic
+#: retry and the incident falls to the manual close — deliberate, and named here
+#: rather than discovered as a "permanent incident".
+#: Minimum spacing between retries of a pending episode-end close (#14407), on par
+#: with the store's default `close_cooldown_min` (60 min): a retry inside the
+#: cooldown is refused AFTER it has already paid a store read.
+_EPISODE_RESOLVE_RETRY_BACKOFF_S = 3_600.0
 
 
 def _negative_env(raw: str | None) -> bool:
@@ -1787,6 +1850,22 @@ class AbuseEngine:
         # store remains authoritative for staging and is the cross-replica gate.
         self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
+        # Episode ends whose incident resolution did not COMPLETE, awaiting a
+        # retry on a later clean window (#14407). The value is the FIRST-SEEN
+        # instant (a TTL anchor read by `_remember_pending_resolve`), and the
+        # entry is dropped once `_EPISODE_RESOLVE_RETRY_TTL_S` has elapsed.
+        # NOT an attempt count: the retry fires on every clean window while the
+        # store REFUSES attempts during its `close_cooldown_min` (#5143), so a
+        # count budget is spent inside one cooldown and drops the hint exactly
+        # when the retry would have worked — which is why the bound is a
+        # deadline AND the retries are spaced (`_EPISODE_RESOLVE_RETRY_BACKOFF_S`,
+        # without which the deadline is a 25h read tax, not a bound).
+        # In-process and bounded three ways (that deadline, the spacing, and
+        # `_MAX_PENDING_EPISODE_RESOLVES`) — a hint, never an authority.
+        self._pending_episode_resolves: dict[tuple[str, str], datetime] = {}
+        # Last retry instant per subject, so a failing close is retried at the
+        # store's own backoff pace instead of once per clean evaluation (#14407).
+        self._last_resolve_attempt: dict[tuple[str, str], datetime] = {}
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
                       now: datetime, window_s: int) -> bool:
@@ -1811,6 +1890,136 @@ class AbuseEngine:
                     k: exp for k, exp in self._last_notified.items()
                     if exp > now}
             return True
+
+    def _end_alert_episode(self, org_id: str, rule: str) -> None:
+        """A rule's flag episode ENDED: re-arm delivery and RESOLVE its incidents.
+
+        #14407. Two facts belong to the same event and are set here together, so
+        a caller cannot get one without the other:
+
+        * the DELIVERY window is re-armed WHEREVER the release fires (always on
+          the NO-INCIDENT-CHANNEL path; with a store, when the close resolves or
+          the store did not answer `SKIPPED_WINDOW`), because a NEW episode must
+          page at once — the episode end is the RELEASE SITE. Which BOUND that window is
+          depends on the shape: on the NO-INCIDENT-CHANNEL path it is the
+          ceiling for a CONTINUOUSLY breaching subject — and for a new episode
+          FOLDED into a window whose predecessor's end the engine could not
+          observe — because there a flapping rule pages once per episode end (no
+          `SKIPPED_WINDOW` gate
+          holds that release); WITH a store the gate normally holds an
+          alternating rule inside the window, so the 24h ceiling applies there
+          too — the module docstring in `notify` carries the scopes. And only
+          the engine knows the rule's window went clean;
+        * the incidents are closed + deleted-to-resolve, because nothing else ever
+          resolved an abuse incident: the sentinel outlived the condition and its
+          issue stayed OPEN for the rest of time, so the tracker reported a
+          permanent incident for a recovered one.
+
+        Deliberately called only on the ``ended`` branch — a clean window whose
+        durable ``flag_clear`` did NOT persist is not a confirmed episode end, and
+        a store failure must reduce alert volume, never increase it (#3631).
+
+        Best-effort by construction (``resolve_abuse_episode`` never raises): the
+        evaluation path must never be broken by the alert path.
+        """
+        try:
+            from tortoise.notify import resolve_abuse_episode
+            resolved = resolve_abuse_episode(org_id, rule)
+        except Exception:  # noqa: BLE001, RUF100 — never break the request path
+            logger.debug("abuse episode-end resolution failed (%s, %s)",
+                         org_id, rule)
+            resolved = False
+        # A FAILED close is retried, not lost. `resolve_incident_state` fails
+        # non-destructively by design — a failed `_close` records `close_failed_at`
+        # and re-raises (#5143), an R2 transport error propagates — and this gate
+        # fires exactly ONCE per episode (the next clean window reads
+        # `flagged=False`), so without a pending set a single blip would strand the
+        # incident OPEN for the rest of time: the "permanent incident for a
+        # recovered condition" this whole fix exists to remove.
+        #
+        # RECORDING the hint is a set lookup with no store read. The RETRY is not
+        # free: `_evaluate`'s decision to retry is a set lookup plus
+        # `_resolve_retry_due`, and the retry pays the SAME 3–4 store reads per rule as
+        # the first attempt: measured 3 with one incident kind on record and 4 with
+        # both, for the first attempt and the retry alike — a sentinel on record is
+        # read twice (`_alias_states`, then the compare-and-delete re-read after a
+        # SUCCESSFUL close). With no sentinel either call costs 2, and the `flagged`
+        # gate avoids the call entirely (0) — which is why the retry is
+        # spaced by `_EPISODE_RESOLVE_RETRY_BACKOFF_S` and bounded by
+        # `_EPISODE_RESOLVE_RETRY_TTL_S` rather than run on every clean window.
+        if resolved:
+            self._pending_episode_resolves.pop((org_id, rule), None)
+            self._last_resolve_attempt.pop((org_id, rule), None)
+        else:
+            self._remember_pending_resolve(org_id, rule)
+
+    def _resolve_retry_due(self, org_id: str, rule: str) -> bool:
+        """May the pending episode-end close be retried NOW? (#14407)
+
+        The retry branch fires on every clean-window evaluation of the rule, and a
+        clean window is by definition an org UNDER its threshold — so a retry with
+        no rate bound is up to ~1000 store reads per hour per rule, for as long as
+        the close keeps failing, on the abuse pool whose documented cost profile is
+        microseconds of accounting. The store backs off for `close_cooldown_min`
+        after a failure, but it reads the alias set BEFORE honouring that cooldown,
+        so the FIRST read is paid either way: the retry is therefore spaced by the
+        same backoff here.
+
+        Deliberately conservative: `_EPISODE_RESOLVE_RETRY_BACKOFF_S` (one hour)
+        matches the store's documented default cooldown, so a retry never lands
+        inside a cooldown it would only be refused by.
+        """
+        with self._notify_lock:
+            last = self._last_resolve_attempt.get((org_id, rule))
+        if last is None:
+            return True
+        return (_utcnow() - last).total_seconds() >= _EPISODE_RESOLVE_RETRY_BACKOFF_S
+
+    def _remember_pending_resolve(self, org_id: str, rule: str) -> None:
+        """Queue an episode-end resolution that did not COMPLETE, for a retry.
+
+        Bounded by WALL CLOCK, not by call count: the retry branch fires on every
+        clean-window evaluation of the rule — i.e. on every `record_point_create`
+        for an org under its threshold — while a failed close makes the store
+        REFUSE further attempts for `close_cooldown_min` (`#5143`). A call-count
+        cap is therefore spent inside a single cooldown, and the entry is dropped
+        exactly when the cooldown expires and the retry could have worked. A
+        deadline is the only bound that matches the store's backoff.
+
+        Bounded twice, because the retry is not free (the same incident reads as
+        the first attempt):
+          * per subject — `_EPISODE_RESOLVE_RETRY_TTL_S`, after which the entry is
+            DROPPED with a warning: a close that keeps failing past that is a
+            durable fault, and the runbook's manual close is the honest fallback
+            rather than an unbounded read tax on the request path;
+          * overall — `_MAX_PENDING_EPISODE_RESOLVES` entries, so a fleet-wide
+            outage cannot grow the map without limit.
+        This is a retry HINT, never an authority: the store holds the incident.
+        """
+        key = (org_id, rule)
+        now = _utcnow()
+        with self._notify_lock:
+            self._last_resolve_attempt[key] = now
+        first = self._pending_episode_resolves.get(key)
+        if first is not None and (now - first).total_seconds() > _EPISODE_RESOLVE_RETRY_TTL_S:
+            self._pending_episode_resolves.pop(key, None)
+            self._last_resolve_attempt.pop(key, None)
+            logger.warning(
+                "abuse episode end: %s/%s still not resolved after %ds — giving up "
+                "on the automatic close; close the incident by hand (the runbook "
+                "names the object)", org_id, rule,
+                int(_EPISODE_RESOLVE_RETRY_TTL_S))
+            return
+        with self._notify_lock:
+            self._pending_episode_resolves.setdefault(key, now)
+            if len(self._pending_episode_resolves) > _MAX_PENDING_EPISODE_RESOLVES:
+                logger.warning(
+                    "abuse episode end: %d pending resolutions exceeds the cap — "
+                    "dropping ALL retry hints; the incidents stay OPEN and need a "
+                    "manual close", len(self._pending_episode_resolves))
+                self._pending_episode_resolves.clear()
+                self._last_resolve_attempt.clear()
+                self._pending_episode_resolves[key] = now
 
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
         """Re-arm the alert budget for a stage when its episode ENDS, so a
@@ -1883,22 +2092,87 @@ class AbuseEngine:
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
+            #
+            # `flagged` is what makes this an EPISODE end, and it gates only the
+            # INCIDENT-side work (`_end_alert_episode`). The clean window is the
+            # overwhelmingly common evaluation — an org under its threshold — and
+            # for it there is no episode at all; firing that work on that branch
+            # anyway cost up to 4 `resolve_incident_state` calls per
+            # `record_point_create` (2 rules × 2 incident kinds × ONE subject —
+            # `resolve_abuse_episode` resolves only the rule-scoped spelling since
+            # `439db940711c` removed the bare-spelling arm; the figure was 8 while
+            # that second spelling was also resolved), each a `_read_json` →
+            # `storage.download` round trip, on the
+            # 4-worker abuse pool whose documented cost profile is "microseconds of
+            # accounting" (`monitoring.py` CONTROL_PLANE_ABUSE_*). Zero pre-#14407.
+            # The IN-PROCESS claim release below is NOT part of that gate: it is a
+            # dict `pop` with no I/O, and gating it muted out-of-band-cleared
+            # episodes (see the comment at the release).
+            #
+            # A `latest_flag_at` that RAISES still counts as not-ended: a store
+            # failure must reduce alert volume, never increase it (#3631).
             ended = False
+            flagged = False
             try:
-                if self.store.latest_flag_at(org_id, rule) is not None:
+                flagged = self.store.latest_flag_at(org_id, rule) is not None
+                if flagged:
                     self.store.flag_clear(org_id, rule, now=now)
                 ended = True
             except Exception as e:
                 report_abuse_decision_fault(
                     "clean_window_episode_end", org_id, rule, e)
             if ended:
-                # Episode CONFIRMED over: re-arm the alert budget so a NEW
-                # episode alerts again (#3631 — per-episode, not a wall-clock
-                # cooldown). NOT released when the episode-end read/write
-                # FAILED — a store failure must reduce alert volume, never
-                # increase it, so the claim is left to expire on its own.
+                # The ENGINE claim is released whenever the clean-window read/write
+                # SUCCEEDED — NOT only when a flag episode was observed to end.
+                # `_release_notify` is a dict `pop` under a lock (no I/O), so the
+                # `flagged` gate below — whose whole motive is up to 4 store reads per
+                # clean window — does not apply to it. Gating it on `flagged` muted
+                # a re-breach after an episode was cleared OUT OF BAND
+                # (`abuse_unsuspend`, a manual `flag_clear`): that flag_clear makes
+                # the next clean window read `flagged=False`, so the claim survived
+                # and a new detection inside the original window was dropped at
+                # `_claim_notify` and never reached `notify_abuse` at all — not even
+                # folded into a digest — for R2's 86400 s. `_release_notify`'s own
+                # docstring states the behaviour this restores. The delivery bound
+                # is NOT weakened by the release: it lives in
+                # `notify._claim_delivery` / the store lifecycle, which stay
+                # episode-scoped and recovery-streak-gated (#3146).
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
+            if ended and flagged:
+                # Episode CONFIRMED over: re-arm the DELIVERY budget and close the
+                # incidents so a NEW episode alerts again (#3631 — per-episode, not
+                # a wall-clock cooldown). NOT fired when the episode-end read/write
+                # FAILED — a store failure must reduce alert volume, never increase
+                # it, so the incident is left to expire on its own; and not fired on
+                # a clean window with no episode, which is where the R2 cost lives.
+                self._end_alert_episode(org_id, rule)
+            elif (ended
+                  and (org_id, rule) in self._pending_episode_resolves
+                  and self._resolve_retry_due(org_id, rule)):
+                # A previous episode end could not close its incidents (a failed
+                # close re-raises by design, #5143, or returned SKIPPED_WINDOW
+                # because the recovery window is not satisfied yet, #3146). Retry
+                # it here: for this org the flag is already gone, so no later
+                # window would ever see `flagged=True` again and the incident
+                # would stay OPEN forever.
+                #
+                # GATED ON `ended` like the confirmed arm above, and for the same
+                # reason: when the clean-window read RAISED the episode state is
+                # UNKNOWN, and "unknown" must never close an incident (#5143 /
+                # ADR-011's false all-clear). The retry finishes an episode already
+                # known to have ended; it never decides that one did.
+                #
+                # COST, stated honestly: a retry costs the SAME 3–4 store reads per rule
+                # as the first attempt (measured: 3 with one incident kind on record, 4
+                # with both), so a close that cannot complete costs them on each clean
+                # window until it succeeds. A close that RAISES costs 2, because the
+                # compare-and-delete re-read runs only after a SUCCESSFUL close, and the
+                # `flagged` gate avoids the call altogether (0) when there is no episode
+                # or `_EPISODE_RESOLVE_RETRY_TTL_S` drops the hint. That is bounded
+                # and rare; it is NOT free, and it must not be described as a bare
+                # dict lookup.
+                self._end_alert_episode(org_id, rule)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
@@ -1910,6 +2184,23 @@ class AbuseEngine:
             # alert itself stays bounded by _claim_notify (#3631 target a).
             flagged_at = None
         if flagged_at is None:
+            # NO FLAG ON RECORD — including an episode that ended out of band (the
+            # ``abuse_unsuspend`` SQL function and a manual ``flag_clear`` write the
+            # flag away with no in-process caller here), so no clean window ran the
+            # episode-end work and BOTH its incident and its 24h delivery window
+            # stand.
+            #
+            # Deliberately NOT inferred as an episode end here. The same read
+            # returns None when a flag we just WROTE is invisible to a stale read,
+            # and that is the #3631 storm: releasing the alert budget or queueing a
+            # close on every such None re-pages per detection and can close the
+            # incident of an org that is still over threshold (a false all-clear).
+            # A store read is not evidence that an episode ended unless it is the
+            # read that also cleared it (`flag_clear` on the clean-window branch).
+            # The cost of that choice is DECLARED and bounded: after an out-of-band
+            # clear a new episode inside the armed window is folded, and its
+            # reminder fires at the window's end naming the open issue; the runbook
+            # row names the manual close. See `notify._INCIDENT_DELIVERY_WINDOW_S`.
             return self._flag(org_id, rule, details, now, window_s)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()

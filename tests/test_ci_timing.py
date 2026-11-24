@@ -3766,7 +3766,9 @@ def _code_spans(md: str) -> list[str | None]:
 #: number: that artifact is regenerated every week and the flake table gains and
 #: loses rows with each sample, so `docs/ci-timing.md:823` names this row today and
 #: an unrelated one after the next sweep — the exact rot the 2026-11-23 refresh
-#: re-cut in `docs/ops/ci-wall-clock.md` §6.
+#: re-cut in `docs/ops/ci-wall-clock.md` §6. (The arm this nodeid names was itself
+#: CUT in the B4 test cut, 2026-11-23; the string stays verbatim because it is a
+#: FROZEN fixture — the backtick-bearing id the 2026-11-23 artifact recorded.)
 _BACKTICK_NODEID = ("tests/test_7949_capstone_measure.py::"
                     "test_each_block_arm_reds_on_the_mutation_it_guards"
                     "[<lambda>-`_HOLD_NONE` (the clause is negated)]")
@@ -6734,7 +6736,8 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
 # that a file with a CI reading has no CI reading (`test_hermetic_egress_guard.py`
 # 2.0 -> 0.1 still saying "it takes the #3400 flat 2.0s default"), which reddened
 # tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
-# and tests/test_tool_risk_tiers.py::...::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it.
+# (cut in the B7 test-bureaucracy cut, 2026-11-23) and
+# tests/test_tool_risk_tiers.py::...::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it.
 _UNMEASURED_NOTE_MANIFEST = """\
 surfaces:
   core:
@@ -6824,8 +6827,10 @@ def test_the_unmeasured_note_repair_is_not_vacuous() -> None:
 # `The weight stays the flat `DEFAULT_FAST_WEIGHT` declaration …`
 # (`test_10602_query_limit_bound.py: 2.3`) and `it takes the header's flat
 # `DEFAULT_FAST_WEIGHT`` (`test_5095_s3_identity_policy.py: 0.4`). Neither the
-# writer's cutter nor `tests/test_ci_selection.py::_FLAT_DEFAULT_CLAIM_RE` could
-# match it — the verb list was `takes|carries|holds` and the first alternation
+# writer's cutter nor the matcher `test_ci_selection.py` used to export for it
+# (the MATCHER went in the B7 cut, 2026-11-23; the cutter did not) could match
+# it — the verb list was
+# `takes|carries|holds` and the first alternation
 # requires the literal `2.0s` — so those rows would have asserted the default
 # through every future refresh. The fixture below is the pre-fix row verbatim.
 _NAMED_CONSTANT_CLAIM_MANIFEST = """\
@@ -7040,9 +7045,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # continuation lines (measured at `a91123c76`: 1 row of 1222 did — the block's
 # dominant shape is the PREAMBLE for the row below, so almost every indented block
 # in it opens a note of its own; re-derive both figures at your own head),
-# and the guard that judges a written map joins them before judging
-# (`tests/test_ci_selection.py`
-# `_durations_row_comments`). The renderer used to reason about the row-line
+# and the guard that judges a written map joined them before judging (the
+# `_durations_row_comments` helper in `tests/test_ci_selection.py`, removed with
+# its arms in the B7 cut, 2026-11-23). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
 # `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
 # deleted the OPENER. The real casualty, at the 2026-11-02 head:
@@ -7051,7 +7056,8 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 #     # never ran cannot appear in an artifact), so this is the LOCAL wall of …
 #
 # which reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623, job 125131177056).
+# legs (run 41395489623, job 125131177056) — that arm was CUT in the B7 cut,
+# 2026-11-23, so the defect is now only visible to a reader.
 _WRAPPED_NOTE_MANIFEST = """\
 surfaces:
   core:
@@ -8217,7 +8223,9 @@ def test_the_unmeasured_markers_qualifier_goes_with_the_marker() -> None:
     assert ci_timing._restate_unmeasured_marker(
         "  # unmeasured by CI — #10025: some rationale") == \
         (f"  # {ci_timing._CARRIED_FORWARD} — #10025: some rationale")
-    # the guard's own spelling (`_UNMEASURED_ON_CI_RE`) is the other two prepositions
+    # the guard's own spelling (`_strip_unmeasured_marker`'s `on|in|by` alternation — the
+    # `_UNMEASURED_ON_CI_RE` constant it came from was CUT in the B7 cut, 2026-11-23)
+    # covers the other two prepositions
     for qualifier in ("on", "in"):
         assert ci_timing._strip_unmeasured_marker(
             f"  # unmeasured {qualifier} CI — #1: why") == "  # #1: why"

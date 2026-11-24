@@ -710,6 +710,12 @@ _PRICING_INIT_RE = re.compile(
 #: A `function` head, whose body the stray-call scan must not read as top level.
 _FUNCTION_HEAD_RE = re.compile(r"\bfunction\b[^\n{]*\{")
 
+#: A single px length inside a `border` shorthand (`1px`, `2.5px`) — the only
+#: unit the CTA-baseline compensation relation can do arithmetic on. A border
+#: written in `rem`/`em`/`thin` does not match, so the relation FAILS rather
+#: than comparing a number to a keyword (#14406 review round 11).
+_BORDER_WIDTH_PX = re.compile(r"([0-9]+(?:\.[0-9]+)?)px")
+
 
 def _without_function_bodies(code: str) -> str:
     """`code` with every `function …(…) { … }`, head included, removed.
@@ -3542,7 +3548,7 @@ MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{
 
 
 #: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
-#: `_max_height_media_blocks`; width had no reader, which is how owner item 3
+#: `_max_height_media_blocks`; width had no reader, which is how #13696 item 3
 #: (a flat `.outcomes { max-width }` override inside this block) survived a
 #: full review cycle and had to be caught by eye (#13696).
 MAX_WIDTH_MEDIA_RE = re.compile(r"@media\s*\(\s*max-width:\s*(\d+)\s*px\s*\)\s*\{")
@@ -3687,6 +3693,82 @@ def _effective_decl(body: str, prop: str) -> str | None:
     return last
 
 
+def _css_last_declaring_body(css: str, selector: str, prop: str) -> str | None:
+    """The LAST rule APPLYING AT DESKTOP that names `selector` and DECLARES `prop`.
+
+    This is the body a caller should hand to `_effective_decl`, and the
+    difference from `_css_rules_with_scope(...)[-1]` is not cosmetic: `[-1]` is
+    the last rule whose PRELUDE is that selector text, whether or not it says
+    anything about `prop`, so ANY later `.pricing-card { … }` rule that does not
+    repeat `display` hides the rule that does.
+
+    Measured (#14406 review round 13) on the tree at `f091cc8dedb2`, with the
+    class's own rows and the page restored byte-identically after every mutant:
+
+        .pricing-card { align-self: stretch }        RED  "`.pricing-card` is not a flex container"
+        .pricing-card { border-color: #fff }         RED  "`.pricing-card` is not a flex container"
+        .pricing-card .btn { border-radius: 2rem }   RED  "the card's CTA does not take the leftover height"
+
+    Every one of those is a page that renders all four CTAs on the shared
+    baseline — the card IS a flex container and its CTA DOES take the slack —
+    and the first is the very edit review round 12 declared GREEN, which it
+    measured written INSIDE the existing block. The same edit written as its own
+    rule still red, with a message naming a property the page satisfies: a
+    maintainer's correct edit cannot clear it, and the guard's own docstring
+    says why that matters ("a guard that reds the page it ships is a guard a
+    maintainer deletes").
+
+    Resolution stays LAST-WINS, so the override the rows exist for is still
+    caught — `_effective_decl` reports the winning declaration inside the body,
+    and this helper picks the last body that declares the property at all. An
+    appended `.pricing-card { display: block }` is therefore still the owner and
+    still reds (measured: RED before and after this reader).
+
+    ⛔ `at_desktop=True` (the default) reads through `_css_desktop_rules`, so a
+    rule inside a `min-width` media block is the owner when it is the last one
+    that declares `prop` (#14406 review round 15). Skipping media made the
+    compensation's TWO OPERANDS come from DIFFERENT TREES: the graded winner is
+    read by `_css_block_end_cascade`, which DOES reach `min-width` media, while
+    `@media (min-width: 1024px) { .pricing-card { padding-bottom: 2rem } }` was
+    invisible to the `expected` side — so the popular CTA was measured 4px low at
+    1440x900 with all 205 tests in the module GREEN. A `max-` block that cannot
+    apply at desktop size is still skipped, so the mobile hatches stay invisible.
+    """
+    # ⛔ "NON-MEDIA" IS THE WRONG AXIS; the CONDITION is (#14406 review round 16).
+    # This reader used to keep only rules at TOP LEVEL, so a `@media` block that
+    # applies at the very viewport every measurement here is taken at (1440x900)
+    # was invisible — the mirror of round 6's finding, which fixed the same
+    # prefix confusion in `_css_desktop_rules` and never reached this reader.
+    # Measured on the tree at `2d1958c1b9bb` — each mutant APPENDED inside the
+    # page's `<style>` block (after every base rule, the only position where a
+    # media rule actually wins the 1440x900 cascade), the CTA class's 9 rows
+    # run, then the page restored byte-identically (`sha256 d74e7c9dd20d`):
+    #
+    #   @media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }
+    #   @media (min-width: 1200px) { .pricing-card { padding: 2rem } }
+    #        -> 9 passed / 9 passed — GREEN over a page whose inset is derived
+    #           from a base rule the browser no longer applies (fail-OPEN).
+    #
+    # A third shape, `@media (min-width: 1200px) { .pricing-card.popular {
+    # padding-bottom: 1.75rem } }`, was ALREADY RED before this fix — the
+    # popular row resolves the whole `padding` family through
+    # `_css_block_end_cascade`, which has been media-aware since round 5. The
+    # two reads that were not are the ones below.
+    # already answers exactly this question — it keeps a media rule whose
+    # THRESHOLD can apply at desktop (and fails closed on a `not`, an
+    # uncomparable unit, or a query list) — so the reader resolves through it
+    # instead of re-deciding what `inside_media` means. The page's own hatches
+    # (`max-width: 760px` / `360px`, `max-height: 820px`) stay excluded, so a
+    # correct page is not red for stacking its cards on a phone.
+    wanted = {part.strip() for part in selector.split(",")}
+    declaring = [
+        body for prelude, body, _condition in _css_desktop_rules(css)
+        if wanted.issubset({p.strip() for p in prelude.split(",")})
+        and _effective_decl(body, prop) is not None
+    ]
+    return declaring[-1] if declaring else None
+
+
 def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
     """Every style rule as `(prelude, body, inside_media)`, comment-blanked.
 
@@ -3707,6 +3789,1304 @@ def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
         out.append((prelude, _brace_block(blanked, m.end() - 1),
                     any(start <= m.start() < end for start, end in media)))
     return out
+
+
+def _media_blocks(css: str) -> list[tuple[int, int, str]]:
+    """Every `@media (…) { … }` block as `(start, end, condition)`.
+
+    `_media_block_spans` answers "is this rule inside a media block"; this also
+    returns the CONDITION, because the condition decides whether the block can
+    affect a desktop viewport at all — and that is the difference between a
+    legitimate narrow-viewport hatch and an override that ships (#14406 review
+    round 4, finding G3).
+    """
+    blanked = _css_blanked(css)
+    out: list[tuple[int, int, str]] = []
+    for m in re.finditer(r"@media([^{]*)\{", blanked):
+        inner = _brace_block(blanked, m.end() - 1)
+        out.append((m.start(), m.end() + len(inner) + 1, m.group(1).strip()))
+    return out
+
+
+#: The desktop floor `_css_desktop_rules` compares a `max-` threshold against.
+#: `max-width` / `max-height` are INCLUSIVE (`width <= N`), so a threshold at or
+#: above these DOES apply at a desktop viewport — MDN, "Using media queries":
+#: `@media (max-width: 1440px)` matches a 1440-wide viewport and is equivalent to
+#: `@media (width <= 1440px)`. The pricing measurements are taken at 1440x900 and
+#: the page stacks the cards below ~907px, so 1100 is above the page's own narrow
+#: hatch (nothing it treats as "narrow" is pulled in) and low enough that every
+#: block able to affect a 1440x900 render is seen. Both are deliberately
+#: conservative: a threshold between the floor and 1440 is INCLUDED even though
+#: it cannot affect the 1440 measurement.
+DESKTOP_MIN_WIDTH = 1100
+DESKTOP_MIN_HEIGHT = 900
+
+#: `max-<axis>: <value>` inside a media CONDITION — the value may carry any unit.
+MAX_SIDE_MEDIA_RE = re.compile(r"max-(width|height)\s*:\s*([^)\s]+)")
+
+#: A top-level logical OR — the `or` KEYWORD of a media condition (Media Queries
+#: 4 §3: `<media-condition> or <media-condition>`). The look-ahead refuses
+#: `orange`/`order`, and the caller's look-behind refuses `color`.
+OR_KEYWORD_RE = re.compile(r"or(?![\w-])", re.IGNORECASE)
+
+#: A NEGATED media query or condition (`not all and (max-width: 760px)`).
+NOT_KEYWORD_RE = re.compile(r"(?<![\w-])not(?![\w-])", re.IGNORECASE)
+
+
+def _media_query_components(condition: str) -> list[str]:
+    """The alternative queries of a media query LIST **or** an `or` condition.
+
+    Both spellings are the same logical OR, and both are split so that
+    `_media_applies_at_desktop` decides by the BEST alternative instead of by a
+    single threshold drawn from the whole string:
+
+    * a query LIST — *"a media query list is true if any component query is true
+      and false only when all component queries are false"* (W3C Media Queries
+      Level 4 §3; MDN, "Using media queries": *"comma-separated media queries
+      act as a logical OR"*), fixed in #14406 review round 7;
+    * an `or` CONDITION — `<media-condition> or <media-condition>` is the same
+      OR one level in. `and` binds tighter than `or`, so the top-level split is
+      on `or`, exactly as it is on a comma. Measured while closing the round-7
+      class: `@media (max-width: 760px) or (min-width: 900px)` applies at
+      1440x900 through its SECOND operand, and the round-7 splitter (commas
+      only) returned it whole, read `max-width: 760px` out of it, and called it
+      a narrow hatch — `_css_reaching_decls` did NOT see
+      `.pricing-card .btn { margin-top: 0 }` inside it, so every row of
+      `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over the 3-baseline
+      split this class exists to catch.
+
+    A comma inside `var(--narrow, 760px)` / `calc(…)` is NOT a separator, so the
+    split tracks parenthesis depth; an `or` inside the parens is left alone for
+    the same reason.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    index = 0
+    while index < len(condition):
+        char = condition[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if depth == 0 and char == ",":
+            parts.append("".join(current))
+            current = []
+            index += 1
+            continue
+        if (depth == 0 and OR_KEYWORD_RE.match(condition, index)
+                and not (index and re.match(r"[\w-]", condition[index - 1]))):
+            parts.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _media_applies_at_desktop(condition: str) -> bool:
+    """Could a media CONDITION apply at a desktop viewport — by its THRESHOLD?
+
+    The predicate is the comparison a browser makes, not the spelling of the
+    condition. Measured (#14406 review round 6, finding 4): the first draft
+    skipped on the `max-` SUBSTRING, so
+    `@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }` —
+    which matches the very viewport every measurement in this PR is taken at —
+    was invisible to every row of `TestProductTeamsPricingCardCtaBaseline`: all
+    four stayed GREEN while the rendered CTAs split to three baselines 70.2px
+    apart. `max-width: 1200px` is the same shape one breakpoint down, and such
+    a block is a plausible "align the cards on laptops" edit.
+
+    `max-width: 760px` / `max-height: 820px` (the page's own viewport hatches)
+    are still EXCLUDED — they cannot apply at 1440x900, and the cards stack
+    there by design.
+
+    Fail-closed on anything this reader cannot compare: a `max-` value in a unit
+    that is not plain `px` (`50em`, `calc(...)`, `var(...)`) is treated as
+    REACHING a desktop viewport, because guessing "narrow" is the direction that
+    hides an override.
+
+    ⛔ TWO NARROW SPELLINGS THIS READER DOES NOT MODEL, measured at this head
+    rather than assumed, and both deliberately left on the fail-closed side
+    (they are FALSE REDS, the direction a maintainer can SEE and a whole PR's
+    rounds have accepted; the other direction hides an override and ships):
+
+    * the Media Queries 4 RANGE syntax — `@media (width <= 760px) { … }` does
+      not carry `max-width`, so nothing is `constrained` and the block is read
+      as reaching desktop. Measured: `.pricing-card .btn { margin-top: 0 }`
+      inside it reds 4 rows of `TestProductTeamsPricingCardCtaBaseline`, on a
+      page a browser renders correctly. The `max-width` spelling of the SAME
+      hatch stays excluded, so this is a spelling gap and not a threshold one.
+    * a bare MEDIA TYPE — `@media print { … }` carries no threshold by design
+      and is likewise read as reaching, although print cannot affect a
+      1440x900 SCREEN measurement. `print` appears in the query-LIST rows
+      above for the same reason (an unmodelled component fails closed), so
+      excluding it here would reverse that recorded choice; this note exists so
+      the next reader finds the measurement instead of re-deriving it.
+
+    Both shapes are recorded as evidence, not fixed: modelling them is a
+    behaviour change that belongs in its own round with its own mutants.
+
+    The CONDITION may be a query LIST or an `or` condition — both are a logical
+    OR — so the answer is `any()` over the alternatives, never a verdict from
+    one threshold picked out of the whole string. Measured (#14406 review round
+    7): `@media (max-width: 760px), (min-width: 900px) { .pricing-card .btn {
+    margin-top: 0 } }` applies at 1440x900 through its SECOND query, and the
+    single-threshold form read it as a narrow hatch — all four rows of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN while the rendered
+    CTAs split back to three baselines 70.2px apart.
+    """
+    return any(_media_query_applies_at_desktop(component)
+               for component in _media_query_components(condition))
+
+
+def _media_query_applies_at_desktop(component: str) -> bool:
+    """Could ONE alternative query (one comma- and `or`-free condition) apply at desktop."""
+    # `not` inverts the whole query, so the `max-` threshold no longer says what
+    # this reader thinks it says: `not all and (max-width: 760px)` is TRUE at
+    # 1440x900 (the inner query is false there, and `not` flips it), while the
+    # un-negated reading calls it a narrow hatch and hides the rule. Measured
+    # while closing the round-7 class: the mutant
+    # `@media not all and (max-width: 760px) { .pricing-card .btn {
+    # margin-top: 0 } }` was invisible to `_css_reaching_decls`, so all four
+    # rows of `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a
+    # rendered 3-baseline split. Negation is not modelled, so this fails CLOSED
+    # (treats the query as reaching a desktop viewport) — the same direction
+    # every other unmodellable input takes here.
+    #
+    # Round 8 reached the same conclusion independently by a different mutant
+    # (`not print and (max-width: 760px)`, caught by
+    # `test_a_negated_media_query_cannot_be_read_as_a_narrow_hatch`), so the
+    # two lanes agree; the keyword regex is shared rather than duplicated.
+    if NOT_KEYWORD_RE.search(component):
+        return True
+    constrained = False
+    for axis, raw in MAX_SIDE_MEDIA_RE.findall(component):
+        floor = DESKTOP_MIN_WIDTH if axis == "width" else DESKTOP_MIN_HEIGHT
+        if not re.fullmatch(r"\d+(?:\.\d+)?px", raw):
+            return True
+        constrained = True
+        if float(raw[:-2]) >= floor:
+            return True
+    return not constrained
+
+
+def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
+    """Every style rule that can apply at a DESKTOP viewport, `(prelude, body, media)`.
+
+    `media` is the `@media` condition the rule sits in, or `None` at top level.
+
+    A rule inside a `max-width`/`max-height` block whose threshold is BELOW the
+    desktop floor (`DESKTOP_MIN_WIDTH` / `DESKTOP_MIN_HEIGHT`) is EXCLUDED — a
+    viewport hatch, and the pricing cards legitimately stack one per row below
+    ~907px, so a narrow override is the page working as designed. Every OTHER
+    media block is INCLUDED, because `min-width` / `min-height` / preference
+    blocks apply AT desktop size — and so does a `max-width` at or above the
+    floor, which is why the test is the THRESHOLD and not the `max-` prefix
+    (#14406 review round 6, finding 4: `@media (max-width: 1440px) { … }`
+    applies at the measured 1440x900 viewport and the prefix test skipped it).
+
+    Measured (#14406 review round 4, finding G3):
+    `@media (min-width: 1024px) { .pricing-card .btn { margin-top: 0 } }` left
+    the entire CTA class GREEN while the rendered buttons split to three
+    baselines, 70.2px apart — the defect signature of #13645 item 6. A reader
+    that skips every media rule cannot see an override hiding in a `min-width`
+    one, so `inside_media` is the wrong axis: the CONDITION is.
+    """
+    blanked = _css_blanked(css)
+    media = _media_blocks(css)
+    out: list[tuple[str, str, str | None]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        if "<" in prelude:
+            # The FIRST rule of the sheet carries the whole document `<head>`
+            # as its prelude — this scan starts at index 0 — and downstream
+            # readers had to defend against that junk prefix themselves. The
+            # defence one of them chose was `if "\n" in part: continue`, and
+            # that skip also threw away legitimate MULTI-LINE selectors, so a
+            # wrapped `#pricing-section\n  .pricing-card.popular { … }`
+            # (1,2,0, a browser applies it) was invisible to the cascade with
+            # the guard GREEN (#14406 review round 9, measured). Cut the head at
+            # the `<style>` tag HERE, once, so the prelude is the selector list
+            # it actually is and no reader has to skip newlines.
+            prelude = prelude.rsplit(">", 1)[-1].strip()
+        condition = next((c for start, end, c in media
+                          if start <= m.start() < end), None)
+        if condition is not None and not _media_applies_at_desktop(condition):
+            continue
+        out.append((prelude, _brace_block(blanked, m.end() - 1), condition))
+    return out
+
+
+def _css_rightmost_compound(part: str) -> str:
+    """The RIGHTMOST compound of one comma part of a selector list.
+
+    Combinators are ` `, `>`, `+` and `~` — but only at the TOP level of the
+    selector. Splitting on a flat `[\\s>+~]+` is wrong for the very selectors
+    this reader has to model: `~` is also the attribute operator in
+    `[class~="pricing-card"]`, and `+`/`~` can sit inside a functional
+    pseudo-class or a quoted value. The scan below tracks bracket, parenthesis
+    and quote depth, so `[class~="pricing-card"]` stays ONE compound and
+    `.grid ~ [class^='pricing']` still splits into two.
+
+    Measured (#14406 review round 8): with the flat split, the compound of
+    `[class~="pricing-card"]` came out as `="pricing-card"]`, so the class
+    attribute form was invisible to every reach reader.
+    """
+    depth = 0
+    quote = ""
+    current: list[str] = []
+    compounds: list[str] = []
+    for char in part:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            continue
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0 and (char.isspace() or char in ">+~"):
+            if current:
+                compounds.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if current:
+        compounds.append("".join(current))
+    return compounds[-1] if compounds else ""
+
+
+def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
+    """Does this RIGHTMOST compound select elements matching `compound`?
+
+    `compound` is written the way the callers write it: a class (`.pricing-card`,
+    `.btn`). The literal class text is matched, and so are the CLASS-ATTRIBUTE
+    selectors that select the same elements — for `class`, `[class~="x"]` IS
+    the `.x` shorthand (`~=` is the whitespace-separated-word match, and a class
+    is one word of the `class` attribute).
+
+    Measured (#14406 review round 8): `[class~="pricing-card"] { display: block }`
+    appended to the sheet left every row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN, because the readers matched
+    the literal `.pricing-card` text and this selector names its own class
+    without the dot. That is the same false PASS the attribute form of the
+    selector exists to produce, so the reader models it rather than trusting
+    one spelling.
+
+    The prefix/suffix/substring forms are matched on the operator's own
+    semantics rather than by guessing, and an attribute VALUE this reader cannot
+    read (a bare identifier, `var(…)`, an unquoted word) fails CLOSED — it counts
+    as selecting. Over-reaching reds a correct page, which a maintainer can see;
+    the other direction hides an override, which is the defect class every round
+    of this review has found.
+
+    ⛔ `=` IS ONE OF THOSE OPERATORS, and round 8 left it out. The operator was
+    read inside the REGEX (`[~|^$*]?=`), so a selector that spelled the operator
+    the plain way never matched the pattern at all and fell through to `False` —
+    not to the fail-closed arm, which only covered a value it could not parse.
+    Measured (#14406 review round 9): `[class="btn"] { margin-top: 0 }` selects
+    the same CTAs as `.btn` (three of the four cards carry `class="btn"`
+    exactly), restores the three-baseline / 70.2px split, and left EVERY row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN; `[class="pricing-card"]
+    { display: block }` was invisible to the flex row for the same reason.
+
+    ⛔ AND ATTRIBUTE NAMES ARE CASE-INSENSITIVE in HTML, so `[CLASS="btn"]`
+    selects exactly what `[class="btn"]` does — a lowercase-only match is the
+    same blind spot wearing a different case (#14406 review round 9).
+    """
+    if compound in rightmost:
+        return True
+    if not compound.startswith("."):
+        return False
+    name = compound[1:]
+    if not name:
+        return False
+    # The attribute NAME is matched case-insensitively and the operator is read
+    # OUT of the value, so an operator (or a `[class]` presence test) this
+    # reader does not model fails CLOSED instead of falling through to `False`.
+    for m in re.finditer(r"\[\s*class\b([^\]]*)\]", rightmost, re.IGNORECASE):
+        raw = m.group(1).strip()
+        operator = re.match(r"([~|^$*]?=)\s*(.*)$", raw, re.S)
+        if not operator:
+            return True
+        op, raw_value = operator.group(1), operator.group(2).strip()
+        quoted = re.fullmatch(r"[\"'](.*)[\"']", raw_value, re.S)
+        if not quoted:
+            # A value this reader cannot read (a variable, an unquoted word)
+            # may match the class, so it counts — fail closed.
+            return True
+        value = quoted.group(1)
+        if op == "=" and name in value.split():
+            # `=` compares the WHOLE attribute value, and a class list is
+            # space-separated — so `[class="pricing-card popular"]` is exactly
+            # the popular card's attribute and must count. Comparing the two
+            # strings for equality instead would miss every multi-class card
+            # (and `[class="pricing-card popular"] { … !important }` would take
+            # the cascade with the guard GREEN), while `[class="btn-secondary"]`
+            # still does NOT reach `.btn` because the class is one word of that
+            # value, not the whole of it (#14406 review round 9).
+            return True
+        if op == "~=" and value == name:
+            return True
+        if op == "|=" and (value == name or name.startswith(value + "-")):
+            return True
+        if op == "^=" and name.startswith(value):
+            return True
+        if op == "$=" and name.endswith(value):
+            return True
+        if op == "*=" and value in name:
+            return True
+    return False
+
+
+class _FirstClassElement(HTMLParser):
+    """The FIRST start tag in a document whose class list contains one class.
+
+    The SUBJECT's identity — `("a", {"href": "/auth", "class": "btn"})` — is
+    the half of the selector-matching question no CSS reader can answer from a
+    selector alone: `_css_compound_matches_element` needs to know which ELEMENT
+    the subject is before it can say whether a compound that names no class
+    selects it (#14406 review round 10).
+    """
+
+    def __init__(self, cls: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._cls = cls
+        self.element: tuple[str, dict[str, str]] | None = None
+
+    def _record(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.element is not None:
+            return
+        # Attribute NAMES are case-insensitive in HTML, so the map is keyed
+        # lowercase; `class` is looked up the same way it is spelled by the
+        # parser, which already lowercases names.
+        found = {name.lower(): (value or "") for name, value in attrs}
+        if self._cls in found.get("class", "").split():
+            self.element = (tag.lower(), found)
+
+    def handle_starttag(self, tag, attrs):
+        self._record(tag, attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        self._record(tag, attrs)
+
+
+def _subject_element(markup: str, compound: str,
+                     ) -> tuple[str, dict[str, str]] | None:
+    """The page element a class-carrying COMPOUND selects — or None.
+
+    ⛔ THE COMPOUND MAY CARRY SEVERAL CLASSES, and passing the raw suffix made
+    the element branch DEAD for exactly the operand that needs it (#14406 review
+    round 21). `_element_carrying_class(css, compound[1:])` for
+    `.pricing-card.popular` asked for a class literally named
+    `pricing-card.popular`, found none, and returned None — so
+    `_border_end_width_cascade` saw element-reached rules for the BASE card but
+    not for the POPULAR one. Measured on the tracked page: appending
+    `.pricing-grid .pricing-card { border-bottom-width: 1px }` (or the
+    `#pricing-section` form) moved the browser's extra from 0 to -1px while the
+    reader still computed 1.0, and the relation row stayed GREEN over a 1px
+    split — the #13645 item 6 signature. The MOST SPECIFIC class (the last one)
+    is what identifies the subject.
+    """
+    if not compound.startswith("."):
+        return None
+    classes = [name for name in compound.lstrip(".").split(".") if name]
+    if not classes:
+        return None
+    return _element_carrying_class(markup, classes[-1])
+
+
+#: One pseudo-class or pseudo-element token, WITH its parenthesised argument
+#: when it has one (`:nth-child(2)`, `::before`, `:not(.popular)`).
+_CSS_PSEUDO_TOKEN = re.compile(r"::?[\w-]+(?:\([^)]*\))?")
+
+#: The NEGATION form, whose argument says what the rule does NOT select.
+_CSS_NOT_PSEUDO = re.compile(r":not\(([^)]*)\)", re.IGNORECASE)
+
+#: ONE class-only compound, e.g. `.popular` or `.popular.featured` — the only
+#: `:not()` argument this reader can decide from class sets alone. A tag, id,
+#: attribute or nested pseudo leaves it UNDECIDED, which counts as matching.
+_CSS_NOT_CLASS_ONLY = re.compile(r"(?:\.[\w-]+)+$")
+
+#: The pseudo-classes whose ARGUMENT is a selector list, so the classes inside it
+#: are part of what the rule names (`:is(.pricing-card.popular)` selects the
+#: popular card). Every other pseudo narrows or decorates without naming one.
+_CSS_IS_PSEUDO = re.compile(r":(?:is|where)\(([^)]*)\)", re.IGNORECASE)
+
+
+def _css_class_fragment(selector: str) -> str:
+    """`selector` with its pseudo-classes reduced to what they say about CLASSES.
+
+    `:not(…)` is the CALLER's to disprove first — its argument says what the rule
+    does NOT select, so it must be resolved before this runs, never folded in.
+    """
+    unwrapped = _CSS_IS_PSEUDO.sub(r" \1 ", selector)
+    return _CSS_PSEUDO_TOKEN.sub(" ", unwrapped)
+
+
+#: One class token, so a TAG-qualified compound (`div.pricing-card`) yields the
+#: class it names rather than a bare `div` in the class position.
+_CSS_CLASS_TOKEN = re.compile(r"\.([\w-]+)")
+
+
+def _css_classes(selector: str) -> set[str]:
+    """The class names a selector fragment NAMES (`.a.b` → `{a, b}`)."""
+    return set(_CSS_CLASS_TOKEN.findall(selector))
+
+
+def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
+    """Does this RIGHTMOST rule select EVERY element of `compound`?
+
+    ⛔ `_css_rightmost_selects` compares the class TEXT, so `.pricing-card`
+    does not match the compound `.pricing-card.popular` — and
+    `_css_compound_matches_element` refuses class-named compounds by design (it
+    owns the ELEMENT question). Between the two, a rule that reaches the popular
+    card through its BASE class was invisible to the popular operand of a
+    relation whose base operand saw it (#14406 review round 21).
+
+    `rightmost`'s classes being a SUBSET of `compound`'s is the exact
+    criterion: `.pricing-card` selects every `.pricing-card.popular` element,
+    while `.pricing-card.popular` does not select a plain `.pricing-card`. Both
+    are class-only compounds, so no tag, id or attribute question arises, and
+    the caller keeps the specificity ordering — a base rule cannot out-rank the
+    popular card's own rule, so a correct page is unaffected (verified: the
+    clean page still reads base 1.0 / popular 2.0 / extra 1.0).
+
+    ⛔ AND A PSEUDO-CLASS IS NOT A LICENCE TO GIVE UP (#14406 review round 23,
+    measured). Bailing on any `:` threw away the whole class-only question, and
+    the two other reach readers both miss the same selectors —
+    `_css_rightmost_selects` because the COMPOUND text is not a substring of
+    them, `_css_compound_matches_element` because it refuses class-named
+    compounds. So `.popular:nth-child(2) { border-bottom-width: 3px }` selected
+    the popular card in a browser (same (0,2,0) as its own border rule, later in
+    source) and was invisible to BOTH operands: the reader derived extra_px 1,
+    the browser applied 2, and every row of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a page whose
+    popular CTA sits 1px off the shared baseline — the #13645 item 6
+    signature, the same fail-open the class-only bug produced.
+
+    A pseudo-class this reader cannot evaluate is treated the way
+    `_css_compound_matches_element` treats one: it MAY match, so the rule counts
+    (fail CLOSED — over-reaching reds a correct page a maintainer can see,
+    while the other direction hides an override). One form IS disprovable:
+    `:not(.x)` where `x` is a class the subject carries cannot select it, and
+    counting it would false-RED a correct page.
+
+    ⛔ AND `:not()` TAKES A SELECTOR LIST WHOSE ARGUMENT IS A CONJUNCTION
+    (#14406 review round 25, measured). `:not(.a.b)` excludes only an element
+    carrying BOTH `a` and `b`; intersecting the argument's class SET with the
+    subject's read it as "excludes if EITHER", so
+    `.pricing-card:not(.popular.featured) { border-bottom-width: 1px }` was
+    treated as unreachable for the popular card, the reader derived extra_px 1.0
+    against a browser 0.0, and all eleven rows of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a 1px split.
+    Disproof now requires ONE ALTERNATIVE to be provably matched — a class-only
+    compound whose classes the subject carries — because that is the only thing
+    classes alone can decide; `:not(div)` and `:not(.a, .b)` stay undecided and
+    therefore count (fail closed).
+    """
+    if not compound.startswith("."):
+        return False
+    if "[" in rightmost or "#" in rightmost:
+        return False
+    subject = _css_classes(compound)
+    for exclusion in _CSS_NOT_PSEUDO.finditer(rightmost):
+        for alternative in exclusion.group(1).split(","):
+            candidate = alternative.strip()
+            if _CSS_NOT_CLASS_ONLY.fullmatch(candidate) and (
+                    _css_classes(candidate) <= subject):
+                return False
+    rule = _css_classes(_css_class_fragment(
+        _CSS_NOT_PSEUDO.sub(" ", rightmost)))
+    return bool(rule) and rule <= subject
+
+
+def _compound_requires_a_foreign_class(rightmost: str, compound: str) -> bool:
+    """Does `rightmost` REQUIRE a class that `compound`'s element lacks?
+
+    The precise form of the `skip_popular` test, which was the string
+    `".popular" in part` (#14406 review round 23, measured). That text test is
+    wrong in BOTH directions on the property the compensation exists because
+    of, and it put the two operands of one relation in different worlds again:
+
+    * FALSE OPEN — `.pricing-card:not(.popular) { border-bottom-width: 0 }`
+      sets the three SIBLING cards' border and says nothing about the popular
+      card's, so a browser applies extra 2px; the part names `.popular`, so it
+      was dropped from the base operand, the reader kept the shipped 1px and
+      every row stayed GREEN over a 2px split.
+    * FALSE OFF (`section.popular .pricing-card { padding-bottom: … }`) is the
+      mirror: an ANCESTOR naming `.popular` skipped the whole part, although
+      the rule reaches every card in the grid — so a real edit stayed invisible.
+
+    Classes the rule NAMES are what select the element; `:not(…)` names what it
+    excludes, so those are removed before the comparison. A part with no class
+    at all (`div.pricing-card`, `#pricing-grid`) is not foreign and stays.
+    """
+    if not compound.startswith("."):
+        return False
+    if "[" in rightmost or "#" in rightmost:
+        return False
+    required = _css_classes(_css_class_fragment(
+        _CSS_NOT_PSEUDO.sub(" ", rightmost)))
+    return bool(required) and not required <= _css_classes(compound)
+
+
+def _element_carrying_class(markup: str, cls: str,
+                            ) -> tuple[str, dict[str, str]] | None:
+    """The first element carrying `cls`, as `(tag, attributes)` — or None.
+
+    Parsed with `HTMLParser` rather than a regex: the attribute set is the
+    thing being read (a bare `<a href="/auth">` rule selects the pricing CTA by
+    its OWN tag and destination), and a regex over `class="…"` would have to
+    re-implement quoting, ordering and case to get the same answer.
+    """
+    parser = _FirstClassElement(cls)
+    parser.feed(markup)
+    parser.close()
+    return parser.element
+
+
+#: The elements that never take a closing tag, so the depth stack must not wait
+#: for one. Only the card's own markup is parsed here (h3/div/p/a/span), but a
+#: `<br>` or an `<img>` added to a card must not desync the walk into thinking
+#: every later element is one level deeper.
+_VOID_TAGS = frozenset(["area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track",
+                       "wbr"])
+
+
+class _CardChildren(HTMLParser):
+    """The DIRECT children of every `.pricing-card` element, in document order.
+
+    The `order` property only reorders SIBLINGS, so "the CTA is the last item
+    `margin-top: auto` aligns" is a statement about the card's own children:
+    `order: -1` on the CTA, or `order: 1` on `.features`, both move the button
+    relative to its siblings. A class-only reader sees the first (the CTA's
+    class is the subject of the row) and is blind to the second, which is why
+    the subject set comes from the MARKUP's containment rather than from a
+    hand-written list of class names (#14406 review round 12).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._inside_card: list[bool] = []
+        self.children: list[tuple[str, dict[str, str]]] = []
+
+    def _enter(self, tag: str, attrs: list[tuple[str, str | None]],
+               self_closing: bool) -> None:
+        found = {name.lower(): (value or "") for name, value in attrs}
+        if self._inside_card and self._inside_card[-1]:
+            self.children.append((tag.lower(), found))
+        if not self_closing:
+            self._inside_card.append(
+                "pricing-card" in found.get("class", "").split())
+
+    def handle_starttag(self, tag, attrs):
+        self._enter(tag, attrs, tag.lower() in _VOID_TAGS)
+
+    def handle_startendtag(self, tag, attrs):
+        self._enter(tag, attrs, True)
+
+    def handle_endtag(self, tag):
+        if self._inside_card:
+            self._inside_card.pop()
+
+
+def _card_direct_children(markup: str) -> list[tuple[str, dict[str, str]]]:
+    """Every direct child of every `.pricing-card` in `markup`, as elements.
+
+    `(tag, attributes)` — the same identity `_css_compound_matches_element`
+    takes — so a rule that reaches a child by its TAG (`div { order: 1 }`) is
+    read exactly like one that reaches it by a class. The static grid and
+    `renderPricing()`'s template build the same children (the row that pins the
+    CTA-last invariant cross-checks both paths), so one parse of the served
+    markup covers the selector space a rule can use.
+    """
+    parser = _CardChildren()
+    parser.feed(markup)
+    parser.close()
+    return parser.children
+
+
+def _css_compound_matches_element(compound: str,
+                                  element: tuple[str, dict[str, str]]) -> bool:
+    """Can this RIGHTMOST compound select `element` (the subject's identity)?
+
+    This is the OTHER half of `_css_rightmost_selects`: that function answers
+    "does this compound name the subject's CLASS" — in every spelling of the
+    `class` attribute, `[class~="x"]` / `[class="x"]` included — and this one
+    answers "does it select the subject's ELEMENT", for the compounds that name
+    no class at all. Measured (#14406 review round 10, before it existed):
+    `#pricing-grid a { margin-top: 0 }` and `.pricing-grid a[href] {
+    margin-top: 0 }` both take the pricing CTA's slack — (1,0,1) and (0,2,1)
+    against the pinned `.pricing-card .btn`'s (0,2,0), so they win at ANY source
+    order — and left EVERY row of `TestProductTeamsPricingCardCtaBaseline`
+    GREEN while the rendered CTAs split back to three baselines, 70.2px apart
+    (#13645 item 6).
+
+    ⛔ IT IS NOT A LICENCE TO MATCH EVERYTHING, and the two ways it could
+    false-RED a CORRECT page are both closed here rather than by the caller:
+
+    * `p { margin: … }` rule on the page (measured: it has them) must not count
+      as reaching the CTA — the TAG has to match, so `p` does not select an
+      `<a>`.
+    * `*` and `a[href="/auth"]` DO select it, but they cannot win the cascade
+      against a stronger pin — that is `_css_element_reaches`'s specificity
+      floor, not this function's business.
+
+    Unreadable input fails CLOSED, the same direction the class reader takes: an
+    attribute value this reader cannot model counts as matching.
+    """
+    tag, attrs = element
+    if re.search(r":root\b", compound):
+        # `:root` is the document element, whatever the subject is.
+        return tag.lower() == "html"
+    for match in re.finditer(
+            r"\[\s*([\w-]+)\s*(?:([~|^$*]?=)\s*(\"[^\"]*\"|'[^']*'|[^\]]*?))?"
+            r"\s*([iIsS])?\s*\]", compound):
+        name = match.group(1).lower()
+        operator, raw, insensitive = match.groups()[1:]
+        if name not in attrs:
+            return False
+        if operator is None:
+            continue                     # `[href]`: a presence test
+        quoted = re.fullmatch(r"[\"'](.*)[\"']", (raw or "").strip(), re.S)
+        if not quoted:
+            return True                  # fail closed: may match
+        value, actual = quoted.group(1), attrs[name]
+        if insensitive:
+            value, actual = value.lower(), actual.lower()
+        if (operator == "=" and actual == value) or (
+                operator == "~=" and value in actual.split()) or (
+                operator == "|=" and (actual == value
+                                       or actual.startswith(value + "-"))) or (
+                operator == "^=" and actual.startswith(value)) or (
+                operator == "$=" and actual.endswith(value)) or (
+                operator == "*=" and value in actual):
+            continue
+        return False
+    core = re.sub(r"\[[^\]]*\]", " ", compound)
+    for match in re.finditer(r"#([\w-]+)", core):
+        if attrs.get("id") != match.group(1):
+            return False
+    # ⛔ The id has been VALIDATED by the loop above, so it must not survive into
+    # the TAG comparison below — `#pricing-grid` left in `core` made `remainder`
+    # read `#pricing-grid` and the final check compare it to `div`, so an id-only
+    # rightmost compound could never match the element it names. Measured
+    # (#14406 review round 12): `#pricing-grid { align-items: center }` left all
+    # nine rows of `TestProductTeamsPricingCardCtaBaseline` GREEN over three
+    # separate baselines while the class spelling reds, and the element carries
+    # both spellings (`<div class="pricing-grid" id="pricing-grid"`), so the id
+    # form is at least as likely an edit.
+    core = re.sub(r"#[\w-]+", " ", core)
+    if re.search(r"\.[\w-]+", core):
+        # A class-named compound is `_css_rightmost_selects`'s question, and it
+        # is already asked. Returning False here keeps ONE owner per question.
+        return False
+    # ⛔ THE ID IS CONSUMED ABOVE, and the duplicate strip that stood here is
+    # gone: one owner per fix. Round 10's id test `continue`d and left the `#id`
+    # text in `core`, so the remainder comparison asked whether the TAG
+    # literally reads `#pricing-grid` and answered False — an id-ONLY rightmost
+    # compound matched the subject's id and was discarded one line later. Round
+    # 10's own mutants all put the id in an ANCESTOR position (`#pricing-grid
+    # a`, `#pricing-grid div`), where the rightmost compound is the bare tag and
+    # the bug cannot show (measured, #14406 review round 12).
+    remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", core).strip()
+    if remainder and remainder != "*":
+        return remainder.lower() == tag.lower()
+    # Nothing but pseudo-classes (`:hover`, `:first-child`, `:root` above): a
+    # state/pseudo-class test this reader cannot evaluate, so it may match.
+    return True
+
+
+#: Which rule OWNS each subject's pinned declarations, as a SELECTOR — the
+#: specificity floor a bare-element rule has to reach before it can override
+#: them. `.pricing-card`'s `display`/`flex-direction` are pinned by the base
+#: rule itself; the CTA's `margin-top: auto` is pinned by
+#: `.pricing-card .btn`. A rule that cannot reach the pin's specificity cannot
+#: win (the cascade's 2nd criterion), so including it would only false-RED a
+#: correct page — which is why this floor exists on the AGREEMENT reader and
+#: not on the cascade one, which sorts instead (#14406 review round 10).
+#: ⛔ A SUBJECT WITH NO ENTRY HERE HAS NO ELEMENT REACH AT ALL, and that is a
+#: silent loss of the round-10 fix rather than a tolerant default:
+#: `#pricing-grid { align-items: center }` (1,0,0) is applied by a browser at
+#: ANY source order and left every row of
+#: `TestProductTeamsPricingCardCtaBaseline` GREEN, because `.pricing-grid` was
+#: missing from this map — so `_css_reaching_decls` computed `floor = None` and
+#: skipped the bare-element branch entirely (#14406 review round 12, measured).
+#: Every subject a row pins must be listed; the `None`-floor path stays for the
+#: subjects that are only ASKED about (`.features`, `.price`, …), where the
+#: caller wants the fact, not a verdict.
+PINNED_OWNER_SELECTOR = {".pricing-card": ".pricing-card",
+                         ".btn": ".pricing-card .btn",
+                         # ⛔ AND THE GRID ITSELF (#14406 review round 12). The
+                         # height precondition is pinned on `.pricing-grid`'s own
+                         # declarations, so a rule that cannot reach its (0,1,0)
+                         # specificity cannot win — without an entry here the
+                         # element branch of `_css_reaching_decls` is dead for
+                         # this subject, which is how `#pricing-grid {
+                         # align-items: center }` shipped as a fail-open.
+                         ".pricing-grid": ".pricing-grid"}
+
+
+def _css_element_reaches(part: str, rightmost: str,
+                         element: tuple[str, dict[str, str]],
+                         floor: tuple[int, int, int], value: str) -> bool:
+    """Does a BARE-ELEMENT compound select the subject AND out-rank the pin?
+
+    Both halves are load-bearing and were measured (#14406 review round 10):
+
+    * WITHOUT the element test, the guard is blind to `#pricing-grid a` — a
+      rule that moves the CTA with every row GREEN.
+    * WITHOUT the floor, it false-REDs a correct page on the page's own
+      `*, *::before, *::after { margin: 0; padding: 0 }` (a universal selector
+      matches every subject but out-ranks nothing) and on `.selfhost a { … }`
+      ((0,1,1), below the CTA's pin) — and a guard that reds the page it ships
+      is a guard a maintainer deletes.
+
+    `!important` beats the floor: an important declaration out-ranks ANY
+    non-important one regardless of specificity, so it is admitted whatever the
+    selector's weight.
+    """
+    if re.search(r"\.[\w-]+", rightmost):
+        return False                     # a class-named compound: other branch
+    if not _css_compound_matches_element(rightmost, element):
+        return False
+    if re.search(r"!\s*important\s*$", value):
+        return True
+    specificity = _css_specificity(part)
+    # An unmodellable selector (`:is()` etc.) counts as MAXIMALLY specific, the
+    # same fail-closed direction `_css_specificity`'s callers already take.
+    return specificity is None or specificity >= floor
+
+
+def _css_reaching_decls(css: str, prop: str, compound: str,
+                        tokens: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """Every rule that declares `prop` and can select `compound` at desktop size.
+
+    `_css_rules_with_scope` matches a prelude only when it NAMES the exact
+    selector text and never consults specificity, so a HIGHER-SPECIFICITY rule
+    under a different prelude can override a pinned declaration while every
+    exact-selector row stays green. Measured (#14406 review round 3): appending
+    `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against the
+    pinned `.pricing-card .btn`'s (0,2,0), so it wins at ANY source order —
+    left all three rows of `TestProductTeamsPricingCardCtaBaseline` GREEN while
+    the rendered CTAs split again.
+
+    This is the AGREEMENT half of that question (whatever reaches the subject
+    must say the same thing) and it is what the class's rows use for the
+    declarations no other row covers: the card's `display`/`flex-direction`,
+    the popular card's `padding-bottom`. Measured on the tree before it:
+    `.pricing-grid .pricing-card { display: block }` and
+    `.pricing-grid .pricing-card.popular { padding-bottom: 1.75rem }` both left
+    every row in the class GREEN while the rendered baselines split.
+
+    Reach, and its LIMITS (stated, because a guard that overclaims its reach is
+    how the next lane trusts a shield that is not there — #14406 review round 4,
+    finding D):
+
+    * ANCESTOR selectors are reached — the test is on the RIGHTMOST compound of
+      each comma part, so `.pricing-grid .btn` and `.pricing-card > .btn` both
+      count as selecting a `.btn` (`compound` is a SUBSTRING of that compound,
+      so `.btn-secondary` counting too is deliberate fail-closed slack).
+    * `min-width` / `min-height` / preference media blocks are reached, and so
+      is a `max-width` / `max-height` whose THRESHOLD is at or above the desktop
+      floor; only a `max-` block that cannot apply at desktop size is skipped
+      (see `_css_desktop_rules` and `_media_applies_at_desktop`).
+    * It is NOT a cascade resolver: it does not prove which declaration wins.
+      Callers therefore assert that every candidate AGREES with the pinned
+      value — a disagreement is either a live override or dead weight the next
+      editor cannot tell apart.
+    * It reads NAMED properties only. A caller that pins `margin-top` must also
+      pin the logical alias it delegates to (`margin-block-start`) and any
+      shorthand that resets it (`margin`, `margin-block`) — see
+      `SLACK_PROPS` in `TestProductTeamsPricingCardCtaBaseline`.
+    * ⛔ IT ALSO REACHES A SELECTOR THAT NAMES NO CLASS BUT SELECTS THE
+      SUBJECT'S ELEMENT, when that selector can out-rank the pinned rule. Round
+      9 declared this a residual — `a` / `#pricing-grid a` / `a[href="/auth"]`
+      select the page's own CTA tag and destination, and all three left every
+      row of `TestProductTeamsPricingCardCtaBaseline` GREEN. Round 10 settled it
+      with the subject's ELEMENT in the reader's contract
+      (`_element_carrying_class` → `_css_compound_matches_element`) rather than
+      by widening the class test: the tag has to match, so the page's own
+      `p { margin: … }` rules cannot count, and `_css_element_reaches` adds the
+      specificity floor that keeps `*` and `.selfhost a { … }` from reding a
+      correct page. The floor is the cascade's own rule — a rule that cannot
+      reach the pin's specificity cannot win — not a tolerance.
+
+      What is still NOT reached: a compound whose subject it cannot decide from
+      identity alone but that names a class for a DIFFERENT element (`a.foo`
+      matching `.btn`'s anchor through a class the subject does not carry), and
+      `@layer` / `@supports` / inheritance, which no reader here models.
+    """
+    out: list[tuple[str, str]] = []
+    element = _subject_element(css, compound)
+    owner = PINNED_OWNER_SELECTOR.get(compound)
+    floor = _css_specificity(owner) if owner else None
+    for prelude, body, _condition in _css_desktop_rules(css):
+        value = _effective_decl(body, prop)
+        if value is None:
+            continue
+        for part in (p.strip() for p in prelude.split(",")):
+            rightmost = _css_rightmost_compound(part)
+            if _css_rightmost_selects(rightmost, compound) and all(
+                    t in rightmost for t in tokens):
+                out.append((part, value))
+                break
+            if (element is not None and floor is not None
+                    and _css_element_reaches(part, rightmost, element, floor,
+                                             value)):
+                out.append((part, value))
+                break
+    return out
+
+
+#: Every property that can SET `padding-bottom` on one element. `padding` and
+#: `padding-block` are SHORTHANDS and their omitted sides are set to `initial`,
+#: so they reset it — the same family `SLACK_PROPS` pins for `margin`, and the
+#: half `padding-bottom`/`padding-block-end` alone cannot see (#14406 review
+#: round 5, finding 1: `padding: 1.75rem` and `padding-block: 1.75rem` both
+#: restored the owner-reported defect with every row in the class GREEN).
+PADDING_END_PROPS = ("padding-bottom", "padding-block-end", "padding",
+                     "padding-block")
+
+#: The same family for the CTA's block-END margin. None of these should declare
+#: `auto` on the CTA: a second `auto` does not add to `margin-top: auto`, it
+#: SPLITS the card's free space with it, centring the button in each card's own
+#: leftover (#14406 review round 12).
+BLOCK_END_MARGIN_PROPS = ("margin-bottom", "margin-block-end", "margin",
+                          "margin-block")
+
+#: Every property through which the CTA's OWN box can take the card's leftover
+#: space — growth, or a block size DERIVED FROM THE CARD — instead of leaving it
+#: to the pinned `margin-top: auto`. `SLACK_PROPS` covers the other mechanism
+#: (a declaration that STARVES the auto margin); this is the one where the auto
+#: margin is starved by the CTA's own box growing to meet it (#14406 review
+#: round 17, measured — see `_cta_takes_the_slack_by_sizing`).
+GROW_PROPS = ("flex", "flex-grow")
+CONTAINER_RELATIVE_BLOCK_SIZE_PROPS = ("flex-basis", "height", "block-size",
+                                       "min-height", "min-block-size")
+
+#: A percentage anywhere in a block-size value — the only spelling that makes an
+#: element's size depend on its CONTAINER. Captured with its number so that the
+#: inert `0%` (a zero basis/floor is overridden by the flex item's own
+#: `min-height: auto`, measured) is not read as container-relative.
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
+
+
+def _is_nonzero_percentage(value: str) -> bool:
+    """Is any percentage in `value` non-zero (`calc(100% - 2rem)` included)?"""
+    return any(float(match.group(1)) != 0.0
+               for match in _PERCENT_RE.finditer(value))
+
+
+def _sizing_takes_the_slack(prop: str, value: str) -> bool:
+    """Would `prop: value` on the CTA consume the space `margin-top: auto` needs?
+
+    The property decides what the value MEANS, so this is a per-family read and
+    not a substring test:
+
+    * `flex-grow` — any non-zero value grows the item into the card's leftover.
+    * `flex` — the shorthand's FIRST number is `flex-grow` (CSS Flexible Box
+      Layout §7.1.1), so `1` / `1 1 auto` / `1 1 0%` all grow, while `none`
+      (`0 0 auto`) and `initial` (`0 1 auto`) do not. `auto` is `1 1 auto` — it
+      grows — and is caught by the keyword not being a number. An unreadable
+      shorthand fails CLOSED (treated as growing), the direction every reader in
+      this file takes for a value it cannot decide.
+    * `flex-basis` and the block-size family — a NON-ZERO PERCENTAGE is the only
+      spelling whose value is derived from the card; `3rem`, `50vh`, `0%` and
+      `max-height` are not (the last two are measured inert on this page).
+    """
+    bare = _without_important(value).strip().lower()
+    if prop == "flex-grow":
+        try:
+            return float(bare) > 0
+        except ValueError:
+            return True
+    if prop == "flex":
+        if bare in ("none", "initial"):
+            return False
+        tokens = bare.split()
+        grow = None
+        for token in tokens:
+            try:
+                grow = float(token)
+            except ValueError:
+                continue
+            break
+        if grow is None or grow > 0:
+            return True
+        return any(_is_nonzero_percentage(token) for token in tokens[1:])
+    # `flex-basis` / `height` / `block-size` / `min-height` / `min-block-size`.
+    return _is_nonzero_percentage(bare)
+
+
+def _cta_takes_the_slack_by_sizing(css: str) -> list[tuple[str, str, str]]:
+    """Rules that make the CTA's OWN box grow into the slack, as `(prelude, prop, value)`.
+
+    ⛔ THE PINNED `margin-top: auto` CAN BE STARVED WITHOUT TOUCHING A MARGIN.
+    Every row in `TestProductTeamsPricingCardCtaBaseline` pinned the SLACK
+    MECHANISM (`SLACK_PROPS`, `BLOCK_END_MARGIN_PROPS`) or the card's own box
+    (`display` / `flex-direction` / `height` on `.pricing-card`) — and a flex
+    item that GROWS, or whose block size is a percentage of its card, takes the
+    free space itself, so the auto margin has nothing left to absorb and the
+    button stops being pinned to the card's bottom edge. Each card's content is
+    a different height (that IS #13645 item 6), so the four CTA tops re-split.
+
+    Measured at `bc6525269cba` at 1440x900 (headless Chromium; the page restored
+    byte-identically, `sha256 d74e7c9dd20d`, after every mutant) — CTA tops, and
+    the verdict of all NINE rows of the class:
+
+        .pricing-card .btn { flex: 1 }             6345.58 6345.58 6367.05 6415.78  GREEN
+        .pricing-card .btn { flex: auto }          (same)                            GREEN
+        .pricing-card .btn { flex-grow: 1 }        (same)                            GREEN
+        .pricing-card .btn { flex-grow: 0.5 }      6380.69 6380.69 6391.42 6415.78  GREEN
+        .pricing-card .btn { flex-basis: 100% }    (the 3-baseline split)            GREEN
+        .pricing-card .btn { flex: 0 0 100% }      (same)                            GREEN
+        .pricing-card .btn { flex: 1 1 0% }        (same)                            GREEN
+        .pricing-card .btn { height: 100% }        (same)                            GREEN
+        .pricing-card .btn { block-size: 100% }    (same)                            GREEN
+        .pricing-card .btn { min-height: 100% }    (same)                            GREEN
+        .pricing-card .btn { min-block-size: 100% } (same)                           GREEN
+
+    — the shipped page reads 6415.78 four times, and `margin-top: 0` (already
+    RED) reads the same three-baseline split, so the signature is the one this
+    class exists for and not a shape of its own. The controls that must stay
+    GREEN are measured too, and are NOT refused: `flex: none` / `flex: initial`
+    / `flex: 0 1 auto` / `flex-grow: 0` / `flex-basis: auto` / `flex-basis: 0%`
+    / `flex: 0 1 0%` / `height: 3rem` / `height: 50vh` / `inline-size: 100%` /
+    `max-height: 100%` — every one of them leaves the four tops equal.
+
+    Reach is `_css_reaching_decls`'s (rightmost-compound matching, ancestors and
+    media blocks included, with the specificity floor that keeps the page's own
+    `a { … }` rules out), so a rule that reaches the CTA through a DIFFERENT
+    selector is seen as well as one that names `.pricing-card .btn`.
+    """
+    offenders: list[tuple[str, str, str]] = []
+    for prop in (*GROW_PROPS, *CONTAINER_RELATIVE_BLOCK_SIZE_PROPS):
+        for prelude, value in _css_reaching_decls(css, prop, ".btn"):
+            if _sizing_takes_the_slack(prop, value):
+                offenders.append((prelude, prop, value))
+    return offenders
+
+
+def _css_tokens(value: str) -> list[str]:
+    """A declaration value split on whitespace, but keeping `calc(…)` whole.
+
+    A plain `value.split()` shreds `calc(1.75rem - 1px)` into three tokens, so a
+    shorthand author who wrote `padding: calc(1.75rem - 1px)` would be read as
+    setting a `calc(1.75rem` block-end side and would RED a correct page. Depth
+    tracking removes that false red for the cost of six lines.
+    """
+    tokens: list[str] = []
+    depth, current = 0, []
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+#: A trailing `!important` on a declaration value. It is a PRIORITY marker, not
+#: part of the value, so every reader that compares or splits a value must strip
+#: it first. Three measured consequences of NOT stripping it (#14406 review
+#: round 12): `margin-bottom: auto !important` is invisible to an equality test
+#: against `auto` (a fail-open); `margin-top: auto !important` — the pinned
+#: intent, only stronger — reads as a COMPETING declaration to the slack row;
+#: and `display: flex !important` reads as not `flex` (both false REDs).
+_CSS_IMPORTANT = re.compile(r"!\s*important\s*$")
+
+
+def _without_important(value: str) -> str:
+    """`value` with a trailing `!important` removed."""
+    return _CSS_IMPORTANT.sub("", value).strip()
+
+
+def _css_block_end(prop: str, value: str) -> str:
+    """The value `prop` gives the BLOCK-END (bottom) side of the box.
+
+    Both box-side families are ordered lists, so the token that lands on
+    block-end is positional: for `padding-block`/`margin-block` one value sets
+    both sides and two are `(start, end)`; for `padding`/`margin`, one value sets
+    all four sides, two are `(block, inline)`, three are `(block-start, inline,
+    block-end)` and four are `(block-start, inline-end, block-end, inline-start)`
+    — so block-end is the THIRD token for 3 and 4 values and the FIRST otherwise.
+    `SLACK_PROPS` uses the same rule for `margin`/`margin-block`'s block-START
+    side (first token).
+
+    The MARGIN family is read by the same rule (#14406 review round 11):
+    `margin-bottom: auto` (or `margin-block-end: auto`, or `margin: auto`)
+    SHARES the card's free space with the pinned `margin-top: auto`, so the CTA
+    is centred in each card's leftover instead of pushed to its bottom — and
+    each card has a different leftover, so the four baselines split with every
+    other row in the class GREEN (measured).
+    """
+    if prop not in ("padding", "padding-block", "margin", "margin-block"):
+        return value
+    tokens = _css_tokens(_without_important(value))
+    if not tokens:
+        return value
+    if prop in ("padding-block", "margin-block"):
+        return tokens[-1] if len(tokens) > 1 else tokens[0]
+    return tokens[2] if len(tokens) >= 3 else tokens[0]
+
+
+#: A CSS length this file can convert to px: a number and `px` or `rem`.
+_CSS_LENGTH = re.compile(r"([0-9]*\.?[0-9]+)(px|rem)$")
+
+#: A BARE zero — `0`, `0.0`, `.0` — the one unitless number CSS accepts as a
+#: length. One definition, because the border-width reader and `_css_length_px`
+#: must agree on it (#14406 review round 20).
+_BARE_ZERO_LENGTH = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)")
+
+
+def _css_root_px(css: str) -> float | None:
+    """The page's `rem` base in px — 16 unless `html`/`:root` overrides it.
+
+    Returning `None` on an override is deliberately fail-closed: this reader
+    assumes the CSS default root size, and a page that moved it would make every
+    `rem` below silently wrong (#14406 review round 15).
+    """
+    for prelude, body, _inside_media in _css_all_rules(css):
+        parts = [p.strip().lower() for p in prelude.split(",")]
+        if ("html" in parts or ":root" in parts) and (
+                _effective_decl(body, "font-size") is not None):
+            return None
+    return 16.0
+
+
+def _css_length_px(value: str, root: float | None) -> float | None:
+    """`value` as a px number, or `None` when it is not a length this reads.
+
+    A BARE `0` is a valid length in CSS and is read as zero (#14406 review round
+    15: the page's `* { margin: 0 }` reset was otherwise unparseable and red the
+    two block-end rows on a correct page). Any other unitless number is NOT a
+    length, so it stays `None` and the caller fails.
+
+    `None` is the caller's signal to FAIL rather than skip — a geometry claim
+    derived from a length the reader cannot convert is not a claim (#14406
+    review round 15).
+    """
+    text = _without_important(value).strip().lower()
+    if _BARE_ZERO_LENGTH.fullmatch(text) and float(text) == 0.0:
+        return 0.0
+    match = _CSS_LENGTH.match(text)
+    if not match:
+        return None
+    number, unit = float(match.group(1)), match.group(2)
+    if unit == "px":
+        return number
+    return None if root is None else number * root
+
+
+def _css_block_start(prop: str, value: str) -> str:
+    """The value `prop` gives the BLOCK-START (top) side of the box.
+
+    The mirror of `_css_block_end` for the START side, and the ONE reader both
+    slack rows use — the positive pin (`margin-top: auto`) and the negative one
+    (no `auto` on the block-END side) — so the two cannot drift apart. The
+    START side is always the FIRST token: `margin`/`margin-block` with one value
+    set both sides and with two are `(start, end)` (MDN, "margin"). Any other
+    property already names its side, so its value is returned unchanged.
+    """
+    if prop not in ("margin", "margin-block"):
+        return value
+    tokens = _css_tokens(_without_important(value))
+    return tokens[0] if tokens else value
+
+
+def _css_align_keyword(prop: str, value: str) -> str:
+    """The `align-items`/`align-self` keyword `prop` sets on the subject.
+
+    `place-items` / `place-self` are the shorthands for `align-items` +
+    `justify-items` / `align-self` + `justify-self`, and ONE value sets both —
+    so `place-items: center` re-centres the grid's boxes exactly as
+    `align-items: center` does, and a reader that only queried the longhand
+    would be blind to it. The ALIGN half comes FIRST; a `safe`/`unsafe` position
+    keyword prefixes the half it belongs to rather than replacing it (MDN,
+    "place-items"), so it is skipped rather than returned.
+    """
+    tokens = [t.lower() for t in _css_tokens(value)]
+    if not tokens:
+        return value.strip().lower()
+    head = tokens[0]
+    if head in ("safe", "unsafe") and len(tokens) > 1:
+        return tokens[1]
+    return head
+
+
+#: Every property that can SET `flex-direction` on one element. `flex-flow` is
+#: the shorthand for `flex-direction` + `flex-wrap`, and its two components are
+#: ORDER-INSENSITIVE (`<'flex-direction'> || <'flex-wrap'>` — W3C CSS Flexible
+#: Box Layout 1 §5.1; MDN, "flex-flow": *"the components can appear in either
+#: order"*), so the direction is whichever token is a direction keyword — and an
+#: OMITTED direction takes its INITIAL value `row`, which is itself an override
+#: of the pinned `column` (MDN, "flex-flow": *"defaults are row and nowrap"*).
+#: Measured (#14406 review round 8): both `flex-flow: row` and the
+#: direction-free `flex-flow: nowrap` appended to `.pricing-card` left every row
+#: of `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser applied the
+#: row layout and the CTA left the shared baseline — the same shorthand hole
+#: `SLACK_PROPS` closes for `margin` and `PADDING_END_PROPS` for `padding`.
+FLEX_DIRECTION_PROPS = ("flex-direction", "flex-flow")
+FLEX_DIRECTION_VALUES = frozenset(
+    ("row", "row-reverse", "column", "column-reverse"))
+
+
+def _css_flex_direction(prop: str, value: str) -> str:
+    """The `flex-direction` value `prop` gives the box — `row` when omitted.
+
+    For `flex-direction` itself this is the value unchanged. For `flex-flow` it
+    is the direction keyword if the shorthand carries one, in either position,
+    and otherwise the property's INITIAL value `row` — because the shorthand
+    RESETS the component it omits, which is the half a token-presence check
+    cannot see (`flex-flow: nowrap` reads as "no direction here" and is in fact
+    "direction: row").
+
+    ⛔ `!important` is stripped first, for EVERY prop: it is a priority marker,
+    not part of the value, and leaving it on made `flex-direction: column
+    !important` — the pin's own intent, only stronger — read as a DISAGREEMENT
+    with the pinned `column`, and made `display: flex !important` read as not
+    `flex` (#14406 review round 12, both measured RED on a correct page).
+    """
+    value = _without_important(value)
+    if prop not in FLEX_DIRECTION_PROPS:
+        return value
+    if prop == "flex-direction":
+        return value.strip().lower()
+    for token in _css_tokens(value):
+        if token.strip().lower() in FLEX_DIRECTION_VALUES:
+            return token.strip().lower()
+    return "row"
+
+
+def _css_specificity(selector: str) -> tuple[int, int, int] | None:
+    """`(ids, classes, types)` for ONE selector part, or `None` if unmodellable.
+
+    Deliberately small. It answers one question — does a rule that disagrees
+    with a pinned value out-rank or TIE the pinned rule? — and a functional
+    pseudo-class (`:is()`, `:where()`, `:not()`, `:has()`) changes specificity in
+    ways this counter does not model, so it returns `None` and the one caller
+    treats that as MAXIMALLY specific (fail closed) rather than guessing.
+    """
+    if re.search(r":(?:is|where|not|has|matches)\(", selector):
+        return None
+    attrs = re.findall(r"\[[^\]]*\]", selector)
+    bare = re.sub(r"\[[^\]]*\]", " ", selector)
+    pseudo = re.findall(r"::?[\w-]+", bare)
+    # The COLUMNS are the standard's, not "pseudo vs element" (MDN, Specificity:
+    # the CLASS column is classes + attribute selectors + PSEUDO-CLASSES, the
+    # TYPE column is type selectors + PSEUDO-ELEMENTS). The first draft counted
+    # every pseudo and then subtracted BOTH the pseudo-elements and every type
+    # selector from the class count, so each type selector cancelled a class:
+    # `div.pricing-card` read (0,0,1) instead of (0,1,1), `p::before` read
+    # (0,-1,2), and a type-qualified override of the popular card's compensation
+    # ranked BELOW the pinned rule — `section .pricing-card.popular { … }`
+    # (0,2,1) stayed GREEN while a browser applied it (#14406 review round 6,
+    # finding 1, measured with the helper itself).
+    pseudo_classes = len([p for p in pseudo if not p.startswith("::")])
+    pseudo_elements = len(pseudo) - pseudo_classes
+    rest = re.sub(r"::?[\w-]+|\.[\w-]+|#[\w-]+", " ", bare)
+    types = len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", rest))
+    return (len(re.findall(r"#[\w-]+", bare)),
+            len(re.findall(r"\.[\w-]+", bare)) + len(attrs) + pseudo_classes,
+            types + pseudo_elements)
+
+
+def _css_block_end_cascade(css: str, compound: str,
+                           props: tuple[str, ...] = PADDING_END_PROPS,
+                           ) -> list[tuple[str, str, str]]:
+    """Every declaration that sets `compound`'s block-END inset, weakest → strongest.
+
+    The LAST entry is the one a browser applies, so a caller can assert the
+    WINNER's value. That is the difference from `_css_reaching_decls`'s
+    agreement invariant, and for this property it is the difference between a
+    guard and a false pass: the popular card's own `.pricing-card.popular`
+    `padding-bottom: calc(1.75rem - 1px)` (0,2,0) and the base `.pricing-card`
+    `padding: 1.75rem` (0,1,0) DISAGREE ON PURPOSE, so "every candidate must
+    agree" reds a correct page; and `.pricing-grid .pricing-card { padding-bottom:
+    1.75rem }` (0,2,0, appended after) TIES the winner and takes it, which a
+    `('.popular',)`-filtered sweep cannot see at all (#14406 review round 5,
+    finding 1 — two cascade-valid mutants, both 1px off, both GREEN).
+
+    Order is the author-origin cascade: `!important` first, then specificity,
+    then source order (rule index, then declaration index inside the block, so a
+    later `padding-bottom` beats an earlier `padding` in the SAME block).
+
+    Reach — and it is NOT full CSS:
+
+    * The subject is the RIGHTMOST compound of each comma part, matched by
+      SUBSTRING (`compound in rightmost`), the same slack `_css_reaching_decls`
+      documents: ancestors are reached, `.pricing-cardx` matches too.
+    * `*` and `*::…` count as reaching — a universal selector out-ranks nothing
+      on specificity but `* { padding: 0 !important }` bypasses the cascade
+      entirely, and leaving it out is a fail-open hole of exactly the class this
+      row guards.
+    * A property the caller does not list is invisible; a selector whose
+      specificity cannot be modelled (`:is()` etc.) is ranked MAXIMALLY
+      specific, so an unmodelled override fails closed (red).
+    * It does not model `@layer`, `@supports`, inheritance or `revert` — none of
+      which this page uses, and each of which would need its own reader.
+    * It reaches a selector that names NO class but selects the subject's
+      ELEMENT (`#pricing-grid a`, `#pricing-grid div`, `a[href="/auth"]`,
+      `*`), through the same `_css_compound_matches_element` the agreement
+      reader uses (#14406 review round 10). ⛔ NO specificity floor here, and
+      that asymmetry with `_css_element_reaches` is deliberate: this reader
+      ORDERS the cascade, so a weak bare-element rule is ranked BELOW the pin
+      and cannot become the winner — it needs no exclusion to be harmless,
+      while the agreement reader has no ordering and must exclude it or red a
+      correct page.
+    """
+    ranked: list[tuple[tuple, str, str, str]] = []
+    element = _subject_element(css, compound)
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            # `_css_desktop_rules` cuts the document `<head>` off the FIRST
+            # rule's prelude, so a part can only carry markup if that cut had
+            # nothing to cut at; a NEWLINE is NOT a reason to skip — selectors
+            # wrap, and skipping them hid a wrapped
+            # `#pricing-section` / `.pricing-card.popular { padding-bottom:
+            # 1.75rem }` from the cascade (#14406 review round 9, measured: the
+            # winner stayed `calc(1.75rem - 1px)` while a browser applied the
+            # wrapped rule).
+            if "<" in part:
+                continue
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, compound) and not (
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)):
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in props:
+                    continue
+                important = bool(re.search(r"!\s*important\s*$", value))
+                clean = re.sub(r"!\s*important\s*$", "", value).strip()
+                ranked.append(((important, specificity, rule_index, decl_index),
+                               part, prop, _css_block_end(prop, clean)))
+    ranked.sort(key=lambda entry: entry[0])
+    return [(part, prop, value) for _rank, part, prop, value in ranked]
 
 
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
@@ -3801,6 +5181,38 @@ def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
         blocks.append((int(match.group(1)),
                        _brace_block(blanked, match.end() - 1)))
     return blocks
+
+
+#: An inline `style` ATTRIBUTE in any spelling the HTML parser accepts.
+#: `style="…"` is only ONE of them: an unquoted attribute value, a
+#: single-quoted value and a value with whitespace around the `=` are all valid
+#: HTML and all out-rank every rule in the sheet, which is what makes one
+#: spelling a fail-open rather than a formatting difference. `(?<![\w-])` keeps
+#: a `data-style=…` / `x-style=…` attribute out, so the reader cannot false-RED
+#: a correct page that carries a similarly-named attribute.
+INLINE_STYLE_ATTR_RE = re.compile(
+    r"(?<![\w-])style\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    re.IGNORECASE)
+
+
+def _inline_style_attributes(markup: str) -> list[str]:
+    """Every inline `style` attribute in `markup`, in ANY quoting spelling.
+
+    An inline declaration out-ranks every selector in the sheet, so
+    `<div class="pricing-card" style="display:block">` splits the four CTAs
+    back to three baselines while no CSS reader can see it (#14406 review
+    round 8). The row that closes that hole read the attribute as the LITERAL
+    `style="` … `"`, which is one spelling out of four: `style='display:block'`,
+    `style = "display:block"` and the unquoted `style=display:block` are all
+    valid HTML, all apply, and all left every row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN (#14406 review round 9,
+    measured against the pre-fix reader). The reader takes the attribute, not a
+    formatting convention, so the row cannot be defeated by a quote character.
+
+    It returns the matched spine (attribute name through value) rather than a
+    boolean, so a failure message can quote the offending attribute verbatim.
+    """
+    return INLINE_STYLE_ATTR_RE.findall(markup)
 
 
 #: The e2e test that proves the company host's served root.
@@ -4064,11 +5476,12 @@ class TestPageHeadingOutline:
     def test_the_niche_product_page_does_not_skip_a_heading_level(self):
         """#13645: same outline contract, one page over.
 
-        The owner's PDF has ONE h1 (the hero) and an h2 per beat, with the intro
-        and compute beats heading-less — the measured outline is exactly
-        `[1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]`: one hero h1, five h2 (the three
-        steps, onboarding and pricing), the four tier-card h3s under
-        `#pricing-section`, and one h4 on the self-hosted card. No level skips.
+        Measured outline: `[1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]` — one hero h1;
+        SIX h2 (the compute beat's "Organisational Intelligence" — #13645 item 2,
+        added 2026-11-23, which is why the intro is the only heading-less beat
+        left — then the three steps, onboarding and pricing); the four
+        tier-card h3s under `#pricing-section`; and one h4 on the self-hosted
+        card. No level skips.
 
         ⛔ A STEP rendered as an h3 — an easy slip when a beat is pasted in — is
         an accessibility regression here exactly as it is on the product page,
@@ -10246,7 +11659,7 @@ class TestProductTeamsIdentity:
 
 
 class TestProductTeamsCopy:
-    """The owner's PDF copy, VERBATIM, section by section — with THREE ruled exceptions.
+    """The owner's copy, section by section — with the departures recorded as departures.
 
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
@@ -10259,10 +11672,34 @@ class TestProductTeamsCopy:
     https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
     It names the two readings as typos and states that, for those two strings
     only, it supersedes the earlier "must survive the build unchanged"
-    instruction. Everything else stays verbatim — except the onboarding
-    heading's trailing full stop, which the owner also asked to remove (#13696
-    item 4). That is a THIRD departure, and it is recorded as one rather than
-    folded into the copy ruling.
+    instruction. The onboarding heading's trailing full stop is a THIRD
+    departure (#13696 item 4), recorded as one rather than folded into the copy
+    ruling.
+
+    ⛔ AND THE OWNER RE-WROTE PART OF THE PAGE ON 2026-11-23 (#13645 items 2-5):
+    the compute beat gained the title "Organisational Intelligence" and reads
+    "over YOUR context", and step 03 is retitled "03 · Reason & Learn" with its
+    body REPLACED — the PDF's step-03 paragraph no longer appears on the page at
+    all. Those are the owner's EDITS, not a builder's paraphrase, and the pins
+    below assert the NEW text: restoring the PDF's step-03 paragraph is now a
+    revert of an owner edit, exactly as re-spelling `superintelligence` was a
+    revert of a ruling. The ruling on the two typos stands on #13645 for anyone
+    who does restore that paragraph. The edits are relayed onto the artifact at
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
+
+    ⛔ THE LABELS BELOW ARE THAT COMMENT'S OWN NUMBERS, qualified by issue —
+    `#13645 item 2` is the title, `#13645 item 3` is "your context", `#13645
+    items 4-5` are step 03's heading and body, and `#13645 item 6` is the
+    pricing-CTA baseline. They used to read `owner item 1` / `owner item 2`,
+    which collided with THIS repo's other owner item set: `#13696 item 3` is
+    the outcomes/lead measure overhang (`test_the_outcomes_grid_is_never_wider_
+    than_the_prose_above_it`, `test_the_lead_resolves_the_shared_measure_in_the_
+    prose_font`), and `#13696 item 2` is the deleted hairline
+    (`test_the_intro_opens_on_the_lead_and_carries_no_rule`). A bare `grep
+    "owner item 3"` returned both fixes as one undifferentiated set, so an
+    artifact that records four different owner items under two labels could not
+    be resolved back to the decision that owns it. Named rows, not line
+    numbers: a citation into this file rots on the next edit above it.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10294,12 +11731,17 @@ class TestProductTeamsCopy:
     #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
     #: ⛔ `decisions` (PLURAL) is the owner's RULING, not a builder's tidy-up:
     #: #13645#issuecomment-7047852104 records it, and the PDF's singular is the
-    #: typo it corrects (#14020 review P1 at `73dbbf66ea`).
+    #: typo it corrects (#14020 review P1 at `73dbbf66ea`). `your context` (not
+    #: the PDF's `this context`) is the owner's separate edit of 2026-11-23,
+    #: `#13645 item 3`.
     COMPUTE = (
-        "Tortoise then computes over this context, analysing hundreds or even "
+        "Tortoise then computes over your context, analysing hundreds or even "
         "millions of variables so you and your agents make decisions with "
         "superintelligence."
     )
+    #: The compute beat's section TITLE — the owner's addition of 2026-11-23
+    #: (`#13645 item 2`), not the PDF's: the PDF opens that beat with the claim.
+    COMPUTE_H2 = "Organisational Intelligence"
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
     OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
 
@@ -10314,12 +11756,25 @@ class TestProductTeamsCopy:
          "and code work, turning loose facts into knowledge. With deduplication and "
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
-        ("beat-reason", "03 · Reason",
-         "Improve decision-making with superintelligence, grounded in your "
-         "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
-         "inspired by interconnected prediction markets, Tortoise can compute "
-         "hundreds or even millions of data points."),
+        ("beat-reason", "03 · Reason & Learn",
+         "Thanks to an algorithm inspired by interconnected prediction markets, "
+         "Tortoise can compute hundreds or even millions of data points, "
+         "calculating confidence with business logic and learning from new "
+         "evidence."),
     )
+    #: Where each step's pinned copy actually comes from. Steps 01-02 are the
+    #: PDF reproduced verbatim; step 03's heading AND body are the owner's
+    #: 2026-11-23 rewrites (`#13645 items 4-5`), so naming the PDF as the source
+    #: for that beat was false on both branches of the failure message — and the
+    #: PDF's paragraph is pinned ABSENT below, so "restore the PDF's copy" is a
+    #: revert of an owner edit, not a return to verbatim. (`fdd3a6a60f` reverted
+    #: it once already, which is why the message has to name the right source.)
+    STEP_SOURCES: ClassVar[dict[str, str]] = {
+        "beat-ingest": "the PDF",
+        "beat-organize": "the PDF",
+        "beat-reason": (
+            "the owner's 2026-11-23 rewrite of step 03 (`#13645 items 4-5`)"),
+    }
     ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI"
     ONBOARD_P = (
         "Tortoise connects via MCP or SDK, so you and your agents can use it in "
@@ -10379,7 +11834,7 @@ class TestProductTeamsCopy:
         `.lead`, whose `font-size` was the serif clamp (1.3–1.9rem) — where 74ch
         is ~710–780px, so `min()` picked the flat 660px while the paragraphs
         below computed 605.625px (13.6px mono). 54px wider, ~27px left of the
-        prose, every box flex-centred: owner item 3's defect one element up.
+        prose, every box flex-centred: #13696 item 3's defect one element up.
         Headless Chrome at 768x900: `.lead` 660px @ 20.8px vs `p` 605.625px.
 
         Three things keep it resolved in the PROSE font, and each is asserted
@@ -10434,7 +11889,7 @@ class TestProductTeamsCopy:
         # its own rule — the shape an editor leaves while debugging — keep this
         # row GREEN while the lead loses its serif (#14020 review P2).
         assert any("font-family: var(--serif)" in b for b in span_rules), (
-            "the lead's inner <span> does not take the serif; owner item 2 has "
+            "the lead's inner <span> does not take the serif; #13696 item 2 has "
             "the opening line read as the section's title, not as body copy")
         # …and the <span> has to EXIST. The serif moved onto it, so deleting it
         # from the markup drops the lead back to body copy with every CSS row
@@ -10531,7 +11986,7 @@ class TestProductTeamsCopy:
                     f"`max-width` for `.outcomes` ({m.group(1).strip()!r}). "
                     "That overrides the shared `min(660px, 74ch)` for every "
                     "width in the band and makes the grid wider than the prose "
-                    "it sits under — owner item 3, #13696. Delete the override "
+                    "it sits under — #13696 item 3. Delete the override "
                     "and let the grid inherit the shared measure.")
         # ⛔ THE MEDIA-ONLY SWEEP ABOVE IS NOT THE INVARIANT, and reading only
         # `@media (max-width: Npx)` bodies left the BASE block unread: appending
@@ -10547,7 +12002,7 @@ class TestProductTeamsCopy:
             "`.outcomes` gets its measure from "
             f"{len(with_measure)} rules: "
             f"{[p for p, _ in with_measure]!r}. Exactly ONE may declare it — a "
-            "second override (base OR media) is owner item 3 again: the grid "
+            "second override (base OR media) is #13696 item 3 again: the grid "
             "is wider than the prose above it whenever that rule applies "
             "(#13696, #14020 review P2.3)")
         prelude, body = with_measure[0]
@@ -10582,7 +12037,7 @@ class TestProductTeamsCopy:
         assert grid_rules, (
             "`.outcomes` declares no base `font-size`, so it inherits the body's "
             "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
-            "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
+            "623.7px against the prose's 605.9px at 768 — #13696 item 3, 18px the "
             "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
         for body_, inside_ in grid_rules:
             got = _effective_decl(body_, "font-size")
@@ -10711,7 +12166,51 @@ class TestProductTeamsCopy:
             f"owner's page 2, as ruled, reads {self.COMPUTE!r}. ⛔ `make "
             "decisions` (plural) is the owner's ruling, recorded on "
             "#13645#issuecomment-7047852104 — restoring the PDF's singular "
-            "re-lands a typo the owner ruled on.")
+            "re-lands a typo the owner ruled on; `your context` is the owner's "
+            "edit of 2026-11-23 (#13645 item 3).")
+
+    def test_the_compute_beat_carries_the_owners_section_title(self):
+        """#13645 item 2: the beat opens on a TITLE, not on the claim.
+
+        The PDF's compute beat has no heading — it opens with the paragraph — so
+        the owner asked for one, and it is an ADDITION to the PDF's text rather
+        than a correction of it. Nothing else here reads it: the copy pin above
+        takes the FIRST `<p>`, which an `<h2>` never displaces, and the heading
+        outline only counts levels. Without this row the title could be deleted
+        and every copy row would stay green.
+        """
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        # `<h2\b[^>]*>` — the title is the ordinary thing to style, and
+        # `<h2 class="beat-title">` is a `<h2>` that must not read as "has no
+        # <h2>". Fail-closed either way, but a message that denies what is on
+        # the page is the same misattribution class as the rest of this round.
+        h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", compute, re.S)
+        assert h2, (
+            "#beat-compute has no <h2> — the compute claim reads as a "
+            "continuation of the intro above it, which is the defect "
+            "#13645 item 2 fixes")
+        assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
+            f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
+            f"owner asked for {self.COMPUTE_H2!r} (#13645 item 2)")
+        # `group(0)` — the WHOLE `<h2 …>…</h2>`, attributes included. Reading
+        # `group(1)` looked only at the inner HTML, so a `.beat-num` carried ON
+        # the heading (`<h2 class="beat-num">…`) was GREEN while the message
+        # below asserts the title carries one (#14406 review round 5, finding 3).
+        assert "beat-num" not in h2.group(0), (
+            "the compute beat's title carries a `.beat-num`. The numbered beats "
+            "are the three STEPS (01/02/03); this one is a claim, and a number "
+            "on it would invent a fourth step")
+        # ⛔ POSITION, not just presence (#14406 review round 17). `re.search`
+        # above accepts the title ANYWHERE in the beat, so moving it BELOW the
+        # claim — the one placement that reinstates the defect item 2 exists to
+        # fix — left the whole website guard GREEN (measured: 209 passed). The
+        # docstring says it: "the beat opens on a TITLE, not on the claim".
+        claim = re.search(r"<p\b", compute)
+        assert claim and compute.index("<h2") < claim.start(), (
+            "#beat-compute's <h2> comes AFTER the claim. #13645 item 2 exists "
+            "because the claim read as a continuation of the intro above it; a "
+            "title below it leaves exactly that defect in place, with the copy "
+            "rows and the heading outline all still green")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -10732,22 +12231,33 @@ class TestProductTeamsCopy:
             f"the ↓ column reads {labels(down[0])!r}; the PDF reads "
             f"{self.OUTCOMES_DOWN!r}")
 
-    def test_the_three_steps_are_verbatim(self):
+    def test_the_three_steps_carry_the_pinned_copy(self):
+        """Each step against ITS OWN source — the PDF for 01/02, the owner for 03.
+
+        ⛔ THE NAME AND THE MESSAGE ARE THE GUARD, not decoration: this row used
+        to be `test_the_three_steps_are_verbatim` and to tell the maintainer, on
+        red, that "the PDF reads …" — true for steps 01-02 and FALSE for step
+        03, whose heading and body the owner replaced on 2026-11-23. In the same
+        breath it printed the pinned paragraph (the owner's) beside the PDF's
+        and warned about a `superintelligence` typo that paragraph no longer
+        contains. The row a maintainer hits first when touching step 03 was
+        therefore instructing them to perform the exact revert the edit
+        superseded — the shape that already cost this branch `fdd3a6a60f`. The
+        source is now named per beat.
+        """
         html = _product_teams_html()
         for section_id, heading, paragraph in self.STEPS:
+            source = self.STEP_SOURCES[section_id]
             beat = _element_by_id(html, section_id)
-            h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+            h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", beat, re.S)
             assert h2, f"#{section_id} has no <h2>"
             assert _beat_text(h2.group(1)) == heading, (
-                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; the "
-                f"PDF reads {heading!r}")
+                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; "
+                f"{source} reads {heading!r}")
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
-                f"#{section_id}'s paragraph reads {body!r}; the PDF, as ruled, "
-                f"reads [{paragraph!r}]. ⛔ `superintelligence` (one word) in "
-                "step 03 is the owner's ruling, recorded on "
-                "#13645#issuecomment-7047852104 — restoring the PDF's two-word "
-                "spelling re-lands a typo the owner ruled on.")
+                f"#{section_id}'s paragraph reads {body!r}; {source} reads "
+                f"[{paragraph!r}]")
 
     def test_the_pdfs_two_typos_are_absent_from_the_rendered_page(self):
         """The PDF's spellings must NOT reach the reader — pinned as ABSENCE.
@@ -10762,20 +12272,62 @@ class TestProductTeamsCopy:
 
         The ruling that makes the corrected forms correct:
         https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+
+        ⛔ STEP 03'S PARAGRAPH IS NO LONGER ON THE PAGE AT ALL: the owner
+        REPLACED it on 2026-11-23 (#13645 item 5), so the second typo pair has
+        nothing left to guard. It is pinned ABSENT as a whole sentence instead —
+        both spellings — because a lane that "restores the PDF's copy" would put
+        that paragraph back, and restoring it is now a revert of an owner edit
+        rather than a return to verbatim. The ruling stands on #13645 for anyone
+        who does restore it; the ruled spelling stays asserted here so it is the
+        spelling that comes back.
         """
         served = _served(_product_teams_html())
-        for typo in ("make decision with superintelligence",
-                     "super intelligence, grounded"):
+        # ⛔ AND THE RETITLE IS PINNED BY PRESENCE, not only by the `STEPS`
+        # comparison (#14406 review round 17). `STEPS` compares the page TO a
+        # constant on that class, so reverting the page's `· Reason & Learn` to
+        # the PDF's `· Reason` AND the constant together left every row green
+        # (measured: 763 passed) — the pair-revert this row exists to close, and
+        # the other two text edits already red on it. `_served` keeps the entity
+        # literal, so the pin is on the served bytes.
+        assert "Reason &amp; Learn" in served, (
+            "step 03's heading does not read '… · Reason & Learn'. The owner "
+            "retitled it on 2026-11-23 (#13645 item 4) — with no presence pin, "
+            "reverting the page AND `STEPS` together stays green, which is the "
+            "pair-revert these pins exist to close")
+        # The compute beat is where the ruled typo pair still lives.
+        for typo in ("make decision with superintelligence",):
             assert typo not in served, (
                 f"the rendered page contains the PDF's spelling {typo!r}. The "
                 "owner ruled it a typo and the corrected string is what ships "
                 "(#13645#issuecomment-7047852104) — restoring it is a revert "
                 "of a recorded ruling, not a return to verbatim copy.")
-        for ruled in ("make decisions with superintelligence",
-                      "superintelligence, grounded"):
+        for ruled in ("make decisions with superintelligence",):
             assert ruled in served, (
                 f"the rendered page is missing the ruled string {ruled!r} "
                 "(#13645#issuecomment-7047852104)")
+        for pdf_step_03 in ("super intelligence, grounded",
+                            "superintelligence, grounded",
+                            "Improve decision-making with superintelligence"):
+            assert pdf_step_03 not in served, (
+                f"the rendered page contains {pdf_step_03!r}, part of the "
+                "step-03 paragraph the owner REPLACED on 2026-11-23 (#13645 "
+                "item 5). The PDF's paragraph is gone from this page by the "
+                "owner's instruction — restoring it reverts an owner edit, not "
+                "a builder's paraphrase.")
+        # ⛔ THE OTHER 2026-11-23 EDIT HAD NO SUCH PIN, so reverting BOTH the page
+        # (`…html:840`) and `COMPUTE` to "over this context" kept every row green
+        # (measured on `fb5514dcdc`: 16 passed) — while the same pair-revert for
+        # step 03 reds 2. `COMPUTE` catches the page-only revert; this catches the
+        # PAIR, for the same reason the PDF's paragraph is pinned absent above.
+        # `this context` occurs only in the constant and in the page, so nothing
+        # else can satisfy or defeat the literal.
+        assert "over this context" not in served, (
+            "the rendered page reads \"over this context\". The owner changed it "
+            "to \"your context\" on 2026-11-23 (#13645 item 3, "
+            "#issuecomment-7108810457) — restoring the old phrase reverts an "
+            "owner edit, and a page+constant pair-revert would otherwise stay "
+            "green")
         # The onboarding heading is the THIRD departure (#13696 item 4) and its
         # pair-revert was unpinned: `ONBOARD_H2` has no full stop, so reverting
         # page and constant together kept every copy row green. Pinned ABSENT
@@ -10820,3 +12372,2645 @@ class TestProductTeamsCopy:
             f"the script's scrubbed beat list {listed.group(1)!r} does not "
             f"match the beat order {order!r}, so the wrong panel fades in for "
             "the scroll position")
+
+
+#: Every property that can set a box's BLOCK-END border WIDTH.
+BORDER_END_WIDTH_PROPS = ("border", "border-width", "border-block",
+                          "border-block-width", "border-bottom",
+                          "border-block-end", "border-bottom-width",
+                          "border-block-end-width")
+
+#: Every property that can set the block-END border STYLE — the axis that
+#: decides whether a stated WIDTH is used at all. The style axis is separate
+#: from the width axis because CSS resolves them separately: a `none` style in
+#: one declaration zeroes a width declared in ANOTHER one.
+BORDER_END_STYLE_PROPS = ("border-style", "border-block-style",
+                          "border-bottom-style", "border-block-end-style")
+
+#: Border-style keywords that mean "no border" and therefore a WIDTH of zero.
+_BORDER_NONE_STYLES = ("none", "hidden")
+
+#: The border SHORTHANDS that set their side's block-END STYLE as well as its
+#: width. `border-width` and the `border-*-width` longhands are NOT here: they
+#: set widths only and say nothing about the style axis.
+_BORDER_STYLE_SHORTHANDS = ("border", "border-block", "border-bottom",
+                            "border-block-end")
+
+#: CSS-wide keywords that RESET a property to its INITIAL value. A shorthand
+#: that resets sets every sub-property it covers, so `border-bottom: initial`
+#: is a `none` STYLE — i.e. a 0px border — not "this rule says nothing".
+_CSS_WIDE_RESET = ("initial", "unset", "revert", "revert-layer")
+
+#: A declaration the cascade MATCHED but could not resolve to a number/style.
+#: A sentinel rather than `None`, because `None` already means "this
+#: declaration states nothing for this axis" and the two must rank differently:
+#: an unresolvable declaration that WINS the cascade makes the whole read
+#: unknown, where a silent one lets an earlier rule's value stand (#14406
+#: review round 23).
+_UNREADABLE = object()
+
+#: Every border-style keyword (CSS Backgrounds and Borders 3 §4.1). A style
+#: token found in a declaration is what the style axis ranks; anything outside
+#: this tuple is not a style (e.g. a colour name or `var(--accent)`).
+_BORDER_STYLES = ("none", "hidden", "solid", "dashed", "dotted", "double",
+                  "groove", "ridge", "inset", "outset")
+
+
+def _css_border_end_style(prop: str, value: str) -> str | None:
+    """The block-END border STYLE `prop` states, lowercased, or `None`.
+
+    Same positional rule as `_css_border_end_length`: `border`/`border-style`
+    are ordered lists whose THIRD value is block-end for 3 and 4 values, and
+    `border-block`/`border-block-style` are `(start, end)`; the single-side
+    longhands name their side. A shorthand (`border: 2px solid #f00`,
+    `border-bottom: 4px none`) states a style for every side it sets, so it is
+    an entry on this axis too — otherwise a LATER `border-bottom-style: solid`
+    could not restore a border a shorthand removed.
+
+    ⛔ AND AN OMITTED STYLE IN A SHORTHAND IS `none`, not silence: `border: 3px`
+    and `border-bottom: 2px` take the initial value of every sub-property they
+    omit, and `border-style`'s initial value is `none` — so a width-only
+    shorthand REMOVES the border. A CSS-wide reset (`initial`/`unset`/`revert`)
+    lands on the same value, on a shorthand or on the style longhand
+    (#14406 review round 23).
+    """
+    styles = [t.lower() for t in _css_tokens(_without_important(value))
+              if t.lower() in _BORDER_STYLES]
+    if not styles:
+        # ⛔ A VALID SHORTHAND THAT STATES A WIDTH AND OMITS THE STYLE RESETS IT
+        # TO `none` (CSS Backgrounds and Borders 3: an omitted sub-property of
+        # a shorthand takes its INITIAL value, and `border-style`'s initial
+        # value is `none`), so `border-bottom: 2px` REMOVES the border while
+        # stating a 2px width. Returning None here read that as "says nothing",
+        # the earlier `solid` survived, and the reader reported a 2px border a
+        # browser does not draw (#14406 review round 23, measured). A shorthand
+        # this reader cannot resolve at all (`border: var(--x)`, `border: thin`)
+        # still returns None and the caller fails rather than guesses.
+        if prop in _BORDER_STYLE_SHORTHANDS:
+            tokens = _css_tokens(_without_important(value))
+            if any(token.lower() in _CSS_WIDE_RESET for token in tokens):
+                return "none"
+            # …and only a shorthand this reader can see is VALID: `border:
+            # 1px 2px 0` and `border-bottom: 2px 3px` are not legal shorthands
+            # at all (the browser DROPS the declaration, so an earlier style
+            # stands), and reading them as `none` would be a removal this
+            # reader invented. `border-block` is the one shorthand whose
+            # short form takes two widths.
+            widths = [token for token in tokens
+                      if _BORDER_WIDTH_PX.fullmatch(token)
+                      or (_BARE_ZERO_LENGTH.fullmatch(token)
+                          and float(token) == 0.0)]
+            if 0 < len(widths) <= (2 if prop == "border-block" else 1):
+                return "none"
+            return None
+        if prop in BORDER_END_STYLE_PROPS and any(
+                token.lower() in _CSS_WIDE_RESET
+                for token in _css_tokens(_without_important(value))):
+            # A CSS-wide reset on the STYLE LONGHAND is `none` for every keyword
+            # here: `border-style` is not inherited, so `initial`, `unset` and
+            # `revert` all land on the initial value. `inherit` is deliberately
+            # NOT in `_CSS_WIDE_RESET` — it takes the parent's style, which this
+            # reader cannot see (#14406 review round 23).
+            return "none"
+        return None
+    if prop in ("border", "border-style"):
+        return styles[2] if len(styles) >= 3 else styles[0]
+    if prop in ("border-block", "border-block-style"):
+        return styles[-1] if len(styles) > 1 else styles[0]
+    return styles[0]
+
+
+def _css_border_end_length(prop: str, value: str) -> float | None:
+    """The BLOCK-END border WIDTH `prop` states, in px, ignoring its STYLE.
+
+    Style-blind on purpose: whether a stated width is USED is the style axis's
+    decision, and the two axes resolve independently (see
+    `_border_end_width_cascade`). Folding the style into this read is what made
+    `border-bottom: 2px none` followed by `border-bottom-style: solid` read 0
+    on a page a browser draws with 2px.
+    """
+    tokens = _css_tokens(_without_important(value))
+    lengths: list[float] = []
+    for token in tokens:
+        match = _BORDER_WIDTH_PX.fullmatch(token)
+        if match:
+            lengths.append(float(match.group(1)))
+        elif _BARE_ZERO_LENGTH.fullmatch(token) and float(token) == 0.0:
+            lengths.append(0.0)
+    if not lengths:
+        return None
+    if prop in ("border", "border-width"):
+        chosen = lengths[2] if len(lengths) >= 3 else lengths[0]
+    elif prop in ("border-block", "border-block-width"):
+        chosen = lengths[-1] if len(lengths) > 1 else lengths[0]
+    else:
+        chosen = lengths[0]
+    return chosen
+
+
+def _css_border_end_width(prop: str, value: str) -> float | None:
+    """The BLOCK-END border width `prop` sets, in px, or `None` if it sets none.
+
+    The border-width FAMILY, for the same reason `BASE_PAD_PROPS` exists: the
+    compensation relation's other operand was read from the `border` shorthand
+    alone, so `border-bottom-width`, `border-block-end` and
+    `border-width: a b c` were invisible and re-split the four CTAs with every
+    row GREEN (measured #14406 review round 19: `.pricing-card.popular
+    { border-bottom-width: 3px }` put its CTA at 6414.78 against 6415.78 —
+    1px, the exact #13645 item 6 signature — 209 passed).
+
+    `border`/`border-width` are ordered lists — 1 value sets all four sides, 2
+    are `(block, inline)`, 3 are `(block-start, inline, block-end)` and 4 are
+    `(block-start, inline-end, block-end, inline-start)` — so block-end is the
+    THIRD for 3 and 4 values and the FIRST otherwise, the positional rule
+    `_css_block_end` already applies to `padding`. `border-block` is
+    `(start, end)`; the single-side properties name their side.
+
+    Widths are picked out by the px pattern rather than by position, because a
+    `border:` shorthand interleaves style and colour tokens
+    (`2px solid var(--accent)`) and those are not lengths.
+
+    ⛔ A ZERO WIDTH IS A WIDTH, and dropping it was a fail-open (#14406 review
+    round 20, measured): the width list kept only `px` tokens, so the commonest
+    way to REMOVE a border — `border-bottom: 0`, `border-bottom: none`,
+    `border-bottom-width: 0` — produced no length at all, the declaration was
+    skipped entirely, and the cascade fell back to an EARLIER rule's width. On
+    the shipped page that re-derives `extra_px = 1` where a browser applies -1,
+    i.e. the popular CTA moves 2px and every row stays GREEN — precisely the
+    compensation's own signature. The positions are kept too: in
+    `border-width: 1px 0 3px` the zero is the THIRD value and block-end is 0,
+    so a list of only the px tokens would read the wrong side.
+
+    `border-block-width` is in the family for the same reason as the other
+    longhands (#14406 review round 20): it sets the block-END width and it was
+    absent from `BORDER_END_WIDTH_PROPS`, so `border-block-width: 3px` was
+    invisible and the row compared the compensation to itself. Its 1/2 values
+    are `(start, end)`, like `border-block`.
+
+    ⛔ AND A `none`/`hidden` STYLE ZEROES THE WIDTH EVEN WHEN A LENGTH IS
+    STATED (CSS Backgrounds and Borders 3 — a side's USED border width is 0
+    when its style is `none` or `hidden`, whatever the width property says), so
+    `border-bottom: 4px none #f00` is a 0px border, not a 4px one.
+
+    ⛔ AND THE STYLE IS ITS OWN AXIS, so this single-declaration read is only
+    half the rule (#14406 review round 22, measured). A declaration that sets
+    the STYLE LONGHAND zeroes the width just as the shorthand does — but it is
+    a different declaration, and reading only width properties made the removal
+    invisible: `.pricing-card.popular { border-bottom-style: none }` (and
+    `hidden`, `border-style`, `border-block-end-style`) left the reader at the
+    shipped 1px while a browser applies -1, the exact fail-open round 20 found
+    for `border-bottom: 0`. `_border_end_width_cascade` now resolves this axis
+    against the whole cascade; this function keeps the one-declaration form
+    for callers and assertions that hand it a single value.
+    """
+    if _css_border_end_style(prop, value) in _BORDER_NONE_STYLES:
+        # `none`/`hidden` state a width of zero and OVERRIDE a stated length.
+        # Unlike `thin`, whose px width this file cannot convert, so it stays
+        # None below and the caller fails rather than guesses.
+        return 0.0
+    return _css_border_end_length(prop, value)
+
+
+def _border_end_width_cascade(css: str, compound: str,
+                              skip_popular: bool) -> float | None:
+    """The block-END border width a browser applies to `compound`.
+
+    Same ranking as `_css_block_end_cascade` — `!important`, then specificity,
+    then source order — and the same reach (`_css_rightmost_selects`, the
+    element a bare rule selects, and `*`), because this is the OTHER operand of
+    a relation whose `padding` half is already read that way: a reader narrower
+    than the one it is compared against turns a stale expectation into a green
+    row (#14406 review round 19).
+
+    `skip_popular` drops the parts that NAME `.popular`, so the BASE operand is
+    the border the three sibling cards get. The popular operand keeps them on
+    purpose: its own rule out-ranks the base one and the cascade decides.
+
+    ⛔ TWO AXES, RESOLVED SEPARATELY (#14406 review round 22). CSS computes a
+    side's border STYLE and WIDTH independently, so a `none`/`hidden` style
+    zeroes a width stated in ANOTHER declaration — `.pricing-card.popular
+    { border-bottom-style: none }` is a 0px border with the shipped 2px width
+    untouched — and a later `border-bottom-style: solid` restores a border a
+    shorthand had removed. Both reads therefore rank in their own list and only
+    the RESOLVED pair decides. Folding the style into the width read (the
+    round-21 shape) got both directions wrong: it kept the removal invisible
+    when the style was a longhand, and read 0 where a browser draws 2px when a
+    shorthand's dead style was later restored.
+
+    ⛔ AND A DECLARATION THAT MATCHES IS NEVER SILENT (#14406 review round 23,
+    measured). Every matched declaration is ranked on its axis; one this reader
+    cannot resolve ranks as `_UNREADABLE` and, if it WINS, makes the read
+    UNKNOWN (`None`, which the caller turns into a failure). Dropping it instead
+    let an EARLIER rule's value stand, which is how `border-bottom-width: thin`
+    (1px in a browser) and `border-bottom: 2px` (a shorthand that RESETS the
+    style to `none`, so no border at all) both read the shipped 1px and left the
+    relation GREEN over a popular CTA off the shared baseline.
+    """
+    ranked: list[tuple[tuple, float | object]] = []
+    styles: list[tuple[tuple, str | object]] = []
+    element = _subject_element(css, compound)
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            if "<" in part:
+                continue
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, compound) and not (
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)) and not (
+                    _compound_selects_every_subject(rightmost, compound)):
+                continue
+            # The BASE operand skips the rules that REQUIRE a class its three
+            # sibling cards do not carry (`.pricing-card.popular`) — which is
+            # what `skip_popular` means, NOT “the text `.popular` appears
+            # anywhere in the part”. The text test is fail-OPEN for
+            # `.pricing-card:not(.popular)` and fail-OFF for an ancestor that
+            # names `.popular`; `_compound_requires_a_foreign_class` carries the
+            # measured table (#14406 review round 23).
+            if skip_popular and _compound_requires_a_foreign_class(
+                    rightmost, compound):
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in (BORDER_END_WIDTH_PROPS
+                                           + BORDER_END_STYLE_PROPS):
+                    continue
+                important = bool(_CSS_IMPORTANT.search(value))
+                rank = (important, specificity, rule_index, decl_index)
+                # The two axes are RESOLVED SEPARATELY and only then combined:
+                # CSS computes a side's style and width independently, so a
+                # `none` style zeroes a width stated in another declaration —
+                # and a later `solid` restores one a shorthand had removed.
+                #
+                # ⛔ AND AN UNRESOLVED DECLARATION IS NOT SILENCE (#14406 review
+                # round 23, measured). Every MATCHED declaration enters its
+                # axis's list, with `_UNREADABLE` as the value when this reader
+                # cannot resolve it, because dropping it let an EARLIER rule's
+                # value stand: `.pricing-card.popular { border-bottom-width:
+                # thin }` (1px in a browser, extra 0) and `… { border-bottom:
+                # 2px }` (style reset to `none`, extra −1) both read the shipped
+                # 1px and left the row GREEN over a popular CTA off the shared
+                # baseline. If the winner is unresolvable the read is UNKNOWN and
+                # the caller fails, which is the direction this file fails in.
+                if prop in BORDER_END_WIDTH_PROPS:
+                    width = _css_border_end_length(prop, value)
+                    ranked.append((rank, width if width is not None
+                                   else _UNREADABLE))
+                if prop in BORDER_END_STYLE_PROPS or (
+                        prop in _BORDER_STYLE_SHORTHANDS):
+                    style = _css_border_end_style(prop, value)
+                    styles.append((rank, style if style is not None
+                                   else _UNREADABLE))
+    ranked.sort(key=lambda entry: entry[0])
+    styles.sort(key=lambda entry: entry[0])
+    style = styles[-1][1] if styles else None
+    if style is _UNREADABLE:
+        return None
+    if style in _BORDER_NONE_STYLES:
+        return 0.0
+    width = ranked[-1][1] if ranked else None
+    return None if width is _UNREADABLE else width
+
+
+def _popular_border_extra_px(css: str) -> float:
+    """How much MORE of the bottom content box the popular card's border eats.
+
+    ⛔ BOTH BORDERS ARE THE PROPERTY'S OWNER, NOT A SELECTOR'S LAST MATCH
+    (#14406 review round 13). These two reads were `[...][-1]` — the last rule
+    whose PRELUDE is the selector — so a later `.pricing-card { … }` rule that
+    repeats no `border` hid the rule that declares it, and the row above red a
+    page whose border was untouched (measured: `.pricing-card { border-color:
+    #fff }`, CTA baselines unmoved, `_border_px_of` receiving "").
+    """
+    base_card = _border_end_width_cascade(css, ".pricing-card",
+                                         skip_popular=True)
+    assert base_card is not None, (
+        "no rule the three sibling cards obey gives `.pricing-card` a "
+        "block-END border width, so this relation has no base operand")
+    popular_card = _border_end_width_cascade(css, ".pricing-card.popular",
+                                             skip_popular=False)
+    assert popular_card is not None, (
+        "no rule reaching `.pricing-card.popular` gives it a block-END border "
+        "width, so its thicker border — the reason the compensation exists — "
+        "is gone")
+    return popular_card - base_card
+
+
+#: Every property that can set a box's BLOCK-END inset, in one place so the
+#: base-inset reader and the CTA padding rows cannot drift apart.
+BASE_PAD_PROPS = ("padding", "padding-block", "padding-bottom",
+                  "padding-block-end")
+
+
+def _base_block_end_pad(css: str) -> str | None:
+    """The BASE card's block-END inset, resolved by the CASCADE.
+
+    ⛔ ONE reader (#14406 review round 16): `_expected_popular_block_end_pad`
+    and the popular-card cascade row both call this, because the row read the
+    `padding` shorthand itself and so red a `padding-block`/`padding-inline`
+    split whose geometry is identical (CTA tops unchanged at 745.78 x4,
+    measured) with "declares `padding`" — while this helper sat above it saying
+    there was "no fifth copy to pin".
+
+    ⛔ AND THE ORDER IS THE CASCADE, not "longhand before shorthand" (#14406
+    review round 16, measured). The first version walked
+    `padding-block-end`/`padding-bottom` before `padding-block`/`padding`, so a
+    base rule declaring the LONGHAND hid a LATER rule declaring the shorthand:
+    with `padding-block: 1.75rem` on `.pricing-card` and the existing
+    `@media (min-width: 1200px) { .pricing-card { padding: 2rem } }` probe, it
+    derived `calc(1.75rem - 1px)` where a browser applies 2rem — the same
+    stale-expectation fail-open round 16 closed in `_css_last_declaring_body`,
+    one function over. CSS resolves by `!important`, then specificity, then
+    SOURCE ORDER; "longhand beats shorthand" is not a cascade axis at all.
+    Every rule read here names `.pricing-card` ITSELF, so specificity ties by
+    construction and what remains is `!important` over source order — the
+    author-origin cascade in full.
+
+    Reach is the CASCADE's, not an exact-selector's (#14406 review round 19):
+    this reader used to accept only rules whose selector LIST contained
+    `.pricing-card` verbatim, so an ancestor- or type-qualified override of the
+    base inset moved what a browser renders while the expectation stayed at the
+    base rule's value — measured `.pricing-grid .pricing-card { padding: 2rem }`
+    and `div.pricing-card { padding: 2rem }` at 4px off the shared baseline with
+    the whole module GREEN (209 passed). It is one operand of a relation whose
+    other side (`_css_block_end_cascade`) is fully wide, so a narrow read here
+    makes a stale expectation indistinguishable from a correct one. The parts
+    that NAME `.popular` are skipped instead: those are the OTHER operand.
+
+    `!important` is a PRIORITY, not part of the value (#14406 review round 19):
+    the longhand branch of `_css_block_end` returns its value verbatim, so
+    `padding-bottom: 1.75rem !important` produced the expectation
+    `calc(1.75rem !important - 1px)` — not a CSS value at all — and reded six
+    rows on a page that renders identically (measured: CTA tops 6415.78 x4).
+    It is stripped before the side is read.
+    """
+    ranked: list[tuple[tuple, str]] = []
+    element = _element_carrying_class(css, "pricing-card")
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            if "<" in part:
+                continue
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, ".pricing-card") and not (
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)):
+                continue
+            if ".popular" in part:
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in BASE_PAD_PROPS:
+                    continue
+                important = bool(_CSS_IMPORTANT.search(value))
+                ranked.append(((important, specificity, rule_index, decl_index),
+                               _css_block_end(
+                                   prop, _without_important(value.strip()))))
+    ranked.sort(key=lambda entry: entry[0])
+    return ranked[-1][1] if ranked else None
+
+
+def _expected_popular_block_end_pad(css: str) -> str:
+    """The popular card's bottom inset as a RELATION, never a remembered constant.
+
+    ⛔ #14406 review round 12: this value was pinned as the literal string
+    `calc(1.75rem - 1px)` in FOUR sibling rows of
+    `TestCssDesktopReachAndSpecificity`, so the relation-preserving edit
+    (`padding: 2rem` together with `calc(2rem - 1px)`) — geometrically identical,
+    because the popular inset is the base inset less the extra border pixel —
+    red the FILE and the messages claimed "the page is already wrong". Round 12
+    fixed the one row it was looking at; the reviewer then measured the same
+    false RED three more times. One helper, so there is no fifth copy to pin.
+    """
+    base_pad = _base_block_end_pad(css)
+    assert base_pad, (
+        "no rule naming `.pricing-card` declares a block-END padding as "
+        "`padding`, `padding-block`, `padding-bottom` or `padding-block-end`, "
+        "so the base inset the compensation is derived from is gone — same "
+        "reader as the border reads (#14406 review round 13: `.pricing-card "
+        "{ align-self: stretch }` appended as its own rule left this reading "
+        "an empty padding)")
+    extra_px = _popular_border_extra_px(css)
+    assert extra_px > 0, (
+        "the popular card's bottom border is not WIDER than its siblings', so "
+        f"the compensation this helper derives is stale (measured {extra_px:g}px, "
+        "expected a positive difference)")
+    return f"calc({base_pad} - {extra_px:g}px)"
+
+
+class TestProductTeamsPricingCardCtaBaseline:
+    """#13645 item 6 — the four pricing CTAs share ONE baseline.
+
+    The report was that the buttons sit at different heights because the tier
+    copy has different lengths. The BOXES
+    were never the problem — `.pricing-grid`'s default `align-items: stretch`
+    already gives all four one height (measured 1440x900: every card ran
+    304.33 -> 815.72) — the defect was where the CTA sat INSIDE its box:
+    `.btn` tops read 675.58 / 675.58 / 697.05 / 745.78, three distinct
+    baselines 70.2px apart. After the two declarations pinned below all four
+    read 745.78 at 1440x900 (measured, headless Chromium).
+
+    ⛔ THE REPORT IS A SCREENSHOT THE OWNER PASTED, so it is item 6 of the
+    relayed decision rather than a filename this repo can hold:
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
+    (`clipboard-2026-11-23-121001` exists nowhere in this repo, and the
+    screenshots are deliberately outside it). Without that record a later lane
+    meeting `display: flex` + `padding-bottom: calc(1.75rem - 1px)` has only an
+    ephemeral filename behind it, cannot tell an owner-requested fix from a
+    builder's preference, and reverting unexplained CSS is an ordinary edit —
+    which is the asymmetry this class existed to close for the copy items.
+
+    ⛔ WHY A STATIC PIN FOR A LAYOUT FIX: the failure is invisible to every
+    other row here — no copy, no price and no markup changes — so a revert of
+    the two declarations would be green everywhere else and the owner would
+    have to report it a second time.
+
+    ⛔ WHAT THE READER ACTUALLY BUYS (the first draft of this docstring claimed
+    the comment beside the rule says `display: flex` and `margin-top: auto`, so
+    blanking was what stopped the prose satisfying the rows — MEASURED FALSE:
+    the comment says "FLEX COLUMN", and the only `margin-top: auto` in prose is
+    LEADING, above `.pricing-card`, outside any rule body `_effective_decl`
+    reads). Two properties are load-bearing instead: `_effective_decl` returns
+    the LAST declaration in a MATCHED rule body, so an appended override
+    inside the block reds; and matching the prelude keeps the value tied to
+    the selector that owns it.
+
+    ⛔ AND A SUBSTRING SEARCH WOULD BE GREEN ON A BROKEN PAGE: `.pricing-grid`
+    and `.pricing-toggle` both literally carry `display: flex` (`…html:200`,
+    `:204`), so "the sheet contains `display: flex`" is true with
+    `.pricing-card` never made a container at all.
+
+    ⛔ `[-1]` IS LAST-IN-SOURCE-ORDER, NOT THE CASCADE WINNER — specificity is
+    never consulted by `_css_rules_with_scope`, so a higher-specificity rule
+    that names a DIFFERENT selector is invisible here. Measured (#14406 review
+    round 3): appending `.pricing-grid .pricing-card .btn { margin-top: 0 }`
+    — (0,3,0) against the pinned (0,2,0), winning at any order — left all three
+    rows of this class GREEN while the four CTAs split again. `[-1]` is still
+    right for the rule that OWNS the declaration (an appended duplicate of the
+    same selector must win); `test_no_other_rule_takes_the_ctas_slack` closes
+    the competing-selector half — for ancestor selectors, the logical aliases
+    and `min-width` media blocks too, each of which was a measured false PASS
+    in that row's first draft (#14406 review round 4, G1-G3).
+
+    ⛔ ONE ROW RESOLVES THE CASCADE INSTEAD OF ASKING FOR AGREEMENT, and the
+    difference is not cosmetic: the popular card's `padding-bottom`
+    compensation must OVERRIDE the base `.pricing-card`'s `padding: 1.75rem`, so
+    an agreement invariant reds a correct page there while still missing a
+    TYING rule appended later. The popular-card row therefore reads
+    `_css_block_end_cascade` — the whole `padding` family (both longhands, both
+    shorthands) ranked by `!important`, specificity and source order — and
+    asserts what a browser applies (#14406 review round 5, finding 1, measured
+    with two cascade-valid mutants that both left every row GREEN).
+
+    ⛔ THAT ROW SITS ON `_css_specificity`, SO ITS COUNTER IS PART OF THE GUARD.
+    The first version subtracted BOTH pseudo-elements and every TYPE selector
+    from the class count, so a type selector cancelled a class and a
+    TYPED-QUALIFIED override ranked BELOW the pinned rule: appending
+    `section .pricing-card.popular { padding-bottom: 1.75rem }` (0,2,1) or
+    `div.pricing-card.popular { padding-bottom: 1.75rem }` (0,2,1) — both of
+    which a browser applies at any source order, both of which put the popular
+    CTA back 1px high — left EVERY row in this class GREEN (measured, #14406
+    review round 6 finding 1). The counter now follows the standard's columns
+    (`TestCssDesktopReachAndSpecificity` pins it), and the two mutants above are
+    pinned there: shrinking the counter back to "pseudo minus all elements" reds
+    both that class and the cascade row.
+    """
+
+    def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
+        css = _product_teams_html()
+        # ⛔ THE PROPERTY'S OWNER, NOT THE LAST RULE WITH THE SELECTOR (#14406
+        # review round 13). `_css_rules_with_scope(...)[-1]` is the last rule
+        # whose PRELUDE is `.pricing-card`, so any later card rule that does not
+        # repeat `display` shadows the rule that does — measured on the tree at
+        # `f091cc8dedb2`: appending `.pricing-card { align-self: stretch }` (the
+        # edit round 12 declared GREEN, written as its own rule instead of
+        # inside the block) or even `.pricing-card { border-color: #fff }` red
+        # this row with "is not a flex container" about a card that is one.
+        # `_css_last_declaring_body` picks the last rule that DECLARES the
+        # property, so the override shape still loses none of its teeth:
+        # `.pricing-card { display: block }` still owns `display` and still reds.
+        card_display = _css_last_declaring_body(css, ".pricing-card", "display")
+        assert card_display is not None, (
+            "no rule naming `.pricing-card` declares `display`, so this row "
+            "would compare None to 'flex' — the card's container is gone "
+            "(#13645 item 6)")
+        # ⛔ `!important` is a PRIORITY, not part of the value, so it is stripped
+        # before the comparison: `display: flex !important` is this pin's own
+        # intent, only stronger, and comparing the raw declaration reded a
+        # correct page (#14406 review round 12).
+        assert _without_important(
+            _effective_decl(card_display, "display") or "") == "flex", (
+            "`.pricing-card` is not a flex container, so `margin-top: auto` on "
+            "its CTA has no free space to absorb and the four buttons go back "
+            "to their content-length heights (three baselines, 70.2px apart at "
+            "1440x900 — #13645 item 6)")
+        # ⛔ THE FAMILY, NOT THE LITERAL LONGHAND (#14406 review round 16).
+        # `flex-flow: column nowrap` IS this pin's intent written as the
+        # shorthand: it renders the card pixel-identically (measured at
+        # 1440x900 — all four CTA tops 745.78, cards 304.33 -> 815.72), and
+        # reading only `flex-direction` red it with "declares `flex-direction` …"
+        # — a message naming a property the page does not have. One reader, not
+        # two: `FLEX_DIRECTION_PROPS` is the family the disagreement loop below,
+        # the grid row and `_css_flex_direction` already resolve. It adds no
+        # fail-open, because that loop separately requires every `flex-flow`
+        # that REACHES the card to resolve to `column` — so a declared shorthand
+        # can never be the row layout and still pass here.
+        card_direction = _css_last_declaring_body(
+            css, ".pricing-card", "flex-direction")
+        card_shorthand = _css_last_declaring_body(
+            css, ".pricing-card", "flex-flow")
+        assert card_direction is not None or card_shorthand is not None, (
+            "no rule naming `.pricing-card` declares `flex-direction` or its "
+            "`flex-flow` shorthand, so the children stack along the browser "
+            "default `row` (#13645 item 6)")
+        for owner, prop in ((card_direction, "flex-direction"),
+                            (card_shorthand, "flex-flow")):
+            if owner is None:
+                continue
+            declared = _effective_decl(owner, prop) or ""
+            assert _css_flex_direction(prop, declared) == "column", (
+                f"`.pricing-card` sets `{prop}: {declared}`, a flex ROW — its "
+                "children sit side by side instead of stacking, so the card "
+                "renders as one line of text (#13645 item 6)")
+        # ⛔ THE BLOCK-START SIDE, read as the FAMILY it is (#14406 review round
+        # 15). Reading only `margin-top` reded a page that spells the same thing
+        # `margin-block-start: auto` — which renders IDENTICALLY (measured: all
+        # four CTAs at 6415.78 at 1440x900) — with "does not take the leftover
+        # height". The same file already resolves `padding-block-end` first for
+        # this reason; the logical alias is the property `margin-top` delegates
+        # to, and the shorthands reset it.
+        cta_start = None
+        for prop in ("margin-block-start", "margin-top"):
+            owner = _css_last_declaring_body(css, ".pricing-card .btn", prop)
+            if owner is not None:
+                cta_start = _without_important(
+                    _effective_decl(owner, prop) or "")
+                break
+        if cta_start is None:
+            for prop in ("margin-block", "margin"):
+                owner = _css_last_declaring_body(css, ".pricing-card .btn", prop)
+                if owner is not None:
+                    tokens = _css_tokens(_without_important(
+                        _effective_decl(owner, prop) or ""))
+                    cta_start = tokens[0] if tokens else None
+                    break
+        assert cta_start is not None, (
+            "no rule naming `.pricing-card .btn` declares a block-start margin "
+            "(`margin-top`, `margin-block-start`, `margin` or `margin-block`), "
+            "so the CTA does not take the leftover height (#13645 item 6)")
+        # ⛔ `!important` is a PRIORITY, not part of the value: `margin-top: auto
+        # !important` is this pin's own intent, only stronger, and comparing the
+        # raw declaration reded a correct page (#14406 review round 12).
+        assert cta_start == "auto", (
+            "the card's CTA does not take the leftover height, so it sits "
+            "wherever its tier's copy ends and the four buttons do not share a "
+            "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
+            "without it `display: flex` alone changes nothing a reader sees")
+
+        # The slack half of this cascade question is
+        # `test_no_other_rule_takes_the_ctas_slack`'s (a NEGATIVE invariant).
+        # These three declarations had no such row, so a higher-specificity
+        # selector under a different prelude overrode each one with every row
+        # in this class GREEN — measured on the tree before the loop:
+        # `.pricing-grid .pricing-card { display: block }` and
+        # `.pricing-grid .pricing-card.popular { padding-bottom: 1.75rem }`.
+        # `_css_rules_with_scope` cannot see either, so every base rule that
+        # can SELECT the subject must AGREE with the pinned value.
+        for compound, prop, expected in (
+                (".pricing-card", "display", "flex"),
+                (".pricing-card", "flex-direction", "column"),
+                # `flex-flow` is the shorthand for `flex-direction` + `flex-wrap`
+                # and RESETS the component it omits, so `flex-flow: row` and
+                # even the direction-free `flex-flow: nowrap` both override the
+                # pinned `column` (initial value `row`). Measured (#14406 review
+                # round 8): both left every row of this class GREEN while the
+                # rendered CTA left the shared baseline. `_css_flex_direction`
+                # reads the direction out of either the longhand or the shorthand.
+                (".pricing-card", "flex-flow", "column")):
+            disagreeing = [(p, v) for p, v in _css_reaching_decls(
+                css, prop, compound)
+                if _css_flex_direction(prop, v) != expected]
+            assert disagreeing == [], (
+                f"a rule that can select `{compound}` declares "
+                f"`{prop}: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
+                f"overriding the pinned `{prop}: {expected}`. `_effective_decl` "
+                "reads the winning declaration of the rule that NAMES the "
+                "selector, so a higher-specificity override under ANOTHER "
+                "prelude does not red it — specificity, not source order, picks "
+                "the winner (#14406 review round 3 P2, the same hole "
+                "`test_no_other_rule_takes_the_ctas_slack` closes for the slack)")
+
+    #: Every declaration that sets the CTA's VERTICAL slack. `margin-block-start`
+    #: is the LOGICAL alias `margin-top` delegates to, so pinning only the
+    #: physical property left `margin-block-start: 0` invisible (measured —
+    #: #14406 review round 4, finding G2). `margin` and `margin-block` are the
+    #: shorthands that RESET it, and in the CSS grammar the FIRST token is the
+    #: block-start side (one value = all sides; two = block, inline; three =
+    #: top, inline, bottom), so `margin: 0 auto` is a zero top margin and is
+    #: refused with `margin: 0` — which is correct, it splits the baselines.
+    SLACK_PROPS = ("margin-top", "margin-block-start", "margin", "margin-block")
+
+    def test_the_grid_keeps_the_four_boxes_one_height(self):
+        """`.pricing-grid`'s `align-items: stretch` is LOAD-BEARING for the one baseline.
+
+        The class docstring states the precondition and nothing asserted it: the
+        boxes were "never the problem" because the grid's DEFAULT
+        `align-items: stretch` gives all four of them one height, and the defect
+        was only where the CTA sat INSIDE its box. Once the boxes stop being
+        equal height, `margin-top: auto` pushes each button to its OWN card's
+        bottom and the baselines separate again — the exact #13645 item 6
+        signature, back, from a one-word edit.
+
+        Measured (#14406 review round 11) — each of these left ALL SEVEN rows of
+        this class GREEN while the rendered CTAs split:
+
+            .pricing-grid { align-items: center }      boxes to content height
+            .pricing-grid { align-items: flex-start }  tops aligned, bottoms not
+            .pricing-card { align-self: flex-start }   the popular card alone
+            .pricing-grid { place-items: center }      the same, via the shorthand
+
+        `align-items: center` on a pricing grid is the single most likely
+        "tidy the cards up on a laptop" edit, so it is pinned rather than
+        trusted. `normal` is allowed beside `stretch` because it behaves as
+        `stretch` on a flex container; anything else, and any value this reader
+        cannot classify, reds.
+
+        ⛔ THE LAYOUT MODE IS PART OF THE PRECONDITION, and the align family
+        alone does not pin it (#14406 review round 12, measured). `align-items:
+        stretch` only stretches the items of a FLEX ROW: on a non-flex container
+        the declared value is inert, and in a flex COLUMN it stretches the CROSS
+        axis — which is horizontal — so every card keeps its own content height.
+        Both restore the exact #13645 item 6 signature with ALL NINE rows of this
+        class GREEN:
+
+            .pricing-grid { display: block }                       3 baselines
+            .pricing-grid { display: flex; flex-direction: column } 3 baselines
+            #pricing-grid { display: block }    (the bare-element reach — see
+                                                 PINNED_OWNER_SELECTOR)
+
+        So the grid's `display` and its direction are read as AGREEMENT
+        invariants beside the align family, `flex-flow` included because it is
+        the shorthand that resets the direction.
+        """
+        css = _product_teams_html()
+        for compound, prop, allowed in (
+                (".pricing-grid", "align-items", {"stretch", "normal"}),
+                (".pricing-grid", "place-items", {"stretch", "normal"}),
+                # ⛔ `stretch`/`normal` are a CARD's flex default inside a
+                # `stretch` container (#14406 review round 12). The docstring
+                # above keeps `normal` for the grid "because it behaves as
+                # stretch"; the same reasoning applies to these two, and not
+                # applying it here was a measured FALSE RED: a page carrying
+                # `align-self: stretch` on `.pricing-card` renders identically
+                # (boxes one height, CTAs on the shared baseline) and this row
+                # red it, while refusing only the values that MOVE the box is
+                # what the row is for.
+                (".pricing-card", "align-self", {"auto", "stretch", "normal"}),
+                (".pricing-card", "place-self", {"auto", "stretch", "normal"})):
+            bad = [(prelude, value)
+                   for prelude, value in _css_reaching_decls(css, prop, compound)
+                   if _css_align_keyword(prop, value) not in allowed]
+            assert bad == [], (
+                f"a rule that can select `{compound}` declares "
+                f"`{prop}: {bad[0][1] if bad else ''}`, so the four pricing "
+                "boxes stop sharing one height and `margin-top: auto` aligns "
+                "each CTA to its OWN card's bottom — three baselines 70.2px "
+                "apart at 1440x900 (#13645 item 6), with every other row in "
+                "this class still GREEN")
+
+        # The layout MODE — `display` and the direction — beside the align
+        # family. Without it `display: block` and `flex-direction: column` both
+        # restore the defect with every row green (measured, #14406 review
+        # round 12); `align-items: stretch` is inert on the first and applies to
+        # the CROSS axis on the second.
+        #
+        # ⛔ AND AN EXPLICIT CROSS SIZE BEATS `stretch`, so a definite `height`
+        # or `max-height` on the card re-opens the split from the other side
+        # (#14406 review round 12, measured GREEN):
+        #
+        #       .pricing-card { height: fit-content }    each card content-height
+        #       .pricing-card { max-height: 700px }      capped below the stretch
+        #
+        # `min-height` is deliberately NOT refused: it raises a floor that
+        # `stretch` still applies above, all four cards carry the same one, and
+        # refusing it would red a correct page — a named residual, not a silent
+        # one.
+        capped = [(prop, value, prelude)
+                  for prop in ("height", "max-height", "block-size",
+                               "max-block-size")
+                  for prelude, value in _css_reaching_decls(
+                      css, prop, ".pricing-card")]
+        assert capped == [], (
+            f"a rule that can select `.pricing-card` declares `{capped[0][0]}: "
+            f"{capped[0][1] if capped else ''}` ({capped[0][2]!r}), and an "
+            "explicit cross size BEATS the grid's `stretch` — so the four boxes "
+            "stop sharing one height and `margin-top: auto` aligns each CTA to "
+            "its own card's bottom (#13645 item 6), with every other row in "
+            "this class still GREEN")
+        # ⛔ ONE FLEX LINE, not four (#14406 review round 15). `align-items:
+        # stretch` applies PER LINE, so the four cards share a height only while
+        # they are on the SAME line — and the grid carries `flex-wrap: wrap`.
+        # Measured: each of these wrapped the grid onto two lines and left every
+        # row of this class GREEN, with the popular CTA 515-575px below its
+        # siblings at 1440x900:
+        #
+        #     .pricing-card { min-width: 280px }        1192 > 1100
+        #     .pricing-grid { gap: 4rem }                1112 > 1100
+        #     .pricing-grid { max-width: 900px }          992 >  900
+        #
+        # The fit is DERIVED from the page's own numbers rather than restated:
+        # `flex: 1` gives each card a base size of 0, so a line holds all four
+        # while `4 x min-width + 3 x column-gap <= the grid's max-width`. A
+        # length this reader cannot convert FAILS rather than skips.
+        root = _css_root_px(css)
+
+        def _length(prop: str, compound: str, what: str) -> float:
+            found = [value for _prelude, value
+                     in _css_reaching_decls(css, prop, compound)]
+            assert found, (f"`{compound}` declares no `{prop}`, so the one-line "
+                           f"fit cannot be derived ({what})")
+            px = _css_length_px(found[-1], root)
+            assert px is not None, (
+                f"`{compound}` declares `{prop}: {found[-1]}`, which this "
+                "reader cannot convert to px (only `px` and `rem` are read, and "
+                "`rem` needs an unset root font-size) — the one-line fit is a "
+                "FAIL, not a skip")
+            return px
+
+        grid_max = _length("max-width", ".pricing-grid", "the line's budget")
+        card_min = _length("min-width", ".pricing-card", "a card's floor")
+        column_gaps = [value for _prelude, value
+                       in _css_reaching_decls(css, "column-gap", ".pricing-grid")]
+        if column_gaps:
+            gap_px = _css_length_px(column_gaps[-1], root)
+            assert gap_px is not None, (
+                f"`.pricing-grid` declares `column-gap: {column_gaps[-1]}`, "
+                "which this reader cannot convert to px — the one-line fit is a "
+                "FAIL, not a skip")
+        else:
+            gap_px = _length("gap", ".pricing-grid", "the gap between cards")
+        needed = 4 * card_min + 3 * gap_px
+        assert needed <= grid_max, (
+            f"the four pricing cards no longer fit on ONE line at desktop: "
+            f"4 x {card_min:g}px + 3 x {gap_px:g}px = {needed:g}px against the "
+            f"grid's {grid_max:g}px budget, so `flex-wrap: wrap` puts them on "
+            "two lines — `align-items: stretch` stretches PER LINE, so the "
+            "boxes on different lines stop sharing a height and "
+            "`margin-top: auto` aligns each CTA to its own card's bottom "
+            "(#13645 item 6), with every other row in this class still GREEN")
+        for prop, allowed in (("display", {"flex", "inline-flex"}),
+                              ("flex-direction", {"row", "row-reverse"}),
+                              ("flex-flow", {"row", "row-reverse"})):
+            bad = [(prelude, value)
+                   for prelude, value
+                   in _css_reaching_decls(css, prop, ".pricing-grid")
+                   if _css_flex_direction(prop, value) not in allowed]
+            where = repr(bad[0][0]) if bad else ""
+            assert bad == [], (
+                f"a rule that can select `.pricing-grid` declares "
+                f"`{prop}: {bad[0][1] if bad else ''}` ({where}). ⛔ This row pins "
+                "the FLEX IMPLEMENTATION the page ships — not a claim that every "
+                "other layout renders differently. A 4-column grid with "
+                "`grid-template-columns: repeat(4, minmax(0, 1fr))` really does "
+                "stretch its items to one height (measured, #14406 review round "
+                "15) and still reds here, because this reader classifies no track "
+                "counts; a flex COLUMN does split the baselines, since its cross "
+                "axis is horizontal. So `margin-top: auto` stops aligning to a "
+                "shared bottom and the three-baseline / 70.2px split of #13645 "
+                "item 6 is back with every other row in this class GREEN (#14406 "
+                "review rounds 12/15). Migrating to `display: grid` deliberately "
+                "means re-cutting this row with its track pins, not widening "
+                "`allowed` here.")
+
+    def test_no_rule_gives_the_cta_a_block_end_margin(self):
+        """The CTA's block-END margin must stay 0 — `auto` there SHARES the slack.
+
+        `SLACK_PROPS` pins the block-START half, because that is what
+        `margin-top: auto` is. But a second `auto` on the block-END side does not
+        add to it — the two `auto` margins SPLIT the card's free space, so the
+        button is centred in each card's leftover instead of pushed to its
+        bottom. Each card's leftover differs (that is the whole premise of item
+        6), so the four baselines split again.
+
+        Measured (#14406 review round 11) — each left ALL SEVEN rows of this
+        class GREEN while the rendered CTAs split:
+
+            .pricing-card .btn { margin-top: auto; margin-bottom: auto }
+            .pricing-card .btn { margin-top: auto; margin-block-end: auto }
+
+        This is the INVERSE of `SLACK_PROPS` on purpose: there `auto` is the
+        pinned value and any other reds; here a NON-ZERO block-end margin is the
+        refused one. Sharing the loop would have made the same word mean both
+        things.
+
+        ⛔ IT REFUSES EVERY NON-ZERO VALUE, not only `auto` (#14406 review round
+        15). The docstring above claimed the block-end margin "must stay 0" while
+        the assertion only refused `auto`, so `.pricing-card.popular .btn {
+        margin-bottom: 0.5rem }` — a plain 8px shove — left this row and all 205
+        tests in the module GREEN with the popular CTA measured 8px high. `auto`
+        is the dramatic case; any length is the same defect at a smaller scale.
+        """
+        css = _product_teams_html()
+        bad = [(prop, value, prelude)
+               for prelude, prop, value in _css_block_end_cascade(
+                   css, ".btn", BLOCK_END_MARGIN_PROPS)
+               if _css_length_px(_css_block_end(prop, value), 16.0) != 0.0]
+        assert bad == [], (
+            "a rule that can select `.pricing-card .btn` gives the CTA a "
+            f"NON-ZERO block-END margin (`{bad[0][0]}: {bad[0][1]}`, "
+            f"{bad[0][2]!r}); any such margin moves the button up off the shared "
+            "baseline, and two `auto` margins SPLIT the card's free space "
+            "instead of stacking — so the button centres in each card's own "
+            "leftover (#13645 item 6), with every other row in this class still "
+            "GREEN")
+
+    def test_no_rule_gives_a_card_a_block_end_margin(self):
+        """A CARD's block-end margin moves the edge `margin-top: auto` aligns to.
+
+        The rows above pin the card's cross SIZE (`height`/`max-height`), its
+        `align-self`, and the CTA's own margins — but a bottom margin on the CARD
+        shrinks the stretched border box inside its flex line, so the edge the
+        CTA is pushed against moves up by that margin while the boxes keep their
+        one height. Measured (#14406 review round 15): `.pricing-card.popular {
+        margin-bottom: 1rem }` put the popular CTA at 6399.78 against
+        6415.78 for the other three — a 16px split — with all 205 tests in the
+        module GREEN.
+
+        The page declares no margin on `.pricing-card`, so refusing every
+        non-zero block-end value costs no false RED.
+        """
+        css = _product_teams_html()
+        bad = [(prop, value, prelude)
+               for prelude, prop, value in _css_block_end_cascade(
+                   css, ".pricing-card", BLOCK_END_MARGIN_PROPS)
+               if _css_length_px(_css_block_end(prop, value), 16.0) != 0.0]
+        assert bad == [], (
+            "a rule that can select `.pricing-card` gives the card a NON-ZERO "
+            f"block-END margin (`{bad[0][0]}: {bad[0][1]}`, {bad[0][2]!r}), "
+            "which shrinks the stretched box inside its flex line — so the edge "
+            "`margin-top: auto` aligns the CTA to moves up by that much and the "
+            "four baselines split (#13645 item 6), with every other row in this "
+            "class still GREEN")
+
+    def test_nothing_lets_the_cta_take_the_slack_with_its_own_box(self):
+        """The CTA must not GROW into the slack its `margin-top: auto` needs.
+
+        ⛔ THE MARGIN FAMILY IS NOT THE ONLY WAY TO TAKE THE SLACK. Every row
+        above pins the mechanism (`margin-top: auto` present, nothing else
+        touching it) and the card's own box — but a flex ITEM that grows, or
+        whose block size is a percentage of its card, absorbs the very space
+        the auto margin would have taken: the button stops being pinned to the
+        card's bottom edge, and because each card's content is a different
+        height (that is #13645 item 6) the four tops re-split.
+
+        Measured at `bc6525269cba`, 1440x900, headless Chromium, the page
+        restored byte-identically (`sha256 d74e7c9dd20d`) after every mutant —
+        CTA tops, from the shipped page's four equal `6415.78`:
+
+            .pricing-card .btn { flex: 1 }               6345.58 6345.58 6367.05 6415.78
+            .pricing-card .btn { flex-grow: 0.5 }        6380.69 6380.69 6391.42 6415.78
+            .pricing-card .btn { flex-basis: 100% }      the same 3-baseline split
+            .pricing-card .btn { height: 100% }          the same
+            .pricing-card .btn { min-block-size: 100% } the same
+
+        — and ALL NINE rows of this class stayed GREEN on every one of them.
+        `margin-top: 0` (already RED) produces the same three values, so this is
+        the class's own defect signature rather than a tolerance argument. The
+        first spelling is the one a maintainer reaches for when they mean "make
+        the button fill the leftover": it does, and it breaks the invariant
+        this class exists to hold.
+
+        `flex: none` / `flex: initial` / `flex: 0 1 auto` / `flex-grow: 0` /
+        `height: 3rem` / `height: 50vh` / `flex-basis: 0%` are measured to leave
+        the four tops EQUAL, so the reader permits them — refusing every size
+        declaration would red correct pages (`_cta_takes_the_slack_by_sizing`
+        carries the full measured table, both directions).
+        """
+        offenders = _cta_takes_the_slack_by_sizing(_product_teams_html())
+        assert offenders == [], (
+            "a rule that can select `.pricing-card .btn` lets the CTA's own box "
+            f"take the card's leftover space (`{offenders[0][1]}: "
+            f"{offenders[0][2]}`, {offenders[0][0]!r}). Growth and a "
+            "container-relative block size starve the pinned `margin-top: "
+            "auto` of the free space it absorbs, so the button is no longer "
+            "pushed to its card's bottom edge — and each card's content is a "
+            "different height, so the four baselines split to three, 70.2px "
+            "apart (#13645 item 6), with every other row in this class still "
+            "GREEN (#14406 review round 17, measured: `.pricing-card .btn "
+            "{ flex: 1 }` reads 6345.58 / 6345.58 / 6367.05 / 6415.78)")
+
+    def test_no_other_rule_takes_the_ctas_slack(self):
+        """The card CTA's ONLY vertical slack is the pinned `margin-top: auto`.
+
+        `_css_rules_with_scope` matches a prelude that NAMES the exact selector
+        and returns them in source order, so `[-1]` cannot see a rule that
+        reaches the same element through a DIFFERENT selector. Measured
+        (#14406 review round 3): appending `.pricing-grid .pricing-card .btn
+        { margin-top: 0 }` — (0,3,0) against the pinned (0,2,0), so it wins at
+        any source order — left all three rows of this class GREEN while the
+        rendered CTAs split again.
+
+        The first version of THIS row only looked at a prelude containing both
+        `.pricing-card` and `.btn`, only at `margin-top`/`margin`, and only
+        outside `@media`. Three measured false PASSes followed (#14406 review
+        round 4) — the same 3-baseline / 70.2px signature with every row green:
+
+        * **G1 — ancestor selectors.** `.pricing-grid .btn { margin-top: 0 }`
+          (0,2,0) is tied with the pinned rule and later in source, so it wins;
+          the filter required `.pricing-card` in the same prelude and never read
+          it.
+        * **G2 — the logical property.** `margin-block-start: 0`, including
+          INSIDE the pinned rule's own body, where `_effective_decl(body,
+          "margin-top")` returns `None`.
+        * **G3 — `min-width` media.** `@media (min-width: 1024px) { … }` applies
+          at 1440x900; the `inside_media` skip threw it away. A `max-width`
+          hatch is the opposite case (the cards stack there by design) and is
+          still skipped.
+
+        So the reach here is `_css_reaching_decls`'s — rightmost-compound
+        matching (ancestors included), logical aliases and shorthands, and
+        `min-width` media — and the invariant is the one the page needs: every
+        rule that can select the CTA must either not touch the slack or say
+        `auto`. It does not re-implement the cascade; it fails closed on any
+        disagreement, because specificity — not source order — picks the winner
+        and a reader of source order cannot.
+        """
+        css = _product_teams_html()
+        competing = []
+        for prop in self.SLACK_PROPS:
+            for prelude, value in _css_reaching_decls(css, prop, ".btn"):
+                # `!important` is a priority marker, not part of the value: an
+                # `margin-top: auto !important` is the PINNED intent, stronger,
+                # and reading it as a competitor reded a correct page.
+                bare = _without_important(value)
+                # The block-start side is the first token for the shorthands,
+                # read by the SAME helper the positive rows use.
+                start_side = _css_block_start(prop, bare)
+                if start_side == "auto":
+                    continue
+                competing.append((prelude, prop, value))
+        assert competing == [], (
+            "another rule sets the pricing CTA's vertical slack, and can starve "
+            f"the pinned `margin-top: auto`: {competing!r}. Specificity, not "
+            "source order, decides which one a browser applies, so "
+            "`.pricing-grid .pricing-card .btn { margin-top: 0 }` (0,3,0), "
+            "`.pricing-grid .btn { margin-top: 0 }` (0,2,0, later in source), "
+            "`margin-block-start: 0` (the logical alias) and the same inside a "
+            "`@media (min-width: …)` block all out-rank or by-pass the pinned "
+            "rule and split the four baselines to three, 70.2px apart "
+            "(#13645 item 6)")
+
+    def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
+        """The 2px border eats ONE more px than its siblings' 1px — measured.
+
+        With the flex column in place the popular card's CTA landed 1px high
+        (744.78 against 745.78, at 1440x900): `box-sizing: border-box` means the
+        2px border removes one more pixel of content box at the bottom than a
+        1px border does, and `margin-top: auto` aligns to that inner edge. The
+        `padding-bottom` compensation is the thing that makes the four y values
+        EQUAL rather than 1px apart, so a reader who deletes it as a mystery
+        number must red here instead of shipping an alignment that is "close".
+        """
+        css = _product_teams_html()
+        popular = [body for body, inside_media
+                   in _css_rules_with_scope(css, ".pricing-card.popular")
+                   if not inside_media]
+        assert popular, "`.pricing-card.popular` declares no rule"
+        # ⛔ NO LITERAL HERE ANY MORE (#14406 review round 12). Round 11 added the
+        # DERIVED half below and left this assert in place, so the row still
+        # pinned the constant: a relation-preserving edit — `padding: 2rem`
+        # together with `calc(2rem - 1px)` — is geometrically identical (the
+        # popular card's inset stays the base card's less the extra border
+        # pixel) and still red here, with the message saying it "does not
+        # compensate for its 2px border" when it does. The derivation owns the
+        # row: it grades the cascade WINNER against `expected_pad`, and
+        # `extra_px > 0` keeps a stale-direction edit a FAIL rather than a skip.
+        # Same cascade caveat as the flex row above, but this one is answered by
+        # RESOLVING the cascade instead of demanding agreement: `.pricing-card`'s
+        # `padding` shorthand (0,1,0) and this rule (0,2,0) disagree ON PURPOSE,
+        # so "every rule that can select it must agree" would red a correct page
+        # — while `.pricing-grid .pricing-card { padding-bottom: 1.75rem }`
+        # (0,2,0) or `#pricing-section .pricing-card.popular { padding: 1.75rem }`
+        # (1,2,0) override the compensation with every row in this class GREEN
+        # (#14406 review round 5, finding 1 — the same 1px defect, measured).
+        # `_css_block_end_cascade` reads the whole `padding` FAMILY (both
+        # longhands, both shorthands, block-end side) and returns it in cascade
+        # order, so the row asserts what a browser actually applies.
+        # Measured mutants that must be caught here (each left every row GREEN
+        # before the round-6 specificity fix, #14406):
+        #   section .pricing-card.popular { padding-bottom: 1.75rem }   (0,2,1)
+        #   div.pricing-card.popular     { padding-bottom: 1.75rem }   (0,2,1)
+        #   .pricing-grid .pricing-card  { padding-bottom: 1.75rem }   (0,2,0, later)
+        #   #pricing-section .pricing-card.popular { padding: 1.75rem } (1,2,0)
+        #   .pricing-card.popular { padding: 1.75rem }   (shorthand in the same block)
+        cascade = _css_block_end_cascade(css, ".pricing-card")
+        assert cascade, "no rule sets the pricing card's block-END inset"
+        prelude, prop, winner = cascade[-1]
+
+        # ⛔ THE LITERAL IS DERIVED, NOT REMEMBERED (#14406 review round 11).
+        # Pinning `calc(1.75rem - 1px)` as a string made the row a claim about a
+        # constant instead of about the RELATION the constant exists to encode:
+        # the popular card's bottom inset is the base card's, less the extra
+        # border width its 2px border eats. Measured — with the literal pinned
+        # and ALL SEVEN rows GREEN:
+        #
+        #   .pricing-card { padding: 2rem }            popular CTA 4px LOW
+        #   .pricing-card.popular { border: 3px … }     popular CTA 1px HIGH
+        #
+        # Both are "a mystery number left behind by an edit above it", which is
+        # the failure the pin was written to prevent. Read the two numbers the
+        # `1px` is the DIFFERENCE OF, and require the winner to be their relation.
+        # The relation lives in `_expected_popular_block_end_pad` (module level)
+        # because FOUR sibling rows need the same value and each had its own copy
+        # of the literal (#14406 review round 12).
+        #
+        # ⛔ AND EVERY OPERAND IS A PROPERTY'S OWNER, NOT A SELECTOR'S LAST MATCH
+        # (#14406 review round 13). `_css_rules_with_scope(...)[-1]` is the last
+        # rule whose PRELUDE is the selector, so a later `.pricing-card { … }`
+        # rule that repeats none of `border`/`padding` shadows the rule that
+        # does — measured on the tree at `f091cc8dedb2`: `.pricing-card {
+        # border-color: #fff }` (an unrelated card edit, CTA baselines unmoved)
+        # red this row with "declares `border: `, whose bottom width cannot be
+        # read", and `.pricing-card { padding: 2rem }` with its compensation
+        # derived from a padding the page no longer has.
+        base_border = _border_end_width_cascade(css, ".pricing-card",
+                                               skip_popular=True)
+        assert base_border is not None, (
+            "no rule the sibling cards obey gives `.pricing-card` a block-END "
+            "border width, so the compensation relation has no base operand")
+        popular_border = _border_end_width_cascade(
+            css, ".pricing-card.popular", skip_popular=False)
+        assert popular_border is not None, (
+            "no rule reaching `.pricing-card.popular` gives it a block-END "
+            "border width, so its thicker border — the reason the "
+            "compensation exists — is gone")
+        # ⛔ THE WHOLE `padding` FAMILY, through the ONE helper
+        # (#14406 review round 16). Reading only the shorthand here red a
+        # `padding-block`/`padding-inline` split whose geometry is identical —
+        # the exact false RED `_expected_popular_block_end_pad` was fixed for,
+        # left behind as a fifth copy of the derivation it documents.
+        base_pad = _base_block_end_pad(css)
+        assert base_pad is not None, (
+            "no rule naming `.pricing-card` declares a block-END padding as "
+            "`padding`, `padding-block`, `padding-bottom` or "
+            "`padding-block-end`, so the base inset the compensation is "
+            "derived from is gone")
+        extra_px = _popular_border_extra_px(css)
+        assert extra_px > 0, (
+            "the popular card's bottom border is not WIDER than its siblings', "
+            f"so the 1px compensation this row exists for is stale (measured "
+            f"{extra_px:g}px, expected a positive difference)")
+        popular_border_px = _border_end_width_cascade(
+            css, ".pricing-card.popular", skip_popular=False)
+        base_border_px = _border_end_width_cascade(
+            css, ".pricing-card", skip_popular=True)
+        assert popular_border_px is not None and base_border_px is not None, (
+            "the compensation relation's border operands cannot be read from "
+            "this page, so its message would quote a number it does not have")
+        expected_pad = _expected_popular_block_end_pad(css)
+
+        assert winner == expected_pad, (
+            f"the declaration that WINS the popular card's bottom inset is "
+            f"`{prop}: {winner}` ({prelude!r}), not the compensation that makes "
+            f"the four y values EQUAL. Its {popular_border_px:g}px border eats "
+            f"{extra_px:g}px more of the content box at the bottom than its "
+            f"siblings' {base_border_px:g}px, so its inset must be the base "
+            f"card's block-end padding ({base_pad!r}) less that difference: "
+            f"`{expected_pad}`. Measured at 1440x900, a mismatch "
+            "moves this CTA off the shared baseline (744.78 vs 745.78 is ONE "
+            "pixel — #13645 item 6). The losing declarations, weakest first: "
+            f"{cascade[:-1]!r}")
+
+    def test_no_rule_resets_the_cards_declarations_with_all(self):
+        """`all` is the shorthand for EVERY property, so no value of it agrees.
+
+        `all: revert` on `.pricing-card` (or `all: unset`, or `all: initial`)
+        resets `display` to the browser default `block` and `flex-direction` to
+        `row`, and on `.btn` it resets `margin-top: auto` to `0` — the exact
+        3-baseline split of #13645 item 6, from ONE declaration. It is not a
+        property the flex row or the slack row queries, so neither could see it:
+        measured (#14406 review round 8), `all: revert` appended to the
+        `.pricing-card` rule left all four rows of this class GREEN.
+
+        There is no value to agree with, which is why this is a NEGATIVE row
+        rather than another entry in the families above: ANY declaration of
+        `all` that reaches either subject displaces whatever the pinned
+        declarations say.
+        """
+        css = _product_teams_html()
+        for compound in (".pricing-card", ".btn"):
+            resets = _css_reaching_decls(css, "all", compound)
+            assert resets == [], (
+                f"a rule that can select `{compound}` declares the `all` "
+                f"shorthand (`{resets[0][0]!r}` → `all: {resets[0][1]}`), which "
+                "resets every property in the pinned CSS — `all: revert` on "
+                "the card drops `display: flex`/`flex-direction: column`, and "
+                "on the CTA it drops `margin-top: auto` — with every other row "
+                "in this class GREEN (#14406 review round 8, measured)")
+
+    def test_no_rule_reorders_the_cta_inside_its_card(self):
+        """`order` moves the CTA without moving the markup the row above reads.
+
+        `test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render`
+        asserts the CTA is the last child in the DOM of both render paths —
+        which is the invariant `margin-top: auto` depends on, since auto margins
+        align the LAST item. `order: -1` on `.pricing-card .btn` makes the
+        anchor the FIRST flex item while the markup still ends on it, so the
+        last-child row stays green and the rendered CTA sits above `.features`. 
+        Measured (#14406 review round 8): `order: -1` appended to the CTA rule
+        left all four rows of this class GREEN.
+
+        `order`'s initial value is `0`, so the invariant is "every reaching rule
+        either does not declare it or declares `0`" — the same AGREEMENT shape
+        the slack row uses.
+
+        ⛔ THE SUBJECT IS EVERY DIRECT CHILD OF THE CARD, NOT THE CTA ALONE
+        (#14406 review round 12, measured). `order` reorders SIBLINGS, so the
+        button stops being the item `margin-top: auto` aligns just as surely
+        when a SIBLING is pushed past it — and those rules name a selector this
+        row never asked about. Each of these restored the three-baseline split
+        with ALL NINE rows of this class GREEN:
+
+            .pricing-card .features { order: 1 }   the CTA is no longer last
+            .pricing-card .price    { order: 1 }   same, one child up
+            .pricing-card div       { order: 1 }   the same, by TAG
+            .pricing-card > div     { order: 1 }   the same, child combinator
+            #pricing-grid div       { order: 1 }   the same, from the grid
+
+        The subject set therefore comes from the MARKUP's containment
+        (`_card_direct_children`), and each child is matched both by every class
+        it carries and by its ELEMENT — which is what makes the two TAG-selector
+        mutants above visible. A rule that reorders a grandchild (`.feature`
+        inside `.features`) cannot move the CTA and is not red here, which is
+        why the set is the card's DIRECT children and not its whole subtree.
+        """
+        css = _product_teams_html()
+        reordering = [(p, v) for p, v in _css_reaching_decls(css, "order", ".btn")
+                      if v.strip() not in ("0", "")]
+        assert reordering == [], (
+            f"a rule that can select the CTA declares `order: "
+            f"{reordering[0][1]}` ({reordering[0][0]!r}), which moves the button "
+            "inside its card without changing the markup — the last-child row "
+            "reads the DOM and stays GREEN while the rendered CTA is no longer "
+            "the item `margin-top: auto` aligns (#14406 review round 8, "
+            "measured: `order: -1` passed every row)")
+
+        children = _card_direct_children(
+            _static_pricing_grid(_served(_product_teams_html())))
+        assert len(children) >= 8, (
+            f"only {len(children)} direct children were read out of the four "
+            "pricing cards — `_card_direct_children` has lost the markup shape "
+            "it parses, and the sibling sweep below would pass over nothing")
+        moved = []
+        for prelude, body, _condition in _css_desktop_rules(css):
+            order = _effective_decl(body, "order")
+            if order is None or order.strip().lower() in ("0", ""):
+                continue
+            for part in (candidate.strip() for candidate in prelude.split(",")):
+                rightmost = _css_rightmost_compound(part)
+                if any(
+                        _css_rightmost_selects(rightmost, f".{name}")
+                        for _tag, attrs in children
+                        for name in attrs.get("class", "").split()) or any(
+                        _css_compound_matches_element(rightmost, child)
+                        for child in children):
+                    moved.append((part, order))
+                    break
+        assert moved == [], (
+            f"a rule declares `order: {moved[0][1]}` ({moved[0][0]!r}) on a "
+            "child of a pricing card, so the CTA is no longer the LAST item its "
+            "card's flex column lays out — `margin-top: auto` then aligns the "
+            "button against a taller sibling instead of the card's bottom edge, "
+            "and the four baselines split to three, 70.2px apart (#13645 item "
+            "6) with every other row in this class GREEN (#14406 review round "
+            "12, measured with `.pricing-card .features { order: 1 }` and with "
+            "the same rule written as a TAG selector)")
+
+    def test_no_card_carries_an_inline_style(self):
+        """An inline `style` out-ranks every rule in the sheet, and no reader sees it.
+
+        A declaration in a `style="…"` attribute wins over ANY selector — it
+        sits above the author-origin cascade that every row in this class
+        resolves — and it is not in the `<style>` block the readers parse, so
+        `<div class="pricing-card" style="display:block">` splits the CTAs back
+        to three baselines with every row here GREEN. Measured (#14406 review
+        round 8): that one attribute left all four rows of this class passing.
+
+        The row is scoped to the pricing grid and the `renderPricing()` template
+        (the two places a card or its CTA is authored), so the page's unrelated
+        inline styles stay legal — there are two of them today, both outside the
+        grid, and a whole-page version of this row would red them.
+
+        ⛔ THE ATTRIBUTE IS READ BY `_inline_style_attributes`, NOT BY THE LITERAL
+        `style="`. Round 8 wrote the row as `re.findall(r'style="[^"]*"', …)`,
+        which is ONE of the four spellings an HTML parser accepts: a
+        single-quoted `style='display:block'`, a spaced `style =
+        "display:block"` and the unquoted `style=display:block` all out-rank the
+        pinned CSS exactly as the double-quoted form does — and all left every
+        row of this class GREEN (#14406 review round 9, measured against the
+        pre-fix reader).
+        """
+        served = _served(_product_teams_html())
+        grid = _static_pricing_grid(served)
+        assert grid, "the pricing grid slice is empty — this row would pass vacuously"
+        inline = _inline_style_attributes(grid)
+        assert inline == [], (
+            f"a pricing card or its CTA carries an inline `style` attribute "
+            f"({inline[0]!r}). An inline declaration out-ranks every rule in "
+            "the sheet, so the pinned `display: flex` / `flex-direction: "
+            "column` / `margin-top: auto` no longer apply and the four "
+            "baselines split — while this file's CSS rows, which parse the "
+            "`<style>` block, cannot see it at all (#14406 review round 8, "
+            "measured)")
+        template = re.search(r"return `<div class=\"pricing-card[^`]*`",
+                             _product_teams_html(), re.S)
+        assert template, "renderPricing()'s card template changed shape — re-point this gate"
+        template_inline = _inline_style_attributes(template.group(0))
+        assert template_inline == [], (
+            "renderPricing()'s template builds a card or CTA with an inline "
+            f"`style` attribute ({template_inline[0]!r}), which out-ranks the "
+            "pinned card CSS on the path a real visitor sees while the static "
+            "cards stay aligned (#14406 review round 8)")
+
+    def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
+        """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
+
+        The static cards are the no-JS fallback and `renderPricing()` replaces
+        them on load, so BOTH shapes have to end on the anchor; a link or a
+        footnote added after it would take the slack and the buttons would
+        misalign on one path only (JS visitors) or the other (crawlers).
+        """
+        chunks = _static_pricing_grid(_served(_product_teams_html())).split(
+            '<div class="pricing-card')[1:]
+        assert len(chunks) == 4, (
+            "the split found " f"{len(chunks)} card chunk(s) for four cards — it "
+            "needs the opening tag to read `<div class=\"pricing-card`, so a "
+            "card written `<div id=\"card-free\" class=\"pricing-card\">` is "
+            "absorbed into the previous chunk and its CTA is never checked. The "
+            "siblings in this class assert their rule count for the same reason; "
+            "this row iterated a shrinking population silently")
+        for chunk in chunks:
+            # Cut the chunk at the CARD's own balanced close: the slice handed in
+            # ends at the usage paragraph, so the last chunk would otherwise
+            # carry `<p class="pricing-usage">` into the tail and the row would
+            # pass by looking past it.
+            depth, body = 1, chunk
+            for tag in re.finditer(r"</?div\b[^>]*>", chunk):
+                depth += -1 if tag.group(0).startswith("</") else 1
+                if depth == 0:
+                    body = chunk[:tag.end()]
+                    break
+            assert depth == 0, "a static pricing card has an unbalanced <div>"
+            cta = re.search(r'<a href="[^"]*" class="btn[^"]*">.*?</a>', body, re.S)
+            assert cta, "a static pricing card has no CTA anchor"
+            tail = body[body.index("</a>", cta.start()) + 4:]
+            assert re.fullmatch(r"(?:\s*</div>)+\s*", tail), (
+                "a static pricing card carries markup after its CTA "
+                f"({tail.strip()!r}). `.pricing-card .btn {{ margin-top: auto }}` "
+                "aligns the last child, so anything below the button steals the "
+                "slack and the four baselines split again (#13645 item 6)")
+        template = re.search(r"return `<div class=\"pricing-card[^`]*`", _product_teams_html(), re.S)
+        assert template, "renderPricing()'s card template changed shape — re-point this gate"
+        assert re.search(r'</a>\s*</div>`$', template.group(0)), (
+            "renderPricing()'s template does not end on the CTA anchor, so the "
+            "JS-rendered cards (what a real visitor sees) would take the slack "
+            "somewhere other than the button while the static cards stay "
+            "aligned (#13645 item 6)")
+
+
+class TestCssDesktopReachAndSpecificity:
+    """The readers `TestProductTeamsPricingCardCtaBaseline` stands on.
+
+    All are guards-of-the-guard: a cascade row is only as good as the
+    specificity counter, the media-reach predicate and the markup readers
+    behind it, and each of those had a measured FALSE PASS that no page-level
+    row could see, because the mutant lives in the guard's own arithmetic
+    (#14406 review rounds 6, 8 and 9). The rows below mutate the PAGE TEXT the
+    way an editor would — appending a real rule, or an attribute in another
+    quoting spelling — and assert the reader SEES it.
+    """
+
+    #: The standard's columns (MDN, Specificity: the CLASS column holds classes,
+    #: attribute selectors and PSEUDO-CLASSES; the TYPE column holds type
+    #: selectors and PSEUDO-ELEMENTS). Before the round-6 fix the counter
+    #: subtracted `pseudo + type selectors` from the class count, so every type
+    #: selector CANCELLED a class — `p::before` even went NEGATIVE.
+    SPECIFICITY_CASES = (
+        ("div.pricing-card", (0, 1, 1)),
+        ("div.pricing-card.popular", (0, 2, 1)),
+        ("section .pricing-card.popular", (0, 2, 1)),
+        (".pricing-card.popular", (0, 2, 0)),
+        (".pricing-grid .pricing-card", (0, 2, 0)),
+        ("p::before", (0, 0, 2)),
+        (".pricing-card:hover", (0, 2, 0)),
+        ("#pricing-section .pricing-card.popular:hover", (1, 3, 0)),
+        ("[data-tier='pro'].pricing-card", (0, 2, 0)),
+        ("*", (0, 0, 0)),
+    )
+
+    def test_specificity_puts_type_selectors_in_the_type_column(self):
+        for selector, expected in self.SPECIFICITY_CASES:
+            assert _css_specificity(selector) == expected, (
+                f"`{selector}` is {expected} by the standard's columns; "
+                f"`_css_specificity` says {_css_specificity(selector)}. A type "
+                "selector subtracted from the CLASS count ranks a "
+                "type-qualified override BELOW the rule it beats in a browser, "
+                "which is a false PASS in every row that resolves a cascade "
+                "(#14406 review round 6, finding 1)")
+        for unmodellable in (":is(.a, .b)", ":where(.a)", ":not(.a)", ":has(a)"):
+            assert _css_specificity(unmodellable) is None, (
+                f"`{unmodellable}` changes specificity in ways this counter "
+                "does not model — it must return None so the one caller ranks "
+                "it maximally specific (fail closed), never guess")
+
+    @staticmethod
+    def _page_with(rule: str) -> str:
+        """The page with `rule` appended inside its FIRST `<style>` block.
+
+        Inserted rather than concatenated: appended to the whole document the
+        rule's prelude would carry the closing markup, and
+        `_css_block_end_cascade` skips a prelude containing `<` (it has to, or
+        the document head's hex colours count as ids and the `*` reset wins the
+        cascade). That guard is correct; the mutant has to look like a real edit.
+        """
+        page = _product_teams_html()
+        assert "</style>" in page, "the page has no <style> block to extend"
+        return page.replace("</style>", f"\n{rule}\n</style>", 1)
+
+    def test_a_later_rule_that_declares_another_property_does_not_shadow_the_pin(self):
+        """The pinned reads resolve the PROPERTY's owner, not the last selector match.
+
+        `_css_rules_with_scope(...)[-1]` is the last rule whose PRELUDE is the
+        selector, so a later rule for the same selector that says nothing about
+        the property being pinned hides the rule that does — and the row reports
+        the property as missing rather than as shadowed.
+
+        Measured (#14406 review round 13) at `f091cc8dedb2`, each mutant applied
+        to the tracked page and restored byte-identically:
+
+            .pricing-card { align-self: stretch }        FLEX ROW RED "is not a flex container"
+            .pricing-card { border-color: #fff }         FLEX ROW RED "is not a flex container"
+            .pricing-card .btn { border-radius: 2rem }   FLEX ROW RED "does not take the leftover height"
+
+        None of those moves a CTA — the card is a flex container, its CTA does
+        take the slack — and the first is the edit round 12 fixed, measured
+        written INSIDE the existing block; as its own rule it still red. A
+        guard that reds the page it ships is the one a maintainer deletes.
+
+        The LAST-WINS half is what keeps this from weakening the guard:
+        `_effective_decl` reports the winning declaration in a body, and this
+        test's non-vacuity arm proves an appended `.pricing-card { display:
+        block }` still becomes the owner — so the override shape the rows exist
+        for is untouched.
+        """
+        pairs = ((".pricing-card", ("display",)),
+                 (".pricing-card", FLEX_DIRECTION_PROPS),
+                 (".pricing-card .btn", ("margin-top", "margin-block-start")),
+                 (".pricing-card", ("border",)))
+
+        def owner(css: str, selector: str, props: tuple[str, ...]):
+            # ⛔ THE FAMILY (#14406 review round 16): `flex-direction` and
+            # `margin-top` are each ONE spelling of the thing this row makes
+            # non-vacuous, so requiring the longhand made the whole row red on
+            # a page written with `flex-flow: column nowrap` or
+            # `margin-block-start: auto` — both pixel-identical (measured at
+            # 1440x900: CTA tops 745.78 x4).
+            for prop in props:
+                body = _css_last_declaring_body(css, selector, prop)
+                if body is not None:
+                    return _effective_decl(body, prop)
+            return None
+
+        pristine = {(sel, props): owner(_product_teams_html(), sel, props)
+                    for sel, props in pairs}
+        missing = [k for k, v in pristine.items() if v is None]
+        assert missing == [], (
+            f"the unmutated page declares nothing for {missing!r}, so the rows "
+            "below cannot tell a caught shadow from a page that never had the "
+            "declaration")
+
+        for mutant, shadow_selector, hidden in (
+                (".pricing-card { align-self: stretch }",
+                 ".pricing-card", ("display",)),
+                (".pricing-card { border-color: #fff }",
+                 ".pricing-card", ("display",)),
+                (".pricing-card .btn { border-radius: 2rem }",
+                 ".pricing-card .btn", ("margin-top", "margin-block-start"))):
+            mutated = self._page_with(mutant)
+            # The mutant really does shadow the pre-fix `[-1]` read — otherwise
+            # this arm would pass on the reader it exists to replace.
+            shadow = [body for body, inside_media
+                      in _css_rules_with_scope(mutated, shadow_selector)
+                      if not inside_media][-1]
+            assert all(_effective_decl(shadow, prop) is None
+                       for prop in hidden), (
+                f"`{mutant}` does not shadow the last-selector read for "
+                f"`{hidden}` (its body still declares it), so this arm is "
+                "VACUOUS — pick a mutant that actually hides the pinned "
+                "declaration")
+            for selector, prop in pairs:
+                assert owner(mutated, selector, prop) == pristine[(selector, prop)], (
+                    f"appending `{mutant}` changed the resolved `{prop}` on "
+                    f"`{selector}` from {pristine[(selector, prop)]!r} to "
+                    f"{owner(mutated, selector, prop)!r}. The rule does not "
+                    "touch "
+                    f"`{prop}`, so the page still renders identically — the "
+                    "reader resolved the LAST selector match instead of the "
+                    "last rule that DECLARES the property (#14406 review "
+                    "round 13, measured)")
+
+        # Non-vacuity: an appended rule that DOES declare the property is still
+        # its owner, so the override shape the pinned rows exist for still reds.
+        assert owner(self._page_with(".pricing-card { display: block }"),
+                     ".pricing-card", ("display",)) == "block", (
+            "an appended `.pricing-card { display: block }` is no longer read "
+            "as the owner of `display`, so the row that pins the card's flex "
+            "container is blind to the ordinary override (measured RED before "
+            "and after this reader)")
+        assert owner(self._page_with(".pricing-card { border: 2px solid #f00 }"),
+                     ".pricing-card", ("border",)) == "2px solid #f00", (
+            "an appended `.pricing-card { border: … }` is no longer read as the "
+            "owner of `border`, so the popular card's compensation relation "
+            "would be derived from the border the page no longer has")
+
+    def test_the_growth_reader_separates_a_growing_cta_from_a_sized_one(self):
+        """`_sizing_takes_the_slack` must red GROWTH and permit a definite size.
+
+        Unlike every other reader in this class this one has to decide between
+        two spellings that look alike — `height: 100%` (the size is derived from
+        the card, so the CTA's top moves to the card's content bottom and the
+        baselines split) and `height: 3rem` (the same box on all four cards, so
+        the tops stay equal). A reader that refused both would red a correct
+        page, and one that refused neither is the fail-open found at
+        `bc6525269cba`; `TestProductTeamsPricingCardCtaBaseline` carries the
+        browser measurement, and this row pins the DECISION on the page text.
+
+        Both arms are non-vacuous by construction: every refused mutant is
+        first shown to really reach the CTA through `_css_reaching_decls` with
+        the property it declares, and every permitted one is shown to reach it
+        too — so "not an offender" cannot pass on a rule the reader never saw.
+        """
+        reaching = (
+            ".pricing-card .btn { %s }",
+            ".pricing-grid .btn { %s }",
+            ".pricing-card > .btn { %s }",
+        )
+        cases = (
+            # (declaration, refused?) — measured at 1440x900: the refused rows
+            # are the three-baseline split, the permitted rows leave all four
+            # CTA tops equal (see `_cta_takes_the_slack_by_sizing`).
+            (("flex: 1", True), ("flex: auto", True),
+             ("flex: 1 1 0%", True), ("flex: 0 0 100%", True),
+             ("flex-grow: 1", True), ("flex-grow: 0.5", True),
+             ("flex-basis: 100%", True), ("flex-basis: 50%", True),
+             ("height: 100%", True), ("height: calc(100% - 2rem)", True),
+             ("block-size: 100%", True), ("min-height: 100%", True),
+             ("min-block-size: 100%", True),
+             ("flex: none", False), ("flex: initial", False),
+             ("flex: 0 1 auto", False), ("flex-grow: 0", False),
+             ("flex-basis: auto", False), ("flex-basis: 0%", False),
+             ("flex: 0 1 0%", False), ("height: 3rem", False),
+             ("height: 50vh", False), ("min-height: 0%", False),
+             ("max-height: 100%", False), ("inline-size: 100%", False))
+        )
+        for template in reaching:
+            for declaration, refused in cases:
+                prop, _sep, value = declaration.partition(":")
+                rule = template % declaration
+                mutated = self._page_with(rule)
+                seen = _css_reaching_decls(mutated, prop.strip(), ".btn")
+                assert (rule.strip("{} ").split("{")[0].strip(), value.strip()) in seen, (
+                    f"`{rule}` does not reach `.btn` through "
+                    f"`_css_reaching_decls` (got {seen!r}), so this arm would "
+                    "be VACUOUS — the reader could not see the declaration "
+                    "under any policy")
+                offenders = _cta_takes_the_slack_by_sizing(mutated)
+                got = any(offender_prop == prop.strip()
+                          and _without_important(offender_value) == value.strip()
+                          for _prelude, offender_prop, offender_value in offenders)
+                assert got is refused, (
+                    f"`{rule}` was expected to be "
+                    f"{'REFUSED' if refused else 'PERMITTED'} by "
+                    f"`_cta_takes_the_slack_by_sizing`, and it was "
+                    f"{'permitted' if refused else 'refused'} "
+                    f"(offenders={offenders!r}). "
+                    + ("A growing CTA, or one sized as a percentage of its "
+                       "card, takes the space `margin-top: auto` needs and "
+                       "re-splits the four baselines (#14406 review round "
+                       "17, measured)." if refused else
+                       "This spelling leaves the four CTA tops EQUAL "
+                       "(measured), so refusing it reds a correct page — a "
+                       "guard a maintainer deletes."))
+        # The shipped page is not an offender, so the row it backs is a real
+        # invariant rather than one the page already violates.
+        assert _cta_takes_the_slack_by_sizing(_product_teams_html()) == []
+
+    def test_the_owner_reader_sees_a_desktop_media_block_and_skips_a_narrow_hatch(self):
+        """A media CONDITION, not `inside_media`, decides what owns the property.
+
+        `_css_last_declaring_body` kept only rules at TOP LEVEL, so an override
+        written inside `@media (min-width: 1200px) { … }` — which a browser
+        applies at the 1440x900 viewport every measurement in this PR is taken
+        at — was invisible to it. Measured (#14406 review round 16) at
+        `2d1958c1b9bb`, each mutant appended inside the page's `<style>` (after
+        every base rule, the position where it really wins the cascade), the
+        nine rows of `TestProductTeamsPricingCardCtaBaseline` run, the page
+        restored byte-identically (`sha256 d74e7c9dd20d`):
+
+            @media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }
+            @media (min-width: 1200px) { .pricing-card { padding: 2rem } }
+                -> 9 passed / 9 passed (fail-OPEN) before this fix, 1 failed / 1 failed after.
+
+        The third shape that looked like the same defect — a media
+        `padding-bottom: 1.75rem` on the popular card — was ALREADY RED at that
+        head: the popular row resolves the `padding` family through
+        `_css_block_end_cascade`, which is media-aware since round 5. Only the
+        reads that go through this helper were blind.
+
+        This is round 6's finding one reader out: that round fixed the same
+        `max-` prefix confusion in `_css_desktop_rules` and left this reader
+        re-deciding `inside_media` for itself.
+        """
+        # The reader IS the helper the rest of the family derives from, so a
+        # change here moves `_popular_border_extra_px` and
+        # `_expected_popular_block_end_pad` with it — asserted on the helper,
+        # not only on the body text.
+        assert _popular_border_extra_px(_product_teams_html()) == 1.0, (
+            "the shipped page's popular card eats exactly one extra border "
+            f"pixel; the helper derives {_popular_border_extra_px(_product_teams_html()):g}")
+
+        desktop_media = self._page_with(
+            "@media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }")
+        assert _popular_border_extra_px(desktop_media) == 2.0, (
+            "a `min-width: 1200px` block applies at the measured 1440x900 "
+            "viewport, so the popular card's border is 3px there and the "
+            f"compensation must be 2px; the reader derives "
+            f"{_popular_border_extra_px(desktop_media):g}. Before this fix it "
+            "derived 1px and every row stayed GREEN over a page whose CTA was "
+            "off the baseline (#14406 review round 16, measured)")
+        # ⛔ THE BASE INSET IS DERIVED FROM THE PAGE UNDER TEST, never spelled
+        # as a literal (#14406 review round 16, measured): this expectation read
+        # `calc(1.75rem - 2px)`, so the relation-preserving edit
+        # (`padding: 2rem` together with `padding-bottom: calc(2rem - 1px)` —
+        # the same CTA y values) red it with "the relation the row pins is
+        # stale" about a page whose relation is exactly right. Same class as
+        # the four literals round 12 removed from its sibling rows.
+        base_inset = _base_block_end_pad(_product_teams_html())
+        assert base_inset is not None, (
+            "the shipped page declares no block-END base inset, so this row "
+            "has no operand to derive its expectation from")
+        assert _expected_popular_block_end_pad(desktop_media) == (
+                f"calc({base_inset} - 2px)"), (
+            "the derived inset still subtracts the base 1px while the browser "
+            "applies a 3px border, so the relation the row pins is stale: "
+            f"{_expected_popular_block_end_pad(desktop_media)!r}")
+
+        # …and the base inset, not only the border: this is the second measured
+        # fail-open, and it goes through the OTHER helper (`_css_block_end` on
+        # `padding`) so pinning the border alone would leave it open.
+        base_pad_media = self._page_with(
+            "@media (min-width: 1200px) { .pricing-card { padding: 2rem } }")
+        assert _expected_popular_block_end_pad(base_pad_media) == "calc(2rem - 1px)", (
+            "a `min-width: 1200px` block that moves the base card's inset to "
+            "2rem applies at 1440, so the popular card's compensation must be "
+            f"derived from 2rem; the helper derives "
+            f"{_expected_popular_block_end_pad(base_pad_media)!r} (measured "
+            "GREEN over the split baseline before this fix, #14406 review "
+            "round 16)")
+
+        # A `max-width` at or ABOVE the desktop floor applies at 1440 too —
+        # inclusive, and 1440 is the measured viewport (round 6, finding 4).
+        at_floor = self._page_with(
+            "@media (max-width: 1440px) { .pricing-card.popular { border: 3px solid #f00 } }")
+        assert _popular_border_extra_px(at_floor) == 2.0, (
+            "`max-width: 1440px` INCLUDES 1440, so this block owns the border "
+            "at the measured viewport; reading it as a narrow hatch is the "
+            "round-6 defect in this reader")
+
+        # …and the direction that must NOT move: the page's own viewport
+        # hatches cannot apply at 1440, so they cannot become the owner. A
+        # reader that reds a correct phone layout is the guard a maintainer
+        # deletes.
+        for hatch, expected in (
+                ("@media (max-width: 760px) { .pricing-card.popular { border: 9px solid #f00 } }", 1.0),
+                ("@media (max-height: 820px) { .pricing-card.popular { border: 9px solid #f00 } }", 1.0)):
+            mutated = self._page_with(hatch)
+            assert _popular_border_extra_px(mutated) == expected, (
+                f"`{hatch}` cannot apply at 1440x900, so the shipped "
+                f"compensation is still correct there; the reader derives "
+                f"{_popular_border_extra_px(mutated):g} instead of {expected:g} "
+                " — a FALSE RED on a page that renders as designed")
+
+    def test_a_type_qualified_override_of_the_popular_cards_inset_wins_the_cascade(self):
+        """`section .pricing-card.popular` is (0,2,1) — a browser applies it.
+
+        Both mutants below restore the owner-reported 1px defect (the popular
+        CTA back to 744.78 against 745.78) and BOTH left every row of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN before the round-6
+        specificity fix — measured with the helper itself, which ranked the
+        pinned `calc(1.75rem - 1px)` as the winner in both.
+        """
+        baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
+        assert baseline and baseline[-1][2] == _expected_popular_block_end_pad(
+            _product_teams_html()), (
+            f"the unmutated page's winning block-end inset reads {baseline[-1:]!r}, "
+            "so the rows below cannot distinguish a caught mutant from a page "
+            "that is already wrong")
+        for mutant in (
+                "section .pricing-card.popular { padding-bottom: 1.75rem }",
+                "div.pricing-card.popular { padding-bottom: 1.75rem }",
+        ):
+            cascade = _css_block_end_cascade(self._page_with(mutant), ".pricing-card")
+            assert cascade[-1][2] == "1.75rem", (
+                f"appending `{mutant}` leaves the cascade reader's winner at "
+                f"{cascade[-1][2]!r} ({cascade[-1][0]!r}), but in a browser that "
+                "rule (0,2,1) out-ranks `.pricing-card.popular`'s (0,2,0) calc "
+                "and the popular CTA drops 1px below the other three "
+                "(#13645 item 6, #14406 review round 6 finding 1)")
+
+    def test_a_zeroed_border_is_read_as_the_zero_width_a_browser_applies(self):
+        """A border REMOVED with `0`/`none` is a width of zero, not silence.
+
+        `_css_border_end_width` collected only `px` tokens, so the commonest way
+        to remove a border produced no length at all: the declaration was
+        skipped, the cascade fell back to an EARLIER rule's width, and the
+        relation compared itself. Measured at `ef58aef247` (#14406 review round
+        20), each rule appended to the tracked page and the reader evaluated:
+
+            .pricing-card.popular { border-bottom: 0 }             browser -1, read 1
+            .pricing-card.popular { border-bottom: none }          browser -1, read 1
+            .pricing-card.popular { border-bottom-width: 0 }       browser -1, read 1
+            .pricing-card.popular { border: 0 }                    browser -1, read 1
+            .pricing-card { border-bottom: 0 }                     browser  2, read 1
+            .pricing-card.popular { border-block-width: 3px }      browser  2, read 1
+            .pricing-card.popular { border-block-width: 2px 3px }  same
+
+        `border-block-width` was absent from `BORDER_END_WIDTH_PROPS` entirely,
+        so the whole longhand was invisible; the zero shapes were read as "this
+        rule says nothing about the border". Both re-split the four CTAs by
+        1–2px — the compensation's own signature — with every row GREEN.
+
+        ⛔ ROUND 22: THE STYLE IS A SECOND AXIS, and the width family could not
+        see it (#14406 review round 22, measured at `674f4a8366`). A `none`
+        style stated as a LONGHAND zeroes the width exactly as the shorthand
+        does, but it arrives in a declaration that names no width at all:
+
+            .pricing-card.popular { border-bottom-style: none }      browser -1, read 1
+            .pricing-card.popular { border-bottom-style: hidden }    browser -1, read 1
+            .pricing-card.popular { border-style: none }             browser -1, read 1
+            .pricing-card.popular { border-block-end-style: none }   browser -1, read 1
+            .pricing-card         { border-bottom-style: none }      browser  2, read 1
+
+        So the style and width reads are ranked in their OWN cascade lists and
+        only the resolved PAIR decides. Resolving the style inside the width
+        read (the round-21 shape) got the mirror case wrong in the other
+        direction: `border-bottom: 2px none` with a LATER
+        `border-bottom-style: solid` is a 2px border in a browser, and read 0.
+        """
+        shipped = _product_teams_html()
+        assert _popular_border_extra_px(shipped) == 1.0, (
+            "the unmutated page must read 1px, or the rows below cannot tell a "
+            "caught mutant from a page that is already wrong; it reads "
+            f"{_popular_border_extra_px(shipped):g}")
+
+        # The FAMILY membership is asserted on the helper: a page mutant cannot
+        # prove a property that is absent from the tuple itself.
+        assert "border-block-width" in BORDER_END_WIDTH_PROPS, (
+            "`border-block-width` sets the block-END width, so leaving it out "
+            "of the family makes the whole longhand invisible to the relation")
+        for prop, value, expected in (
+                ("border", "none", 0.0),
+                ("border", "hidden", 0.0),
+                ("border", "0 solid #f00", 0.0),
+                ("border", "4px none #f00", 0.0),
+                ("border-bottom", "4px hidden", 0.0),
+                ("border-width", "1px 2px 0", 0.0),
+                ("border-block-width", "2px 3px", 3.0),
+                ("border-block-width", "4px", 4.0),
+                ("border-bottom", "0", 0.0),
+                ("border-bottom", "0px", 0.0),
+        ):
+            assert _css_border_end_width(prop, value) == expected, (
+                f"`{prop}: {value}` gives block-end {expected:g}px in a "
+                f"browser; the reader says {_css_border_end_width(prop, value)!r}")
+
+        # The STYLE is its own axis (#14406 review round 22): a `none`/`hidden`
+        # style is what makes a stated width unused, and it can arrive in a
+        # longhand the width family cannot see at all.
+        assert "border-bottom-style" in BORDER_END_STYLE_PROPS, (
+            "`border-bottom-style` is how a maintainer REMOVES the popular "
+            "card's 2px border, so leaving it out of the style family makes "
+            "the removal invisible to the relation")
+        for prop, value, expected in (
+                ("border-bottom-style", "none", "none"),
+                ("border-bottom-style", "hidden", "hidden"),
+                ("border-bottom-style", "solid", "solid"),
+                ("border-block-end-style", "NONE", "none"),
+                ("border-style", "solid dashed dotted double", "dotted"),
+                ("border-style", "dashed solid", "dashed"),
+                ("border", "2px solid var(--accent)", "solid"),
+                ("border", "4px none #f00", "none"),
+                ("border-bottom-width", "3px", None),
+                ("border-width", "1px 2px 0", None),
+        ):
+            assert _css_border_end_style(prop, value) == expected, (
+                f"`{prop}: {value}` states block-end style {expected!r}; the "
+                f"style axis reads {_css_border_end_style(prop, value)!r}, so "
+                "the `none`/`hidden` zeroing fires on the wrong declarations")
+        # …and a width this file CANNOT read still fails rather than being read
+        # as zero: `thin` is a keyword, not a length.
+        assert _css_border_end_width("border", "thin") is None, (
+            "`border: thin` states a width this file cannot convert to px, so "
+            "the reader must return None and let the caller fail — treating it "
+            "as zero would be a guess in the compensation's own arithmetic")
+
+        # The relation itself, on the shapes a maintainer actually writes. The
+        # expectation is the browser's: extra = popular's block-END minus base's.
+        for mutant, expected in (
+                (".pricing-card.popular { border-bottom: 0 }", -1.0),
+                (".pricing-card.popular { border-bottom: none }", -1.0),
+                (".pricing-card.popular { border-bottom-width: 0 }", -1.0),
+                (".pricing-card.popular { border: 0 }", -1.0),
+                (".pricing-card.popular { border-bottom: 0px }", -1.0),
+                (".pricing-card { border-bottom: 0 }", 2.0),
+                (".pricing-card { border: none }", 2.0),
+                (".pricing-card.popular { border-block-width: 3px }", 2.0),
+                (".pricing-card.popular { border-block-width: 2px 3px }", 2.0),
+                (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
+                (".pricing-card.popular { border-bottom: 4px none #f00 }", -1.0),
+                # A `none`/`hidden` STYLE LONGHAND is the same removal via a
+                # declaration the width family cannot see (#14406 round 22).
+                (".pricing-card.popular { border-bottom-style: none }", -1.0),
+                (".pricing-card.popular { border-bottom-style: hidden }", -1.0),
+                (".pricing-card.popular { border-block-end-style: none }", -1.0),
+                (".pricing-card.popular { border-style: none }", -1.0),
+                (".pricing-card { border-bottom-style: none }", 2.0),
+                # …and the style axis is RESOLVED, not per-declaration: a later
+                # `solid` restores the border, an `!important` removal holds
+                # against it, and the mirror case (a shorthand whose dead style
+                # is later restored) keeps the width it states.
+                (".pricing-card.popular { border-bottom-style: none }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card.popular { border-bottom-style: none !important }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", -1.0),
+                (".pricing-card.popular { border-bottom: 2px none }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", 1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings, so the compensation relation needs {expected:g}; "
+                f"the reader derives {got:g} and the CTA baseline rows stay "
+                "GREEN over a page whose CTAs are off the shared baseline "
+                "(#14406 review round 20)")
+
+        # NO OVER-REACH: a rule that states no width at all cannot become the
+        # operand (round 13's shape), and an EQUAL border is 0 extra, not 1.
+        for quiet, expected in (
+                (".pricing-card.popular { border-color: #fff }", 1.0),
+                (".pricing-card { border-color: #fff }", 1.0),
+                (".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card.popular { border-bottom-style: dashed }", 1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` declares no border WIDTH, so the shipped 1px "
+                f"compensation is still correct; the reader derives {got:g} "
+                "instead of 1 — a FALSE RED on a page that renders as designed")
+
+    def test_an_unresolved_border_declaration_is_not_read_as_silence(self):
+        """A matched declaration this reader cannot resolve must not be DROPPED.
+
+        Two measured fail-opens at `c692e6e8` (#14406 review round 23), both on
+        the property the compensation exists because of, both leaving the relation
+        at the shipped 1px while a browser applies something else:
+
+            .pricing-card.popular { border-bottom-width: thin }    browser  0, read 1
+            .pricing-card.popular { border-bottom-width: 2em }     browser 31, read 1
+            .pricing-card.popular { border-bottom: 2px }           browser -1, read 1
+            .pricing-card.popular { border: 3px }                  browser -1, read 2
+            .pricing-card.popular { border-bottom: initial }       browser -1, read 1
+            .pricing-card.popular { border-bottom-style: initial } browser -1, read 1
+
+        Root 1: an unresolvable WIDTH was skipped, so an EARLIER rule's width
+        stood — `thin`, `calc()`, `pt`, `em`, `var()` all read as "this rule says
+        nothing about the border" (the same shape round 20 found for `0`/`none`).
+        Root 2: a SHORTHAND that states a width and omits the style RESETS the
+        style to `none` (CSS Backgrounds and Borders 3 — an omitted sub-property
+        takes its initial value), so `border-bottom: 2px` REMOVES the border; the
+        reader contributed no style entry and the earlier `solid` survived.
+
+        The cascade now ranks every MATCHED declaration on its axis and lets the
+        winner decide. A winner this reader cannot resolve makes the read UNKNOWN
+        — the caller fails, this file's fail-closed direction — because guessing
+        a value is what let both roots look GREEN.
+        """
+        shipped = _product_teams_html()
+        assert _popular_border_extra_px(shipped) == 1.0, (
+            "the unmutated page must read 1px, or the rows below cannot tell a "
+            "caught mutant from a page that is already wrong; it reads "
+            f"{_popular_border_extra_px(shipped):g}")
+
+        # Root 2 on the ONE-DECLARATION read: a shorthand that states a width and
+        # no style is a `none` style, i.e. a 0px border.
+        for prop, value, expected in (
+                ("border", "3px", "none"),
+                ("border-bottom", "2px", "none"),
+                ("border-block-end", "2px", "none"),
+                ("border-block", "2px 3px", "none"),
+                ("border-bottom", "initial", "none"),
+                ("border-bottom-style", "initial", "none"),
+                ("border-bottom-style", "unset", "none"),
+        ):
+            assert _css_border_end_style(prop, value) == expected, (
+                f"`{prop}: {value}` leaves the block-end style at {expected!r} "
+                "in a browser (an omitted or reset sub-property takes its "
+                f"initial value); the reader says "
+                f"{_css_border_end_style(prop, value)!r}, so the removal is "
+                "invisible to the relation")
+        assert _css_border_end_width("border-bottom", "2px") == 0.0, (
+            "`border-bottom: 2px` states a 2px width with no style, and no style "
+            "means the used width is 0 — the reader must not hand the cascade a "
+            "2px border a browser does not draw")
+
+        # …and a declaration this reader CANNOT resolve still returns silence
+        # from the single-declaration read: the caller fails rather than guesses
+        # (there is no `thin`→px conversion in this file, by decision).
+        assert _css_border_end_width("border", "thin") is None, (
+            "`border: thin` states a width this file cannot convert to px and no "
+            "style, so the single-declaration read returns None and the caller "
+            "fails rather than guessing a zero")
+        assert _css_border_end_style("border-bottom-style", "inherit") is None, (
+            "`inherit` takes the PARENT's style, which this reader cannot see — "
+            "it must not be modelled as `none`")
+        assert _css_border_end_style("border-width", "3px") is None, (
+            "`border-width` sets widths only and says nothing about the style "
+            "axis, so it must not contribute a `none` style")
+
+        # Root 1 — the relation itself. The expectation is the BROWSER's: the
+        # popular card's block-END border minus its siblings', in px.
+        for mutant, expected in (
+                (".pricing-card.popular { border-bottom: 2px }", -1.0),
+                (".pricing-card.popular { border: 3px }", -1.0),
+                (".pricing-card.popular { border-block: 3px }", -1.0),
+                (".pricing-card.popular { border-block-end: 2px }", -1.0),
+                (".pricing-card.popular { border-bottom: initial }", -1.0),
+                (".pricing-card.popular { border-bottom-style: initial }", -1.0),
+                (".pricing-card.popular { border-style: unset }", -1.0),
+                (".pricing-card { border-bottom: 2px }", 2.0),
+                (".pricing-card { border: 3px }", 2.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings; the reader derives {got:g}, so the CTA baseline "
+                "rows stay GREEN over a page whose popular CTA is off the "
+                "shared baseline (#14406 review round 23)")
+
+        # …and an UNRESOLVABLE width on either operand is UNKNOWN, not stale: the
+        # earlier rule's value is not the answer, so the caller must fail.
+        for mutant in (
+                ".pricing-card.popular { border-bottom-width: thin }",
+                ".pricing-card.popular { border-bottom-width: calc(1px) }",
+                ".pricing-card.popular { border-bottom-width: 1pt }",
+                ".pricing-card.popular { border-bottom-width: 2em }",
+                ".pricing-card.popular { border-bottom-width: var(--w) }",
+                ".pricing-card.popular { border-bottom-style: inherit }",
+                ".pricing-card { border-bottom-width: thin }",
+        ):
+            try:
+                got = _popular_border_extra_px(self._page_with(mutant))
+            except AssertionError:
+                continue
+            raise AssertionError(
+                f"appending `{mutant}` leaves the block-END border width "
+                f"unresolvable to this reader (a keyword, a relative unit, a "
+                f"`calc`/`var`, or an `inherit`), so the read is UNKNOWN and the "
+                f"caller must fail — reading {got:g} is an EARLIER rule's value "
+                "presented as this declaration's, which is how rounds 20-22's "
+                "fail-opens looked (#14406 review round 23)")
+
+        # NO OVER-REACH: a width shorthand says nothing about the style, a
+        # readable shorthand keeps its style, and an unresolvable WIDTH on a card
+        # whose style is readable is still the WIDTH declaration we cannot read.
+        for quiet, expected in (
+                (".pricing-card.popular { border-width: 3px }", 2.0),
+                (".pricing-card.popular { border-bottom: 2px solid #f00 }", 1.0),
+                (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
+                (".pricing-card.popular { border-bottom: 0.5px solid #f00 }", -0.5),
+                (".pricing-card.popular { border-color: #fff }", 1.0),
+                (".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card { border-color: #fff }", 1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` changes no block-end border a browser draws, so the "
+                f"shipped 1px compensation still holds; the reader derives "
+                f"{got:g} instead of {expected:g} — a FALSE RED on a page that "
+                "renders as designed")
+
+    def test_a_pseudo_class_or_an_exclusion_does_not_hide_the_border_reach(self):
+        """The relation's two operands must read the SAME rule set — pseudos too.
+
+        The class-set reach reader (`_compound_selects_every_subject`) bailed on
+        any `:`, and the two other reach readers miss those selectors as well:
+        `_css_rightmost_selects` because the COMPOUND's text is not a substring
+        of them, `_css_compound_matches_element` because it refuses class-named
+        compounds. A rule that reached the popular card *only* through such a
+        selector was therefore invisible to BOTH operands, so the relation kept
+        reading the shipped 1px while a browser applied more.
+
+        Measured at `1b64dd9364` (#14406 review round 23) — one rule appended to
+        the tracked page, `_popular_border_extra_px` evaluated:
+
+            .popular:nth-child(2) { border-bottom-width: 3px }        browser 2, read 1
+            .pricing-card:not(.popular) { border-bottom-width: 0 }     browser 2, read 1
+            #pricing-section div.pricing-card { border-bottom-width: 3px }
+                                                                     browser 0, read -1
+
+        The first two are fail-OPEN — the row stays GREEN over a page whose
+        popular CTA sits 1px off the shared baseline (#13645 item 6) — and the
+        third is the mirror false RED on a page that renders as designed. The
+        base operand's own exclusion is the sharpest: `.pricing-card
+        :not(.popular)` sets the THREE SIBLINGS' border and says nothing about
+        the popular card's, and the old `skip_popular` test was the string
+        `.popular in part`, so the part was dropped from the base operand.
+        """
+        # `expected` is what CSS applies to the page; `before` is what the reader
+        # derived BEFORE round 23's fix, so this row is non-vacuous by
+        # construction (each of the three fails on the pre-fix helper).
+        for mutant, expected, before in (
+                (".popular:nth-child(2) { border-bottom-width: 3px }", 2.0, 1.0),
+                (".pricing-card:not(.popular) { border-bottom-width: 0 }",
+                 2.0, 1.0),
+                # ⛔ `:not(.a.b)` EXCLUDES ONLY AN ELEMENT CARRYING BOTH (#14406
+                # review round 25). Intersecting the argument's class set with
+                # the subject read it as "excludes if EITHER", so this rule was
+                # treated as unreachable for the popular card and the reader
+                # derived 1.0 where a browser applies 0.0 — 1px off, every
+                # CTA-baseline row GREEN. Reverting the loop leaves this case
+                # RED, which is the only thing that pins the fix.
+                (".pricing-card:not(.popular.featured) "
+                 "{ border-bottom-width: 1px }", 0.0, 1.0),
+                ("#pricing-section div.pricing-card "
+                 "{ border-bottom-width: 3px }", 0.0, -1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings, so the compensation relation needs {expected:g}; "
+                f"the reader derives {got:g} (it read {before:g} before round "
+                "23's fix) and the CTA baseline rows stay GREEN over a page "
+                "whose CTAs are off the shared baseline (#14406 review round "
+                "23)")
+
+        # NO OVER-REACH: a rule that names a class the base cards do NOT carry
+        # still belongs to the popular operand alone, and an exclusion naming a
+        # class nobody carries selects EVERY card — so it zeroes both operands
+        # and the relation reports 0. That last one reds the relation's own
+        # `extra_px > 0` guard with the right message instead of reporting the
+        # popular card's untouched 2px.
+        for quiet, expected in (
+                (".pricing-card.popular:nth-child(2) "
+                 "{ border-bottom-width: 3px }", 2.0),
+                ("div.pricing-card.popular { border-bottom-width: 3px }", 2.0),
+                (".pricing-card:not(.featured) { border-bottom-width: 0 }", 0.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` resolves to {expected:g}px extra on a browser; the "
+                f"reader derives {got:g} — a FALSE RED on a page that renders "
+                "as designed, which is the failure mode a maintainer deletes "
+                "the guard over (#14406 review round 23)")
+
+    def test_a_max_width_block_at_or_above_the_desktop_floor_is_reached(self):
+        """`@media (max-width: 1440px)` applies at 1440 — so the guard must see it.
+
+        `max-width` is INCLUSIVE (`width <= N`), which is why the `max-` PREFIX
+        is the wrong predicate: the first draft skipped every `max-` block, so
+        `@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }`
+        applied at the very viewport every measurement in this PR uses and was
+        invisible — three baselines, 70.2px apart, every row GREEN (#14406
+        review round 6, finding 4).
+        """
+        seen = "@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }"
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(seen), "margin-top", ".btn")]
+        assert any(v.strip() == "0" for _p, v in reached), (
+            "the reach reader did not see `.pricing-card .btn { margin-top: 0 }` "
+            "inside `@media (max-width: 1440px)`, which applies at 1440x900 "
+            f"(width <= 1440). Reached: {reached!r}")
+
+        # ...and the page's OWN viewport hatch stays excluded: at 1440x900 a
+        # `max-width: 760px` block cannot apply, and the cards stack there by
+        # design, so pulling it in would be a false RED on a correct page.
+        hatch = "@media (max-width: 760px) { .pricing-card .btn { margin-top: 0 } }"
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(hatch), "margin-top", ".btn")]
+        assert not any(v.strip() == "0" for _p, v in reached), (
+            "the page's own narrow-viewport hatch (`max-width: 760px`) is now "
+            "read as a desktop rule — the floor comparison has drifted below "
+            f"the page's ~907px stack point. Reached: {reached!r}")
+
+    def test_a_comma_separated_media_list_is_decided_by_any_query(self):
+        """A query LIST is an OR, so its SECOND query can make it apply.
+
+        `@media (max-width: 760px), (min-width: 900px)` is *true* at 1440x900
+        through `min-width: 900px` — "a media query list is true if any
+        component query is true and false only when all component queries are
+        false" (W3C Media Queries 4 §3; MDN, "Using media queries").
+
+        The round-6 predicate compared the threshold of every `max-` it found in
+        the whole condition STRING and decided from that one number, so the
+        second query was never evaluated: the block read as a narrow hatch.
+        Measured (#14406 review round 7) — the mutant below left all four rows
+        of `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser
+        applied it and split the rendered CTAs back to three baselines 70.2px
+        apart.
+        """
+        # The list decides by its BEST query, not by its narrowest.
+        for applying in (
+                "(max-width: 760px), (min-width: 900px)",
+                "(min-width: 900px), (max-width: 760px)",
+                "(max-width: 760px), print",
+                "(max-width: 760px), (max-width: 1440px)",
+        ):
+            assert _media_applies_at_desktop(applying), (
+                f"`@media {applying}` applies at 1440x900 through one of its "
+                "queries, but the reach predicate says it does not — the rule "
+                "inside it is invisible to every cascade row (#14406 review "
+                "round 7)")
+
+        # ...and a list of ONLY narrow queries is still a narrow hatch, or the
+        # page's own `max-width: 760px` blocks would become false REDs.
+        for excluded in (
+                "(max-width: 760px)",
+                "(max-width: 760px), (max-width: 480px)",
+                "(max-width: 760px) and (max-height: 600px)",
+        ):
+            assert not _media_applies_at_desktop(excluded), (
+                f"`@media {excluded}` cannot apply at 1440x900, but the reach "
+                "predicate says it does — the cards stack at those widths by "
+                "design, so this is a false RED on a correct page")
+
+        # A comma inside `var()`/`calc()` is not a list separator.
+        assert _media_query_components("(max-width: 760px), (min-width: 900px)") == [
+            "(max-width: 760px)", "(min-width: 900px)"], (
+            "the comma split did not split a real query list")
+        assert _media_query_components("(max-width: var(--narrow, 760px))") == [
+            "(max-width: var(--narrow, 760px))"], (
+            "a comma INSIDE the parens of `var(--narrow, 760px)` was treated as "
+            "a list separator, which invents a second query that does not exist")
+
+    def test_a_comma_list_override_of_the_ctas_slack_is_reached(self):
+        """The page-level mutant that the round-6 predicate left GREEN.
+
+        This reads through `_css_reaching_decls`, the reader
+        `test_no_other_rule_takes_the_ctas_slack` stands on — and that row now
+        REDs on the mutant below (it passed all four before this fix). The
+        padding cascade (`_css_block_end_cascade`) shares the same predicate via
+        `_css_desktop_rules`, so it gains the reach too; it is not asserted here
+        because a `.pricing-card`-specificity mutant is out-ranked by the
+        popular card's (0,2,0) rule on a CORRECT page, which would not
+        distinguish the reach from the specificity.
+        """
+        mutant = ("@media (max-width: 760px), (min-width: 900px) { "
+                  ".pricing-card .btn { margin-top: 0 } }")
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(mutant), "margin-top", ".btn")]
+        assert any(v.strip() == "0" for _p, v in reached), (
+            "`.pricing-card .btn { margin-top: 0 }` inside "
+            "`@media (max-width: 760px), (min-width: 900px)` applies at "
+            "1440x900 (`min-width: 900px` is true there) but the reach reader "
+            "did not see it, so `test_no_other_rule_takes_the_ctas_slack` "
+            f"stays GREEN over a 3-baseline split. Reached: {reached!r}")
+
+    def test_a_flex_flow_override_is_read_as_a_direction(self):
+        """`flex-flow` IS `flex-direction` + `flex-wrap`, and it resets both.
+
+        The shorthand's components are ORDER-INSENSITIVE
+        (`<'flex-direction'> || <'flex-wrap'>`: W3C CSS Flexible Box Layout 1
+        §5.1; MDN, "flex-flow" — *"the components can appear in either order"*),
+        and the direction it omits takes its INITIAL value `row` (same page:
+        *"its defaults are row and nowrap"*). So all four of `flex-flow: row`,
+        `flex-flow: column`, `flex-flow: wrap column` and `flex-flow: nowrap`
+        set a direction, and only `column`/`column-reverse` agrees with the pin.
+
+        Measured (#14406 review round 8): `flex-flow: row` and
+        `flex-flow: nowrap` appended to the card rule left ALL FOUR rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser laid the
+        card out as a row and the CTA left the shared baseline.
+        """
+        assert _css_flex_direction("flex-flow", "row") == "row"
+        assert _css_flex_direction("flex-flow", "column") == "column"
+        assert _css_flex_direction("flex-flow", "wrap column") == "column", (
+            "`flex-flow` is order-insensitive, so the direction keyword is not "
+            "necessarily the first token")
+        assert _css_flex_direction("flex-flow", "nowrap") == "row", (
+            "an OMITTED direction in `flex-flow` is reset to its initial value "
+            "`row` — reading the shorthand as 'no direction here' is the hole "
+            "this row closes")
+        assert _css_flex_direction("flex-direction", "column") == "column"
+
+        for mutant in (".pricing-card { flex-flow: row }",
+                       ".pricing-card { flex-flow: nowrap }"):
+            reached = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(mutant), "flex-flow", ".pricing-card")
+                if _css_flex_direction("flex-flow", v) != "column"]
+            assert reached, (
+                f"appending `{mutant}` overrides the card's `flex-direction: "
+                "column` in a browser, but the flex row's agreement sweep "
+                "found no disagreement — the rendered CTA leaves the shared "
+                "baseline with every row GREEN (#14406 review round 8)")
+
+    def test_a_class_attribute_selector_reaches_the_class_it_names(self):
+        """`[class~="x"]` IS the `.x` shorthand, so it must be reached.
+
+        `~=` is the whitespace-separated-word match and a class is one word of
+        the `class` attribute, which is exactly what the `.x` shorthand denotes
+        — so a rule whose rightmost compound names its own class without the dot
+        selects the same elements. The readers matched the literal `.pricing-card`
+        text only.
+
+        Measured (#14406 review round 8): `[class~="pricing-card"] {
+        display: block }` appended to the sheet left all four rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        """
+        assert _css_rightmost_selects('[class~="pricing-card"]', ".pricing-card")
+        assert _css_rightmost_selects(".grid > [class*='pricing']", ".pricing-card")
+        assert _css_rightmost_selects("[class^='pricing']", ".pricing-card")
+        # Fail-closed: an attribute value this reader cannot read may match.
+        assert _css_rightmost_selects("[class=var(--c)]", ".pricing-card")
+        # ...and a genuinely different class does NOT reach, or the readers
+        # would red every unrelated card rule on a correct page.
+        assert not _css_rightmost_selects('[class~="card"]', ".pricing-card")
+        assert not _css_rightmost_selects(".feature", ".pricing-card")
+
+        mutant = '[class~="pricing-card"] { display: block }'
+        reached = [(p, v) for p, v in _css_reaching_decls(
+            self._page_with(mutant), "display", ".pricing-card")]
+        assert any(v.strip() == "block" for _p, v in reached), (
+            "`[class~=\"pricing-card\"] { display: block }` selects the same "
+            "elements as `.pricing-card` (a class IS a word of the `class` "
+            "attribute) and overrides the pinned `display: flex`, but the "
+            f"reach reader did not see it. Reached: {reached!r}")
+
+        # `all` is the shorthand for every property, so it must be reachable
+        # through the SAME predicate the family sweeps use — on both subjects.
+        for compound, subject in ((".pricing-card", '[class~="pricing-card"]'),
+                                  (".btn", '[class~="btn"]')):
+            reached = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(f"{subject} {{ all: revert }}"), "all", compound)]
+            assert any(v.strip() == "revert" for _p, v in reached), (
+                f"`{subject} {{ all: revert }}` resets every property on "
+                f"`{compound}`, but the `all` reach found nothing — the "
+                "negative row would stay GREEN over a one-declaration revert "
+                "of the pinned CSS (#14406 review round 8)")
+    def test_an_exact_class_attribute_match_reaches_the_class_it_names(self):
+        """`=` is an operator too, and attribute NAMES are case-insensitive.
+
+        Round 8 modelled `~= |= ^= $= *=` and read the operator inside its OWN
+        regex, so `[class="btn"]` never matched the pattern and fell through to
+        `False` — not to the fail-closed arm, which only covered a VALUE the
+        reader could not parse. A browser applies it: three of the four pricing
+        cards carry `class="btn"` EXACTLY, so `[class="btn"] { margin-top: 0 }`
+        is `.pricing-card .btn { margin-top: 0 }` by another name and restores
+        the three-baseline / 70.2px split. Measured (#14406 review round 9)
+        against the pre-fix reader: every row of
+        `TestProductTeamsPricingCardCtaBaseline` stayed GREEN, `_css_reaching_decls`
+        returned no competing declaration at all, and
+        `[class="pricing-card"].popular { padding-bottom: 1.75rem }` — (0,2,0),
+        later in source, so it TAKES the cascade — left the popular-card row
+        reading `calc(1.75rem - 1px)`.
+
+        HTML attribute NAMES are case-insensitive (`[CLASS="btn"]` selects the
+        same elements), so a lowercase-only match is the same hole in a
+        different case; both are asserted below.
+        """
+        # The operator itself, in every spelling that means "exactly this value".
+        for selector in ('[class="btn"]', "[class='btn']",
+                         '[CLASS="btn"]', '[ class = "btn" ]'):
+            assert _css_rightmost_selects(selector, ".btn"), (
+                f"`{selector}` is the `=` (exact) class-attribute match, which "
+                "selects every element whose class attribute is exactly `btn` "
+                "— the pattern the pricing CTAs carry — but the reach reader "
+                "says it selects nothing (#14406 review round 9)")
+        # ...and it is not a licence to reach EVERY class.
+        assert not _css_rightmost_selects('[class="btn-secondary"]', ".btn"), (
+            "`=` is an EXACT match, so `[class=\"btn-secondary\"]` does not "
+            "select `.btn` — reading it as a reach would false-RED a correct "
+            "page")
+        assert not _css_rightmost_selects('[classname="btn"]', ".btn"), (
+            "`classname` is a different attribute; only `class` carries the "
+            "class list")
+        # A class LIST is space-separated, so `=` against a multi-class value is
+        # exactly that element's attribute — the popular card's own markup.
+        assert _css_rightmost_selects('[class="pricing-card popular"]',
+                                      ".pricing-card"), (
+            "`=` compares the WHOLE attribute value and a class list is "
+            "space-separated, so `[class=\"pricing-card popular\"]` IS the "
+            "popular card — with `!important` it takes the cascade, and an "
+            "equality test between the two strings misses it (#14406 review "
+            "round 9)")
+
+        # Page-level: the two mutants the pre-fix reader could not see.
+        for mutant, prop, compound, pinned in (
+                ('[class="btn"] { margin-top: 0 }', "margin-top", ".btn", "auto"),
+                ('[class="pricing-card"] { display: block }',
+                 "display", ".pricing-card", "flex")):
+            disagreeing = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(mutant), prop, compound)
+                if v.strip() != pinned]
+            assert disagreeing, (
+                f"`{mutant}` selects the same elements as `{compound}` and "
+                f"overrides the pinned `{prop}: {pinned}`, but no agreement "
+                "sweep sees it — the CTA/flex rows stay GREEN over a rendered "
+                "3-baseline split (#14406 review round 9)")
+
+        cascade = _css_block_end_cascade(
+            self._page_with(
+                '[class="pricing-card"].popular { padding-bottom: 1.75rem }'),
+            ".pricing-card")
+        assert cascade[-1][2] == "1.75rem", (
+            "`[class=\"pricing-card\"].popular` is (0,2,0) — TIED with the "
+            "pinned `.pricing-card.popular` and later in source, so a browser "
+            "applies its `padding-bottom: 1.75rem` and the popular CTA drops "
+            f"1px. The cascade reader's winner is {cascade[-1]!r} "
+            "(#14406 review round 9)")
+
+    def test_a_bare_element_selector_that_outranks_the_pin_reaches_the_subject(self):
+        """A selector can select the CTA WITHOUT naming `.btn` — and win.
+
+        Round 9 declared this a residual: `#pricing-grid a`, `a[href="/auth"]`
+        and a bare `a` select the page's own CTA tag and destination, and all
+        three left every row of `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        Round 10 settles it with the subject's ELEMENT in the reader's contract
+        (`_element_carrying_class` → `_css_compound_matches_element`) plus the
+        cascade's own specificity floor (`_css_element_reaches`), and this row
+        pins BOTH directions, because each half alone is a broken guard:
+
+        * without the element test, `#pricing-grid a { margin-top: 0 }` —
+          (1,0,1) against the pinned `.pricing-card .btn` (0,2,0), so it wins at
+          ANY source order — moves the CTA with every row GREEN;
+        * without the floor, the page's own `*, *::before, *::after { margin: 0
+          }` and `.selfhost a { … }` would red a CORRECT page, and a guard that
+          reds the page it ships is a guard a maintainer deletes.
+        """
+        page = _product_teams_html()
+        cta = _element_carrying_class(page, "btn")
+        card = _element_carrying_class(page, "pricing-card")
+        assert cta and cta[0] == "a", (
+            f"the pricing CTA's element is {cta!r} — the reader's subject moved")
+        assert card and card[0] == "div", (
+            f"the pricing card's element is {card!r} — the reader's subject "
+            "moved")
+
+        # Identity, not styling: tag, id and attributes decide. A class is the
+        # OTHER reader's question and must not be answered twice.
+        assert _css_compound_matches_element("a", cta)
+        assert _css_compound_matches_element('a[href="/auth"]', cta)
+        assert _css_compound_matches_element("*", cta)
+        assert not _css_compound_matches_element("p", cta), (
+            "the page declares `p { … }` rules; a naked `p` cannot select an "
+            "`<a>`, so matching it would false-RED a correct page")
+        assert not _css_compound_matches_element('a[href="/signup"]', cta)
+        assert not _css_compound_matches_element("#pricing-section", cta)
+        assert not _css_compound_matches_element(".btn", cta)
+
+        # The mutants a browser applies — all four left every row of the class
+        # GREEN before this round (measured against the pre-fix reader).
+        for mutant, prop, compound, pinned in (
+                ("#pricing-grid a { margin-top: 0 }", "margin-top", ".btn",
+                 "auto"),
+                ("#pricing-grid div { display: block }", "display",
+                 ".pricing-card", "flex"),
+                (".pricing-grid a[href] { margin-top: 0 }", "margin-top",
+                 ".btn", "auto"),
+                # `!important` out-ranks ANY non-important declaration, so it is
+                # admitted whatever the selector's weight.
+                ("a { margin-top: 0 !important }", "margin-top", ".btn",
+                 "auto")):
+            disagreeing = [
+                (p, v) for p, v in _css_reaching_decls(
+                    self._page_with(mutant), prop, compound)
+                if v.replace("!important", "").strip() != pinned]
+            assert disagreeing, (
+                f"`{mutant}` selects the subject and out-ranks the pinned "
+                f"`{prop}: {pinned}` — (1,0,1)/(0,2,1) beat (0,2,0) at any "
+                "source order, and `!important` beats it outright — but no "
+                "agreement sweep sees it, so the rows stay GREEN over the "
+                "3-baseline / 70.2px split (#13645 item 6, #14406 round 10)")
+
+        # ...and the OTHER direction, on the same reader: a bare-element rule
+        # that CANNOT win the cascade must not make a correct page red.
+        for mutant in ("a { margin-top: 0 }",          # (0,0,1)
+                       '* { margin-top: 0 }',           # (0,0,0)
+                       'a[href="/auth"] { margin-top: 0 }',   # (0,1,1)
+                       ".selfhost a { margin-top: 0 }"):  # (0,1,1)
+            competing = [
+                (p, v) for p, v in _css_reaching_decls(
+                    self._page_with(mutant), "margin-top", ".btn")
+                if v.strip() != "auto"]
+            assert competing == [], (
+                f"`{mutant}` cannot out-rank the pinned `.pricing-card .btn "
+                "`margin-top: auto`)` (its specificity is below (0,2,0) and it "
+                "is not `!important`), so a browser keeps the pinned value — "
+                f"counting it reds a correct page. Competing: {competing!r}")
+
+        # The cascade reader has no floor on purpose: it ORDERS, so a weak
+        # bare-element rule is ranked below the pin instead of being excluded —
+        # and a strong one (1,0,1) must become the winner, or the 1px defect
+        # ships under a GREEN popular-card row.
+        assert _css_block_end_cascade(
+            self._page_with("p { padding-bottom: 1.75rem }"),
+            ".pricing-card")[-1][2] == _expected_popular_block_end_pad(
+            self._page_with("p { padding-bottom: 1.75rem }")), (
+            "a `p` rule does not select the card, so it must not become the "
+            "cascade winner (and the page's own `p` rules must stay harmless)")
+        assert _css_block_end_cascade(
+            self._page_with("#pricing-grid div { padding-bottom: 1.75rem }"),
+            ".pricing-card")[-1][2] == "1.75rem", (
+            "`#pricing-grid div` is (1,0,1) — it out-ranks the popular card's "
+            "(0,2,0) compensation, so a browser applies its `padding-bottom: "
+            "1.75rem` and the popular CTA drops 1px; the cascade reader's "
+            "winner must be that declaration (#14406 review round 10)")
+
+    def test_an_id_only_compound_reaches_the_element_it_names(self):
+        """`#pricing-grid` is a compound, not a tag called "#pricing-grid".
+
+        `_css_compound_matches_element` checks the ids on the way in and then
+        compared the REMAINDER — with the `#id` text still in it — against the
+        tag, so an id-ONLY rightmost compound matched the subject's id and was
+        discarded one line later. Round 10's mutants all put the id in an
+        ANCESTOR position (`#pricing-grid a`, `#pricing-grid div`), where the
+        rightmost compound is the bare tag and the bug cannot show, so the
+        guard-of-the-guard row added by that round could not see it.
+
+        Measured (#14406 review round 12) — each left ALL NINE rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN:
+
+            #pricing-grid { display: block }        3 baselines
+            #pricing-grid { align-items: center }   boxes to content height
+            #pricing-grid { place-items: center }   the same, via the shorthand
+
+        Both directions are pinned: the id must MATCH, and a wrong id must still
+        be refused — otherwise "strip the remainder" would be a blanket True.
+        """
+        page = _product_teams_html()
+        grid = _element_carrying_class(page, "pricing-grid")
+        assert grid and grid[0] == "div" and grid[1].get("id") == "pricing-grid", (
+            f"the `.pricing-grid` element is {grid!r} — this row's subject moved")
+        for compound in ("#pricing-grid", "div#pricing-grid"):
+            assert _css_compound_matches_element(compound, grid), (
+                f"`{compound}` selects the `.pricing-grid` element by its own "
+                "id, so a rule written that way out-ranks `.pricing-grid` "
+                "(1,0,0 vs 0,1,0) at ANY source order — and the reader says it "
+                "does not reach (#14406 review round 12, measured)")
+        for compound in ("#pricing-section", "#nope", "span#pricing-grid"):
+            assert not _css_compound_matches_element(compound, grid), (
+                f"`{compound}` does NOT select the `.pricing-grid` element, so "
+                "counting it reds a correct page")
+
+        # ...and the whole reader, end to end: each mutant must be REACHED, and
+        # the same declarations with the pinned values must stay silent.
+        for mutant in ("#pricing-grid { align-items: center }",
+                       "#pricing-grid { place-items: center }",
+                       "#pricing-grid { display: block }"):
+            prop = ("align-items" if "align-items" in mutant else "place-items")
+            if "display" in mutant:
+                prop = "display"
+            reached = _css_reaching_decls(self._page_with(mutant), prop,
+                                          ".pricing-grid")
+            assert any("#pricing-grid" in prelude for prelude, _v in reached), (
+                f"`{mutant}` is (1,0,0) and a browser applies it at 1440x900, "
+                "but `_css_reaching_decls` does not reach it — the grid's "
+                "equal-height pin is blind to the id spelling of its own "
+                f"subject. Reached: {reached!r}")
+        for control in ("#pricing-grid { align-items: stretch }",
+                        "#pricing-grid { display: flex }"):
+            prop = "display" if "display" in control else "align-items"
+            bad = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(control), prop, ".pricing-grid")
+                if v.strip().lower() not in ("stretch", "flex", "normal")]
+            assert bad == [], (
+                f"`{control}` declares the PINNED value from a stronger "
+                f"selector, so it must not count as a disagreement: {bad!r}")
+
+    def test_the_inline_style_reader_sees_every_quoting_spelling(self):
+        """An inline `style` attribute has FOUR legal spellings, not one.
+
+        The round-8 row read the attribute as the literal `style="…"`. The
+        HTML parser accepts a single-quoted value, whitespace around the `=`,
+        and an unquoted value, and every one of them out-ranks the whole sheet:
+        `<div class="pricing-card" style='display:block'>` splits the four CTAs
+        back to three baselines exactly as the double-quoted form does.
+        Measured (#14406 review round 9) against the pre-fix row: the
+        single-quoted, spaced and unquoted mutants all left every row of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        """
+        for mutant, pre_fix_reader_sees_it in (
+                ('style="display:block"', True),
+                ("style='display:block'", False),
+                ('style = "display:block"', False),
+                ("style=display:block", False),
+        ):
+            markup = f'<div class="pricing-card popular" {mutant}>'
+            # This pins the FINDING, not just the fix: if the pre-fix reader's
+            # coverage ever changes, the claim in this docstring is wrong and
+            # this row says so instead of asserting against a memory.
+            assert bool(re.findall(r'style="[^"]*"', markup)) is pre_fix_reader_sees_it, (
+                f"the PRE-FIX reader's coverage of {mutant!r} is not what this "
+                "row records — re-derive the finding before trusting the fix")
+            assert _inline_style_attributes(markup) == [mutant], (
+                f"`{mutant}` is a legal inline-style attribute and out-ranks "
+                "every rule in the sheet, but the reader does not see it "
+                f"(got {_inline_style_attributes(markup)!r}) — the "
+                "no-inline-style row stays GREEN over a split baseline "
+                "(#14406 review round 9)")
+
+        # A differently-NAMED attribute is not an inline style, or the row would
+        # false-RED a correct page that carries one.
+        assert _inline_style_attributes('<div data-style="x" x-style="y">') == []
+
+        # The page's own inline styles are real, and the reader sees them — a
+        # reader that returned `[]` unconditionally would pass every row above.
+        assert _inline_style_attributes(_served(_product_teams_html())), (
+            "the page carries inline `style` attributes of its own, so a reader "
+            "that finds none is not reading the attribute at all")
+        assert _inline_style_attributes(
+            _static_pricing_grid(_served(_product_teams_html()))) == [], (
+            "the pricing grid itself now carries an inline `style` attribute — "
+            "that is the defect `test_no_card_carries_an_inline_style` exists "
+            "for, and this row would mask it by staying green here")
+
+    def test_a_wrapped_selector_is_still_read_by_the_cascade(self):
+        """A selector that WRAPS is still a selector — the cascade skipped it.
+
+        `_css_block_end_cascade` skipped any comma part containing a newline,
+        a defence against the document `<head>` that the first rule's prelude
+        carries. The defence was too wide: it also threw away a selector an
+        editor had simply WRAPPED, which is what a long selector does at a line
+        limit — and the wrapped form is (1,2,0), so a browser applies it and the
+        popular card's 1px compensation is gone. Measured (#14406 review round
+        9) on this tree before the fix: every mutant below left the cascade
+        reader's winner at `calc(1.75rem - 1px)` — the guard GREEN over the
+        owner-reported 744.78-vs-745.78 defect, with every row of
+        `TestProductTeamsPricingCardCtaBaseline` passing.
+
+        The head is now cut at the `<style>` tag where it is CREATED
+        (`_css_desktop_rules`), so no downstream reader has to skip newlines and
+        the junk-prefix defence is still in place for a prelude the cut could
+        not reach.
+        """
+        baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
+        assert baseline[-1][2] == _expected_popular_block_end_pad(
+            _product_teams_html()), (
+            f"the unmutated page's winning block-end inset is {baseline[-1:]!r}, "
+            "so these rows could not tell a caught mutant from a page that is "
+            "already wrong")
+        for mutant in (
+                # the descendant combinator on its own line
+                "#pricing-section\n  .pricing-card.popular { padding-bottom: 1.75rem }",
+                # ...as the wrapped part of a selector LIST
+                ".pricing-grid .pricing-card,\n#pricing-section\n  .pricing-card.popular "
+                "{ padding-bottom: 1.75rem }",
+                # ...and with the brace on its own line, tying on specificity
+                ".pricing-grid .pricing-card,\n.pricing-card.popular\n"
+                "{ padding-bottom: 1.75rem }",
+        ):
+            cascade = _css_block_end_cascade(self._page_with(mutant), ".pricing-card")
+            assert cascade[-1][2] == "1.75rem", (
+                f"`{mutant.replace(chr(10), ' ')}` is a WRAPPED selector: (1,2,0) "
+                "in a browser, so it takes the popular card's bottom inset and "
+                "its CTA drops 1px — but the cascade reader's winner is still "
+                f"{cascade[-1]!r}. A newline is not a reason to skip a "
+                "selector (#14406 review round 9, measured)")
+
+        # ...and dropping the newline skip did not turn EVERY wrapped rule into
+        # a reach: a wrapped rule that does not select the card is still not a
+        # candidate, or a correct page would be red for an unrelated line break.
+        unrelated = self._page_with(
+            "#pricing-section\n  .pricing-grid { padding-bottom: 1.75rem }")
+        assert _css_block_end_cascade(unrelated, ".pricing-card")[-1][2] == (
+            _expected_popular_block_end_pad(unrelated)), (
+            "`#pricing-section\n  .pricing-grid` does not select the pricing "
+            "card, so it must not become the cascade winner — dropping the "
+            "newline skip must widen the reader's ENUMERATION, not its "
+            "matching")
+
+    def test_an_or_condition_is_the_same_logical_or_as_a_query_list(self):
+        """`or` is a top-level OR too — the round-7 splitter only knew commas.
+
+        Media Queries 4 §3 spells the OR twice: a comma-separated query LIST,
+        and `<media-condition> or <media-condition>` inside a condition. `and`
+        binds tighter than `or`, so the split belongs on `or` exactly as it
+        belongs on a comma — and the round-7 fix split only on commas, which
+        left the same fail-open one spelling over: the whole
+        `(max-width: 760px) or (min-width: 900px)` came back as ONE component,
+        the reader took `max-width: 760px` out of it and called the block a
+        narrow hatch. Measured on this tree before the split was widened:
+        `_css_reaching_decls` did not see `.pricing-card .btn { margin-top: 0 }`
+        inside it (`reached=False`), while a browser applies the rule at
+        1440x900 through the second operand.
+        """
+        for applying in (
+                "(max-width: 760px) or (min-width: 900px)",
+                "(min-width: 900px) or (max-width: 760px)",
+                "(max-width: 760px) or (max-width: 1440px)",
+                "(max-width: 760px) or (min-width: 900px) or print",
+                "(max-width: 760px) OR (min-width: 900px)",
+        ):
+            assert _media_applies_at_desktop(applying), (
+                f"`@media {applying}` is true at 1440x900 through one of its "
+                "`or` operands, but the reach predicate says it does not — the "
+                "rule inside it is invisible to every cascade row (#14406 "
+                "round-7 class, the `or` spelling)")
+
+        # ...and an `or` whose operands are ALL narrow is still a hatch.
+        for excluded in (
+                "(max-width: 760px) or (max-width: 480px)",
+                "(max-width: 760px) and (min-height: 400px)",
+        ):
+            assert not _media_applies_at_desktop(excluded), (
+                f"`@media {excluded}` cannot apply at 1440x900, but the reach "
+                "predicate says it does — the cards stack at those widths by "
+                "design, so this is a false RED on a correct page")
+
+        assert _media_query_components(
+            "(max-width: 760px) or (min-width: 900px)") == [
+            "(max-width: 760px)", "(min-width: 900px)"], (
+            "the `or` split did not split a real `or` condition")
+        # `or` as a SUBSTRING of a word is not an operator, and neither is an
+        # `or` inside the parens of a function value.
+        assert _media_query_components("(color: orange)") == ["(color: orange)"], (
+            "`orange` was split as `or` + `ange`")
+        assert _media_query_components("(max-width: var(--or, 760px))") == [
+            "(max-width: var(--or, 760px))"], (
+            "an `or` INSIDE the parens of `var(--or, 760px)` was treated as an "
+            "operator, inventing two conditions that do not exist")
+
+    def test_a_negated_media_query_is_reachable_not_a_hatch(self):
+        """`not` inverts the query, so a `max-width` inside it can be DESKTOP.
+
+        `@media not all and (max-width: 760px)` is TRUE at 1440x900: the inner
+        `(max-width: 760px)` is false there, and `not` flips it. The reader
+        modelled only the threshold, so it called the block a narrow hatch and
+        hid the rule. Measured on this tree before the fix: the mutant
+        `@media not all and (max-width: 760px) { .pricing-card .btn {
+        margin-top: 0 } }` returned `reached=False`, so all four rows of
+        `TestProductTeamsPricingCardCtaBaseline` stayed GREEN while a browser
+        applied it and split the rendered CTAs back to three baselines.
+
+        Negation is NOT modelled here, so the predicate fails CLOSED — any
+        `not` query is treated as reaching a desktop viewport. That is
+        deliberately conservative in the over-block direction: it can red a
+        page that hides a rule behind `not (min-width: …)`, but it cannot hide
+        an override, which is the direction that ships a defect.
+        """
+        for reached in (
+                "not all and (max-width: 760px)",
+                "not (min-width: 900px)",
+                "NOT all and (max-width: 760px)",
+                # Round 8's spelling: the negated operand need not be the
+                # `max-` query at all — `print` is false at 1440x900, so
+                # negating the conjunction makes the block apply there.
+                "not print and (max-width: 760px)",
+        ):
+            assert _media_applies_at_desktop(reached), (
+                f"`@media {reached}` carries a `not`, so its `max-` threshold "
+                "does not mean what this reader reads it as — an unmodelled "
+                "negation must fail CLOSED (reaching), never be treated as a "
+                "narrow hatch (#14406 round-7 class, the `not` spelling)")
+
+        # ...and the page's OWN un-negated hatches stay excluded, or this fix
+        # would turn every narrow-viewport rule into a false RED.
+        assert not _media_applies_at_desktop("(max-width: 760px)")
+        assert not _media_applies_at_desktop("(max-height: 820px)")
+
+    def test_an_or_and_a_negated_media_override_are_reached(self):
+        """The page-level mutants the comma-only splitter left GREEN.
+
+        Both rules apply at 1440x900 in a browser and both restore the
+        #13645 item 6 signature — three CTA baselines, 70.2px apart — while
+        `test_no_other_rule_takes_the_ctas_slack` and the flex-column row stayed
+        GREEN, because the reach reader never yielded the declaration at all.
+        """
+        for mutant in (
+                "@media (max-width: 760px) or (min-width: 900px) { "
+                ".pricing-card .btn { margin-top: 0 } }",
+                "@media not all and (max-width: 760px) { "
+                ".pricing-card .btn { margin-top: 0 } }",
+        ):
+            reached = [(p, v) for p, v in
+                       _css_reaching_decls(self._page_with(mutant), "margin-top", ".btn")]
+            assert any(v.strip() == "0" for _p, v in reached), (
+                f"`{mutant}` applies at 1440x900 but the reach reader did not "
+                "see `.pricing-card .btn { margin-top: 0 }`, so the CTA rows "
+                f"stay GREEN over a 3-baseline split. Reached: {reached!r}")
