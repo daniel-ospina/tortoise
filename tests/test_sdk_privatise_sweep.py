@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (EXTENT_TBD lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2046 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
