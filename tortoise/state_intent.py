@@ -319,14 +319,15 @@ _ENDING_BASE = (
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
 #:   route.
-#: * "show me the retired onboarding flow" — an IMPERATIVE naming ONE record, which
-#:   was measured as a hijack: it is a lookup, and the population is not its
-#:   answer. ⛔ `list what we retired` WAS LISTED HERE AND IS NOW ROUTED (#14033);
-#:   the discriminator is not the imperative mood but the `what we <verb>` CLAUSE,
-#:   which asks for a SET (§ ``list_what``). The same frame with a SET noun
-#:   (`list our commitments`, `show me all the commitments`) is the recall the
-#:   start anchor gives up, and it is named here so it is a decision and not a
-#:   gap.
+#: * "show me the retired onboarding flow" / "list the retired onboarding flow"
+#:   — a bare IMPERATIVE naming one record BY NAME, which was measured as a
+#:   hijack. ⛔ `list what we retired` used to sit in this bullet and does NOT
+#:   anymore (#14033): it routes through ``list_what`` below, and the
+#:   discriminator is the `what we <verb>` CLAUSE — a request for the SET — not
+#:   the imperative mood. The bare imperative still refuses, and the same frame
+#:   with a SET noun (`list our commitments`, `show me all the commitments`) is
+#:   the recall the start anchor gives up, named here so it is a decision and
+#:   not a gap.
 #: * "do we ever archive plans" / "do we archive customer emails" — the
 #:   PRESENT-habitual frame, which `do_support` refuses on purpose (round-5
 #:   review, P1): it asks what we do, not which records ended.
@@ -406,10 +407,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("do_support", re.compile(
         rf"^(?:what\s+)?did\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
     # "is the onboarding flow retired?" / "is our pricing decision withdrawn"
-    # (#14033). A YES/NO question whose PREDICATE is the ending is a STATE
-    # question, and the ended population answers it from the row's own `status`:
-    # the caller does not know whether the record ended, and that is exactly what
-    # this population states.
+    # (#14033). A YES/NO question whose PREDICATE is the ending is a state
+    # QUESTION — the predicate, not the mood, is what makes it one.
     # ⛔ The participle ENDS the question, which is the same tail anchor every
     # tail-anchored shape uses: `is the report archived in S3` keeps the relevance
     # read, because `in S3` is a narrowing and the ending is not the whole
@@ -528,10 +527,10 @@ class StateQuestion:
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus a scan of the nine
-    compiled patterns across the two tables, no model call and no IO, so the hot
-    read path pays microseconds and the mapping is unit-testable offline. A
-    ``None``/empty/whitespace query
+    Deterministic and bounded — one normalisation plus a scan of nine compiled
+    patterns (six ending + three commitment), no model call and no IO, so the hot
+    read path pays microseconds
+    and the mapping is unit-testable offline. A ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.
 
     ``ENDED`` takes precedence over ``COMMITMENTS`` when BOTH tables match the
