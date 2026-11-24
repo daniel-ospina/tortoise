@@ -15658,11 +15658,15 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
 # restates it. NO MCP tool and NO public SDK method is added or renamed: the two
 # reads with no reusable function are free functions over a projection there.
 #
-# Shape is `/v1/points`' own (this is REST parity, not a new contract): the same
+# Shape borrows `/v1/points`': the same
 # `_require_scope(…, "graphs:read")`, the same off-loop construction
 # (`_data_sdk_offloaded`) and the same dedicated read lane (`_read_offload`),
 # the same `truncation` instrument for a capped page, and the same 404-on-absence
-# answer for a by-id read.
+# answer for a by-id read. It does NOT adopt the points route's `pointKind`→
+# `kind` renaming: `kind` is the REST name for a property the point doors never
+# accept as `pointKind`, whereas here the write door's own field name IS
+# `objectKind`/`subjectKind`, so a client writes and reads the same word and
+# `?kind=` filters the thing it names.
 #
 # ⛔ These reads do NOT consult `TORTOISE_RECORD_SERVE` — the record seam is
 # armed on the ANCHORED single-Point read only, and `GET /v1/points` (the LIST
@@ -15723,7 +15727,25 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     route (the caller asked this layer), and the same id stays reachable at the
     route that owns its label, plus at ``/v1/entities/{id}/relations`` and
     ``/v1/entities/{id}/belief``, which are deliberately layer-agnostic.
+
+    ⚠️ THE SCOPE GATE IS THE FIRST STATEMENT, here rather than in each of the
+    three callers. An earlier revision of this block put it in the LIST and
+    edge/belief handlers only, so ``GET /v1/{objects,subjects,sources}/{id}``
+    answered a key that lacked ``graphs:read`` — measured: the same key got 403
+    from ``GET /v1/objects`` and 200 from ``GET /v1/objects/{id}``, i.e. it could
+    not list Objects but could fetch any Object payload by id. That is the
+    "never post-filter: the check is the FIRST statement of a data handler"
+    contract ``_require_scope``'s own docstring states, and putting it in the
+    shared helper makes it impossible to add a fourth by-id route without it.
+
+    ⚠️ A CROSS-LABEL ID COLLISION is not reported as the requested layer:
+    ``FalkorProjection._resolve_entity`` dedupes by identity VALUE, so when two
+    labels share an id value only the first branch's entry survives. Latent
+    rather than live (``entity_identity.resolve_or_mint`` mints opaque ids and
+    never derives one from a name), and stated because this filter depends on
+    the entry's label being present.
     """
+    _require_scope(org, "graphs:read", surface)
     _sdk, resolved = await _resolve_entity_off_loop(org, entity_id, surface=surface)
     for entry in resolved:
         if entry.get("label") != label:
@@ -15732,17 +15754,21 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     raise HTTPException(status_code=404, detail=f"{label} not found")
 
 
-def _paged(body_key: str, rows: list[dict], *, delivered: int,
-           candidates: int) -> dict:
+def _paged(body_key: str, rows: list[dict], *, candidates: int) -> dict:
     """The capped-page envelope `/v1/points` publishes, one layer over.
 
-    ``candidates`` is the EXACT match population (a real ``count()`` under the
-    same WHERE), so ``exact=True`` is the honest flag and a truncated page
-    carries ``total_available`` rather than leaving the caller to guess. A
-    complete page is positively marked complete rather than left un-marked.
+    ``candidates`` is the candidate set the PRODUCER could see, before the
+    ``limit`` cut. Two callers fill it two ways, and the difference is disclosed
+    rather than smoothed: ``list_layer`` passes an EXACT ``count()`` under the
+    same WHERE (so ``exact=True`` is honest and a truncated page carries
+    ``total_available``), while ``list_sources`` passes the length of the
+    whole-population list it paged in Python (also exact, for the same reason —
+    it is the complete set). A caller that ever fills it with a probe row must
+    pass ``exact=False`` instead; that is why the flag is not defaulted here.
     """
     from tortoise.truncation import mark_truncation, truncation_field
 
+    delivered = len(rows)
     sink: dict = {}
     mark_truncation(sink, returned=delivered, candidates=candidates, exact=True)
     body: dict = {body_key: rows, "count": delivered}
@@ -15761,7 +15787,7 @@ async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
         lambda: entity_reads.list_layer(
             sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),
         op=surface)
-    return _paged(body_key, rows, delivered=len(rows), candidates=total)
+    return _paged(body_key, rows, candidates=total)
 
 
 @app.get("/v1/objects")
@@ -15862,7 +15888,7 @@ async def list_sources(
         lambda: sdk.list_knowledge(kind="source"), op="list_sources")
     rows = list(rows or [])
     page = rows[offset:offset + limit]
-    return _paged("sources", page, delivered=len(page), candidates=len(rows))
+    return _paged("sources", page, candidates=len(rows))
 
 
 @app.get("/v1/sources/{entity_id:path}")
@@ -15915,8 +15941,12 @@ async def get_entity_relations(
     rendered as ``[]`` would be a positive claim that nothing declares a
     vocabulary we could not see.
 
-    Layer-agnostic on purpose: pass an Object, a Subject, a Point or a Source id
-    (or a Source's url). Delegates to
+    Layer-agnostic on purpose for an ID: pass an Object, a Subject, a Point or a
+    Source id. ⚠️ A URL is NOT accepted here (a single path segment cannot carry
+    one) — a url-keyed Source's document read is ``/v1/sources/{url}``; stated
+    because the alternative, a ``:path`` converter here, would greedily swallow
+    the trailing ``/relations``.
+    Delegates to
     :func:`tortoise.entity_reads.entity_relations` — see its docstring for why
     the two nearest existing reads (``navigation.entityProfile``, which follows
     every edge but drops direction, and ``sdk._expand_relationships``, which
@@ -15935,7 +15965,7 @@ async def get_entity_relations(
         raise HTTPException(status_code=404, detail="Entity not found")
     from tortoise.truncation import mark_truncation, truncation_field
 
-    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # ⛔ `exact=False`: the probe proves THERE ARE MORE, not HOW MANY. An exact
     # total needs a second COUNT over every edge of the node, and publishing the
     # probe's own ``limit + 1`` as ``total_available`` would be a lower bound
     # wearing a total's clothes (``truncation.py``). A truncated page therefore
@@ -15966,6 +15996,18 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     precedent for a REST GET that can write. Stated and not hidden: a client
     must not treat this route as one that cannot.
 
+    ⛔ **A NODE WITH NO PERSISTED BELIEF ANSWERS ``current: null``, not a
+    Beta(1,1).** EP's ``_read_node`` coalesces absent params to ``(1.0, 1.0)``,
+    so an Object, a Subject, or a Point EP has never consumed would otherwise
+    come back as ``{"mean": 0.5, "alpha": 1.0, "beta": 1.0, "effective_n":
+    2.0}`` — a plausible-looking posterior for a node that carries no evidence,
+    which is precisely the substituted-number class this route's neighbour
+    paragraph forbids. An earlier revision of this handler DID return that value
+    (measured: an Object and a Subject both answered 200 with Beta(1,1)). The
+    gate is the node's own persisted belief state — ``posterior_alpha`` /
+    ``ep_alpha`` / ``confidence`` / ``baseline_set`` present — read off the node
+    the handler already resolved, so no second query and no second predicate.
+
     ⛔ An UNCALIBRATED graph REFUSES the confidence read (``CalibrationError``,
     fail-closed since #344) — answered here as **409** with the SDK's own
     sentence, because the precondition that failed is the graph's state, not the
@@ -15977,6 +16019,13 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     values EP wrote), not a before→after delta — one event does not carry the
     prior. The delta, and a decision-level ``PreferenceFlipped`` event, are
     Phase C and are NOT claimed here.
+
+    ⛔ ``entity_id`` is a single path segment, so a URL cannot be passed here: a
+    **url-keyed** ``:Source`` (which carries no ``id``) has its document read at
+    ``/v1/sources/{url}`` but is not addressable on THIS route. Stated because
+    the alternative — a ``:path`` converter — would greedily swallow nothing
+    here (there is no suffix) but would silently differ from its sibling
+    ``/relations``, which has one.
     """
     from tortoise import event_store
     from tortoise.exceptions import CalibrationError
@@ -16013,6 +16062,23 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         provenance = await _read_offload(
             lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
     entity = resolved[0].get("properties") or {}
+    # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE, not the callee. `view` was
+    # already produced above (the calibration gate has therefore run), but EP's
+    # `_read_node` coalesces ABSENT params to Beta(1,1), so an Object/Subject — or
+    # a Point EP never consumed — comes back as a perfectly-shaped posterior over
+    # no evidence. Measured on the tree before this gate: an Object and a Subject
+    # both answered 200 with `{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n:
+    # 2.0}`. Published as `current` that is the substituted-number class #7478
+    # targets, one level below the graph-level 409.
+    #
+    # The keys are the ones a belief write actually stamps (EP's `_flush_cache`
+    # SET, and `set_point_baseline`): any one of them being present and non-null
+    # means a belief EXISTS on this node; the flag is the declared-prior form.
+    measured = any(
+        entity.get(k) is not None
+        for k in ("posterior_alpha", "posterior_beta", "ep_alpha", "ep_beta",
+                  "confidence", "baseline_alpha", "baseline_beta")) \
+        or entity.get("baseline_set") is True
     return {
         "entity": {
             "id": entity_id,
@@ -16020,7 +16086,21 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             "name": (entity.get("name") or entity.get("content")
                      or entity.get("url") or entity.get("eventId")),
         },
-        "current": view,
+        # `null` + a named reason, never a fabricated Beta(1,1): a node with no
+        # persisted belief has no posterior, and the neutral mean is not one.
+        "current": view if measured else None,
+        "currentUnavailable": (None if measured else {
+            "error_code": "NO_PERSISTED_BELIEF",
+            "message": (
+                "this entity carries no persisted EP belief — no posterior, "
+                "prior or baseline — so there is no posterior to report. The "
+                "neutral Beta(1,1) EP would coalesce to is NOT returned here, "
+                "because it is a fallback rather than a measurement."),
+            "entityLabel": label,
+            # `:Event` has no lifecycle and is never an EP participant; saying
+            # which labels CAN carry a belief keeps the answer diagnosable.
+            "beliefCarriedBy": ["Point", "Subject", "Object"],
+        }),
         "lastBeliefWrite": (
             None if last is None else {
                 "at": last.get("ts"),
@@ -16033,12 +16113,15 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                         "posterior_beta"),
                 },
             }),
-        # ⛔ The WINDOW is published, not hidden: `latest_for_node` scans the
+        # ⛔ The WINDOW is published, not hidden: `latest_for_node` retains the
         # newest N events of this type, so a null `lastBeliefWrite` means "not in
-        # that window", never "this node never changed".
+        # that window", never "this node never changed". The window bounds the
+        # RESULT; it does not bound the store's work (there is no `type` index —
+        # see `event_store.LATEST_FOR_NODE_SCAN`), so this is not an O(N) claim.
         "lastBeliefWriteScan": {
             "eventType": "ConfidenceChanged",
             "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
+            "bounds": "retained rows, not the store's scan",
         },
         "evidence": {
             # `null` for a non-Point entity: the chain is recorded on Points

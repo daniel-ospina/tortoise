@@ -51,6 +51,13 @@ from typing import Any
 #: /v1/subjects`` writes ``subjectKind`` (both via ``TortoiseSDK._create_object``
 #: / ``_create_subject``), and a filter naming a different property would answer
 #: an empty page for a graph full of the thing the caller asked for.
+#:
+#: ⚠️ These names ride the RESPONSE too — this module returns the layer's stored
+#: properties rather than renaming them, which is a deliberate departure from
+#: ``GET /v1/points``' ``pointKind`` → ``kind``. There, `kind` is the REST name
+#: for a property the point doors never accept as `pointKind`; here the write
+#: door's own field name is `objectKind`/`subjectKind`, so a client writes and
+#: reads the same word (and `?kind=` filters the thing it names).
 LAYER_KIND_PROP: dict[str, str] = {
     "Object": "objectKind",
     "Subject": "subjectKind",
@@ -62,6 +69,32 @@ LAYER_KIND_PROP: dict[str, str] = {
 #: layer does not have — an ordering property absent from every row makes
 #: ``SKIP``/``LIMIT`` windows non-adjacent slices of anything (#5346).
 LAYER_ORDER_PROP: dict[str, str] = {"Object": "name", "Subject": "name"}
+
+
+def _layer_terminal_predicate(label: str) -> str:
+    """The layer's OWN terminal vocabulary, through the shared predicate.
+
+    ⛔ ``live._terminal_excluded``'s default is the POINT family
+    (``TERMINAL_EXCLUDED_STATUSES``) and it ANDs the legacy ``outdated`` flag,
+    which is a Point-only marker. Its docstring says so explicitly: *"The OBJECT
+    read surfaces (#3301) pass ``commit_ops.OBJECT_TERMINAL_STATUSES`` — a
+    different family with no ``outdated`` member — and must pass
+    ``include_outdated_flag=False``"*. Handing an Object/Subject list the Point
+    family would hide an entity ended by a word the entity family declares and
+    nothing can mark, so the family is chosen per label here rather than
+    defaulted.
+
+    Behaviour-preserving TODAY — ``live.py:655`` records that the Object and
+    Subject sets are subsets of the Point set and that no entity writer sets
+    ``outdated`` — which is exactly why the wrong family would never show up as a
+    visible bug, only as a silent drift when either set changes.
+    """
+    from .commit_ops import OBJECT_TERMINAL_STATUSES, SUBJECT_TERMINAL_STATUSES
+    from .live import _terminal_excluded
+
+    family = (SUBJECT_TERMINAL_STATUSES if label == "Subject"
+              else OBJECT_TERMINAL_STATUSES)
+    return _terminal_excluded("n.status", family, include_outdated_flag=False)
 
 
 def _safe_label(label: str) -> str:
@@ -112,10 +145,9 @@ def list_layer(
     ⛔ ENDED ROWS ARE EXCLUDED from the list, and reachable by id — the same
     tombstone contract ``GET /v1/points`` states (#432/#689/#13034), read through
     the SAME shared predicate (``live._terminal_excluded``) so the vocabulary and
-    the position axis cannot drift between the two list routes.
+    the position axis cannot drift between the two list routes — with the layer's
+    OWN status family (see ``_layer_terminal_predicate``), never the Point one.
     """
-    from .live import _terminal_excluded
-
     label = _safe_label(label)
     order_prop = LAYER_ORDER_PROP.get(label)
     kind_prop = LAYER_KIND_PROP.get(label)
@@ -132,7 +164,7 @@ def list_layer(
     if limit < 1:
         raise ValueError(f"limit must be >= 1, got {limit}")
 
-    conditions = [_terminal_excluded("n.status")]
+    conditions = [_layer_terminal_predicate(label)]
     params: dict[str, Any] = {}
     if kind:
         conditions.append(f"n.{kind_prop} = $kind")
@@ -216,11 +248,11 @@ def entity_relations(
     ``get_relationships``', not a second one invented here.
 
     ⛔ **THE DECLARATION IS THREE-VALUED, NEVER TWO.** ``declaredBy`` is a list of
-    pack namespaces, ``[]`` means *"declared by no installed pack"* (a core or
-    structural predicate, perfectly legal), and ``declarationsReadable: false``
-    means *"the registry could not be asked"*. Flattening the third into ``[]``
-    would report an unreadable registry as a positive finding that nothing
-    declares the predicate — a false claim about a vocabulary we could not see.
+    pack namespaces, ``[]`` means *"no installed pack is NAMED for this
+    predicate"* (a core or structural predicate — legal and ordinary), and
+    ``declarationsReadable: false`` means *"the registry could not be asked"*.
+    Flattening the third into ``[]`` would report an unreadable registry as a
+    positive finding about a vocabulary we could not see.
 
     ``candidates`` is the ``limit + 1`` PROBE row, exactly as ``GET /v1/points``
     reads its own cap: it proves *there are more edges than this page delivers*
@@ -234,6 +266,13 @@ def entity_relations(
     # traversal root with), so a url-keyed `:Source` — which carries no `id` —
     # is addressable here exactly as it is there, and there is no second
     # label→identity table to drift (#5448).
+    #
+    # ⚠️ A URL cannot be passed on the ROUTE (`{entity_id}` is one segment, and a
+    # URL contains `/`), so a url-keyed Source reaches its relations only through
+    # this function, not through `GET /v1/entities/{id}/relations`. Its own
+    # document read is `/v1/sources/{url}` (which uses the `:path` converter).
+    # Stated rather than implied, because the alternative — a `:path` converter
+    # here — would greedily swallow the trailing `/relations`.
     root_label, root, root_key = _resolve_root(proj.g, entity_id)
     if root_label is None:
         return ({"entity": None, "relations": [], "count": 0,
@@ -246,30 +285,39 @@ def entity_relations(
         raise ValueError(
             f"resolution produced an unsupported identity key {root_key!r}")
 
-    # Both directions in ONE statement, each row carrying its own direction
-    # literal — the shape `_hop_query` uses, with the one column it drops kept.
-    # The source side binds `{key:$eid}` so each branch is index-backed on the
-    # anchor's own identity table (#327).
-    query = (
+    # ⛔ `CALL { … } RETURN … ORDER BY … SKIP/LIMIT`, NOT `… UNION ALL … ORDER BY
+    # … SKIP/LIMIT` directly. The flat form SILENTLY DROPS the window on the
+    # deployed engine (FalkorDB graph module 42006): measured at three parallel
+    # edges, `SKIP 0/1/2/3 LIMIT 2` each returned the SAME first rows, so
+    # `offset` was inert and the store returned the node's ENTIRE edge set on
+    # every request — `rows[:limit]` below would have been the only bound. The
+    # single-branch form is unaffected (which is why `list_layer`'s paging
+    # works), so this is the UNION shape's bug, not a parameter problem. The
+    # wrapped form was measured to page correctly (`skip=0 → [B,C]`,
+    # `skip=1 → [C,D]`).
+    inner = (
         f"MATCH (n:{root_label} {{{root_key}:$eid}})-[r]->(m) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
         "       coalesce(m.name, m.content, m.url) AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
-        "       r.idx AS idx, 'out' AS direction "
+        "       r.idx AS idx, 'out' AS direction, id(r) AS rid "
         "UNION ALL "
         f"MATCH (n:{root_label} {{{root_key}:$eid}})<-[r]-(m) "
+        # ⛔ A SELF-LOOP matches BOTH orientations, so without this it is
+        # returned TWICE — two rows, one edge, and `count` double-counts it.
+        # Excluded on the reverse branch only, so a self-edge is reported once,
+        # as outgoing (it is both; there is no third value that would be true).
+        "WHERE coalesce(m.id, m.eventId, m.url) "
+        "      <> coalesce(n.id, n.eventId, n.url) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
         "       coalesce(m.name, m.content, m.url) AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
-        "       r.idx AS idx, 'in' AS direction "
-        # ``ORDER BY`` on a UNION sorts the UNION's result, and every column is
-        # NAMED in both branches so it depends on no engine-specific rendering
-        # of an expression. The order is TOTAL for one node's edge set:
-        # (direction, mechanism, other endpoint, idx) — ``idx`` is the last key
-        # because Cypher allows PARALLEL edges between the same pair, so without
-        # it a SKIP/LIMIT window would not partition the set (#5346's rule, one
-        # relation over).
-        "ORDER BY direction, mechanism, oid, idx SKIP $skip LIMIT $limit"
+        "       r.idx AS idx, 'in' AS direction, id(r) AS rid"
+    )
+    query = (
+        f"CALL {{ {inner} }} RETURN oid, labels, name, mechanism, declared, "
+        "      idx, direction ORDER BY direction, mechanism, oid, idx, rid "
+        "SKIP $skip LIMIT $limit"
     )
     # `limit + 1`: the INTERNAL probe, never a caller-visible cap — the caller's
     # bound still governs what is delivered (`rows[:limit]` below), so the
