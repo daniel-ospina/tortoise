@@ -2834,13 +2834,8 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
             self.cyphers.append(cypher)
 
             class _Res:
-                # ⛔ An INSTANCE attribute, not a mutable class default (RUF012): the
-                # recorded row is per-response, and a class-level `[]` would be shared by
-                # every `_Res` this recorder ever returns.
-                result_set: list
-
                 def __init__(self) -> None:
-                    self.result_set = []
+                    self.result_set: list = []
 
             return _Res()
 
