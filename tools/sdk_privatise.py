@@ -1959,6 +1959,21 @@ SWEEP_NAMES = 66
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
 #: tree, never arithmetic on the last pin; `--check` exits 0 on it.
+#: ⛔ RE-CUT AT THIS LANE'S FOLD OF `origin/main` `e6b3cf2908ba` INTO THE BRANCH — the pair below
+#: is `--repin`'s own output on the RESOLVED tree, never inherited from either parent. `main`'s own
+#: block above stays (this file's standing rule: both sides' records are kept), and the +10 over
+#: `main`'s measurement is attributed ROW BY ROW rather than waved through: the tool's own
+#: `--report --base 28ca66878d --top 3000` was run in a detached worktree at `origin/main` AND on
+#: this tree, the row sets sorted (860 rows on BOTH sides) and diffed, and EXACTLY FOUR rows differ:
+#:   * `graph.query` 281 → 287 (+6)
+#:   * `graph.delete` 5 → 7 (+2)
+#:   * `proj.g.query` 3651 → 3652 (+1)
+#:   * `seen.update` 101 → 102 (+1)
+#: The first three are this PR's batch surface and its tests driving a real graph handle, the
+#: ordinary-word receiver shape this pin exists to DECLARE; `seen.update` is a Python set's own
+#: method, the same class. No shape is added or absorbed in either direction, and `typed references
+#: still pointing at a public name: 0` on this tree, so no typed call site is legitimised by the
+#: re-cut. The pair below is `--repin`'s own output on THIS tree, never arithmetic on the last pin.
 SWEEP_RESIDUE = (11912, "5283703bcbc10cd4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
