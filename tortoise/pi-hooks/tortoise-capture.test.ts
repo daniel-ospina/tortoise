@@ -8359,6 +8359,37 @@ test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", 
     "a peer that removed the obstruction is not an unclearable path: " + outcome);
 });
 
+test("#14350: a leftover ASIDE copy does not report the claim path UNCLEARABLE", () => {
+  // `refused` means THE CLAIM PATH could not be cleared — never "an aside copy
+  // survived" (#14480 review at `1a0c29c3`, P2; reproduced on the Python twin,
+  // which answered `refused` while `os.path.lexists(path)` was already false).
+  //
+  // The obstruction is MOVED ASIDE first, so the claim path is FREE by the time the
+  // junk copy is disposed of. Answering `refused` records an obstruction and
+  // `flushSpool` then runs the WHOLE PASS UNCLAIMED over a writable spool root —
+  // beside any peer that took the free path — and stamps a durable reason that is
+  // not true. `done` is the measured answer; the leftover is swept by `*.tmp-*`.
+  //
+  // MUTATION THAT REDS THIS: return "refused" from the disposal `catch`.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const fifo = join(tmpSpool(), "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — nothing to grade
+  }
+  const junkRefuses = (): never => {
+    const err = new Error("EIO") as NodeJS.ErrnoException;
+    err.code = "EIO";
+    throw err;
+  };
+  const outcome = clearUnusableClaimPath(fifo, undefined, undefined, junkRefuses);
+  assert.equal(outcome, "done",
+    "the rename vacated the claim path, so the clear is done: " + outcome);
+  assert.equal(existsSync(fifo), false,
+    "the obstruction must be gone from the claim path");
+});
+
 test("#14350: the clear NEVER deletes an object it did not judge", () => {
   // The obstruction clear deletes something that is NOT ours, so it goes through
   // the same atomic arbiter as every other removal: the object is MOVED ASIDE and

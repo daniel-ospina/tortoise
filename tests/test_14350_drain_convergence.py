@@ -33,6 +33,7 @@ drain. Nothing here changes the spool's on-disk format (D2 owns that contract).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -1874,6 +1875,57 @@ def test_the_clear_HONOURS_a_landed_REGULAR_file_it_could_not_READ(tmp_path):
     assert fifo.exists(), "a live claim this call could not judge was unlinked"
     assert fifo.read_text() == peer_raw, (
         "the peer's claim must be back in the path, byte for byte")
+
+
+def test_a_leftover_ASIDE_copy_does_not_report_the_claim_path_UNCLEARABLE(
+        tmp_path, monkeypatch):
+    """`REFUSED` means THE CLAIM PATH could not be cleared — never "an aside copy
+    survived" (#14480 review at `1a0c29c3`, P2, reproduced).
+
+    The obstruction is MOVED ASIDE first, so by the time the junk copy is deleted the
+    claim path is already FREE. A failing `unlink` on that copy used to answer
+    `REFUSED`: `acquire` raised `DrainClaimUnavailable`, whose handler stat'ed the
+    now-empty path and ran the WHOLE PASS UNCLAIMED with the false durable reason
+    "the spool root cannot hold a claim" — over a spool root that is writable, beside
+    any peer that took the free path, and written to the SHARED `status.json` so the
+    operator line reads `NO drain exclusion` on a healthy box.
+
+    The consequence is asserted, not just the return value: `acquire` must WIN the
+    claim, because winning it is the difference between a claimed pass and the
+    two-drainer window this module exists to close.
+
+    MUTATION THAT REDS THIS: `return _CLEAR_REFUSED` in the `except OSError` around
+    the quarantine `unlink` (the pre-fix body returned it from the whole `try`).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    real_unlink = os.unlink
+
+    def junk_refuses_to_go(target, *args, **kwargs):
+        if ".tmp-clear-" in str(target):
+            raise OSError(errno.EIO, "the aside copy cannot be deleted")
+        return real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", junk_refuses_to_go)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert outcome == drain_claim._CLEAR_DONE, (
+        "the rename VACATED the claim path, so the clear is DONE — REFUSED runs the "
+        "whole pass unclaimed beside a peer over a writable root: got "
+        + repr(outcome))
+    assert not os.path.lexists(fifo), (
+        "the obstruction must be gone from the claim path")
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, (
+        "a writable spool root must yield the claim — `None` here IS the unclaimed- "
+        "pass arm this PR removes")
+    claim.release()
 
 
 def test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass(tmp_path):

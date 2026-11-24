@@ -839,8 +839,10 @@ class DrainClaimUnavailable(RuntimeError):
 #:   reasoning aside, the `ENOENT` of a peer's own `unlink` is the COMMON case, and
 #:   answering "cannot be cleared" sent `flush_spool` down the unclaimed-pass arm
 #:   while the peer's claim sat on disk (#14423 cycle-8 review, P1 — reproduced).
-#: * ``REFUSED`` — it is still not a claim and we could not remove it (a non-empty
-#:   directory, a permission wall). THIS is what `DrainClaimUnavailable` means.
+#: * ``REFUSED`` — the CLAIM PATH could not be cleared (a non-empty directory,
+#:   a permission wall). THIS — and only this — is what `DrainClaimUnavailable`
+#:   means. ⛔ A leftover ASIDE copy is NOT this answer: the rename already
+#:   vacated the path, so it is free (#14480 review at `1a0c29c3`, P2).
 #: * ``DONE`` — it was removed; retry the loop.
 #: * ``HELD`` — the object we moved aside turned out to be a REGULAR file, i.e. a
 #:   peer installed its claim in the window. It has been put BACK and there is a
@@ -959,9 +961,25 @@ def _clear_unusable_claim_path(path: Path) -> str:
         return _CLEAR_HELD
     try:
         os.unlink(quarantine)
-        return _CLEAR_DONE
-    except OSError:
-        return _CLEAR_REFUSED
+    except OSError as exc:
+        # ⛔ `REFUSED` HERE WOULD BE A LIE, AND AN EXPENSIVE ONE (review at
+        # `1a0c29c3`, P2 — reproduced: the answer was `refused` while
+        # `os.path.lexists(path)` was already False). The `rename` above VACATED the
+        # claim path, so it is FREE right now; the only thing this `unlink` was for
+        # is the aside copy of junk nobody could ever hold. Answering "could not be
+        # cleared" makes `acquire` raise `DrainClaimUnavailable`, whose handler stats
+        # the — now empty — path and runs the WHOLE PASS UNCLAIMED with the false
+        # durable reason "the spool root cannot hold a claim": the two-drainer window
+        # this module exists to close, plus a recorded fact that is not true.
+        # `_CLEAR_DONE` is the measured answer — retry the loop and install the claim
+        # on the free path — and the leftover is collected by the same `*.tmp-*`
+        # sweep the comment above the rename already names, so it is bounded.
+        print(
+            f"tortoise.drain_claim: the cleared obstruction at {path} could not be "
+            f"deleted from the quarantine ({exc}); the claim path is FREE and the "
+            f"leftover is left to the scratch sweeper",
+            file=sys.stderr)
+    return _CLEAR_DONE
 
 
 def acquire(

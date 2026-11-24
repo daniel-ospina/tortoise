@@ -5015,7 +5015,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: local edit after this merged. A byte change at a shipped generation therefore moves
 #: the generation, which is what this file's own doctrine says one line below.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    34, "18b1256d8e2b3a49d3293860569a3737b91e0e8754b639de8cae026aa2d332a4")
+    34, "90af077eb5a0dad59c789c8e1acd8b987168f23932d754132e0638d0e57b0f22")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5229,7 +5229,7 @@ _GENERATION_DIGESTS = {
     # disposal/claim-policy arms were brought into line with the Python twin. A NEW
     # generation rather than a re-cut of 33 because 33 SHIPPED — see the block above
     # `_PINNED_PI_SEAM_INSTALL_CONTRACT`. The entry above is `main`'s, frozen.
-    34: "18b1256d8e2b3a49d3293860569a3737b91e0e8754b639de8cae026aa2d332a4",
+    34: "90af077eb5a0dad59c789c8e1acd8b987168f23932d754132e0638d0e57b0f22",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

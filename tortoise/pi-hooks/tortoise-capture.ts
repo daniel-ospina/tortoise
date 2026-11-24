@@ -5644,6 +5644,11 @@ export function clearUnusableClaimPath(
   //: filesystem that refuses hard links cannot be built in a test, and the arm
   //: that matters is what the restore does when the link is refused.
   link: (from: string, to: string) => void = linkSync,
+  //: The junk-disposal seam, for the same reason `rename` and `link` are seams: a
+  //: filesystem whose `unlink` refuses (`EIO`/`EACCES`/`EROFS`) cannot be built in
+  //: a test, and the arm that matters is what the clear answers when only the
+  //: ASIDE copy cannot be deleted (#14480 review at `1a0c29c3`, P2).
+  unlink: (target: string) => void = unlinkSync,
 ): ClaimPathClear {
   let before: ReturnType<typeof lstatSync>;
   try {
@@ -5706,11 +5711,23 @@ export function clearUnusableClaimPath(
     return "held";
   }
   try {
-    unlinkSync(quarantine);
-    return "done";
-  } catch {
-    return "refused";
+    unlink(quarantine);
+  } catch (error) {
+    // ⛔ `refused` here would be a lie, and an expensive one (review at
+    // `1a0c29c3`, P2 — reproduced on the Python twin: `refused` while the claim
+    // path was already free). The `rename` above VACATED the claim path; the only
+    // thing this `unlinkSync` was for is the aside copy of junk nobody could ever
+    // hold. `refused` makes `acquireDrainClaim` record an obstruction, and
+    // `flushSpool` then runs the WHOLE PASS UNCLAIMED — the two-drainer window this
+    // module exists to close — over a spool root that is perfectly writable, with a
+    // durable reason that is not true. `done` is the measured answer, and the
+    // leftover is collected by the same `*.tmp-*` mtime sweep the comment above the
+    // rename names, so it is bounded.
+    warn(`the cleared obstruction at ${path} could not be deleted from the ` +
+      `quarantine (${(error as Error)?.message ?? error}); the claim path is FREE ` +
+      `and the leftover is left to the scratch sweeper`);
   }
+  return "done";
 }
 
 /**

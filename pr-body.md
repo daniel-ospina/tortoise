@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 84 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
+# 85 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
 uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
-84 passed
+85 passed
 
 # capture family + install-contract pins (generation 34) + store_sync + doctor
 uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
@@ -105,21 +105,21 @@ uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-784 passed
+785 passed
 
 # the five cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-327 pass / 0 fail
+328 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
 
 All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
 (`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
-family count moves with `main` and is re-run rather than arithmetic'd from the last head. `84` is the
-collection count for `tests/test_14350_drain_convergence.py` (77 `def test_` with one 8-way
-`parametrize`: 77 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
+family count moves with `main` and is re-run rather than arithmetic'd from the last head. `85` is the
+collection count for `tests/test_14350_drain_convergence.py` (78 `def test_` with one 8-way
+`parametrize`: 78 − 1 + 8); the three counts here are the same suites re-RUN on this tree, never
 incremented: `69`/`768`/`317` were the figures at `ef4c1405`, and every later round's cases moved them
 by re-running. The number is re-derived whenever a round changes it; a carried count has been the
 wrong figure in this record four times, which is why the sentence states the collection MODEL beside
@@ -444,6 +444,15 @@ them all. That is the shape that reads green everywhere and blocks installs ever
 | **P3 (correction to this record's own history)** the commit `4a49c877` claimed `grep -rn 'cycle-19' tests/ tortoise/ pr-body.md` "returns nothing in this PR's files". It overstates, and is corrected here rather than by rewriting history: that grep returns many hits on those paths (unrelated, pre-existing files), and WITHIN this PR's files it returns exactly **TWO LINES** — one in code, `tests/test_14350_drain_convergence.py:2488`, a CORRECT cycle-19 P3 citation (the `null`-carry-forward arm, whose row is cycle 19's third), and one in `pr-body.md`, which is this row's own three quotations of the pattern. | **recorded**: no code change. The only hyphenated `cycle-19` CITATION left in this PR's files is the legitimate one (this row's own quotations of the pattern aside), and the two `test_capture_install.py` citations that WERE wrong now read cycle 20. |
 | **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
+**Cycle 22** (a fresh-context reviewer at `1a0c29c3`) — 1 **P2**, and unlike cycles 11-21 it is a
+hole in the MECHANISM, in the arm the PR's own headline claim rests on. Reproduced here before it
+was fixed (a finding is a claim, not a fact): the clear's final `unlink` re-raised the lie.
+
+| finding | disposition |
+|---|---|
+| **P2** `_clear_unusable_claim_path` answered `REFUSED` — "the path cannot be cleared" — when the obstruction had ALREADY been moved aside and only the disposal of that ASIDE copy failed. The claim path was FREE at that moment, so `acquire` raised `DrainClaimUnavailable`, whose handler stat'ed the empty path and ran the WHOLE PASS UNCLAIMED with the false durable reason "the spool root cannot hold a claim" — the two-drainer window this PR exists to close, plus a `status.json` fact that is not true and an operator line (`NO drain exclusion (…)`) on a perfectly writable root. Present on BOTH legs (`drain_claim.py`, the `except OSError` after the quarantine `unlink`; `tortoise-capture.ts`, `catch { return "refused" }`), and the function's own contract for `REFUSED` ("it is still not a claim and we could not remove it") was measurably false in this arm: the object WAS removed. | **fixed on both legs**: a failed disposal of the aside copy now WARNS with the cause and answers `DONE`/`done` — the measured answer, because the `rename` vacated the path and the leftover `*.tmp-clear-*` is collected by the same mtime sweep the comment above the rename already names (bounded, not permanent). `_CLEAR_REFUSED`'s contract is tightened to say it means THE CLAIM PATH could not be cleared. The Pi leg gains an `unlink` seam so the failure is reachable in a test (the same reason `rename`/`link` are seams there). One new row per leg; **both verified RED** under the exact mutant (`return _CLEAR_REFUSED` / `return "refused"` in the disposal arm — Python `1 failed`, Pi `fail 1`), and the trees restored `sha256`-identical. The new rows move the counts: `85`/`785`/`328`. |
+| **P3 ×3** the figures the previous head shipped did not survive re-measurement: `783 passed` (the row `1474ec7b` added was never folded in), `7 CROSS-LEG` beside two "four"s (the file spawns `node` from FIVE tests), and a citation to `capture_spool.py:4366-4375` for a handler that lives at `4412-4473` | **fixed by MEASURING, not by arithmetic**: the family was re-run (`785 passed`, recorded in `WORKTREE-REPORT.md` by the tool that parses it), the cross-leg count was counted from the spawn sites (`grep -nE "subprocess\.run\(" …`), and the handler's range was read from `grep -n "except DrainClaimUnavailable"`. |
+
 ## Residuals, stated
 
 * **Generation 34 is this PR's; generation 33 SHIPPED on `main` in #14423** (`da82ece4226`,
@@ -461,13 +470,14 @@ them all. That is the shape that reads green everywhere and blocks installs ever
   number and the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped
   number satisfies all of them. Since the new row: that same revert — five steps, listed in the
   row's docstring — leaves `306 passed, 1 failed`, and the failure is that row. The node pair is
-  unchanged at `327 pass / 0 fail` either way (the Pi suites never ran the ship-frozen assertion). That is why this PR adds
+  unchanged at `328 pass / 0 fail` either way (the Pi suites never ran the ship-frozen assertion). That is why this PR adds
   `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`: it pins the artifacts at 34 AND
   pins `_GENERATION_DIGESTS[33]`/`_READ_SEAM_GENERATION_DIGESTS[33]` as something other than
   this branch's pair, so re-cutting the shipped 33 reds. Verified RED under that re-cut.
 * **The seam digests this record quotes, each re-derived with `sha256sum` and never copied.**
-  At the head this record ships, the capture half is `18b1256d…` = `_PINNED_PI_SEAM_INSTALL_CONTRACT`
-  = `_GENERATION_DIGESTS[34]`, and the read half is `469eb352…` =
+  At the head this record ships, the capture half is `90af077e…` = `_PINNED_PI_SEAM_INSTALL_CONTRACT`
+  = `_GENERATION_DIGESTS[34]` (re-cut in place by cycle 22's disposal fix — 34 is this PR's own,
+  still unreleased, so the entry moves with the bytes), and the read half is `469eb352…` =
   `_PINNED_PI_READ_SEAM_INSTALL_CONTRACT` = `_READ_SEAM_GENERATION_DIGESTS[34]`. The values the
   branch derived at EARLIER heads are kept only WITH the head that owned them, because a
   figure that is not quoted at a head is not a claim a reader can check — and this bullet is
