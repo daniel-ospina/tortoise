@@ -775,7 +775,7 @@
        y=32 in a box with 748px of room: #beat-onboard 189.2px of copy with
        590.8px empty below it, #beat-ingest 173.9px with 606.1px empty, and every
        beat's title box at y=52 — i.e. 2.4px UNDER the fixed Login pill
-       (`padding: 18px 24px`, so its button ends at 54.4), 72-187px² of painted
+       (`padding: 18px 24px`, so its button ends at 54.4), 61-187px² of painted
        overlap on five of the seven beats. That is the owner's "title+body
        appears too high … looks weirdly cropped … instead of centre on the
        screen": not clipping, top-alignment plus the radial `#vignette`, which
@@ -787,12 +787,13 @@
        does not really support it, and the ORDER trick does not rescue that:
        Chrome before 115 RECOGNISES the value but ignores the modifier (MDN
        BCD: `version_added` 115, note "Before version 115, this value is
-       recognized, but has no effect"; Safari before 17.6 is the same, and on a
-       phone-facing page that is the larger exposure), so it
+       recognized, but has no effect"; Safari has no `safe` support before
+       17.6, and on a phone-facing page that is the larger exposure), so it
        KEEPS the declaration, applies it as a plain `center`, and the
        `flex-start` written above it never runs. On that band the hero would be
-       centred unsafely — its top 95.8px clipped and unreachable at scrollTop 0,
-       h1 painted 2844px² under the Login pill at 375x643 — which is worse than
+       centred unsafely — its top 78.5px clipped and unreachable at scrollTop 0
+       ((687.95 copy - 531 box) / 2, measured 78.47), h1 painted 2844px² under
+       the Login pill at 375x643 — which is worse than
        the bug being fixed. Auto margins have no support band: they absorb the
        free space when there is any and resolve to zero when there is not, which
        IS `safe center`'s predicate, in every engine.
