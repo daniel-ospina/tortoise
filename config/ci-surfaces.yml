@@ -70,10 +70,6 @@ version: 1
 # `DEFAULT_FAST_WEIGHT`), `#14597`'s expansion-fusion row
 # (`tests/test_expansion_fusion_14344.py`, `core`, same flat 2.0 s) and `#14627`'s
 # `tools/fly_secret_declaration_report.py` guard — plus THIS PR's own row
-# `tests/test_record_read_point_vector_keys.py`, `#14592`'s
-# `tests/test_14592_operating_model_evidence.py` and `#14597`'s
-# `tests/test_expansion_fusion_14344.py` (all `core`, all flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — plus THIS PR's own row
 # (`tests/test_14582_creation_hook.py`, `core`, at that same flat 2.0 s), the verb packs
 # the pool into two bins: ten shards at 826.7 s (a, b, d, e, f, g, h, i, j, k) and one at
 # 826.6 s (c), so `ceil(826.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is
@@ -84,18 +80,11 @@ version: 1
 # partition must be re-derived on `main` at that head, never read out of this sentence.
 # The delta is measurable and small: `fast_pool()` holds **1336** files at this head
 # against **1335** on EACH parent (re-counted on each parent's own resolved tree, never
-# carried), and the two additions this fold brings are `main`'s
+# carried), so the TWO additions this fold brings are `main`'s
 # `tests/test_expansion_fusion_14344.py` and this PR's
 # `tests/test_14582_creation_hook.py`. ⛔ The other rows named above are `main`'s at
 # this head, NOT this PR's: each landed before this fold. The name lists are what the
 # guard COMPARES against the live emission
-# The delta is measurable and small: `fast_pool()` holds 1336 files at this head against
-# 1334 on `main`, so the TWO additions this fold brings are this PR's
-# `tests/test_14582_creation_hook.py` and, arrived with `main`'s own advance, `#14597`'s
-# `tests/test_expansion_fusion_14344.py`. ⛔ The other rows named above (`#14548`'s,
-# `#14559`'s, `#14560`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
-# this PR's: each landed before this fold. The name lists are what the guard COMPARES
-# against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
 # graded claim about THIS head — a fold re-derives them with the verb, it never carries
 # them.
