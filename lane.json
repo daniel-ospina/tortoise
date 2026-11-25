@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "exit_code": null,
+  "heartbeat_at": 1795650127,
+  "host": "cmux",
+  "issue": 14687,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14687-1795650127-p1198011-29850253",
+  "lease_until": 1795686727,
+  "pid": 1198011,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795650127,
+  "state": "RUNNING",
+  "tag": "14687",
+  "worktree": "/home/cmux/wt-14687"
+}
