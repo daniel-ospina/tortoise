@@ -16196,6 +16196,16 @@ async def get_source(entity_id: str, org: dict = Depends(get_current_org_gated))
     a client can walk straight from a ``/v1/sources`` row (which carries the
     url) to the document.
 
+    ⛔ THE ``id`` ARM IS FOR A PURE ``:Source``; a HYBRID ``(:Object:Source)`` is
+    answered by its ``url`` only. ``_resolve_entity`` dedupes a node onto the
+    FIRST branch that resolves it and this route scopes on the matched branch, so
+    a hybrid resolves as ``Object`` and is refused here by ``id`` with
+    ``404 Source not found`` — while ``GET /v1/sources`` still LISTS that node
+    (label matching is subset-based). Measured, and it is the honest shape rather
+    than a leak: the payload is withheld on every door. Do not read this 404 as
+    "that Source does not exist" — read it as "that node is not a pure Source";
+    the url form answers it, which is what a ``/v1/sources`` row gives a caller.
+
     ⛔ THE PATH CONVERTER IS ``:path``, and it is load-bearing rather than
     cosmetic: a URL contains ``/``, so a bare ``{entity_id}`` segment cannot
     match one at all (the router sees the decoded path, so ``%2F`` is ``/`` by
