@@ -49855,9 +49855,9 @@ class TortoiseSDK:
         Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
         empty expansion returns ``None`` and the caller keeps the ORIGINAL fts
         leg — byte-identical behavior; the expansion can never turn a working
-        lane into a broken one. Returns the MERGED fts leg (expanded run
-        first, first-pass-only ids appended in their original order) when the
-        expansion ran and returned hits; ``None`` otherwise.
+        lane into a broken one. Returns the MERGED fts leg when the expansion
+        ran and returned hits; ``None`` otherwise — merged through THIS module's
+        fusion (`fuse_expansion_pass`), never the old concatenation (#14344).
         """
         if not fts_hits or not query or not query.strip() or not aliases:
             return None
@@ -49882,10 +49882,10 @@ class TortoiseSDK:
             return None
         if leg_trace is not None:
             leg_trace.extend(_exp_trace)
-        seen = {pid for pid, _score in expanded}
-        merged = list(expanded)
-        merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
-        return merged
+        from .expansion_merge import fuse_expansion_pass  # #14344: FUSED merge,
+        # NOT `expanded + pass-1-only`; rule + rank bound + measurement live
+        # in tortoise/expansion_merge.py's docstring (#14344).
+        return fuse_expansion_pass(fts_hits, expanded)
 
     def _entity_key_dense_pass(
         self,
@@ -49915,30 +49915,30 @@ class TortoiseSDK:
         pass fires at most once. It is additionally skipped entirely when the
         composition adds nothing (``_entity_key_dense_query`` returns ``None``).
 
-        Merge contract — identical to the sparse half's: the expanded run comes
-        first, the pass-1-only ids follow in their original order. No id is ever
-        DROPPED (that is what "additive" means here, exactly as in A4), and the
-        candidate SET only grows.
+        Merge contract — no id is ever DROPPED (that is what "additive" means, as in
+        A4), and the candidate SET only grows. The ORDER is the fusion below, NOT the
+        rank concatenation this pass used to apply: "additive" claims the set alone.
 
-        ⛔ State the second half of that contract plainly, because it is real
-        behaviour and not a footnote: the merged leg's ORDER is the composed
-        query's, so an id already in pass 1 can move up **or down**, and in the
-        degenerate case where the expansion finds nothing new the leg is still
-        re-ranked. That is inherent, not a bug — ``rrf_fusion`` is rank-based, so
-        a merge IS an ordering, and the composed query is the same question with
-        entity context attached (no original token is removed), so its ranking is
-        the mechanism rather than a side effect. It is also exactly what the
-        sparse half does. What a caller must NOT read into "additive" is
-        "order-preserving": on a lever that ships OFF and unmeasured, a state
-        that re-orders a dense leg is a decision to be measured, not a promise
-        the code can keep.
+        ⛔ The ORDER, stated because "additive" is read as more than it means: the
+        merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this module's
+        own `rrf_fusion` over both passes, replacing the rank concatenation
+        (`expanded + pass-1-only`) it used to be. An id BOTH passes carry earns both
+        terms — the entity context AGREEING with the query is the signal the expansion
+        exists to supply — but that is an ADVANTAGE, not a dominance guarantee: it is a
+        PAIR condition, `1/(61+h1) + 1/(61+h2)` vs a single-list rank `r`, beaten only
+        while `r > (61+h1)(61+h2)/(122+h1+h2) - 61`: a TIE at equality, a loss below.
+        The SYMMETRIC case (both ranks at <= 61) wins, ties a lone rank-1 at 62 (`2/122 == 1/61`)
+        and loses past it — while a top slot in EITHER list beats every single-list term
+        outright. A pass-1 id can move down only when a candidate out-ranks it in the
+        composed run, when one ties it and wins the id tiebreak (#2952), or by a shared
+        id under that pair condition — never because the expansion had more rows. Order is NOT preserved: a re-ranked dense
+        leg is the mechanism, not a side effect, and on a lever that ships OFF it stays
+        a decision to be measured, not asserted.
 
-        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
-        failure, a query failure or an empty result returns ``None`` and the
-        caller keeps the ORIGINAL dense leg — byte-identical behavior. The
-        expansion's trace entries are appended ONLY on success (the sparse
-        half's own pattern), so a leg-local failure here can never declare a
-        healthy read degraded — the same false-positive the #8488 arm refuses.
+        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, a failed encode
+        or query, or an empty result returns ``None`` and the caller keeps the
+        ORIGINAL dense leg — byte-identical. Trace entries append ONLY on success, so
+        a leg-local failure can never declare a healthy read degraded (#8488).
 
         Stand-downs, both deliberate:
         * the caller only calls this when the read's dense leg PRODUCED rows, so
@@ -50047,10 +50047,10 @@ class TortoiseSDK:
             return None
         if leg_trace is not None:
             leg_trace.extend(_exp_trace)
-        seen = {pid for pid, _score in expanded}
-        merged = list(expanded)
-        merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
-        return merged
+        from .expansion_merge import fuse_expansion_pass  # #14344: FUSED merge —
+        # the same rule as the sparse half, because one merge rule lives in
+        # one place (expansion_merge), not twice in the SDK.
+        return fuse_expansion_pass(vector_hits, expanded)
 
     def _expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).
