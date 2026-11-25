@@ -149,7 +149,15 @@ def _single_sample_meter(used: float):
     because the two ``now`` reads sit microseconds apart inside one call.
     """
     measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
-    age = (datetime.now(UTC) - datetime.fromisoformat(measured_at)).total_seconds()
+    #: ⛔ TZ-SAFE, mirroring `allowance_gate._stale` (`if measured.tzinfo is None:
+    #: measured = measured.replace(tzinfo=UTC)`). A naive spelling —
+    #: `datetime.utcnow().isoformat()`, which the movement arm's `_Shifted` docstring
+    #: names as a supported correct fixture — is armed by the gate exactly like an
+    #: aware one, so THIS check must not be the thing that rejects it, and above all
+    #: must not reject it with `can't subtract offset-naive and offset-aware
+    #: datetimes` (measured: both arms died there instead of judging the value).
+    _read = datetime.fromisoformat(measured_at)
+    age = (datetime.now(UTC) - (_read if _read.tzinfo else _read.replace(tzinfo=UTC))).total_seconds()
     assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
         f"this fixture's reading is {age:.0f}s old; it must be written as an offset "
         f"from now (-60s <= age <= {_FRESH_FIXTURE_MAX_AGE_S}s — the window is a "
@@ -181,12 +189,16 @@ def _clock_aliases() -> dict[str, str]:
 
     The behavioural arm patches the module's ``datetime`` and ``time`` globals. A
     fixture may instead reach the clock through a name bound at MODULE scope, and
-    the STRUCTURAL arm in this same file accepts those (``:279-282``: *"`_t = time`
-    is a module ALIAS, not a definition: discounting it would red a correct fixture
-    that spells a clock read `_t.gmtime()`"*; ``:299``: *"`_now = datetime.now` — an
-    ordinary spelling — stays accepted"*). Patching only the two globals left the
-    arms DISAGREEING: the shift moved nothing, and the failure blamed a calendar
-    pin the fixture did not have (#14646 P2).
+    the STRUCTURAL arm in this same file accepts those — `_defines_a_body` says so
+    (*"`_t = time` is a module ALIAS, not a definition: discounting it would red a
+    correct fixture that spells a clock read `_t.gmtime()`"*) and `reaches_a_clock`
+    does too (*"`_now = datetime.now` — an ordinary spelling — stays accepted"*).
+    ⛔ Those two are named rather than cited by line: an earlier revision of this
+    docstring quoted `:279-282` and `:299`, which had rotted 48 and 68 lines away
+    from the sentences they claimed — the same defect class this PR re-derives 22
+    addresses to remove, inside the file that ships the fix. Patching only the two
+    globals left the arms DISAGREEING: the shift moved nothing, and the failure
+    blamed a calendar pin the fixture did not have (#14646 P2).
 
     So the patch surface is DERIVED from the file's own source, the same discipline
     the structural arm's scope walk already uses. This does NOT reach a name bound
@@ -634,7 +646,11 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     instant_carrying = [
         value for value in handed if holds_an_instant(value, scope)]
     assert not undated, (
-        "the fixture hands the gate a reading that derives from no clock — "
+        "the fixture hands the gate a reading that reaches no clock THIS ARM "
+        "CAN SEE — which is not the same claim as 'derives from no clock': a "
+        "clock reached through a helper in ANOTHER module, or a name this arm "
+        "cannot resolve, reads the same way here and is CORRECT code, so this is "
+        "a fail-closed red on the SOURCE arm, not a proof of a defect. "
         f"{', '.join(ast.unparse(value) for value in undated)} — so the gate "
         "ages it by "
         f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) and will SERVE instead of "
@@ -661,7 +677,14 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "VALUE itself.")
 
     reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
-    age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
+    #: ⛔ TZ-SAFE at EVERY age site, mirroring `allowance_gate._stale`: a naive
+    #: spelling (`datetime.utcnow().isoformat()`) is a CORRECT reading the gate
+    #: arms, and this file must not reject it — least of all with `can't subtract
+    #: offset-naive and offset-aware datetimes`, which names nothing about the
+    #: rule. There are two of these computations (here and inside
+    #: `_single_sample_meter`); both are normalised.
+    _read = datetime.fromisoformat(reading.measured_at)
+    age = (datetime.now(UTC) - (_read if _read.tzinfo else _read.replace(tzinfo=UTC))).total_seconds()
     assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
         f"the fixture's RETURNED reading is {age:.0f}s old — outside this "
         f"fixture's own {_FRESH_FIXTURE_MAX_AGE_S}s window. A literal written "
@@ -691,12 +714,14 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
       arm only because a ``**{…}`` splat gives ``keyword.arg is None``, so the
       arm's calendar check sees no keyword to inspect.
 
-    ⛔ The NAMED form (``replace(day=1)``, ``replace(hour=2)``) is NOT an
-    example: the source arm's ``pins_a_calendar`` reads ``{"year", "month",
-    "day"}`` keywords and catches those already (`a714ff2`). An earlier revision
-    of this paragraph listed ``replace(day=1)`` as a second escaping shape and
-    that was measured FALSE — do not delete a component from the source arm's
-    set on the strength of this test covering it.
+    ⛔ The NAMED form is NOT an example: the source arm's ``pins_a_calendar``
+    reads ``{"year", "month", "day"}`` keywords and catches ``replace(day=1)``
+    already (`a714ff2`) — but NOT ``replace(hour=2)``/``replace(minute=…)``, which
+    is not in that set (measured: structurally green), so THIS arm is what covers
+    the sub-day pins. An earlier revision of this paragraph listed
+    ``replace(day=1)`` as a second escaping shape and that was measured FALSE — do
+    not delete a component from the source arm's set on the strength of this test
+    covering it.
 
     So this arm does not look at the source at all. It hands the fixture two
     clock readings a known distance apart and requires the value that REACHES
@@ -802,8 +827,32 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
         #: re-patched by the later `handed()` calls in the assertion loop.
         for name, value in patches.items():
             monkeypatch.setattr(module, name, value, raising=False)
-        return real_datetime.fromisoformat(
-            _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at)
+        try:
+            raw = _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at
+        except AssertionError as exc:
+            #: ⛔ The fixture's OWN freshness assert runs inside the shifted clock, so
+            #: when this arm cannot see a clock the reading does not move and THAT
+            #: assert fires first — with "written as an offset from now … never as a
+            #: literal date", which is false for a correctly written fixture that
+            #: merely reaches the clock somewhere this patch cannot reach (another
+            #: module, an import-time constant, a name bound inside the fixture). The
+            #: disclosure below never printed, because the exception left `handed()`
+            #: before the `moved` assertion. A fail-closed red is defensible; a
+            #: fail-closed red that asserts a falsehood is not, so the real cause is
+            #: named here rather than leaving the fixture's message to mislead.
+            raise AssertionError(
+                "this arm cannot SHIFT the clock the fixture reads, so it cannot "
+                "judge it — and the fixture's own freshness check fired first, "
+                "because a reading that does not move under a +6h shift looks 6h "
+                f"stale. Underlying report: {exc}\n"
+                "⛔ The three shapes this arm cannot shift, all CORRECT code: a clock "
+                "reached through a helper in ANOTHER module "
+                "(`from tortoise.ids import now_iso`), a constant computed at IMPORT "
+                "time, and a clock name bound INSIDE the fixture's own body "
+                "(`import time as _t`). Read the clock inline — "
+                "`datetime.now(UTC) - timedelta(minutes=5)` — or bind it at module "
+                "scope, which `_clock_aliases()` does reach.") from exc
+        return real_datetime.fromisoformat(raw)
 
     base = handed(timedelta())
     #: TWO shifts, and the second crosses a year ON PURPOSE: a pinned calendar

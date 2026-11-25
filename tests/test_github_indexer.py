@@ -3356,8 +3356,10 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # (`fdedef380b6d`) is also `7ce74ac20fc0`'s — and `7ce74ac20fc0` is a `#14219` lane commit,
     # NOT this branch's head and an ancestor of neither branch nor `main`, so its identity is a
     # statement about `main`'s own history and nothing here is a branch commit's doing. No commit
-    # on this branch carries that blob at all: **every** one of them, `HEAD` included, carries
-    # `c05b92bdc6ac`, i.e. already post-`#14567`. `main` then grew this module above all four twice — `#14596` (+29 above all
+    # on this branch carries that blob at all: **every** commit this branch AUTHORED, `840b74316332`
+    # and back, carries `c05b92bdc6ac`, i.e. already post-`#14567` (the `remerge-14640` merge head
+    # carries `main`'s own blob instead, which is the point of the merge). `main` then grew this module
+    # above all four twice — `#14596` (+29 above all
     # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
     # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
     # `56446` / `56598` / `57113`, and the table below is re-cut to those. The branch's own
