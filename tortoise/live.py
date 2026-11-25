@@ -190,8 +190,16 @@ def ending_axes(status, outdated: bool = False, *, is_closed=None,
     (``SET n += $props`` applies the caller's props unchanged; ``isClosed`` is no
     reserved name, so nothing coerces it). The residual is INHERITED from
     #13034's ``= false`` conjunct, not introduced by the participation read this
-    rule serves; the fix is to normalise at INTAKE (``bool()`` on write, or a
-    cast in the predicate), and until that lands this paragraph IS the record.
+    rule serves; the fix is to normalise at INTAKE (``bool()`` on write), and
+    until that lands this paragraph IS the record.
+    ⛔ **AND A CAST IN THE PREDICATE IS NOT A SUBSTITUTE FOR THAT — MEASURED on
+    this head's engine:** ``toBoolean(0)`` is ``false`` and ``toBoolean(1)`` is
+    ``true``, but ``toBoolean('yes')`` and ``toBoolean('')`` are ``NULL``, so a
+    ``coalesce(toBoolean(n.isClosed), false) = false`` conjunct would keep a
+    stored ``"yes"`` (which ``bool()`` calls an ENDING) — it moves the
+    divergence to the silent-KEEP direction instead of closing it. Normalising
+    at the WRITE door is the only spelling that makes the two reads agree on
+    every value a caller can store.
     Do not "fix" it by making the Python side agree with the Cypher one — that
     would end a node on a value the caller said nothing about, which is the
     silent-drop direction this rule exists to close.
