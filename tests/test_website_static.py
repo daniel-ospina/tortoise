@@ -79,7 +79,7 @@ from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 from urllib.parse import urljoin, urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
@@ -5620,8 +5620,133 @@ def _compact_selector(selector: str) -> str:
     return re.sub(r"\s*>\s*", ">", " ".join(selector.split()))
 
 
-def _beats_whose_ground(selector: str, side: str,
-                        beat_ids: list[str]) -> list[str]:
+#: A beat's GROUND as the MARKUP declares it: `(tag, classes, ids)`.
+GroundElement = tuple[str, frozenset[str], frozenset[str]]
+
+#: Tags that never have a closing tag (HTML §13.1.2), so a direct-child walk
+#: must not count them as leaving an element open.
+_HTML_VOID_ELEMENTS = frozenset((
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+))
+
+#: One tag: `(closing, name, attrs)`. The attribute group steps over quoted
+#: `>` characters, so `<a title="a > b">` is one tag rather than two.
+_HTML_TAG_RE = re.compile(
+    r"<(/?)([a-zA-Z][\w-]*)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+
+
+def _element_attribute(attrs: str, name: str) -> frozenset[str]:
+    """The whitespace-separated tokens of one attribute, `"`/`'`/bare."""
+    match = re.search(
+        rf"\b{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))",
+        attrs, re.I)
+    if not match:
+        return frozenset()
+    return frozenset(
+        (match.group(1) or match.group(2) or match.group(3) or "").split())
+
+
+def _element_facts(tag: str, attrs: str) -> GroundElement:
+    return (tag.lower(), _element_attribute(attrs, "class"),
+            _element_attribute(attrs, "id"))
+
+
+def _element_body(markup: str, start: int, tag: str) -> str:
+    """`markup` from `start` to the `</tag>` that CLOSES it, depth-matched."""
+    pattern = re.compile(rf"<(/?)({tag})\b", re.I)
+    depth = 1
+    for match in pattern.finditer(markup, start):
+        depth += -1 if match.group(1) else 1
+        if depth == 0:
+            return markup[start:match.start()]
+    return markup[start:]
+
+
+def _direct_child_elements(body: str) -> list[GroundElement]:
+    """Every DIRECT child element of `body`, in document order."""
+    out: list[GroundElement] = []
+    depth = 0
+    for match in _HTML_TAG_RE.finditer(body):
+        closing, tag, attrs = match.group(1), match.group(2).lower(), match.group(3)
+        # A void element, or the XHTML-style `<div/>` spelling, closes itself.
+        if tag in _HTML_VOID_ELEMENTS or attrs.rstrip().endswith("/"):
+            if not closing and depth == 0:
+                out.append(_element_facts(tag, attrs))
+            continue
+        if closing:
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            out.append(_element_facts(tag, attrs))
+        depth += 1
+    return out
+
+
+def _beat_ground_elements(
+        html: str) -> dict[str, dict[str, GroundElement | None]]:
+    """Each beat's FIRST and LAST direct child, read from the MARKUP.
+
+    ⛔ The ground is an ELEMENT, not a selector (#14697 residual 2). The reader
+    used to accept a simple selector of any kind before `:first-child` on the
+    grounds that they "all address the same ELEMENT" — true of the combinator,
+    false of a TYPE selector, which addresses a possibly-empty set: the first
+    child of `#beat-ingest` is an `<h2>`, so `#beat-ingest > p:first-child
+    { margin-top: auto }` matches NOTHING and the beat stays top-aligned,
+    while the guard reported the centring intact (measured at 375x812: 0.0 /
+    574.1, #14677 verbatim). Reading the child removes the guess.
+
+    HTML comments are stripped first: this page's own hero comment QUOTES
+    `<video>`/`<div>`, and a raw tag scan would read those as children.
+    """
+    markup = _without_html_comments(html)
+    out: dict[str, dict[str, GroundElement | None]] = {}
+    for match in BEAT_SECTION_RE.finditer(markup):
+        beat = match.group(1)
+        tag_end = markup.find(">", match.end())
+        if tag_end == -1:
+            continue
+        children = _direct_child_elements(
+            _element_body(markup, tag_end + 1, "section"))
+        out[beat] = {
+            "first-child": children[0] if children else None,
+            "last-child": children[-1] if children else None,
+        }
+    return out
+
+
+def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool:
+    """Does the simple selector between `>` and `:{side}` address `element`?
+
+    `""`/`*` address whatever the ground is, and an element this reader could
+    not resolve (`None`) is accepted rather than red — the combinator already
+    says it is the beat's direct child.
+
+    Attribute selectors and any pseudo-class other than the end under test are
+    DROPPED rather than modelled: this stays a shape check on the tag/class/id
+    a rule names, not a selector engine (the docstring of
+    `_beat_ground_margin_candidates` states the same boundary for the cascade).
+    """
+    if element is None or simple in ("", "*"):
+        return True
+    tag, classes, ids = element
+    stripped = re.sub(r"\[[^\]]*\]", "", simple)
+    stripped = re.sub(r"::?[\w-]+(?:\([^)]*\))?", "", stripped)
+    for token in re.findall(r"[.#]?[\w-]+", stripped):
+        if token.startswith("#"):
+            if token[1:] not in ids:
+                return False
+        elif token.startswith("."):
+            if token[1:] not in classes:
+                return False
+        elif token.lower() != tag:
+            return False
+    return True
+
+
+def _beats_whose_ground(
+        selector: str, side: str,
+        grounds: dict[str, dict[str, GroundElement | None]]) -> list[str]:
     """The beats whose GROUND — the DIRECT child of `#beat-x` / `.beat` — is `side`.
 
     ⛔ The combinator is anchored to the beat's OWN compound selector rather
@@ -5636,64 +5761,145 @@ def _beats_whose_ground(selector: str, side: str,
             behaviourally identical to the shipped one, with a message saying
             the rule was missing.
 
-    So: the beat's compound must be followed by the child combinator, and a
-    simple selector of ANY kind (type, class, `*`) between the combinator and
-    the pseudo is accepted — those all address the same ELEMENT, since the
-    combinator still makes it a direct child of the beat. `(?![-\\w])` keeps
-    `#beat-hero-copy` from satisfying `#beat-hero`.
+    So: the beat's compound must be followed by the child combinator, and the
+    simple selector between the combinator and the pseudo must ADDRESS the
+    child the markup declares (`_ground_selector_matches`, #14697 residual 2).
+    `(?<![-\\w])` keeps `#beat-hero-copy` from satisfying `#beat-hero`.
     """
     compact = _compact_selector(selector)
     out: list[str] = []
-    for beat in beat_ids:
+    for beat, sides in grounds.items():
         for subject in (f"#{beat}", ".beat"):
-            if re.search(rf"{re.escape(subject)}(?![-\w])[^\s>]*>"
-                         rf"(?:[^\s>]*)?:{side}\b", compact):
+            match = re.search(
+                rf"(?<![-\w]){re.escape(subject)}(?![-\w])[^\s>]*>"
+                rf"([^\s>]*):{side}\b", compact)
+            if match and _ground_selector_matches(match.group(1),
+                                                  sides.get(side)):
                 out.append(beat)
                 break
     return out
 
 
-def _beat_auto_margin_homes(
-        html: str) -> dict[str, list[tuple[str, str, float]]]:
-    """`{beat: [(ground_side, height), …]}` for every auto-margin centring rule.
+class _GroundMargin(NamedTuple):
+    """One declaration that can set a ground end, with its CASCADE weight.
 
     `height` is the `N` of the `@media (max-height: Npx)` block the rule lives
-    in, or `math.inf` for a BASE rule — a base rule fires at every viewport, so
-    it is a home for any height. A rule that is conditional on something else
-    (a `max-width` block, say) is NOT recorded: it does not fire wherever the
-    height-based hatch fires, which is the only question this answers.
+    in, or `math.inf` for a BASE rule — a base rule fires at every viewport.
+    """
 
-    Per-block, deliberately (#14683 review P2): flattening every `max-height`
-    block into one list answered "does SOME block centre this beat?", which is
-    green with the centring in a block that never fires on the phones the hatch
-    fires on — the fail-open the review measured.
+    value: str
+    important: bool
+    specificity: tuple[int, int, int]
+    order: int
+    height: float
+
+
+#: The shorthands that also set a ground end, and the value each END takes out
+#: of them: `margin: <top> [<right> [<bottom> [<left>]]]` (so the bottom is the
+#: third value, or the first when fewer than three are written) and
+#: `margin-block: <start> [<end>]` (the same rule on the logical axis).
+_MARGIN_SHORTHANDS = ("margin", "margin-block")
+
+
+def _shorthand_end_value(value: str, side: str, shorthand: str) -> str | None:
+    """The value `shorthand` gives `side`'s end — `None` when it sets nothing.
+
+    Reuses `_css_block_end`, which already carries the positional rule for the
+    block-END axis (and is shared with the padding reader); block-START is the
+    first token for both shorthands, the rule `SLACK_PROPS` documents.
+    """
+    if not _css_tokens(value):
+        return None
+    if side == "last-child":
+        return _css_block_end(shorthand, value)
+    return _css_tokens(value)[0]
+
+
+def _ground_end_declaration(body: str, side: str) -> tuple[str, bool] | None:
+    """The declaration that WINS **inside this rule** for `side`'s end.
+
+    Returns `(value, important)`. Three properties of the cascade are modelled
+    here and each was a measured fail-open of the previous reader (#14683
+    review cycle 2 finding 2, #14697 residuals 1-2, #13837 R2/R3):
+
+    * the LONGHAND/alias pair (`margin-top`, `margin-block-start`) is one
+      declaration to the layout engine, so a logical spelling between the
+      `auto` and nothing else still centres;
+    * a declaration that appears LATER wins, which is how `margin-top: auto;
+      margin-top: 0` disables the centring;
+    * `!important` beats an ordinary declaration wherever it is written, and
+      the `margin`/`margin-block` SHORTHANDS set the end (`margin: 0` is the
+      ordinary way to reset one).
+    """
+    props = dict(GROUND_ENDS)[side]
+    winner: tuple[str, bool] | None = None
+    for declaration in _css_blanked(body).split(";"):
+        name, separator, value = declaration.partition(":")
+        if not separator:
+            continue
+        name = name.strip().lower()
+        value = " ".join(value.split())
+        important = bool(_CSS_IMPORTANT.search(value))
+        if important:
+            value = _without_important(value)
+        if name in props:
+            candidate: tuple[str, bool] | None = (value, important)
+        elif name in _MARGIN_SHORTHANDS:
+            end = _shorthand_end_value(value, side, name)
+            candidate = None if end is None else (end, important)
+        else:
+            continue
+        if candidate is None:
+            continue
+        if winner is not None and winner[1] and not candidate[1]:
+            continue
+        winner = candidate
+    return winner
+
+
+def _beat_ground_margin_candidates(
+        html: str) -> dict[str, dict[str, list[_GroundMargin]]]:
+    """Every rule that can set a ground end, as CASCADE CANDIDATES.
+
+    `{beat: {"first-child": [_GroundMargin, …], "last-child": [...]}}` — one
+    list per end, in source order — so `_winning_ground_margin` can answer
+    "which of these owns the end at viewport height H?", which is the only
+    question that decides whether the centring actually fires.
+
+    ⛔ THE CASCADE IS COMPUTED HERE, ACROSS RULES (#14697 residual 1). Grading
+    the winning declaration *within* a body — what the previous reader did — is
+    green with an ordinary override APPENDED after the `auto` rule, which is
+    exactly how a later edit disables a declaration: measured with
+    `#beat-ingest > :first-child { margin-top: 0 }` appended inside the same
+    `@media (max-height: 820px)` block, the rendered beat top-aligned again
+    (0.0 / 574.1 at 375x812, #14677 verbatim) and the guard reported the
+    mechanism intact. Order is W3C css-cascade-4 §6: importance, then
+    specificity, then source order — the same ranking `_css_block_end_cascade`
+    applies to the pricing card's insets.
+
+    A rule conditional on something OTHER than height (a `max-width` block) is
+    not a candidate: it does not fire wherever the height-based hatch fires,
+    and per-block attribution is what keeps the 400px-block fail-open closed
+    (#14683 review P2).
+
+    Stated, because a guard is trusted for what it claims: a selector whose
+    specificity cannot be modelled (`:is()`/`:where()`/`:not()`/`:has()`) is
+    ranked MAXIMALLY specific by `_css_specificity`, i.e. fail-closed; `@layer`,
+    `@supports` and inheritance are not modelled (this page uses none).
     """
     blanked = _css_blanked(html)
     height_spans = _max_height_media_spans(html)
     other_media = _media_block_spans(html)
-    beat_ids = _beat_section_ids(html)
-    homes: dict[str, list[tuple[str, str, float]]] = {}
+    grounds = _beat_ground_elements(html)
+    out: dict[str, dict[str, list[_GroundMargin]]] = {}
     for match in re.finditer(r"([^{}]+)\{", blanked):
         prelude = " ".join(match.group(1).split())
         if not prelude or prelude.startswith("@"):
             continue
         body = _brace_block(blanked, match.end() - 1)
-        # The WINNING value per property, never "the string appears" (#14683
-        # review cycle 2, findings 1 and 2). Two measured fail-opens: appending
-        # `margin-top: 0` below the `auto` (an ordinary way to disable it) and
-        # swapping the pair (`margin-bottom: auto` on the FIRST child) both left
-        # this reader reporting the mechanism intact while the rendered page was
-        # back to #14677 at 375x812 — 32px top gap, the beat's own padding.
-        # `_effective_decl` is this file's existing answer to exactly that
-        # hazard (#14020 review cycle 3, P1), so the reader uses it rather than
-        # reintroducing a substring scan.
-        centred_props = {
-            prop
-            for _side, props in GROUND_ENDS
-            for prop in props
-            if _effective_decl(body, prop) == "auto"
-        }
-        if not centred_props:
+        declarations = {side: _ground_end_declaration(body, side)
+                        for side, _props in GROUND_ENDS}
+        if not any(declarations.values()):
             continue
         height = math.inf
         for block_height, start, end in height_spans:
@@ -5704,17 +5910,32 @@ def _beat_auto_margin_homes(
             if any(start <= match.start() < end for start, end in other_media):
                 continue
         for part in (p for p in prelude.split(",") if p.strip()):
-            for side, props in GROUND_ENDS:
-                # ⛔ The PROPERTY is part of the home, not just the side (#14683
-                # review cycle 2, finding 1): `margin-bottom: auto` on
-                # `:first-child` is not `margin-top: auto`, it is
-                # `space-between` — recorded without the property, a swap
-                # satisfied the wrong end and the guard stayed green.
-                matched = centred_props.intersection(props)
-                for beat in _beats_whose_ground(part, side, beat_ids):
-                    for prop in matched:
-                        homes.setdefault(beat, []).append((side, prop, height))
-    return homes
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for side, declaration in declarations.items():
+                if declaration is None:
+                    continue
+                value, important = declaration
+                for beat in _beats_whose_ground(part, side, grounds):
+                    out.setdefault(beat, {}).setdefault(side, []).append(
+                        _GroundMargin(value, important, specificity,
+                                      match.start(), height))
+    return out
+
+
+def _winning_ground_margin(candidates: list[_GroundMargin],
+                          height: int) -> str | None:
+    """The value that OWNS the end at viewport height `height`, or `None`.
+
+    A candidate fires at every height at or below its block's `max-height`
+    (`math.inf` for a base rule), so only candidates ACTIVE at `height`
+    compete; among those the winner is decided by importance, then
+    specificity, then source order.
+    """
+    active = [c for c in candidates if c.height >= height]
+    if not active:
+        return None
+    return max(active, key=lambda c: (c.important, c.specificity,
+                                      c.order)).value
 
 
 def _base_beat_justify_values(html: str) -> list[str] | None:
@@ -5803,7 +6024,7 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             for beat in _beats_addressed(prelude, beat_ids):
                 arms.setdefault(beat, set()).add(height)
 
-    homes = _beat_auto_margin_homes(html)
+    candidates = _beat_ground_margin_candidates(html)
     problems: list[str] = []
     for beat in beat_ids:
         if beat not in arms:
@@ -5813,13 +6034,25 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             continue
         for height in sorted(arms[beat]):
             for side, props in GROUND_ENDS:
-                if any(h_side == side and h_prop in props and h_height >= height
-                       for h_side, h_prop, h_height in homes.get(beat, ())):
+                # ⛔ The WINNER of the CASCADE at this height, not "some rule
+                # says `auto`" (#14697 residual 1) and not "some rule on the
+                # ground says auto" (#14697 residual 2) — both were measured
+                # green over a page that renders #14677.
+                value = _winning_ground_margin(
+                    candidates.get(beat, {}).get(side, ()), height)
+                if value == "auto":
                     continue
-                problems.append(
-                    f"{beat} > :{side}: no `{props[0]}: auto` fires at "
-                    f"`max-height: {height}px`, where the hatch switches it "
-                    f"to `flex-start`")
+                if value is None:
+                    problems.append(
+                        f"{beat} > :{side}: no `{props[0]}: auto` fires at "
+                        f"`max-height: {height}px`, where the hatch switches it "
+                        f"to `flex-start`")
+                else:
+                    problems.append(
+                        f"{beat} > :{side}: `{props[0]}` resolves to `{value}` "
+                        f"at `max-height: {height}px`, where the hatch switches "
+                        f"it to `flex-start` — a later or more specific rule "
+                        f"wins the cascade, so the free space is not shared out")
     return problems
 
 
@@ -6138,7 +6371,11 @@ class TestShortViewportCentringIsGradedPerBlock:
             "    }\n"
             f"{extra}\n"
             "</style></head><body>\n"
-            '<section id="beat-hero" class="beat"><div>copy</div></section>\n'
+            # The ground carries `.doc-grid` so a class-qualified selector
+            # addresses it; the guard reads the ELEMENT, not the selector text
+            # (#14697 residual 2).
+            '<section id="beat-hero" class="beat">'
+            '<div class="doc-grid">copy</div></section>\n'
             "</body></html>\n"
         )
 
@@ -6200,10 +6437,16 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert "beat-hero > :first-child" in problems[0], problems
         assert _beats_whose_ground(
             "#beat-hero .doc-copy > :first-child", "first-child",
-            ["beat-hero"]) == []
+            _beat_ground_elements(page)) == []
 
     def test_a_class_qualified_ground_is_still_the_ground(self):
-        """`#beat-hero > .doc-grid:first-child` IS the hero's ground."""
+        """`#beat-hero > .doc-grid:first-child` IS the hero's ground.
+
+        The fixture's ground carries the class the rule names, because the
+        guard now reads the ELEMENT (#14697 residual 2): a rule naming a class
+        no child has addresses nothing, and grading it as centring is the
+        fail-open that residual measured.
+        """
         page = self._page(hatch=(
             self.ALIGNED_HATCH
             + "\n      #beat-hero > .doc-grid:first-child { margin-top: auto; }"
@@ -6214,9 +6457,10 @@ class TestShortViewportCentringIsGradedPerBlock:
 
     def test_a_longer_id_is_not_the_beat(self):
         """`#beat-hero-copy` must not satisfy `#beat-hero`'s ground."""
+        page = self._page(hatch=self.CENTRED_HATCH)
         assert _beats_whose_ground(
             "#beat-hero-copy > :first-child", "first-child",
-            ["beat-hero"]) == []
+            _beat_ground_elements(page)) == []
 
     def test_a_class_scoped_alignment_arm_reaches_every_beat(self):
         """`.beat { justify-content: flex-start }` IS a hatch arm for every beat.
@@ -6295,6 +6539,139 @@ class TestShortViewportCentringIsGradedPerBlock:
             "the reader graded the presence of a string, not the winning "
             "declaration")
         assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_an_appended_override_rule_wins_the_cascade(self):
+        """The cascade is resolved ACROSS rules, not inside one body only.
+
+        #14697 residual 1, measured on the shipped page: appending
+        `#beat-ingest > :first-child { margin-top: 0 }` after the auto rule
+        inside the same `@media (max-height: 820px)` block put the beat back at
+        0.0 / 574.1 at 375x812 — #14677 exactly — while this guard reported the
+        mechanism intact, because it took `any(rule says auto)` and never asked
+        which rule WINS. The pre-fix reader returned `[]` here.
+        """
+        page = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: 0; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a later same-specificity rule setting `margin-top: 0` was ignored "
+            "— the stale `auto` rule above it kept the guard green over a "
+            "beat the browser top-aligns")
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+    def test_a_rule_the_override_cannot_outrank_still_centres(self):
+        """Over-block guard: a WEAKER later rule does not win the cascade.
+
+        `.beat > :first-child` (0,1,0 + the pseudo) loses to
+        `#beat-hero > :first-child` (1,0,0 + the pseudo) however late it is, so
+        a page that narrows the centring with a class-level reset — and still
+        centres the beats — must stay GREEN. Grading "the last rule wins" by
+        source order alone would red it.
+        """
+        page = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      .beat > :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a LOWER-specificity rule was graded as the cascade winner, so a "
+            "correct page reds")
+
+    def test_an_important_reset_wins_and_an_important_auto_holds(self):
+        """`!important` is part of the cascade, in BOTH directions (#13837 R3).
+
+        A trailing `margin-top: 0 !important` beats the plain `auto` (measured
+        fail-open: the reader compared values and never looked at the marker),
+        and `margin-top: auto !important` survives a later plain `0` (otherwise
+        a correct page reds).
+        """
+        reset = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: 0 !important; }"))
+        problems = _short_viewport_centring_problems(reset)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+        held = self._page(hatch=(
+            self.CENTRED_HATCH.replace(
+                "#beat-hero > :first-child { margin-top: auto; }",
+                "#beat-hero > :first-child { margin-top: auto !important; }")
+            + "\n      #beat-hero > :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(held) == [], (
+            "an `!important` auto margin was overridden by a later ordinary "
+            "declaration, redding a page the browser still centres")
+
+    def test_a_margin_shorthand_resets_the_end_it_sets(self):
+        """`margin: 0` sets the end longhands, so it wins (#13837 R2).
+
+        `_effective_decl` is per-property, so the shorthand was invisible and a
+        `margin: 0` reset left the guard green — but the shorthand is exactly
+        how a reset is written. Both directions are pinned: the reset reds, and
+        `margin: auto` (which sets every side to auto) still centres.
+        """
+        reset = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin: 0; }"))
+        problems = _short_viewport_centring_problems(reset)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+        shorthand_auto = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin: auto; }"
+            + "\n      #beat-hero > :last-child { margin-block: auto; }"))
+        assert _short_viewport_centring_problems(shorthand_auto) == [], (
+            "`margin: auto` sets the block-start end to `auto`, so the beat is "
+            "centred and the guard must not red it")
+
+    def test_a_type_selector_must_match_the_child_the_markup_declares(self):
+        """#14697 residual 2 — a type selector addresses a possibly EMPTY set.
+
+        Measured on the shipped page: `#beat-ingest`'s first child is an `<h2>`,
+        so `#beat-ingest > p:first-child { margin-top: auto }` matches nothing
+        and the beat renders top-aligned (0.0 / 574.1 at 375x812) while the
+        guard — which took any simple selector as "the same ELEMENT" — stayed
+        green. The pre-fix reader returned `[]` for the `p` page below.
+        """
+        def page(first_selector: str) -> str:
+            return (
+                "<!doctype html>\n<html><head><style>\n"
+                "    .beat { justify-content: safe center; }\n"
+                "    @media (max-height: 820px) {\n"
+                "      #beat-ingest { justify-content: flex-start; }\n"
+                f"      #beat-ingest > {first_selector}:first-child "
+                "{ margin-top: auto; }\n"
+                "      #beat-ingest > :last-child { margin-bottom: auto; }\n"
+                "    }\n"
+                "</style></head><body>\n"
+                '<section id="beat-ingest" class="beat">'
+                "<h2>Ingest</h2><p>copy</p></section>\n"
+                "</body></html>\n")
+
+        problems = _short_viewport_centring_problems(page("p"))
+        assert problems, (
+            "`#beat-ingest > p:first-child` was accepted as the ground — its "
+            "first child is an `<h2>`, so the rule matches NOTHING and the beat "
+            "top-aligns")
+        assert any("beat-ingest > :first-child" in p for p in problems), problems
+        assert _short_viewport_centring_problems(page("h2")) == [], (
+            "`#beat-ingest > h2:first-child` DOES name the first child")
+
+    def test_the_ground_element_is_read_from_the_markup(self):
+        """The reader resolves the child's tag/class/id, not just the combinator."""
+        page = (
+            '<section id="beat-hero" class="beat">\n'
+            '  <div class="doc-grid" id="hero-grid"><p>nested</p></div>\n'
+            "</section>\n")
+        grounds = _beat_ground_elements(page)
+        assert grounds["beat-hero"]["first-child"] == (
+            "div", frozenset({"doc-grid"}), frozenset({"hero-grid"}))
+        # A descendant is not the ground: the `<p>` inside the `<div>`.
+        assert _beats_whose_ground(
+            "#beat-hero > p:first-child", "first-child", grounds) == []
+        assert _beats_whose_ground(
+            "#beat-hero > .doc-grid:first-child", "first-child", grounds) == [
+            "beat-hero"]
 
 
 class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
