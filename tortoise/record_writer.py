@@ -346,6 +346,21 @@ RECORD_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"
 #: silently replaced by this one.
 CONNECT_TIMEOUT_SECONDS = 10
 
+#: How long the CREATION HOOK may spend connecting to the record, in seconds.
+#: ⛔ SHORTER THAN THE LIVE DOOR'S :data:`CONNECT_TIMEOUT_SECONDS` (10), on
+#: purpose: the hook runs on a graph-creation REQUEST, and in `hosted_api` that
+#: request calls a SYNC function from an `async` endpoint, so the wait blocks the
+#: worker's event loop (including a co-located `/health`). A record outage at
+#: creation must cost the user a bounded pause, not the live path's full budget —
+#: the graph is created either way and `/health` publishes the gap.
+#:
+#: ⛔ ITS OWN BLOCK, ABOVE THE PARKED-HANDLE BOUND (#14610 review F4). This was
+#: inserted between that bound's ``#:`` block and the constant it documents, so
+#: the ``idle_in_transaction_session_timeout`` explanation appeared to describe
+#: this 3 s provision timeout and its last clause dangled with its continuation
+#: cut. One comment per constant, in the same order as the constants.
+PROVISION_CONNECT_TIMEOUT_SECONDS = 3
+
 #: How long a POOLED handle may sit **idle in transaction** before the SERVER ends
 #: it, in seconds (#9558 review cycle 4, P1). ``0`` — the server default — is
 #: unbounded, and pooling turns that into a lock leak: the READ door parks a
@@ -373,15 +388,6 @@ CONNECT_TIMEOUT_SECONDS = 10
 #: caller gets a fresh connect (see ``_take_idle_connection``) — so expiring one
 #: costs a reconnect, never a surfaced error. A DSN that sets its own
 #: ``idle_in_transaction_session_timeout`` WINS, for the same reason
-#: How long the CREATION HOOK may spend connecting to the record, in seconds.
-#: ⛔ SHORTER THAN THE LIVE DOOR'S :data:`CONNECT_TIMEOUT_SECONDS` (10), on
-#: purpose: the hook runs on a graph-creation REQUEST, and in `hosted_api` that
-#: request calls a SYNC function from an `async` endpoint, so the wait blocks the
-#: worker's event loop (including a co-located `/health`). A record outage at
-#: creation must cost the user a bounded pause, not the live path's full budget —
-#: the graph is created either way and `/health` publishes the gap.
-PROVISION_CONNECT_TIMEOUT_SECONDS = 3
-
 #: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
 #: named.
 IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
@@ -3082,7 +3088,7 @@ def clear_uncut_graph(org_id: str, graph_id: str) -> None:
         pass
 
 
-def armed_but_uncut() -> dict[str, int]:
+def armed_but_uncut() -> dict[str, Any]:
     """The uncut-graph observation, for `/health` (#14582).
 
     ⛔ IT CARRIES NO TENANT IDENTIFIERS. `/health` is unauthenticated and a graph
@@ -3116,14 +3122,37 @@ def armed_but_uncut() -> dict[str, int]:
     `armed_but_halted_untracked_observations` is its overflow count (lifetime, not
     folded, for the reasons above), so a population past the cap is still COUNTED
     even where it cannot be named.
+
+    ⛔ WHAT CLEARS IT, AND WHAT CANNOT (#14610 review F3). This is PROCESS memory
+    fed from THIS process's observations, so only this process can retract an
+    entry: the graph's next armed write (:func:`record_owns_position` re-reads the
+    row and calls :func:`clear_uncut_graph`), a successful provision, or a
+    restart. `tools/record_allocator_cli.py backfill` repairs the RECORD but runs
+    in ANOTHER process and cannot retract this one's entry — and on a QUIESCENT
+    graph, or with the allocator flag OFF (where `record_owns_position` returns
+    before its read), no later observation happens at all, so the entry — and the
+    `ok` it drives — clear only on a restart. `/health` therefore publishes that
+    sentence BESIDE the count (`record.armed_but_uncut_clears`) instead of
+    naming a remedy that leaves the field red.
+
+    ⛔ ONE SNAPSHOT, ONE LOCK (#14610 review F6). The reason breakdown travels in
+    THIS dict, derived under the same acquisition as the counts it describes.
+    `armed_but_uncut_reasons` used to take a SECOND lock, so a concurrent
+    `note_uncut_graph` between the two reads published `armed_but_uncut: 0`
+    beside `{"no_cursor_row": 1}` — the self-contradicting payload the reasons
+    key exists to remove.
     """
     with _UNCUT_GUARD:
+        reasons: dict[str, int] = {}
+        for reason in _UNCUT_GRAPHS.values():
+            reasons[reason] = reasons.get(reason, 0) + 1
         return {
             "armed_but_uncut": len(_UNCUT_GRAPHS),
             "armed_but_uncut_untracked_observations": _UNCUT_UNTRACKED,
             "armed_but_uncut_observations": _UNCUT_OBSERVATIONS,
             "armed_but_halted": len(_UNCUT_HALTED),
             "armed_but_halted_untracked_observations": _UNCUT_HALTED_UNTRACKED,
+            "armed_but_uncut_reasons": reasons,
         }
 
 
@@ -3139,12 +3168,13 @@ def armed_but_uncut_reasons() -> dict[str, int]:
 
     The reason breakdown is therefore DISTINCT GRAPHS per reason; the lifetime
     observation total is `armed_but_uncut_observations`.
+
+    ⛔ AND IT IS READ FROM THE SAME SNAPSHOT AS THE COUNT (#14610 review F6).
+    This is an alias for :func:`armed_but_uncut`'s own `armed_but_uncut_reasons`
+    key, NOT a second acquisition, so the two keys of one payload cannot
+    disagree. A path that publishes both takes the snapshot once.
     """
-    with _UNCUT_GUARD:
-        reasons: dict[str, int] = {}
-        for reason in _UNCUT_GRAPHS.values():
-            reasons[reason] = reasons.get(reason, 0) + 1
-        return reasons
+    return armed_but_uncut()["armed_but_uncut_reasons"]
 
 
 def reset_uncut_graphs() -> None:
@@ -3174,6 +3204,13 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     `record_allocator_cli.py` `seed`/`backfill`; a graph an operator halted needs
     its halt respected. Saying "check the cursor" without the verb is how an
     operator re-runs the wrong thing.
+
+    ⛔ AND THE REPAIR SPLITS IN TWO (#14610 review F3): the backfill heals the
+    RECORD, this process's `/health` entry is PROCESS MEMORY, so it clears on that
+    graph's next armed write here, on a successful provision, or on a restart —
+    never on the backfill itself. Both halves are said, because a line naming only
+    the first leaves an operator staring at a red `ok` after doing the right
+    thing.
     """
     key = f"{org_id}\u0000{graph_id}"
     now = time.monotonic()
@@ -3193,7 +3230,10 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         "`tools/record_allocator_cli.py status --org-id %s --graph-id %s`, then "
         "`backfill` (or `seed` + `arm` for this one graph) if it should be cut "
         "over; a `halted` graph stays halted BY DESIGN until an operator "
-        "reopens it. This line repeats at most once per %.0fs per graph",
+        "reopens it. The backfill heals the RECORD: THIS process's `/health` "
+        "entry is process memory and clears only on this graph's next armed "
+        "write here, on a successful provision, or on a restart. "
+        "This line repeats at most once per %.0fs per graph",
         org_id, graph_id, reason, org_id, graph_id, UNCUT_GRAPH_WARN_SECONDS,
     )
 

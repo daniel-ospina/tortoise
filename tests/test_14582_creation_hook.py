@@ -153,6 +153,61 @@ def _hook_calls(node: ast.AST, callee: str) -> int:
     return count
 
 
+def _hook_calls_named_like(node: ast.AST, stem: str) -> int:
+    """Calls in `node`'s body whose callee identifier CONTAINS `stem`.
+
+    ⛔ A REAL SECOND SPELLING, not an inert disjunct (#14610 review F5). The
+    "must stay unhooked" pin used to read
+
+        _hook_calls(node, "provision_graph_record") or _hook_calls(
+            node, "provision_graph_record_")
+
+    but `_hook_calls` matches the callee by EXACT equality and no function in
+    the tree is named `provision_graph_record_`, so the second term was `0`
+    under every possible mutation: the guard was the first term alone while
+    reading as though a second spelling were covered. This matches the way a
+    later edit actually reaches the hook — a WRAPPER carrying the hook's name
+    inside its own (`_provision_graph_record_quietly`) or any
+    `module.provision_graph_record`. Structural, so a comment or a docstring
+    cannot satisfy it.
+    """
+    count = 0
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name is not None and stem in name:
+            count += 1
+    return count
+
+
+def _calls_with_enclosing_tests(
+    node: ast.AST, callee: str,
+) -> list[tuple[ast.Call, list[ast.AST]]]:
+    """Every call to `callee` in `node`'s body, with the `if` tests above it.
+
+    `ast.walk` yields no parents, so the branch a call sits inside is invisible
+    to it — and a call's BRANCH is exactly what the creation-hook pin has to
+    judge (#14610 review F2).
+    """
+    found: list[tuple[ast.Call, list[ast.AST]]] = []
+
+    def walk(parent: ast.AST, guards: list[ast.AST]) -> None:
+        for child in ast.iter_child_nodes(parent):
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else None)
+                if name == callee:
+                    found.append((child, list(guards)))
+            walk(child, [*guards, child.test] if isinstance(child, ast.If) else guards)
+
+    walk(node, [])
+    return found
+
+
 def test_every_creation_door_calls_the_hook():
     """⛔ THE WIRING PIN. A door that drops the call is the defect, not a style.
 
@@ -204,8 +259,7 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
     for rel, function in _UNHOOKED:
         node = _functions(rel).get(function)
         assert node is not None, f"{rel}::{function} is gone — re-run the census"
-        if _hook_calls(node, "provision_graph_record") or _hook_calls(
-                node, "provision_graph_record_"):
+        if _hook_calls_named_like(node, "provision_graph_record"):
             hooked.append(f"{rel}::{function}")
     assert not hooked, (
         f"{hooked} now calls the creation hook, and it must not: its Supabase "
@@ -215,6 +269,83 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "so each create logs a warning and the deployment reads "
         "`record.armed_but_uncut` forever. If this door is to be hooked, the "
         "graph-row mint has to land first")
+
+
+def test_the_unhooked_door_pin_sees_a_wrapper_spelling():
+    """⛔ F5 (#14610 review): the second term of the unhooked-door guard is LIVE.
+
+    The guard used to be `_hook_calls(node, "provision_graph_record") or
+    _hook_calls(node, "provision_graph_record_")` — and because `_hook_calls`
+    matches the callee identifier by EXACT equality, and no function in the tree
+    is named `provision_graph_record_`, the second term could not vary under any
+    mutation. The guard was the first term alone while reading as two.
+
+    Exercised directly, because a spelling the detector cannot see is a spelling
+    a later edit can use to put the hook back into an unhooked door. A WRAPPER is
+    that edit's natural shape (it is how `hosted_api._provision_graph_record`
+    already reaches the writer's hook), so both a direct and a wrapped callee
+    must be seen, and an unrelated `provision_graph` call must not be.
+    """
+    direct = ast.parse(
+        "def f(org, graph):\n    rw.provision_graph_record(org, graph)\n")
+    wrapped = ast.parse(
+        "def f(org, graph):\n    _provision_graph_record_quietly(org, graph)\n")
+    unrelated = ast.parse("def f(org, graph):\n    provision_graph(org, graph)\n")
+    assert _hook_calls_named_like(direct, "provision_graph_record") == 1
+    assert _hook_calls_named_like(wrapped, "provision_graph_record") == 1, (
+        "a wrapper spelling is exactly how the hook returns to an unhooked door — "
+        "the detector must see it, or this term is the inert disjunct again")
+    assert _hook_calls_named_like(unrelated, "provision_graph_record") == 0, (
+        "a detector that fires on `provision_graph` would red a legitimate edit")
+
+
+def test_the_hook_is_taken_on_the_control_plane_arm_only():
+    """⛔ F2 (#14610 review): the REGISTRY arm of `_provision_graph` must not be hooked.
+
+    `_provision_graph` mints the graph on one of two arms. The hook seeds a
+    `record_cursor` row whose key is `(org_id, graph_id) REFERENCES
+    public.graphs`, and the REGISTRY arm's graph (`sdk._graph_create`) is never
+    inserted there — the invariant `record_writer.current_record_tenant` states.
+    So calling the hook on THAT arm fails on EVERY create (FK 23503), the writer
+    records `provision_failed`, and `/health` folds it into `ok: false` for the
+    life of the process on a deployment with no repairable gap: the exact false
+    red `sdk._graph_create` is deliberately left unhooked to avoid (#14582 F3),
+    re-opened through the other door.
+
+    The gate is read from the door's OWN body: the name bound to
+    `is_supabase_enabled()` there IS the arm decision, and every hook call must
+    sit inside a branch on that name. Pre-fix the call is at the function's top
+    level — no enclosing `if` at all — so this reds.
+    """
+    node = _functions("tortoise/hosted_api.py").get("_provision_graph")
+    assert node is not None, "hosted_api._provision_graph is gone — re-run the census"
+    arm_names: set[str] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Assign) or not isinstance(sub.value, ast.Call):
+            continue
+        func = sub.value.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "is_supabase_enabled":
+            arm_names |= {t.id for t in sub.targets if isinstance(t, ast.Name)}
+    assert arm_names, (
+        "`_provision_graph` no longer binds its arm decision to a name, so this pin "
+        "cannot tell which branch mints a `public.graphs` row. Re-cut it against the "
+        "new spelling; do NOT delete it")
+    calls = _calls_with_enclosing_tests(node, "_provision_graph_record")
+    assert calls, (
+        "the hook call is gone from the door — `test_every_creation_door_calls_the_hook` "
+        "reds on that too")
+    ungated = [
+        call for call, guards in calls
+        if not any(arm in ast.unparse(test) for test in guards for arm in arm_names)
+    ]
+    assert not ungated, (
+        f"{len(ungated)} creation-hook call(s) in `hosted_api._provision_graph` sit "
+        f"outside a branch on {sorted(arm_names)}. On the REGISTRY arm the cursor "
+        "row's FK (`REFERENCES public.graphs`) refuses EVERY create, so each one "
+        "publishes a permanent `armed_but_uncut` + `ok: false` for a deployment "
+        "that has no gap to close (#14610 review F2)")
 
 
 def test_the_hook_arms_and_does_not_only_seed():
@@ -382,6 +513,75 @@ def test_health_clears_the_gap_when_the_graph_is_healed(monkeypatch):
         assert block["ok"] is True, (
             "the registry is a LATCH — a healed graph must stop reddening the "
             "deployment, or the only way to clear it is a restart")
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_the_health_payload_takes_the_count_and_its_reasons_from_one_snapshot(
+        monkeypatch):
+    """⛔ F6 (#14610 review): the count and its reasons are ONE read, not two.
+
+    Two lock acquisitions let a concurrent `note_uncut_graph` land between them
+    and publish `armed_but_uncut: 0` beside `{"no_cursor_row": 1}` — a payload
+    that contradicts itself, with no repair path because it is already out. The
+    invariant was only ever asserted at the FUNCTION level, never on `/health`,
+    so nothing redded.
+
+    Proved by making the two readers DISAGREE: the payload must publish the
+    reasons that travelled with the count it publishes. Pre-fix the second reader
+    is consulted, so the `mode_halted` value below leaks into the block.
+    """
+    snapshot = {
+        "armed_but_uncut": 2,
+        "armed_but_uncut_untracked_observations": 0,
+        "armed_but_uncut_observations": 2,
+        "armed_but_halted": 0,
+        "armed_but_halted_untracked_observations": 0,
+        "armed_but_uncut_reasons": {"no_cursor_row": 2},
+    }
+    monkeypatch.setattr(rw, "armed_but_uncut", lambda: dict(snapshot))
+    monkeypatch.setattr(
+        rw, "armed_but_uncut_reasons", lambda: {"mode_halted": 9})
+    block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
+    assert block["armed_but_uncut"] == 2
+    assert block["armed_but_uncut_reasons"] == {"no_cursor_row": 2}, (
+        "the payload's reasons did not come from the snapshot that produced its "
+        f"count — got {block['armed_but_uncut_reasons']!r}. A second reader is a "
+        "second moment: a concurrent observation then publishes a count and a "
+        "breakdown that contradict each other (#14610 review F6)")
+    assert sum(block["armed_but_uncut_reasons"].values()) == block["armed_but_uncut"]
+
+
+def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
+    """⛔ F3 (#14610 review): the payload must not name a remedy that leaves it red.
+
+    The register is PROCESS memory. `record_allocator_cli.py backfill` heals the
+    RECORD in ANOTHER process and cannot retract this process's entry, and on a
+    quiescent graph — or with the allocator flag off, where `record_owns_position`
+    returns before its read — no later observation happens at all, so the entry
+    and the `ok` it drives clear only on a restart. Publishing the count alone
+    left an operator who ran the documented remedy staring at a red `ok` with no
+    way to know why.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        rw.note_uncut_graph("org-14582", "graph-a", reason="no_cursor_row")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["ok"] is False, "the control: this graph is uncut"
+        note = block["armed_but_uncut_clears"]
+        assert isinstance(note, str) and note, (
+            "`/health` publishes `armed_but_uncut` and its reasons but not HOW they "
+            "clear, so the documented remedy appears to clear a field it cannot")
+        assert "restart" in note, (
+            "the note must name the RESTART, because that is the only clear on a "
+            "quiescent graph (and the only one at all with the allocator flag off)")
+        assert "backfill" in note and "another process" in note, (
+            "the note must say that `backfill` repairs the RECORD in another "
+            "process — otherwise it reads as the clear route for this field")
+        # ...and it is published on the UNARMED arm too, because it is a constant
+        # rather than a measurement (a `None` there would read as "not evaluated").
+        assert _health(monkeypatch, dsn=None)["armed_but_uncut_clears"] == note
     finally:
         rw.reset_uncut_graphs()
 

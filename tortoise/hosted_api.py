@@ -8434,6 +8434,26 @@ def _backup_watcher_health() -> dict:
         }
 
 
+#: HOW `record.armed_but_uncut` CAN BE RETRACTED, published BESIDE it (#14610
+#: review F3). The register is PROCESS MEMORY fed from this process's own
+#: observations, so ⛔ an OUT-OF-PROCESS repair cannot retract an entry:
+#: `record_allocator_cli.py backfill` heals the RECORD, while the entry clears on
+#: that graph's next ARMED write to THIS process, a successful provision, or a
+#: restart. A QUIESCENT graph never gets that later write, and with the allocator
+#: flag OFF `record_owns_position` returns before its read at all — so there the
+#: entry, and the `ok` it drives, clear ONLY on a restart. Publishing the count
+#: without that sentence names a remedy that leaves the field red: the latch
+#: class the fold exists to avoid. `ok` is therefore a statement about THIS
+#: PROCESS, not about the deployment's population (which is a `sweep` query).
+_UNCUT_CLEARS_NOTE = (
+    "a restart, or an observation of that graph by THIS process (an armed write "
+    "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
+    "`record_allocator_cli.py backfill` heals the RECORD but runs in another "
+    "process, so on a quiescent graph — or with the allocator flag off — this "
+    "process's entry, and `ok`, clear only on restart"
+)
+
+
 def _record_health() -> dict:
     """#9548: is the Postgres record ARMED on THIS deployment? — for /health.
 
@@ -8609,6 +8629,10 @@ def _record_health() -> dict:
                 "armed_but_halted": None,
                 "armed_but_halted_untracked_observations": None,
                 "armed_but_uncut_reasons": None,
+                # #14610 review F3: present even here, because it is a CONSTANT
+                # rather than a measurement — the clear route does not depend on
+                # the snapshot that failed.
+                "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
@@ -8676,6 +8700,12 @@ def _record_health() -> dict:
         "armed_but_halted": None,
         "armed_but_halted_untracked_observations": None,
         "armed_but_uncut_reasons": None,
+        # ⛔ HOW TO CLEAR IT, BESIDE THE COUNT (#14610 review F3). A constant, so
+        # it is published on every arm including the failed-snapshot one: the
+        # field it describes is process memory, and an operator who runs the
+        # documented `backfill` must be told that this process's entry stays red
+        # until it observes the graph again or restarts.
+        "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -8752,7 +8782,12 @@ def _record_health() -> dict:
         # deployment's population is not COUNTED here (that is a query, and
         # `record_allocator_cli.py sweep` is the verb that runs it).
         uncut = record_writer.armed_but_uncut()
-        uncut_reasons = record_writer.armed_but_uncut_reasons()
+        # ⛔ NOT a second reader (#14610 review F6): the reasons travel INSIDE
+        # `armed_but_uncut()`'s single lock acquisition, because two acquisitions
+        # let a concurrent `note_uncut_graph` publish `armed_but_uncut: 0` beside
+        # `{"no_cursor_row": 1}` — a self-contradicting payload with no repair
+        # path, the exact contradiction the derived reasons key exists to remove.
+        uncut_reasons = uncut["armed_but_uncut_reasons"]
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
@@ -30993,7 +31028,11 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     creation when the record itself is optional and `write_live_record` is
     fail-soft by contract. What is NOT acceptable is silence, and that is what
     `/health`'s `record.armed_but_uncut` + `record_allocator_cli.py backfill`
-    are for. (The atomic form the plan asked for — §A7.8 item 8's
+    are for. ⛔ The two are DIFFERENT repairs and the operator needs both halves:
+    the backfill heals the RECORD in its own process, while `/health`'s entry is
+    process memory and clears on that graph's next armed write here or on a
+    restart (published as `record.armed_but_uncut_clears`, #14610 review F3).
+    (The atomic form the plan asked for — §A7.8 item 8's
     one-transaction RPC — is not buildable from here: the record's app role has
     no grant on `public.graphs`. Tracked against #14582.)
     """
@@ -31098,7 +31137,13 @@ def _provision_graph(org: dict, name: str,
             insert_graph,
             is_supabase_enabled,
         )
-        if is_supabase_enabled():
+        # ⛔ THE ARM DECISION IS BOUND ONCE, and the hook below is gated on THIS
+        # name rather than re-reading the flag (#14610 review F2): the arm that
+        # minted this graph is the only thing that says whether the record can
+        # file it, and a second `is_supabase_enabled()` read would be a second
+        # question at a different moment.
+        control_plane_arm = is_supabase_enabled()
+        if control_plane_arm:
             cp = get_control_plane()
             gid = f"g_{_short_id()}"
             ns = f"org_{org['id']}_{gid}"
@@ -31185,10 +31230,24 @@ def _provision_graph(org: dict, name: str,
         # alias), which is why the hook is here and not at either endpoint: a
         # per-endpoint call site is how the NEXT create path ships without one.
         #
-        # It provisions BOTH arms: on Supabase, `insert_graph` persisted this id
-        # above; on the registry the `:Graph` node exists. The FLOOR is DERIVED by
-        # the hook from the record's own journal enumeration (never assumed `0`),
-        # and `SEED_SQL`'s guard REFUSES rather than seeds when the two disagree.
+        # It provisions the CONTROL-PLANE arm ONLY (#14610 review F2), and that
+        # gate is the whole point: on Supabase, `insert_graph` persisted this id
+        # above, so `record_cursor`'s `(org_id, graph_id) REFERENCES
+        # public.graphs` can hold its row. The registry arm below creates its
+        # graph through `sdk._graph_create`, which never inserts into
+        # `public.graphs` (the invariant `record_writer.current_record_tenant`
+        # states) — so the hook there would fail on EVERY create (FK 23503), the
+        # writer would report `provision_failed`, and `/health` would fold it into
+        # `ok: false` permanently for a deployment with no repairable gap. That is
+        # the false red `sdk._graph_create` is deliberately left unhooked to
+        # avoid (#14582 F3); taking this hook on BOTH arms re-opened it through
+        # the other door. A selfhost deployment that arms the record with no
+        # control plane is out of this hook's reach BY CONSTRUCTION — and it must
+        # not be published as a gap, because no in-band action could close it.
+        #
+        # The FLOOR is DERIVED by the hook from the record's own journal
+        # enumeration (never assumed `0`), and `SEED_SQL`'s guard REFUSES rather
+        # than seeds when the two disagree.
         #
         # ⚠️ THIS FUNCTION IS SYNC AND CALLED FROM `async` ENDPOINTS, so the hook's
         # connect blocks the loop exactly as the control-plane calls above it
@@ -31198,7 +31257,8 @@ def _provision_graph(org: dict, name: str,
         # endpoint the full live-path budget. Moving the whole mint off the loop is
         # the larger fix and is NOT taken here: it would change the locking story of
         # a 55-line flow this PR otherwise does not touch.
-        _provision_graph_record(org["id"], graph["id"])
+        if control_plane_arm:
+            _provision_graph_record(org["id"], graph["id"])
         result = {
             "graph": {
                 "id": graph["id"], "name": graph["name"],
