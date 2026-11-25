@@ -124,9 +124,17 @@ def _record_env_contract() -> tuple[str, str]:
     return RECORD_DSN_ENV, RECORD_ALLOCATE_ENV
 
 
-#: Printed by ``arm`` when it cannot proceed. Kept as a module constant so a
-#: test can assert the CONTENT an operator is handed, rather than a docstring.
-CUTOVER_ACK_TEXT = """record_allocator_cli: `arm` changes a GLOBAL production switch for ONE graph.
+#: Printed by ``arm`` (and by ``backfill --arm``) when it cannot proceed. Kept as a
+#: module constant so a test can assert the CONTENT an operator is handed, rather
+#: than a docstring.
+#: ⛔ TWO OF THESE LINES ARE PARAMETRISED BY SCOPE, not written once (#14610 review,
+#: blocking): the text is shared by a verb that arms ONE graph and a verb that arms a
+#: whole POPULATION, and an acknowledgement whose blast-radius sentence is true for one
+#: of them and false for the other is not an acknowledgement. `command` names the verb
+#: the operator actually ran, and `scope` / `scope_note` are its own reach — so the
+#: sentence cannot be inherited by a verb it does not describe.
+CUTOVER_ACK_TEXT = """record_allocator_cli: `%(command)s` changes a GLOBAL production switch
+for %(scope)s.
 
 arming a graph makes its live door allocate the journal ordinal. FOUR things
 must be true before the flag is rolled, and none of them is this command's to do:
@@ -151,8 +159,8 @@ must be true before the flag is rolled, and none of them is this command's to do
      `%(prog)s backfill --org-id <org> --dry-run` (read it, write nothing) and
      then for real — BEFORE the flag is rolled.
 
-  3. CUTOVER IS PER GRAPH. This command arms ONE graph; every other graph in
-     the org stays uncut and is refused while the flag is on.
+  3. CUTOVER IS PER GRAPH, AND THIS COMMAND'S SCOPE IS %(scope_upper)s.
+     %(scope_note)s
 
   4. THE SESSION BACKFILL (`tools/backfill_copy_turns.py`) must have the flag
      set too — it calls the write seam directly and passes `allocate` from the
@@ -800,8 +808,27 @@ def main(argv: list[str] | None = None) -> int:
                                           and args.arm_graphs)
     if wants_arm and not args.acknowledge_cutover:
         _dsn_env, allocate_env = _record_env_contract()
+        # ⛔ THE ACKNOWLEDGEMENT STATES THIS COMMAND'S OWN BLAST RADIUS (#14610
+        # review, blocking). One shared sentence cannot describe both verbs: `arm`
+        # arms ONE graph, `backfill --arm` arms every uncut graph in its population
+        # in one run — the reason the acknowledgement matters MORE there, and the
+        # reason a text that says "ONE graph" for both is a false statement to the
+        # operator of the population verb. A test asserts each verb's own spelling.
+        command_scope = (("backfill --arm", "every uncut graph in its population",
+                          "This ONE acknowledgement covers a whole sweep: the dry run\n"
+                          "     prints the population, so read it first; every graph it\n"
+                          "     seeds is armed in the same run.")
+                         if args.command == "backfill" else
+                         ("arm", "one graph",
+                          "This command arms ONE graph; every other graph in the org\n"
+                          "     stays uncut and is refused while the flag is on."))
         print(CUTOVER_ACK_TEXT % {"allocate_env": allocate_env,
-                                  "prog": ap.prog}, file=sys.stderr)
+                                  "prog": ap.prog,
+                                  "command": command_scope[0],
+                                  "scope": command_scope[1],
+                                  "scope_upper": command_scope[1].upper(),
+                                  "scope_note": command_scope[2]},
+              file=sys.stderr)
         _emit(args, {"org_id": args.org_id, "graph_id": args.graph_id,
                      "command": args.command,
                      "refused": "unacknowledged-cutover",

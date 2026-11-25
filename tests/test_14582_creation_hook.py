@@ -621,8 +621,12 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
         assert block["armed_but_uncut"] == 0
         assert "mode_halted" not in block["armed_but_uncut_reasons"]
         assert block["ok"] is True, (
-            "a halted graph keeps its journal append, so an `ok: false` here "
-            "would punish the operator for following the documented remedy")
+            "a halted graph is a SANCTIONED STOP, not a gap — the halted population "
+            "stays out of the `ok` fold for that reason. It is not free: a halted "
+            "graph's journal LINE still appends while its record accumulates "
+            "NOTHING, so `ok: false` would red the deployment for the state the "
+            "documented remedy leaves it in"
+            "(`armed_but_halted_clears` states the cost and what clears it)")
     finally:
         rw.reset_uncut_graphs()
 
@@ -793,8 +797,11 @@ def test_a_halted_overflow_is_counted_not_silently_dropped(monkeypatch):
             "the overflow must reach `/health`, or an operator reading the "
             "payload sees a capped number and no hint it was capped")
         assert block["ok"] is True, (
-            "a halted population still keeps its journal append — counting it "
-            "must not smuggle it into the `ok` fold")
+            "a halted population is a sanctioned stop — counting its overflow "
+            "must not smuggle it into the `ok` fold. The reason is SANCTION, not "
+            "safety: the journal line keeps appending while the record gains "
+            "nothing (`_HALTED_CLEARS_NOTE`), which is the operator's stated "
+            "position and not a repair the deployment may refuse")
         # Re-observing an already-tracked halted graph is not an eviction.
         rw.note_uncut_graph("org-14582", f"halted-{over - 1}", reason="mode_halted")
         assert rw.armed_but_uncut()[
@@ -1533,3 +1540,124 @@ def test_the_default_row_hook_is_not_reachable_from_a_credential_hit(monkeypatch
     assert "only caller" in doc, (
         "the docstring must name the REAL mechanism — one caller, reached on a "
         "MISS or a re-provisioning — rather than leaving the reach unstated")
+
+
+# ---------------------------------------------------------------- argv-level pins
+# ⛔ #14610 REVIEW FINDING 2 (blocking, category A — a bypass): every one of these
+# rows was UNPINNED. The suite drove `cli._cmd_backfill(...)` directly, so the
+# argv-level gate in `main()` — the branch that decides whether an operator's
+# `backfill --arm` has to acknowledge a cutover — could be deleted with NOTHING
+# going red. Deleting `(args.command == "backfill" and args.arm_graphs)` from
+# `wants_arm` is a one-line edit that arms an entire org's graphs with no
+# acknowledgement, and the sibling gate is pinned exactly this way in the house
+# style (`test_13043_record_allocator_cli.py::
+# test_arm_refuses_without_the_acknowledgement`), which is what made the omission
+# invisible. These rows call `cli.main([...])` — the real argv path — not the
+# command body.
+
+def test_backfill_arm_is_refused_without_the_cutover_acknowledgement(capsys):
+    """`backfill --arm` IS a cutover — it must pass the same gate as `arm`.
+
+    ⛔ THIS ROW REDS IF THE `backfill` DISJUNCT GOES. `arm` before the writer flag
+    is rolled turns the record path OFF for every graph it touches (`CUTOVER_ACK_TEXT`
+    item 1), and `backfill --arm` rolls that switch for a whole population, so the
+    acknowledgement is not less necessary there — it is more.
+    """
+    from tools import record_allocator_cli as cli
+
+    rc = cli.main(["backfill", "--org-id", "o", "--arm"])
+    assert rc == cli.EXIT_REFUSED, (
+        "`backfill --arm` reached the population path without an acknowledgement — "
+        "the gate in `main()` no longer covers it (got "
+        f"{rc}, want EXIT_REFUSED={cli.EXIT_REFUSED})")
+    err = capsys.readouterr().err
+    assert "record_allocator_cli backfill" in err, (
+        "the refusal must name the command the operator ran:\n" + err)
+
+
+def test_backfill_seed_only_is_not_gated(capsys):
+    """Non-vacuity for the row above: `backfill` WITHOUT `--arm` seeds only.
+
+    A gate that refused every `backfill` would pass the refusal pin and break the
+    verb that the gate's own text recommends (`backfill --dry-run`, then for real).
+    A `seeded` row allocates nothing, so there is no cutover to acknowledge; the
+    run must get PAST the gate and fail later on what it actually lacks (no DSN).
+    """
+    from tools import record_allocator_cli as cli
+
+    rc = cli.main(["backfill", "--org-id", "o", "--dry-run"])
+    assert rc != cli.EXIT_REFUSED, (
+        "a seed-only `backfill` was refused by the CUTOVER gate — the gate now "
+        "covers the verb whose own remedy text recommends it")
+    err = capsys.readouterr().err
+    assert "acknowledge-cutover" not in err, (
+        "a seed-only `backfill` was told to acknowledge a cutover it does not "
+        "perform:\n" + err)
+
+
+def test_the_acknowledgement_states_each_verbs_own_blast_radius(capsys):
+    """⛔ ONE SHARED SENTENCE CANNOT DESCRIBE BOTH VERBS (#14610 review F2).
+
+    Item 3 of the text read "This command arms ONE graph; every other graph in the
+    org stays uncut" — true of `arm`, the OPPOSITE of `backfill --arm`, which arms
+    the whole sweep population in one run. An acknowledgement whose blast-radius
+    sentence is false for the verb the operator ran is not an acknowledgement, and
+    the scope is what the operator is being asked to accept.
+    """
+    from tools import record_allocator_cli as cli
+
+    assert cli.main(["arm", "--org-id", "o", "--graph-id", "g"]) == cli.EXIT_REFUSED
+    single = capsys.readouterr().err
+    assert cli.main(["backfill", "--org-id", "o", "--arm"]) == cli.EXIT_REFUSED
+    population = capsys.readouterr().err
+
+    assert "ONE GRAPH" in single.upper(), (
+        "`arm`'s acknowledgement no longer states its single-graph scope:\n" + single)
+    assert "EVERY UNCUT GRAPH IN ITS POPULATION" in population.upper(), (
+        "`backfill --arm`'s acknowledgement does not state the population scope — "
+        "it is telling a population operator about one graph:\n" + population)
+    # ⛔ The failure this pin exists for: the single-graph sentence surviving into
+    # the population verb's text. `arm`'s phrasing, verbatim, must NOT be there.
+    assert "arms ONE graph; every other graph in the org" not in population, (
+        "`backfill --arm` printed `arm`'s single-graph blast radius — the text is "
+        "shared verbatim and the scope is not interpolated:\n" + population)
+    assert "`arm` changes" not in population, (
+        "`backfill --arm`'s header names the WRONG verb, so an operator reading a "
+        "population refusal believes they ran the single-graph command:\n" + population)
+    assert "`backfill --arm` changes" in population, (
+        "`backfill --arm`'s header must name the verb the operator ran:\n" + population)
+
+
+def test_the_backfill_only_argv_rules_are_enforced(monkeypatch):
+    """The three `ap.error` branches `backfill` added are pinned by argv, not by prose.
+
+    `--journal`/`--enumerated-floor` are PER-GRAPH readings (a single floor handed
+    to a population would seed every graph to one number — the defect `sweep`
+    refuses by name), `--dry-run` promises a rollback only `backfill` can perform,
+    and `--arm` is `backfill`'s spelling. Each must raise `SystemExit` from
+    `ap.error` rather than be silently ignored by a verb that cannot honour it.
+    """
+    import contextlib
+    import io
+
+    from tools import record_allocator_cli as cli
+
+    cases = {
+        "backfill --journal": ["backfill", "--org-id", "o", "--journal", "/tmp/j"],
+        "backfill --enumerated-floor": [
+            "backfill", "--org-id", "o", "--enumerated-floor", "7"],
+        "dry-run on arm": ["arm", "--org-id", "o", "--graph-id", "g", "--dry-run"],
+        "arm on sweep": ["sweep", "--org-id", "o", "--arm"],
+    }
+    for label, argv in cases.items():
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                rc = cli.main(argv)
+            except SystemExit as exc:          # argparse's own exit
+                assert exc.code not in (0, None), (
+                    f"{label} exited {exc.code}, which argparse uses for `--help` "
+                    "— a rule that exits 0 is not a refusal")
+                continue
+        raise AssertionError(
+            f"{label} was ACCEPTED (rc={rc}) — the argv rule that forbids it is "
+            f"gone, so the verb silently ignored {' '.join(argv)}")
