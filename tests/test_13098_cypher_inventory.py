@@ -35,6 +35,7 @@ import ast
 import errno
 import inspect
 import io
+import json
 import os
 import re
 import shutil
@@ -382,6 +383,52 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
         assert census.main(argv) == 2, (
             f"`{' '.join(argv) or '(bare census)'}` re-enumerates for `rg_totals` "
             f"(directly, or through `report()`); that second call must answer 2 too")
+
+
+def test_the_json_verb_enumerates_rg_totals_once_and_emits_through_the_writer(
+        monkeypatch):
+    """`--json` must enumerate `rg_totals()` ONCE, and write its payload through `emit()`.
+
+    ⛔ NEITHER PROPERTY WAS GRADED (#13098 round 5, P2), and both are this change's own
+    invariant:
+      1. The eager `rg_totals()` call was moved INSIDE the enumeration guard, because a
+         SECOND walk that fails after the first succeeded escaped it and exited 1 — the
+         DRIFT code. A counting stub asserts exactly ONE call, so re-eager-ifying
+         `"rg_totals": rg` (calling it while building the payload) reds here;
+      2. the payload must go through `emit()`, or a stdout that cannot be written
+         answers 1 or 120 instead of 2 — the `emit` contract stated in its own docstring.
+    The tree walk is stubbed: the subject is the call COUNT and the writer, not the census.
+    """
+    calls = []
+
+    def counting_totals(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"door": 0, "bare": 0, "verb": 0}
+
+    monkeypatch.setattr(census, "rg_totals", counting_totals)
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert census.main(["--json"]) == 0, "a healthy `--json` run must answer 0"
+    assert len(calls) == 1, (
+        f"`--json` must enumerate `rg_totals()` exactly ONCE (the second walk is inside "
+        f"the guard, never repeated at payload build time); got {len(calls)} call(s)")
+    payload = json.loads(out.getvalue())
+    assert payload["rg_totals"] == {"door": 0, "bare": 0, "verb": 0}, (
+        "the payload must carry the ONE enumeration's totals")
+
+    class _Unwritable(io.StringIO):
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sys, "stdout", _Unwritable())
+    assert census.main(["--json"]) == 2, (
+        "a payload that cannot be written is 2 (could not run), never 1 (DRIFT) and "
+        "never 120 — `--json` must write through `emit()`")
 
 
 def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatch, tmp_path):
@@ -2726,8 +2773,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_default_render_target_is_the_gitignored_document",
         # ⛔ TWO ARMS THAT WERE THE SOLE COVERAGE OF THEIR GUARD AND WERE NOT NAMED
         # (#13098 round 4, P2). Each is the ONLY arm that reaches the branch it grades:
-        # `--check`'s enumeration wrap, `--all-surface`'s wide walk, and the render
-        # target's `Path.resolve()` guard (`RuntimeError` on ELOOP, not an `OSError`).
+        # `main()`'s enumeration wrap, `report()`'s wrap, and the render target's
+        # `Path.resolve()` guard (`RuntimeError` on ELOOP, not an `OSError`).
         # Measured by deleting each `def` block: BOTH structural pins stayed GREEN.
         # These are undecorated, so the `len(decorated) == 9` pin above cannot see them
         # — this set is their only pin, which is why its comment promises names.
@@ -2737,6 +2784,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # `OSError` guard preserves the exit code, so nothing reds unless an arm reads
         # the stderr text that names the missing path.
         "test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY",
+        # ⛔ AND `--json`'s TWO PROPERTIES: one enumeration of `rg_totals()` (the eager
+        # second walk this change moved inside the guard) and a payload written through
+        # `emit()`. Reverting either left the suite green (#13098 round 5, P2).
+        "test_the_json_verb_enumerates_rg_totals_once_and_emits_through_the_writer",
     }
     missing = sorted(split_arms - defined)
     assert not missing, (
