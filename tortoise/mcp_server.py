@@ -8565,12 +8565,14 @@ def tortoise_graph_overview(section: str | None = None,
       audit             takes  `point_kinds` — was `tortoise_audit`
       dream_health                           — was `tortoise_dream_health`
 
-    `structure_check` KEEPS its own door live on purpose: that read is the one
-    member with a WRAP envelope (`-> list[dict]`), and this container returns
-    `Any`, so retiring the door would move the #8482 failure repair off the
-    advertised path — a `_safe` failure payload the array schema cannot carry.
-    The section and the door return the same rows; the door is what carries the
-    repair, and it retires once the container has a declared envelope.
+    `structure_check` is the one section whose own door this batch ALSO retired
+    (`tortoise_check_structure`, #11609 lane P11): that read is the member with a
+    WRAP envelope (`-> list[dict]`), and this container returns `Any`, so the
+    door's retirement is only safe because `_row_section_envelope` builds the SAME
+    `{"result": [...]}` envelope here BY HAND — which is what carries the #8482
+    failure repair now that no annotation does. The section and the door return
+    the same rows, and that equality is measured on the wire by
+    `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`.
 
     Omit `section` → the compact combined summary `tortoise_overview` returned.
     That default is deliberately UNCHANGED by this consolidation: the four
@@ -8851,9 +8853,15 @@ def tortoise_check_confidence(claim_id: str | None = None,
             seed=seed, depth=depth, completeness=completeness,
             min_load=min_load, max_support=max_support, max_nodes=max_nodes)
     # ⛔ `_row_section_envelope` at the CONTAINER boundary (#11609 lane P11):
-    # `calibrate=True` and the no-selector default return a LIST (the graph-wide
-    # audit) and ship `{"result": [...]}` as `tortoise_calibrate_summary` did;
-    # `claim_id` / `topic` / `session=True` return mappings and pass through.
+    # `calibrate=True`, the no-selector default AND the `topic=` arm return a LIST
+    # (the graph-wide audit, and `_belief_timeline` for `topic` — `-> list[dict]`
+    # in the SDK) and ship `{"result": [...]}` as `tortoise_calibrate_summary`
+    # did; `claim_id` / `session=True` return mappings and pass through.
+    # ⚠️ `topic` was classified here as a mapping until the #14645 review (P3):
+    # `check_confidence(topic=...)` returns `_belief_timeline(...)`, a list, so it
+    # IS wrapped — and that is an improvement, because the retired
+    # `tortoise_belief_timeline` shipped `{"result": [...]}` and the container now
+    # agrees with it instead of dropping the envelope.
     return _row_section_envelope(_safe(
         _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
         calibrate=calibrate, include_provenance=include_provenance,

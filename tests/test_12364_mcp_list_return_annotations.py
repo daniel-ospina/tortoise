@@ -87,17 +87,26 @@ def _registry_pairs() -> list[tuple[str, str]]:
     #                        of the four new targets is a pass-through wrapper
     #                        (`tortoise_get_historical_knowledge`), which is why the
     #                        floor below is re-pinned UP in the same wave.
-    #   30 / 24              #11609 lane P11 — the NINE envelope doors all named an
-    #                        `sdk_method` and all retired FORWARD with no row arriving
+    #   30 / 24              #11609 lane P11 — the NINE envelope doors retired FORWARD
+    #                        with no row arriving
     #                        (`search`/`search_sessions`/`suggest_entry_points` →
     #                        `search_knowledge`; `list_batches`/`diary_read` →
     #                        `list_knowledge`; `list_namespaces`/`check_structure` →
     #                        `graph_overview`; `calibrate_summary` →
     #                        `check_confidence`; `expand_relationships` →
-    #                        `explore_connections`), so the pair population falls by
-    #                        exactly nine: 39 − 9 = 30 rows, 28 − 9 = 19 pairs — measured
-    #                        as 24, i.e. five of the nine did NOT name an `sdk_method` in
-    #                        their declaration. The MEASURED value is what the pin follows.
+    #                        `explore_connections`), so the ROW population falls by
+    #                        exactly nine: 39 − 9 = 30 rows. The PAIR population (rows that
+    #                        name an `sdk_method`) falls by only FOUR, because five of the
+    #                        nine declared no `sdk_method` (`diary_read`,
+    #                        `expand_relationships`, `list_namespaces`, `search_sessions`,
+    #                        `suggest_entry_points` — `sdk_method: null` in the manifest):
+    #                        28 − 4 = 24 pairs. ⚠️ An earlier form of this entry said "the
+    #                        NINE envelope doors all named an `sdk_method` … 28 − 9 = 19
+    #                        pairs — measured as 24, i.e. five of the nine did NOT name
+    #                        one", which contradicted itself in one sentence: it printed
+    #                        the arithmetic of a population where all nine named a method
+    #                        and then reported a different measured number (#14645 review
+    #                        N3). The MEASURED value is what the pin follows.
     # Every one of those waves retired doors that DID name an `sdk_method`; before them, the
     # READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves and #11609's
     # seven-door wave did the same (`get_session`, `list_batch`,
