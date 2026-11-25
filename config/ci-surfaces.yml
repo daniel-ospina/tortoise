@@ -57,38 +57,42 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
-# `#14548`'s residue RATCHET, `#14415`'s two batch rows, `#14560`'s
-# `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule row, `#14574`'s
-# drift-reporter registration (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
-# `tests/test_record_read_point_vector_keys.py`, `#14592`'s
-# `tests/test_14592_operating_model_evidence.py` and `#14597`'s
-# `tests/test_expansion_fusion_14344.py` (that last trio `core`, each carrying an explicit
-# `durations` row rather than the default — a ROW is what records their weight, and the default
-# is the registration's alone in this sentence — all `main`'s) — the verb packs the pool
-# into two bins: ten shards at
-# 826.5 s (a, b, c, d, e, f, g, h, i, k) and one at 826.6 s (j), so `ceil(826.6/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 826.6 = 2.0324), so the two agree by
-# construction rather than by a hand re-read. ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's
-# figure may be carried here, and none is — `main`'s own partition must be re-derived on `main`,
-# never read out of this sentence. ⛔ EVERY row named above is `main`'s at this head and none is this
-# branch's: this PR adds no test file, so the delta is ZERO, and it was MEASURED, not reasoned —
-# `fast_pool()` was computed from both sides' manifests and the two sets are equal, and the parsed
-# manifests are identical too, so the `durations` comment rewrites on either side change no value.
-# ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes
-# its inputs from the tree being measured (the manifest, the selector's own constants, and the
-# filesystem under an `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with
-# `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
-# the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
-# sentence's zero.
-# ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
-# EARLIER spelling, BOUND TO THE TREE THAT HELD IT (`git show 939e37f664:config/ci-surfaces.yml`,
-# an ancestor of `main`) and quoted only so the rot it suffered is legible — `1333` here against
-# `1332` on `main`, nothing graded it, and it outlived the landing that made it false. A count in this
-# block is re-measured where it LANDED or not written at all, and this sentence's job is the reason the
-# delta is zero, not a figure that owes a re-measurement to whoever next moves a row. The name lists
-# are what the guard COMPARES against the live emission
+# reader of the prose can see. On THIS tree — `origin/main` `4b2fba3e8a` folded in, carrying
+# `#14597`'s `tests/test_expansion_fusion_14344.py` row, `#14415`'s two batch rows, `#14548`'s
+# residue RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule
+# row, `#14574`'s drift-reporter registration (`tests/test_fly_secret_declaration_report.py`),
+# `#14552`'s `tests/test_record_read_point_vector_keys.py` row, `#14592`'s
+# `tests/test_14592_operating_model_evidence.py` row and `#14607`'s two registrations
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb packs the pool
+# into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s (c, d, h), so
+# `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 826.9 = 2.0317), so the two agree by construction rather than by a hand re-read.
+# ⛔ EVERY file named above is `main`'s at this head and every one is `core`; the weight is the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT` for all of them EXCEPT `#14548`'s residue RATCHET, which is
+# `tests/test_sdk_privatise_sweep.py` at **28.0 s** — a `core` file whose weight is not flat, so do
+# not read that list as "all 2.0 s".
+# ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
+# in `durations` (one of four here: `#14597`'s, `#14560`'s, `#14552`'s and `#14592`'s, plus the
+# RATCHET's — measured at this head, 5 rows among the files named above). A REGISTRATION is a
+# `core`/`api` surface entry, which only puts the file in `fast_pool()` and lets the header's
+# `DEFAULT_FAST_WEIGHT` apply — that is what `#14574`'s file and `#14607`'s two have (measured: 0
+# `durations` rows each), so calling any of them a "row" is a false claim about the map and
+# `test_the_fast_shards_header_block_calls_a_row_only_what_has_one` reds on that spelling. Nor is a
+# row the map's only carrier of a weight: `durations_floors` can additionally PIN a declared value.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
+# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
+# against `main` is measurably ZERO here, and it was MEASURED, not reasoned: `fast_pool()` holds
+# 1337 files at this head and every one of them is `main`'s, because this PR adds no test file —
+# the two sides' parsed manifests are identical (255 surface registrations, 1503 `durations` rows,
+# zero differing values), so the comment-only `durations` rewrites on either side move no member of
+# the pool. ⛔ That zero is a READING of this head, never a promise about the next fold:
+# `fast_pool()` takes its inputs from the tree being measured (the manifest, the selector's own
+# constants, and the filesystem under an `on_demand: <dir>/**` subtree, which
+# `on_demand_subtree_files` expands with `rglob("test_*.py")` on purpose — a file added to a
+# non-gating subtree must not silently re-enter the gate), so re-measure the delta on the tree you
+# are merging INTO rather than carrying this sentence's zero. The name lists are what the guard
+# COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
@@ -2978,6 +2982,8 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_mcp_selfcheck.py
+  - test_recall_neighborhood.py
   # #14552: the store's per-id vector answer, beside the write-gate and retirement suites it
   # completes (test_13826_write_gate.py, test_13629_entity_vector_retire.py). Registered `core`
   # because its subject — `tortoise/record_read.py::point_vector_keys` — is reached from the
