@@ -629,6 +629,59 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
         assert "RAW BODY THAT MUST NOT LEAK" not in repr(body), body
 
 
+def test_a_hybrid_object_source_cannot_republish_its_denied_payload(tmp_path):
+    """#3998 / D30 + #5196: `:Source` is decided by the NODE'S LABELS, not the branch.
+
+    ⛔ The measured defect this pins: `(:Object:Source)` is a PRODUCTION shape
+    (`mcp_server.py`'s #4649 case) and `_RESOLVE_BRANCHES` offers `("Object", "id")`
+    before `("Source", "id")`, so the dedupe keeps the Object row — the route
+    resolves through the OBJECT branch. A disclosure rule keyed on that branch
+    label (`entry["label"] == "Source"`) therefore skipped the filter for exactly
+    the node that carries the denied payload, and `GET /v1/objects/{id}` published
+    the `content`/`text` that `/v1/sources/{id}` withholds.
+
+    MUTANT: in `hosted_api._layer_payload`, restore
+    `if entry.get("label") == "Source":` (the matched branch) instead of grading
+    `entry["labels"]` — both `content` and the planted raw text come back.
+
+    The counter-arm keeps the rule honest in the other direction: a plain
+    `:Object` (no Source label) is still served AS STORED, so this is a disclosure
+    filter and not a blanket redaction.
+    """
+    raw = "HYBRID RAW TEXT THAT MUST NOT LEAK"
+    hybrid_id = "hybrid-obj-source-14592"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # Below the write door: the door will not mint a hybrid, which is why
+            # the node is planted with BOTH labels and BOTH payload keys.
+            sdk._get_proj().g._query(
+                "CREATE (h:Object:Source {id:$i, name:'HYBRID', "
+                "objectKind:'goal', url:'https://example.test/hybrid-14592', "
+                "content:$t, text:$t})",
+                params={"i": hybrid_id, "t": raw},
+                read_only=False)
+            harness = client.post(
+                "/v1/objects", json={"name": "PLAIN", "objectKind": "goal"}).json()
+            sdk._get_proj().g._query(
+                "MATCH (o:Object {id:$i}) SET o.content = $t",
+                params={"i": harness["id"], "t": "PLAIN OBJECT CONTENT"},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        # The `:Source` half is denied even though the route resolved it AS Object …
+        hybrid = client.get(f"/v1/objects/{hybrid_id}").json()
+        assert hybrid.get("name") == "HYBRID", hybrid
+        assert "content" not in hybrid, hybrid
+        assert "text" not in hybrid, hybrid
+        assert raw not in repr(hybrid), hybrid
+
+        # … and a plain `:Object` is still served as stored (no over-redaction).
+        plain = client.get(f"/v1/objects/{harness['id']}").json()
+        assert plain.get("content") == "PLAIN OBJECT CONTENT", plain
+
+
 # ── GET /v1/entities/{id}/relations ────────────────────────────────────────
 
 def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path):
