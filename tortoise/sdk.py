@@ -49836,8 +49836,8 @@ class TortoiseSDK:
         terms — the entity context AGREEING with the query is the signal the expansion
         exists to supply — but that is an ADVANTAGE, not a dominance guarantee: it is a
         PAIR condition, `1/(61+h1) + 1/(61+h2)` vs a single-list rank `r`, beaten only
-        while `r < (h1 + h2 - 61) / 2`. The SYMMETRIC case (both ranks at <= 61) wins,
-        ties a lone rank-1 at 62 (`2/122 == 1/61`, `(-score, id)` decides by spelling)
+        while `r > (61+h1)(61+h2)/(122+h1+h2) - 61`: a TIE at equality, a loss below.
+        The SYMMETRIC case (both ranks at <= 61) wins, ties a lone rank-1 at 62 (`2/122 == 1/61`)
         and loses past it — while a top slot in EITHER list beats every single-list term
         outright. A pass-1 id can move down only when a candidate out-ranks it in the
         composed run, when one ties it and wins the id tiebreak (#2952), or by a shared

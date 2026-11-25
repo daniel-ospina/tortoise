@@ -778,7 +778,8 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     # express every discriminator, so assert only what it CAN show). The seed is
     # carried by BOTH passes, so it earns both reciprocal-rank terms and, ON THIS
     # FIXTURE's ranks, leads the leg. That is fixture geometry, NOT an invariant:
-    # two terms beat a single-list rank only inside the <=61-in-both bound, so the
+    # two terms beat a single-list rank only while ``r > (61+h1)(61+h2)/(122+h1+h2)
+    # - 61`` (a tie at equality, a loss below), so the
     # assertion below is about this fixture's distances and not about membership.
     # Session B (expansion-only) still joins: the fusion adds, it does not filter.
     assert ids[0] == DENSE_SEED_ID, (

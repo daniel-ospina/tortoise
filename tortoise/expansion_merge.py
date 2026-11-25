@@ -57,9 +57,15 @@ def fuse_expansion_pass(
 
       * an id both passes carry earns both terms, and that is an ADVANTAGE, not
         dominance. The condition is a PAIR of ranks, never a bound on one:
-        ``1/(61+h1) + 1/(61+h2)`` beats a single-list candidate at 0-based rank
-        ``r`` only while ``r < (h1 + h2 - 61) / 2``. Two consequences, and the
-        second is the one this bullet used to omit: (a) the SYMMETRIC case
+        ``1/(61+h1) + 1/(61+h2) > 1/(61+r)`` — it beats a single-list candidate
+        at 0-based rank ``r`` exactly while
+        ``r > (61+h1)(61+h2)/(122+h1+h2) - 61``, TIES it at equality and loses
+        below. ⛔ The inequality runs the OTHER WAY from the
+        ``r < (h1 + h2 - 61) / 2`` this docstring first published, which was
+        false in BOTH directions: it said a top-slot shared id never wins, and
+        that a shared id at 1-based 63 in BOTH lists beats a lone rank-1. Two
+        consequences, both of them that closed form specialised, and the second
+        is the one this bullet used to omit: (a) the SYMMETRIC case
         ``h1 == h2 == h`` — the only one a same-rank fixture can build — beats a
         lone rank-1 while the shared id sits at 1-based rank <= 61 in BOTH
         lists, TIES it at 62 (``2/122 == 1/61``, ``rrf_fusion``'s ``(-score,
@@ -85,7 +91,7 @@ def fuse_expansion_pass(
     LENGTH — only by a candidate that out-ranks it in the expanded run, or by
     an id BOTH passes carry, whose PAIR of terms can pass an incumbent that
     out-ranks it in the expanded run: against an incumbent at 0-based rank
-    ``r`` that is ``r < (h1 + h2 - 61) / 2`` — in the symmetric case
+    ``r`` that is ``r > (61+h1)(61+h2)/(122+h1+h2) - 61`` — in the symmetric case
     (``h1 == h2 == h``) the <= 61-in-both reading, a tie at 62 and the
     incumbent ahead past it, and UNCONFINED when the shared id holds a top slot
     in either list, where its two terms beat every single-list term. Both

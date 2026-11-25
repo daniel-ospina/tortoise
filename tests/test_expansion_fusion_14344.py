@@ -41,6 +41,12 @@ from tortoise import expansion_merge
 from tortoise.expansion_merge import fuse_expansion_pass
 from tortoise.search_engine import rrf_fusion
 
+# The tie tolerance for the float comparison in
+# `test_the_published_pair_condition_is_the_fusions_arithmetic`: identical values
+# compare exactly, and the narrowest real margin on that sweep is ~5e-5, so this
+# only ever absorbs summation noise.
+_TIE_EPS = 1e-15
+
 
 # ── The concatenation this replaced, kept ONLY as the counterfactual the
 #    assertions below are written against. Never call it from product code. ──
@@ -265,10 +271,11 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
 
     ``rrf_fusion`` scores a shared id ``1/(61+h1) + 1/(61+h2)`` (0-based ranks)
     against a single-list candidate at 0-based rank ``r``'s ``1/(61+r)``, so the
-    condition is a PAIR of ranks, ``r < (h1 + h2 - 61) / 2`` — never a bound on
-    one rank. Its SYMMETRIC case (``h1 == h2 == h``, the only one a same-rank
-    fixture builds) wins while both 1-based ranks are <= 61, TIES a lone rank-1
-    at 62 and loses past it; its TOP-SLOT case is unconfined. ``DEFAULT_POOL_SIZE``
+    condition is a PAIR of ranks — ``r > (61+h1)(61+h2)/(122+h1+h2) - 61``, a TIE
+    at equality and a loss below it — never a bound on one rank. Its SYMMETRIC
+    case (``h1 == h2 == h``, the only one a same-rank fixture builds) wins while
+    both 1-based ranks are <= 61, TIES a lone rank-1 at 62 and loses past it; its
+    TOP-SLOT case is unconfined. ``DEFAULT_POOL_SIZE``
     is 120 (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the
     shipping default — not a corner.
 
@@ -283,6 +290,13 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     case, and a sentence that published it as a necessary condition was false in
     the other direction. The arithmetic row below carries the asymmetric
     (``h1 != h2``) case that falsifies it; this row carries the wording.
+
+    ⛔ AND ROUND 18 STILL PUBLISHED A FALSE CLOSED FORM, which is why this row now
+    names the ONE true one (#14597 review, P2-1): the sentence it graded said
+    ``r < (h1 + h2 - 61) / 2``, wrong in both directions, and the regex pinned that
+    string instead of the arithmetic. The closed form is now graded positively AND
+    the refuted one negatively, so a carrier cannot re-publish it; that the form is
+    the ENGINE's is `test_the_published_pair_condition_is_the_fusions_arithmetic`.
     """
     import re
 
@@ -298,24 +312,134 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     unbounded = "outranks either pass alone"
     bound = re.compile(r"(<=|\u2264)\s*61")
     # ⛔ The POSITIVE half round 18 found missing from every carrier: the condition
-    # is a pair of ranks (`r < (h1 + h2 - 61) / 2`), so a carrier that states only
-    # the symmetric `<= 61` case publishes it as a NECESSARY condition and is false
-    # whenever either rank is 1. Graded positively because enumerating the false
-    # phrasings is what let the mirror error through twice; both the ASCII and the
-    # typographic minus are accepted, since the README uses U+2212.
-    pair_condition = re.compile(r"\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)")
+    # is a pair of ranks, so a carrier that states only the symmetric `<= 61` case
+    # publishes it as a NECESSARY condition and is false whenever either rank is 1
+    # — and round 18's own closed form was false too, so the form itself is now
+    # graded (see the arithmetic row) rather than only its presence. Both the ASCII
+    # and the typographic minus are accepted, since the README uses U+2212.
+    pair_condition = re.compile(
+        r"\(\s*61\s*\+\s*h1\s*\)\s*\(\s*61\s*\+\s*h2\s*\)\s*/\s*"
+        r"\(\s*122\s*\+\s*h1\s*\+\s*h2\s*\)\s*[-\u2212]\s*61")
+    # ⚠️ The REFUTED form `r < (h1 + h2 - 61) / 2` is deliberately NOT pinned
+    # negatively: every carrier QUOTES it to say it was wrong, and a regex would
+    # have to tell a correction from a re-publication — exactly the fail-closed
+    # over-block this repo does not add gates for. The TRUTH of the form is
+    # graded by `test_the_published_pair_condition_is_the_fusions_arithmetic`
+    # below, which is the instrument that would have caught round 18's error.
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
-            "rank only under the pair condition r < (h1 + h2 - 61) / 2")
+            "rank only under the pair condition "
+            "r > (61+h1)(61+h2)/(122+h1+h2) - 61")
         assert bound.search(text), (
             f"{where} states the two-term advantage without its bound — the "
             "`<= 61` clause is what makes the SYMMETRIC half of the claim true")
         assert pair_condition.search(text), (
             f"{where} publishes the `<= 61` case without the PAIR condition "
-            "`r < (h1 + h2 - 61) / 2` — the `<= 61` reading is the symmetric "
-            "case only, and a shared id holding the TOP slot in either list "
-            "beats every single-list term whatever its other rank (round 18, P2-1)")
+            "`r > (61+h1)(61+h2)/(122+h1+h2) - 61` — the `<= 61` reading is the "
+            "symmetric case only, and a shared id holding the TOP slot in either "
+            "list beats every single-list term whatever its other rank (round 18, P2-1)")
+
+
+def test_the_published_pair_condition_is_the_fusions_arithmetic():
+    """The pair condition the carriers PUBLISH, graded numerically against
+    ``rrf_fusion`` over the ASYMMETRIC interior (#14597 review, P2-1).
+
+    ``rrf_fusion`` sums ``w / (k + rank + 1)`` over a 0-BASED ``rank`` with
+    ``k = 60``, so a shared id at ``(h1, h2)`` scores ``1/(61+h1) + 1/(61+h2)``
+    against a single-list candidate at ``r``'s ``1/(61+r)``. Solving
+
+        ``1/(61+h1) + 1/(61+h2) > 1/(61+r)``   (``A = 61+h1``, ``B = 61+h2``)
+
+    gives ``r > A*B/(A+B) - 61``, i.e. the shared id beats the WORSE-ranked
+    incumbents — a TIE at equality and a loss below it. An earlier cut published
+    ``r < (h1 + h2 - 61) / 2``, which disagrees with the engine on the sweep
+    below in both directions, and the sibling row
+    ``test_the_two_term_advantage_is_bounded_at_1based_61`` could not see it
+    because every fixture there is symmetric or top-slot — the two regions where
+    the two forms happen to agree.
+
+    Rational arithmetic decides the published bound (``Fraction``) and
+    ``rrf_fusion`` itself decides the engine, so the equality case is decided by
+    the VALUE and never by rounding. Non-vacuity: the named fixtures at the top are
+    RED against the published-before form, and that is asserted here rather than
+    remembered (the old form is recomputed, not quoted).
+    """
+    from fractions import Fraction
+
+    def bound(h1: int, h2: int) -> Fraction:
+        return Fraction((61 + h1) * (61 + h2), 122 + h1 + h2) - 61
+
+    def published(h1: int, h2: int, r: int) -> str:
+        b = bound(h1, h2)
+        return "win" if r > b else ("tie" if r == b else "loss")
+
+    def published_before(h1: int, h2: int, r: int) -> str:
+        # The refuted form, recomputed so its disagreement is MEASURED.
+        b = Fraction(h1 + h2 - 61, 2)
+        return "win" if r < b else ("tie" if r == b else "loss")
+
+    def _at(rank: int, pid: str) -> list[tuple[str, float]]:
+        # A ranked list whose `rank` is `pid`. The pads neither list competes for
+        # are inert: a pad earns a term, and only "shared"/"single" are read.
+        return [(f"pad{i}", 1.0) if i != rank else (pid, 1.0)
+                for i in range(rank + 1)]
+
+    def engine(h1: int, h2: int, r: int) -> str:
+        # THREE lists on purpose: the shared id earns exactly TWO terms and the
+        # single-list candidate ONE, each the 0-based `w / (k + rank + 1)` the
+        # prose quotes — run through the repo's OWN ``rrf_fusion`` at `k = 60`,
+        # never a replica of its arithmetic (that is what the refuted form got
+        # away with: it was checked against a paraphrase instead).
+        fused = rrf_fusion(
+            [_at(h1, "shared"), _at(h2, "shared"), _at(r, "single")], 60)
+        if fused["shared"] > fused["single"] + _TIE_EPS:
+            return "win"
+        if fused["single"] > fused["shared"] + _TIE_EPS:
+            return "loss"
+        return "tie"
+
+    # The fixtures that falsified the refuted form, one per failure mode:
+    #   (0, 0, 0)     — top slot in both lists: `2/61 > 1/61`, yet it said "loss"
+    #   (61, 61, 0)   — the exact tie `2/122 == 1/61`; it said "win"
+    #   (61, 61, 100) — a WORSE-ranked incumbent is beaten; it said "loss"
+    #   (62, 62, 0)   — the test's own `beyond 1-based 62` case; it said "win"
+    #   (62, 100, 0)  — asymmetric interior, same false positive
+    #   (1, 201, 100) — asymmetric interior, false negative of the other sign
+    named = {
+        (0, 0, 0): "win",
+        (61, 61, 0): "tie",
+        (61, 61, 100): "win",
+        (62, 62, 0): "loss",
+        (62, 100, 0): "loss",
+        (1, 201, 100): "win",
+    }
+    for (h1, h2, r), want in named.items():
+        assert published(h1, h2, r) == want, (
+            f"(h1, h2, r) = ({h1}, {h2}, {r}): the published bound "
+            f"r > {bound(h1, h2)} must read {want!r}")
+        assert engine(h1, h2, r) == want, (
+            f"(h1, h2, r) = ({h1}, {h2}, {r}): rrf_fusion's own scores must read "
+            f"{want!r} — got {engine(h1, h2, r)!r}")
+        assert published_before(h1, h2, r) != want, (
+            f"(h1, h2, r) = ({h1}, {h2}, {r}) does NOT falsify the refuted "
+            "r < (h1 + h2 - 61) / 2 — pick another fixture or this row has "
+            "lost its non-vacuity")
+
+    examined = 0
+    # Asymmetric interior pairs, the region the symmetric rows cannot build:
+    # (61, 61) and (62, 62) straddle the tie, and (62, 100) / (1, 201) put the
+    # false positive and the false negative of the refuted form on the same sweep.
+    for h1, h2 in ((0, 0), (0, 1), (61, 61), (62, 62), (62, 100), (100, 5),
+                   (1, 201), (5, 200), (200, 0)):
+        for r in range(0, 120):
+            examined += 1
+            got, want = engine(h1, h2, r), published(h1, h2, r)
+            assert got == want, (
+                f"(h1, h2, r) = ({h1}, {h2}, {r}): the published bound "
+                f"r > {bound(h1, h2)} reads {want!r} but rrf_fusion reads "
+                f"{got!r} — the prose and the engine have drifted apart")
+    assert examined >= 1000, f"the sweep must stay broad, got {examined} points"
 
 
 def test_the_two_term_advantage_is_bounded_at_1based_61():

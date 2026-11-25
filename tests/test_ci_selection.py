@@ -9595,8 +9595,8 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
-    # below would be decoration on the one file it exists to grade. This block runs to thousands of
-    # words (the spliced fold's was ~2,950), so the floor is two orders of magnitude below it — not a
+    # below would be decoration on the one file it exists to grade. The real block is more than an
+    # order of magnitude longer than this floor (100 words) — not a
     # tuned value. ⛔ The relation is asserted, not a remembered head count: a count in this comment
     # rots with every fold, and stale counts beside real artefacts are what this PR's review rounds
     # have repeatedly filed (rounds 16 and 18, P3-1).
