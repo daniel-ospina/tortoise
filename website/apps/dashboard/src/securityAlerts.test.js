@@ -82,7 +82,11 @@ test('#10156: an unknown or missing register defaults to the QUIET one', () => {
   // pipelines are independent) is rescued for the types whose incident reading is
   // certain, so a suspension is never rendered as "nothing was changed".
   assert.equal(registerOf({ type: 'suspend' }), REGISTER_ALERT)
-  assert.equal(registerOf({ type: 'flag' }), REGISTER_ALERT)
+  // #14687: `flag` / `review_needed` are rate MEASUREMENTS (the server stamps
+  // them `activity`), so an un-stamped row from an older API is not rescued into
+  // the incident register any more — the quiet reading is true for them.
+  assert.equal(registerOf({ type: 'flag' }), REGISTER_ACTIVITY)
+  assert.equal(registerOf({ type: 'review_needed' }), REGISTER_ACTIVITY)
   assert.equal(registerOf({ type: 'read_velocity' }), REGISTER_ACTIVITY)
   // …and a declared incident still lands in the incident register.
   assert.equal(registerOf({ register: REGISTER_ALERT }), REGISTER_ALERT)

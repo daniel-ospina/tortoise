@@ -121,10 +121,18 @@ export const ALERTS_UNAVAILABLE = "Could not read this Organization's alert "
 //: BOTH lands in the quiet register, so a type added later is never
 //: incident-framed by accident. This list only rescues the types where the
 //: incident reading is certain.
+//:
+//: #14687 removed `flag` and `review_needed` from it, because the product's own
+//: definition of those two changed: they are re-derived rate MEASUREMENTS (see
+//: `ALERT_REGISTER_OF` in `tortoise/abuse.py`), nothing punitive has ever followed
+//: them, and the server now stamps them `activity`. Keeping the rescue here would
+//: have made the mixed-deploy window render a rate as an incident — the exact
+//: framing the register split exists to remove — and the quiet reading is TRUE for
+//: them in either version (nothing was disabled). `suspend` and `auth_ip` stay:
+//: an older API emitted those only for real state changes, and mis-framing one of
+//: those is the direction that must never happen.
 const INCIDENT_BY_DEFINITION = new Set([
   'suspend',
-  'flag',
-  'review_needed',
   'auth_ip',
 ])
 
