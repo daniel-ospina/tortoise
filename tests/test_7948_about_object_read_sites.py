@@ -3583,9 +3583,12 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # to read is the value TWO retirements earlier (the SDK traversal row took
     # 31 -> 30, `#11609` batch 1 another).
     # ⛔ 21 -> 22 at `#14592`'s head (`cy-14593`): row 46 adds ONE cell occurrence (its
-    # own REST door), and `_door_reaches` accepts exactly one pair for it. The floor
-    # MOVES with the table, as the note below requires: at 21 this arm would not red
-    # on a one-occurrence `_doors()` regression, which is the whole thing it is for.
+    # own REST door), and `_door_reaches` accepts exactly one pair for it. This floor
+    # tracks §13's cell-occurrence count and moves WITH the table, as the note below
+    # requires. ⚠️ It is NOT a per-occurrence tripwire: the figure it bounds is
+    # `total` (accepted PAIRS, 28 here) against 22, so it reds on a loss of 7 or more,
+    # not on one. The one-occurrence tripwire is the sibling arm's
+    # `attributed >= 22`, where `attributed` IS the occurrence count.
     assert total >= 22, (
         f"only {total} pairs are accepted although §13's cells name 22 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
