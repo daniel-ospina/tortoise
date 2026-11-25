@@ -572,16 +572,19 @@ drift (`files_scanned: doc=313 tool=314`) and the re-measured tree reads `sites`
 not carried.
 
 ⚠️ **Appendix A gains and loses NO row — nothing here is a census-visible statement SITE — but 135 of
-its `file:line` ADDRESSES moved, and that is the half a carried table gets wrong.** Measured at this
-head by diffing the regenerated table against the previous one: **132** rows in
+its `file:line` ADDRESSES moved, and that is the half a carried table gets wrong.** Measured at the
+P3-1 fix's head by diffing the regenerated table against the previous one: **132** rows in
 `tortoise/hosted_api.py` and **3** in `tortoise/supabase_control.py` (the door wrappers' docstrings and
 their `note_uncut_graph` bodies sit above those rows), 0 elsewhere — 0 added, 0 removed, 1,327 rows
 before and after. Neither file gains a site, so `files` and `files_with_sites` cannot move however many
 lines or door calls they take; ⛔ but this paragraph's previous revision claimed **"NONE MOVED"**, and
 that was false at the head that carried it: **339** addresses had already moved against the merge base
-(`hosted_api.py` **233**, `sdk.py` **104**, `record_allocator.py` **2**) from the feature's own
-insertions, before any review fix. The P3-1 fix moved **135** of them again (`hosted_api.py` **132**,
-`supabase_control.py` **3**); the two comparisons are per-pair, not additive. It is the carried-claim
+(`hosted_api.py` **233**, `sdk.py` **104**, `record_allocator.py` **2**), from this branch's own
+insertions as they stood then — ⛔ a NET figure taken at a post-review-fix head, and NOT "before any
+review fix": the `hosted_api.py` **233** half is the #14587 health-key commit (`432ee2c`), which IS a
+review fix, and its 8 inserted lines are already inside that 339. The P3-1 fix moved **135** of them
+again (`hosted_api.py` **132**, `supabase_control.py` **3**); the two comparisons are per-pair, not
+additive. It is the carried-claim
 defect this section polices, caught by reading the table's own diff instead of trusting the last cut.
 **RE-CUT at the #14587 P2 fix, which hooks the two `kind='default'` minting arms in
 `set_graph_name` / `set_graph_recording`:** its comments add **49** lines to `supabase_control.py` (no
