@@ -73,13 +73,19 @@ version: 1
 # SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 827.1 = 2.0312), so the two agree by construction rather than by
 # a hand re-read.
-# ⛔ EVERY file named above is `main`'s at this head and every one is `core`; the weight is the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT` for all of them EXCEPT `#14548`'s residue RATCHET, which is
-# `tests/test_sdk_privatise_sweep.py` at **28.0 s** — a `core` file whose weight is not flat, so do
-# not read that list as "all 2.0 s".
+# ⛔ EVERY file named above is `main`'s at this head and every one is `core`; the weight is the
+# header's `DEFAULT_FAST_WEIGHT` for all of them EXCEPT `#14548`'s residue RATCHET
+# (`tests/test_sdk_privatise_sweep.py`), whose weight is a MEASURED `durations` row and not the
+# default — a `core` file whose weight is not flat, so do not read that list as "all default".
+# ⛔ NO PER-FILE WEIGHT IS QUOTED HERE, on purpose: a weight beside a file re-stales against the
+# run it came from, `--refresh-durations` rewrites it with no human decision, and a small move does
+# not even shift the graded emission — so no arm would see the sentence go false.
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` — among the files named above, `#14597`'s
-# `tests/test_expansion_fusion_14344.py` row, `#14560`'s, `#14565`'s, `#14552`'s,
+# `tests/test_expansion_fusion_14344.py` row, `#14560`'s
+# `tests/test_14560_operator_vectors.py` row, `#14565`'s
+# `tests/test_14559_reaper_schedule.py` row, `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` row,
 # `#14592`'s `tests/test_14592_operating_model_evidence.py` row and
 # `tests/test_14592_read_parity.py` row, `#14415`'s `tests/test_14219_batch_ingest.py` row and
 # `tests/test_14219_batches_api.py` row, plus the RATCHET's own
