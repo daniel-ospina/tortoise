@@ -1192,8 +1192,11 @@ def main(argv: list[str] | None = None) -> int:
         # run. So this guard asks git where the metadata LIVES rather than asking the
         # index: `--git-dir` and `--git-common-dir` one call, because a linked
         # worktree's refs are shared with the main checkout, so the common dir is a
-        # second answer. Outside a git work tree (`128`) it does not fire, exactly like
-        # the tracked-path probe beside it.
+        # second answer. ⛔ A probe that CANNOT be answered is refused below rather than
+        # read as harmless: the tracked-path probe's "not a repo" pass is not the same
+        # case, because a tracked path cannot exist outside a repository while git
+        # metadata can (measured at `bf0dbcf9`: forcing the probe to exit 128 made the
+        # guard a no-op and `--render` wrote over a `--separate-git-dir` repo's config).
         #
         # ⛔ AND THE PROBE ALONE IS NOT THE INVARIANT — it is the DIRECTORY case of it.
         # A LINKED WORKTREE'S `.git` IS A REGULAR FILE holding `gitdir: …`, and it is
@@ -1207,13 +1210,29 @@ def main(argv: list[str] | None = None) -> int:
         # as metadata too, and that half needs no subprocess (which is also why it is
         # decided first: it cannot be made to depend on git answering).
         metadata_dirs = []
-        if ".git" in target.parts:
-            metadata_dirs.append(Path(*target.parts[: target.parts.index(".git") + 1]))
+        # ⛔ AND THE PROBE IS RUN FROM BESIDE THE TARGET, NOT FROM `ROOT` — `--render`
+        # takes any absolute path, and a destination inside ANOTHER checkout's git
+        # directory carries no `.git` component when that repo was made with
+        # `--separate-git-dir`. Measured at `bf0dbcf9`: probing ROOT answered "not
+        # metadata" for a second repo's separate git dir and `--render` wrote the
+        # document over that repo's `config`. Measured too that a probe from the
+        # target's own parent DOES see it: `git -C <separate-git-dir> rev-parse
+        # --git-dir` answers `.`, and from a subdirectory of it, that directory.
+        #
+        # ⛔ CASE-INSENSITIVE ON PURPOSE: on a case-insensitive filesystem `.GIT/config`
+        # resolves to the real `.git/config`, so a case-sensitive component test lets it
+        # through.
+        dot_git_at = [i for i, part in enumerate(target.parts) if part.lower() == ".git"]
+        if dot_git_at:
+            metadata_dirs.append(Path(*target.parts[: dot_git_at[0] + 1]))
         else:
+            probe_cwd = target.parent
+            while not probe_cwd.is_dir() and probe_cwd != probe_cwd.parent:
+                probe_cwd = probe_cwd.parent
             try:
                 meta_probe = subprocess.run(
                     ["git", "rev-parse", "--git-dir", "--git-common-dir"],
-                    cwd=ROOT, capture_output=True, text=True,
+                    cwd=probe_cwd, capture_output=True, text=True,
                     encoding="utf-8", errors="surrogateescape",
                 )
             except OSError as err:
@@ -1222,18 +1241,44 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            if meta_probe.returncode == 0:
-                # ⛔ AN EMPTY LINE IS NOT `ROOT`: `Path("")` resolves to the current
-                # directory, so an unanswered probe would refuse EVERY destination —
-                # fail-closed in the wrong direction, and silently.
-                for line in meta_probe.stdout.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        metadata_dirs.append((ROOT / line).resolve())
-                    except (OSError, RuntimeError):
-                        continue
+            # ⛔ AN EMPTY LINE IS NOT `probe_cwd`: `Path("")` resolves to the current
+            # directory, so an unanswered probe would refuse EVERY destination —
+            # fail-closed in the wrong direction, and silently.
+            for line in meta_probe.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    metadata_dirs.append((probe_cwd / line).resolve())
+                except (OSError, RuntimeError):
+                    continue
+            # ⛔ A NON-ZERO PROBE IS "COULD NOT DETERMINE", NOT "NOT METADATA". The one
+            # honest permit is git's own `not a git repository` with no `.git` entry on
+            # any ancestor (a plain directory is a legitimate destination). Every other
+            # failure — a broken git, an unreadable layout, a timeout — REFUSES: a false
+            # refusal costs a re-run with another path, a false permit costs a repository
+            # git cannot restore.
+            if meta_probe.returncode != 0:
+                stderr_text = meta_probe.stderr or ""
+                plainly_outside = "not a git repository" in stderr_text and not any(
+                    (parent / ".git").exists()
+                    for parent in (target.parent, *target.parent.parents)
+                )
+                if not plainly_outside:
+                    first = stderr_text.strip().splitlines()
+                    print(
+                        f"refusing to render over {args.render}: git could not say "
+                        "whether it is GIT METADATA\n"
+                        f"(`git rev-parse` from {probe_cwd} exited "
+                        f"{meta_probe.returncode}"
+                        + (f": {first[0]}" if first else "")
+                        + ").\nGit cannot restore what --render writes over, so an "
+                        "unanswerable probe is refused rather than read as harmless.\n"
+                        "Pick another path (the default writes the gitignored "
+                        "`CYPHER-INVENTORY.md`).",
+                        file=sys.stderr,
+                    )
+                    return 2
         for meta in metadata_dirs:
             if target == meta or meta in target.parents:
                 print(
