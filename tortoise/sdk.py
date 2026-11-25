@@ -297,6 +297,35 @@ from .security import redact_secrets
 import threading
 from datetime import UTC
 
+
+def _point_drop_hold() -> frozenset[str]:
+    """The labels whose GRAPH vector this door must not retire yet (`#14560` review, P1).
+
+    ⛔ THE SAME HOLD THE RESTORE DOOR CONSULTS, READ HERE FOR THE SAME REASON.
+    `hosted_backup._RESTORE_DROP_HELD` states it: a coverage verdict is an AGGREGATE, and
+    an aggregate is not evidence about the row a DESTRUCTIVE action touches. The restore
+    door deletes a node; this door pops a caller's vector out of the props it is about to
+    `SET n += $p`. `#14560` made `operator`'s coverage VERIFY (the empty slice is TRIVIAL,
+    and `mirror_required` without `require_substantive` reads that as stop), which is what
+    opened this door in the first place — before that change the operator conjunct was
+    unsatisfiable by arithmetic, so `:Point`'s pop could never fire and the pre-change
+    behaviour was KEEP by accident. Holding here makes the same outcome a RULE until
+    `#13971`'s per-ID ask can answer about the row being written.
+
+    ⛔ IMPORTS PER CALL, and any failure returns the HOLD. Two reasons, both measured
+    elsewhere in this file: a module-level `hosted_backup` import in the SDK pulls the
+    backup/hosted-api graph into every SDK import, and this predicate exists so a WRITE
+    path cannot be taken down by an arming module it cannot read. The fallback direction
+    is the conservative one — the graph keeps the vector, which is the only choice that
+    cannot lose a caller's write.
+    """
+    try:
+        from .hosted_backup import _RESTORE_DROP_HELD
+
+        return _RESTORE_DROP_HELD
+    except Exception:  # pragma: no cover - arming-module fault, keep the vector
+        return frozenset({"Point"})
+
 # #12943: module-scope, not a local import inside ``__init__``. THE IMPORT IS THE
 # ONLY LINE OF THAT HOOK THAT CAN RAISE: ``note_local_cache`` itself is wrapped
 # (its module's contract is "a fault in observability must never deny a caller a
@@ -56802,7 +56831,16 @@ class TortoiseSDK:
                 # record covers it (`#13330` retired the in-graph index, so nothing reads
                 # the property), not a reason to keep re-writing it.
                 if (label == "Point" and not _derived_mirror_required("point")
-                        and not _derived_mirror_required("operator")):
+                        and not _derived_mirror_required("operator")
+                        # ⛔ AND THE HOLD (`#14560` review, P1). `#14560` made the operator
+                        # conjunct VERIFY on a deployment whose operator slice is empty, so
+                        # this pop — unreachable for its whole life by ARITHMETIC — became
+                        # reachable on an AGGREGATE. A caller may be handing us a NEW vector
+                        # here (this door journals no embedding record at all, `#4094`), so a
+                        # pop drops the tenant's write from BOTH stores and returns success.
+                        # `:Point` keeps its copy until `#13971`'s per-ID ask, exactly as the
+                        # restore door holds it; lifting is `_RESTORE_DROP_HELD`'s call.
+                        and "Point" not in _point_drop_hold()):
                     props = dict(_props_base)
                     props.pop("embedding", None)
                 # #4649: a canonical label's identity is an OR-SET, not one key.
