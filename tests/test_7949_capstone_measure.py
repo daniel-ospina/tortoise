@@ -12421,3 +12421,88 @@ def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
             f"`{_SDK147_NEEDLE}` occurs at {true_lines} in `sdk` — the `:147` figures name a "
             "line that is no longer unique, so the census cannot mean one address")
     return failures
+
+
+# ══ A NEGATIVE MEMBERSHIP CLAIM ABOUT THIS BUNDLE'S OWN FILES IS UNGRADED PROSE — AND IT HAS
+#    BEEN FALSE AT TWO HEADS ═══════════════════════════════════════════════════════════════════
+#
+# `05-verify.md` states, in the present tense, whether a sibling document is in this branch's
+# diff. That sentence is a claim about a COMMAND's output, and nothing in this file read it.
+# MEASURED at `6c2c4d06`: the bundle asserted that `git diff --numstat origin/main...HEAD --
+# …/04-plan.md` "prints NOTHING" (twice) and "is EMPTY", while the same command prints
+# `1 1 …/04-plan.md` — because `2bedbc41` re-derived the `org_info` span IN that file and left
+# the surrounding prose asserting the file was in no diff at all. The same paragraph also said
+# "both copies already read" the re-derived pair, while `origin/main`'s copy read the BASE pair
+# (`17218-17295`, its own anchors) — a sentence that refuted its own neighbour.
+#
+# The rule here is the one the bundle already states for every other figure: a NEGATIVE claim
+# ("prints NOTHING", "is EMPTY") is both unmeasurable in the document and self-refuting the moment
+# anyone edits the file it names, so state the pair the command PRINTS and let a reader re-run it.
+# ⛔ This arm cannot check the NUMBERS (that needs `origin/main`, which a CI checkout does not
+# always carry, and an arm that skips when a ref is absent is a no-op gate). What it can do — and
+# what would have caught both heads — is refuse the SHAPE that rots.
+_MEMBERSHIP_CMD_RE = re.compile(
+    r"numstat origin/main\.\.\.HEAD -- "
+    r"docs/epics/2026-11-04-7949-extractor-v4-capstone/(?P<path>[0-9A-Za-z._-]+\.md)`"
+    r"(?P<tail>[^;]{0,60})"
+)
+
+#: The two spellings the documents used for "this file is in no part of this diff".
+_NEGATIVE_MEMBERSHIP_VERDICTS = ("prints NOTHING", "is EMPTY")
+
+
+def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
+    """Split the bundle's `numstat` membership sentences into (negative, positive) claims.
+
+    `negative` is a refusal, not a finding: the document may state what it MEASURED, never a
+    negative it cannot keep. `positive` is the paths the document states a measured pair for,
+    so a deletion of every positive claim is visible instead of silent.
+    """
+    negative: list[str] = []
+    positive: list[str] = []
+    for match in _MEMBERSHIP_CMD_RE.finditer(doc_text):
+        tail = match.group("tail")
+        if any(verdict in tail for verdict in _NEGATIVE_MEMBERSHIP_VERDICTS):
+            negative.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
+        elif "prints `1 1`" in tail:
+            positive.append(match.group("path"))
+    return negative, positive
+
+
+def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
+    """A `numstat … prints NOTHING` sentence is the shape that was FALSE at `6c2c4d06`."""
+    failures = []
+    for name in ("04-plan.md", "05-verify.md"):
+        negative, _ = _membership_claims(_EPIC_CITE_DOCS[name].read_text(encoding="utf-8"))
+        for claim in negative:
+            failures.append(f"{name}: {claim}")
+    assert not failures, (
+        "a bundle document states a NEGATIVE membership claim about a file in this diff. "
+        "Membership changes with every commit that touches that file — and `2bedbc41` made "
+        "this sentence FALSE two lines away from the repair it was describing. State the pair "
+        f"the command prints (`prints \\`1 1\\``) instead. Measured: {failures}")
+
+
+def test_the_org_info_repoint_is_still_stated_as_the_numstat_the_document_read():
+    """The positive half: deleting the measured claim must red, not read as 'nothing to say'."""
+    _, positive = _membership_claims(
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
+    assert "04-plan.md" in positive, (
+        "`05-verify.md` no longer states a MEASURED `numstat origin/main...HEAD` pair for "
+        "`04-plan.md`. The `org_info` span re-point (`17218-17295` -> `17319-17396`) is this "
+        "branch's own work — `git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` — so the row "
+        f"is not optional prose. Measured positive claims: {positive}")
+
+
+def test_the_negative_membership_detector_fires_on_the_sentence_that_actually_shipped():
+    """Mutation attribution: the detector reads the shape that was live, not a hypothetical."""
+    pre_fix = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints NOTHING "
+        "(measured here), so no I7 re-point of this diff puts the file there")
+    negative, positive = _membership_claims(pre_fix)
+    assert negative and not positive, (
+        f"the detector did not fire on the pre-fix sentence — negative={negative} "
+        f"positive={positive}")
+    assert negative[0].startswith("04-plan.md ->"), negative[0]
