@@ -363,6 +363,26 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # stdio checks never ran and `check(live=True)` could green it.
     HTTP_TRANSPORT_FIELDS = ("url", "headers", "oauth")
     STDIO_TRANSPORT_FIELDS = ("command", "args", "env", "cwd")
+    def _unloadable(entry: dict) -> bool:
+        """True when a transport field is present but not a usable STRING.
+
+        The harness runs `asMcpJson` per layer and DROPS the whole entry when a
+        transport is a truthy non-string (`typeof … !== "string" && !!…` →
+        `WARN: … has a non-string "url" — dropped`). Treating such a value as a
+        live transport re-opened the false PASS this commit closes: `declared_endpoint`
+        returns None for a non-string, so the probe graded the CLIENT-resolved
+        endpoint and printed `OK` for a config the harness had dropped entirely.
+        A non-string `command` additionally raised out of `classify` (`.find` on a
+        list, `len` on an int), so `mcp-status` tracebacked instead of printing its
+        one line.
+        """
+        for field in ("url", "command"):
+            if field in entry:
+                value = entry[field]
+                if value and not isinstance(value, str):
+                    return True
+        return False
+
     def _sanitized(entry: dict) -> dict:
         """A present-but-FALSY transport is ABSENCE, not a delta value.
 
@@ -380,8 +400,12 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
     # and each more specific layer is applied as a DELTA over what is accumulated.
     _base_source, base_entry = layers[-1]
+    if _unloadable(base_entry):
+        base_entry = {}          # the harness DROPS an entry with a bad transport
     merged: dict = _sanitized(base_entry)
     for _source, delta in reversed(layers[:-1]):
+        if _unloadable(delta):
+            continue             # a dropped delta leaves the base standing
         delta = _sanitized(delta)
         declares_http = bool(delta.get("url"))
         declares_stdio = bool(delta.get("command"))
@@ -559,9 +583,11 @@ def classify(harness: str, *, project_dir: Path | None = None
     # returned None, the probe graded the CLIENT-resolved endpoint and reported
     # `OK — live call succeeded` (exit 0) for a config the harness cannot load: the
     # fail-open this module exists to remove, through a "last resort" branch.
-    if entry.get("url"):
+    url_value = entry.get("url")
+    command_value = entry.get("command")
+    if isinstance(url_value, str) and url_value:
         transport = "http"
-    elif entry.get("command"):
+    elif isinstance(command_value, str) and command_value:
         transport = "stdio"
     else:
         return Verdict(

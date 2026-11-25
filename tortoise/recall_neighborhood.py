@@ -262,7 +262,11 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
                               max_chars=EXCERPT_MAX_CHARS)
             weight = rel.get("weight")
             suffix = f" (ep {weight:.2f})" if isinstance(weight, (int, float)) else ""
-            severity = rel.get("severity")
+            # ⛔ `severity` was the last field reaching the block raw. Both current
+            # producers derive it from an EP mean, so this is hardening rather than
+            # a live exploit — but the guarantee is supposed to live at this choke
+            # point, not depend on where the value came from.
+            severity = one_line(rel.get("severity"), max_chars=16)
             suffix += f" [{severity}]" if severity else ""
             # A trade-off's MITIGATION is the reason the option was set aside — the
             # business logic — so it rides the relation to the renderer instead of

@@ -1345,3 +1345,23 @@ def test_the_default_relative_dir_still_writes_the_repo_root_config(tmp_path, mo
     result = harness_onboard.write_config("pi", Path("."))
     assert result.wrote == [str(root / ".mcp.json")], result.wrote
     assert not (sub / ".mcp.json").exists()
+
+
+def test_a_non_string_transport_is_unloadable_not_a_live_transport(project, monkeypatch):
+    """The harness DROPS an entry whose `url`/`command` is a truthy non-string.
+
+    Treating it as live re-opened the false PASS this PR closes: `declared_endpoint`
+    returns None for a non-string, so the probe graded the CLIENT-resolved endpoint
+    and printed `OK` for a config the harness had dropped. A non-string `command`
+    also raised out of `classify`, so `mcp-status` tracebacked.
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    for entry in ({"url": ["https://api.premiselabs.co/mcp/"]},
+                  {"url": {"host": "x"}},
+                  {"url": 123},
+                  {"command": ["python3"]},
+                  {"command": 7}):
+        _write_config(project, entry)
+        verdict = mcp_selfcheck.classify("pi", project_dir=project)   # must not raise
+        assert verdict.status == mcp_selfcheck.COMMAND_MISSING, (entry, verdict.line())
+        assert not verdict.ok and verdict.exit_code != 0
