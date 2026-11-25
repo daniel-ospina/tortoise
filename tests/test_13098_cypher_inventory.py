@@ -546,7 +546,8 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
 
 
 def test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_120():
-    """The `_detach_stdout()` half is graded END-TO-END on a REAL file descriptor.
+    """The `_detach_stdout()` half is graded END-TO-END on REAL file descriptors —
+    BOTH call sites, because they sit in DIFFERENT `except` branches.
 
     ⛔ EVERY DOUBLE THE ARM ABOVE USES HAS NO `fileno()`, so `_detach_stdout()` is a
     SUPPRESSED NO-OP in all of them — which means the two calls that make that arm's
@@ -572,6 +573,22 @@ def test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_1
         assert os.fstat(stream.fileno()).st_rdev == os.stat(os.devnull).st_rdev, (
             "the stream that could not be written was NOT re-pointed at devnull, so "
             "the shutdown flush will re-raise and turn this 'could not run' into 120")
+    # ⛔ AND THE OTHER CALL SITE — `except BrokenPipeError` — which the `/dev/full`
+    # case above CANNOT reach (a full disk raises ENOSPC, a closed pipe the other
+    # exception, and they sit in different `except` branches). Measured: deleting
+    # ONLY that branch's `_detach_stdout(out)` left this suite at
+    # `98 passed / 15 skipped` while `--check | true` answered **120** on a real
+    # invocation, so without this half the arm's own claim that "both call sites"
+    # are graded would have been false (#13098 round 12, P2).
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    with os.fdopen(write_end, "w", encoding="utf-8") as pipe:
+        assert census.emit("x", pipe) == 2, (
+            "a closed pipe on a real FD must answer 2 — 1 is DRIFT")
+        pipe.flush()
+        assert os.fstat(pipe.fileno()).st_rdev == os.stat(os.devnull).st_rdev, (
+            "a closed pipe was NOT re-pointed at devnull, so the shutdown flush "
+            "re-raises BrokenPipeError and turns this 'could not run' into 120")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
