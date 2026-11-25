@@ -113,7 +113,7 @@ def stub_factory(monkeypatch):
 
 
 # The documented vocabulary of the surface that CAN enumerate these
-# (`tortoise_search`'s own docstring) minus `point`, which the structural arms
+# (`tortoise_search_knowledge`'s own docstring) minus `point`, which the structural arms
 # legitimately serve.
 _UNSERVED_TYPES = ("event", "subject", "document", "object", "operator", "source")
 
@@ -225,7 +225,7 @@ def test_an_unknown_value_is_told_it_is_not_an_entity_type(stub_factory) -> None
     """A TYPO and an UNSERVED type deserve different answers.
 
     Without the vocabulary arm a nonsense value falls into the same refusal and
-    is told to "use tortoise_search(entity_type='banana')" — advice that names
+    is told to "use tortoise_search_knowledge(entity_type='banana')" — advice that names
     a value the surface does not have. Fails on `"Invalid entity_type" in
     message` and on `tortoise_search` being ABSENT from it (the generic arm's
     message does contain it), so deleting the vocabulary branch reds this.
@@ -362,17 +362,17 @@ def test_the_remedy_for_operator_names_the_search_with_its_limit() -> None:
     stated `is_operator = true`, so the remedy must bound the call and disclose
     the view (the entry does; this test guards the bound half).
 
-    `tortoise_search` defaults to `limit=10`, has no offset walk, and slices at
+    `tortoise_search_knowledge` defaults to `limit=10`, has no offset walk, and slices at
     `limit` (`sdk.py`: `result_ids = result_ids[:limit]`), returning a bare list
     with no total/hasMore — so a limit-less call answers a SILENTLY TRUNCATED
     layer, the same false-PASS class this guard removes. `tools/curate_graph.py`
-    reads the 3,727-row layer as `tortoise_search(entity_type="operator",
+    reads the 3,727-row layer as `tortoise_search_knowledge(entity_type="operator",
     limit=OPERATOR_READ_CEILING)`, measured.
     Fails on the `, limit=` in the literal call string: a limit-less remedy
     (which would truncate at 10) reds here, and that is the point.
     """
     message = _message_for("operator")
-    assert "tortoise_search(entity_type='operator', limit=" in message, (
+    assert "tortoise_search_knowledge(entity_type='operator', limit=" in message, (
         f"a limit-less search answers a truncated layer as if complete: {message!r}"
     )
 
@@ -385,7 +385,7 @@ def test_the_remedy_names_a_call_that_answers_without_a_kind(entity_type,
                                                              expected) -> None:
     """`run_structural_query` returns `[]` when it has NO conditions.
 
-    So `tortoise_search(entity_type="event")` with neither a query nor a kind is
+    So `tortoise_search_knowledge(entity_type="event")` with neither a query nor a kind is
     an `empty_results` RECORD, not an empty layer — naming it as the remedy
     would re-create the exact false PASS this guard removes, one level down.
     These two types have a real one-call enumerator; the message must name it.
@@ -402,7 +402,7 @@ def test_the_remedy_names_a_call_that_answers_without_a_kind(entity_type,
 @pytest.mark.parametrize("entity_type", ["event", "subject", "document",
                                          "object", "source"])
 def test_no_remedy_promises_a_bare_search_that_would_answer_empty(entity_type) -> None:
-    """The generic advice `tortoise_search(entity_type=X)` is FALSE for 5 types.
+    """The generic advice `tortoise_search_knowledge(entity_type=X)` is FALSE for 5 types.
 
     `operator` is the only type whose structural leg adds a condition of its own
     (`n.is_operator = true`); for the rest the leg has no conditions to fire and
@@ -411,7 +411,7 @@ def test_no_remedy_promises_a_bare_search_that_would_answer_empty(entity_type) -
     string verbatim.
     """
     message = _message_for(entity_type)
-    bare = f"tortoise_search(entity_type={entity_type!r})"
+    bare = f"tortoise_search_knowledge(entity_type={entity_type!r})"
     assert bare not in message, (
         f"the remedy for {entity_type!r} promises a call that answers [] with "
         f"no conditions: {message!r}"
@@ -761,7 +761,7 @@ def test_a_falsy_non_none_text_must_still_refuse(stub_factory) -> None:
 def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
     """The operator remedy names a CURRENT-VIEW read while implying the layer.
 
-    `tortoise_search`'s structural leg for `operator` sets
+    `tortoise_search_knowledge`'s structural leg for `operator` sets
     `label_str = "Point"` (`tortoise/search_engine.py:4315` region) and `Point`
     is in `_STATUS_FILTERED_LABELS` (`:148`), so the terminal-status clause is
     appended to the WHERE — a terminally-stated operator is NOT returned. And
@@ -788,7 +788,7 @@ def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
 
 
 def test_the_event_remedys_alternative_branch_is_bounded_where_it_truncates() -> None:
-    """`tortoise_search` slices at `limit` (default 10) with a bare list.
+    """`tortoise_search_knowledge` slices at `limit` (default 10) with a bare list.
 
     `tortoise/sdk.py` validates `limit: int = 10` and `1-10000`, and the tool
     returns a plain list — no `total`, no `hasMore`. So the event remedy's
@@ -804,7 +804,7 @@ def test_the_event_remedys_alternative_branch_is_bounded_where_it_truncates() ->
         f"the get_entity branch's truncating default must be named: {message!r}"
     )
     assert "limit=10000" in message, (
-        f"the tortoise_search branch truncates at 10 without a limit: {message!r}"
+        f"the tortoise_search_knowledge branch truncates at 10 without a limit: {message!r}"
     )
 
 # ── review round 7: the last three remedies that still overpromised ──────────
@@ -936,7 +936,7 @@ def test_every_remedy_that_names_a_search_names_the_silent_cause() -> None:
     Round 9 fixed the `document` partition but left that entry — and `event`'s
     alternative branch — without the clause `operator`, `object` and `subject`
     carry, although both name the same read:
-    `tortoise_search(entity_type=…, kind=…)`, i.e. `run_structural_query`. That
+    `tortoise_search_knowledge(entity_type=…, kind=…)`, i.e. `run_structural_query`. That
     leg answers `[]` with no field reporting it from two causes that are not
     population differences at all: `_breaker_allow("structural")` returning
     False (`tortoise/search_engine.py:4305`), and `graph.query(...,
@@ -953,10 +953,10 @@ def test_every_remedy_that_names_a_search_names_the_silent_cause() -> None:
     searching = {
         entity_type: message
         for entity_type, message in _ENTITY_TYPE_REMEDY.items()
-        if "tortoise_search(" in message
+        if "tortoise_search_knowledge(" in message
     }
     assert searching, (
-        "no remedy names a tortoise_search read — this sweep would be vacuous"
+        "no remedy names a tortoise_search_knowledge read — this sweep would be vacuous"
     )
     missing = {
         entity_type

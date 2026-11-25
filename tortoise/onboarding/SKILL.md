@@ -964,7 +964,7 @@ connection):
    explicit, provenance-recorded starting belief: omit `credibility` and the
    system applies its standard starting belief (medium = Beta(3,1), mean
    0.75, provenance `system-default` — visible per point in
-   `tortoise_calibrate_summary`). Pass `credibility="high"` (ladder: gold /
+   `tortoise_check_confidence(calibrate=True)`). Pass `credibility="high"` (ladder: gold /
    high / medium / low / unverified) when you have a real belief — it is
    recorded as `set-by-author`. The documented flow below ranks on the FIRST
    attempt with zero undocumented calls (0 CalibrationError).

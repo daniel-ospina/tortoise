@@ -1051,12 +1051,14 @@ class MCPReader:
     def _operator_call(self, args: dict[str, Any], label: str) -> Any:
         """One operator-layer read, with a refusal re-raised UNDER its label.
 
-        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_search", …)`
+        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_search_knowledge", …)`
         stays a LITERAL call so `tests/test_curation_11469.py`'s registry audit still
-        reads the tool name out of this file.
+        reads the tool name out of this file. #11609 P11 retired the `tortoise_search`
+        door this used to name — the container is the advertised path, and the door
+        answered only through the warning shim.
         """
         try:
-            return self._call("tortoise_search", args)
+            return self._call("tortoise_search_knowledge", args)
         except C.CurationRefused as exc:
             raise C.CurationRefused(f"{label}: {str(exc)[:300]}") from exc
 

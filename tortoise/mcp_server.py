@@ -4509,7 +4509,7 @@ def _public_filters(filters: Any) -> dict:
 #: the generic advice looked plausible when this was written.
 _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "operator": (
-        "Enumerate it with tortoise_search(entity_type='operator', "
+        "Enumerate it with tortoise_search_knowledge(entity_type='operator', "
         "limit=10000) — one call at the SDK's maximum. That tool has no "
         "offset walk and slices at `limit` (default 10), so a limit-less "
         "call answers a SILENTLY TRUNCATED layer, and a layer above 10,000 "
@@ -4528,7 +4528,7 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "limit=...) — reconcilable against the graph's own Event count — "
         "but it DEFAULTS TO 20 and answers a bare list with no total, so a "
         "limit-less call returns a SILENTLY TRUNCATED window: pass the "
-        "limit you need. Or tortoise_search(entity_type='event', "
+        "limit you need. Or tortoise_search_knowledge(entity_type='event', "
         "kind=<eventKind>, limit=10000) — one kind per call, which also "
         "slices at `limit` (default 10, no total) — and that arm carries the "
         "structural leg's SILENT causes too: a 500 ms driver budget and a "
@@ -4538,7 +4538,7 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "Enumerate it with tortoise_graph_overview(section='sources') — it "
         "lists every provenance Source with its point count, in one call."),
     "document": (
-        "No bulk listing: tortoise_search(entity_type='document', "
+        "No bulk listing: tortoise_search_knowledge(entity_type='document', "
         "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
         "slices at `limit` (default 10, no total). D10 retires :Document — a "
         "document IS a :Source — so the layer is counts.Source in "
@@ -4551,7 +4551,7 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "answers [] with no field reporting it."),
     "object": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
-        "tortoise_search(entity_type='object', kind=<objectKind>, "
+        "tortoise_search_knowledge(entity_type='object', kind=<objectKind>, "
         "limit=10000) answers ONE kind at a time, slices at `limit` (default "
         "10, no total) and reads the CURRENT VIEW — a terminal-status Object "
         "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
@@ -4562,7 +4562,7 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "reporting it."),
     "subject": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
-        "tortoise_search(entity_type='subject', kind=<subjectKind>, "
+        "tortoise_search_knowledge(entity_type='subject', kind=<subjectKind>, "
         "limit=10000) answers ONE kind at a time, slices at `limit` (default "
         "10, no total) and reads the CURRENT VIEW — a terminal-status Subject "
         "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
