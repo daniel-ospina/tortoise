@@ -74,21 +74,26 @@ version: 1
 # not read that list as "all 2.0 s".
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` (one of four here: `#14597`'s, `#14560`'s, `#14552`'s and `#14592`'s, plus the
-# RATCHET's — measured at this head, 5 rows among the files named above). A REGISTRATION is a
-# `core`/`api` surface entry, which only puts the file in `fast_pool()` and lets the header's
-# `DEFAULT_FAST_WEIGHT` apply — that is what `#14574`'s file and `#14607`'s two have (measured: 0
-# `durations` rows each), so calling any of them a "row" is a false claim about the map and
-# `test_the_fast_shards_header_block_calls_a_row_only_what_has_one` reds on that spelling. Nor is a
+# RATCHET's — measured at this head, 5 rows among the files named above). A REGISTRATION is a surface
+# entry on ANY `surfaces` key — `fast_pool()` folds every one of them
+# (`for s, files in manifest["surfaces"].items(): classified.update(files)`,
+# `tools/ci_selection.py:5694`) — so it puts the file in `fast_pool()` and lets the header's
+# `DEFAULT_FAST_WEIGHT` apply. `core` is the common case but is not the definition: the `#14544`
+# sentence below is carried by an `eval` registration ALONE. That is what `#14574`'s file and
+# `#14607`'s two have (measured: 0 `durations` rows each), so calling any of them a "row" is a false
+# claim about the map and the arm that grades it,
+# `test_the_fast_shards_header_block_calls_a_row_only_what_has_one`, reds on that spelling. Nor is a
 # row the map's only carrier of a weight: `durations_floors` can additionally PIN a declared value.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# against `main` is measurably ZERO here, and it was MEASURED, not reasoned: `fast_pool()` holds
-# 1337 files at this head and every one of them is `main`'s, because this PR adds no test file —
-# the two sides' parsed manifests are identical — every surface list, all 1503 `durations` rows and
-# every `durations_floors` entry compared value by value, zero differing — so the comment-only
-# `durations` rewrites on either side move no member of the pool. ⛔ That zero is a READING of this
-# head, never a promise about the next fold: `fast_pool()` takes its inputs from the tree being
-# measured (the manifest, the selector's own constants, and the filesystem under an
+# ⛔ THIS PAIR IS RE-DERIVED ON THIS TREE, and at this head it is ALSO `main`'s: the delta below is
+# zero, so a `--emit-push-matrix` run on `main` lands on the same two bins. ⛔ That agreement is a
+# READING of this head, never a licence to copy a parent's figure in — and none is copied; the verb
+# was run on the tree this block merges INTO. The delta is ZERO here, and it was MEASURED, not
+# reasoned: `fast_pool()` holds 1337 files at this head and every one of them is `main`'s, because
+# this PR adds no test file — the two sides' parsed manifests are identical — every surface list, all
+# 1503 `durations` rows and every `durations_floors` entry compared value by value, zero differing —
+# so the comment-only `durations` rewrites on either side move no member of the pool. ⛔ That zero is
+# a READING of this head, never a promise about the next fold: `fast_pool()` takes its inputs from
+# the tree being measured (the manifest, the selector's own constants, and the filesystem under an
 # `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with `rglob("test_*.py")`
 # on purpose — a file added to a non-gating subtree must not silently re-enter the gate), so
 # re-measure the delta on the tree you are merging INTO rather than carrying this sentence's zero.

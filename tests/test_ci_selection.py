@@ -9888,12 +9888,14 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     # re-spelled, so if this ever empties, re-point the pattern rather than pass over nothing.
     assert claimed, (
         "the `fast_shards` header block names no test file as a `durations` row, so this arm "
-        "grades nothing at all — re-point `_ROW_CLAIM_AFTER_FILE_RE` / "
-        "`_ROW_CLAIM_BEFORE_LIST_RE` at the sentence the block actually uses")
+        "grades nothing at all — re-point the row-claim matchers ("
+        "`_ROW_CLAIM_AFTER_FILE_RE`, `_ROW_CLAIM_BEFORE_LIST_RE`) at the sentence the block "
+        "actually uses")
     missing = [name for name in claimed if name not in rows]
     assert not missing, (
         f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
-        "no row for it. A REGISTRATION (a `core`/`api` surface entry) only puts the file in "
+        "no row for it. A REGISTRATION (a surface entry on any `surfaces` key — every one of them "
+        "feeds `fast_pool()`) only puts the file in "
         "`fast_pool()`; its weight then comes from `DEFAULT_FAST_WEIGHT`, which is not a row. "
         "Say `registration`, or add the row.")
     # …and BOTH reversion shapes are read while `registration` is deliberately not, and while a
