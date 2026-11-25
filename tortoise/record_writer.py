@@ -3067,13 +3067,21 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     review P3). A graph is published here when it was OBSERVED unusable
     (`provision_failed`, `no_cursor_row`, a divergence), and an operator can HALT
     it afterwards — on the write path that is the very next observation. Leaving
-    the stale entry in place counts the graph in BOTH populations, keeps a reason
+    the stale entry in place counted the graph in BOTH populations, kept a reason
     the halt falsified (`provision_failed`) in `armed_but_uncut_reasons()`, and —
     because `ok` folds `armed_but_uncut` and nothing else clears it for a halted
-    row — pins `record.ok: false` for as long as the halt stands. A sanctioned
+    row — pinned `record.ok: false` for as long as the halt stood. A sanctioned
     halt is not a degraded deployment: the health contract says it is published
     on its own key, and a permanent false red is exactly what that split exists
     to prevent.
+
+    ⛔ THE INVARIANT IS "AT MOST ONE MAP PER GRAPH, NEWEST OBSERVATION WINS",
+    and it is symmetric (#14587 review P3): the uncut arm below pops the HALTED
+    entry for the same reason. A graph that is halted and is then observed
+    REFUSING (`provision_refused:divergence`, whose record holds positions the
+    journal cannot reproduce) is published as uncut and stops being labelled
+    halted — that red is a TRUE one, and the label that matters is the fact
+    observed last. What must never happen is the same graph counting in both.
     """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
@@ -3094,6 +3102,9 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
             return
         with _UNCUT_GUARD:
             _UNCUT_OBSERVATIONS += 1
+            # Newest observation wins, both ways: a graph that stops being halted
+            # must not keep inflating `armed_but_halted`.
+            _UNCUT_HALTED.pop(key, None)
             if key in _UNCUT_GRAPHS or len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
                 _UNCUT_GRAPHS[key] = reason
             else:

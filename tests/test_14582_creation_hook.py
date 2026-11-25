@@ -1438,6 +1438,20 @@ def test_a_halt_retracts_an_earlier_uncut_observation():
         assert rw.armed_but_uncut_reasons() == {}, (
             "the halt kept a reason it had itself falsified, and that reason is "
             f"what `/health` publishes: {rw.armed_but_uncut_reasons()}")
+
+        # THE INVARIANT IS SYMMETRIC: at most one map per graph, newest wins. A
+        # graph that is halted and is THEN observed refusing is published as
+        # uncut and stops being labelled halted — the newest fact is the one
+        # `/health` owes the operator, and the same graph must never count twice.
+        rw.note_uncut_graph("org-14582", "graph-1",
+                            reason="provision_refused:divergence")
+        block = rw.armed_but_uncut()
+        assert block["armed_but_uncut"] == 1, block
+        assert block["armed_but_halted"] == 0, (
+            "the graph kept the superseded HALTED label and inflated "
+            f"`armed_but_halted` while counting as uncut too: {block}")
+        assert rw.armed_but_uncut_reasons() == {
+            "provision_refused:divergence": 1}, rw.armed_but_uncut_reasons()
     finally:
         rw.reset_uncut_graphs()
 
