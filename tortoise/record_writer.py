@@ -3018,7 +3018,13 @@ _UNCUT_OBSERVATIONS = 0
 #: provision) is an incomplete CUTOVER — the gap this registry exists to surface.
 #: Both states stay visible on their own keys ('armed_but_halted' vs
 #: 'armed_but_uncut'), so nothing is hidden by the split; do NOT "fix" the
-#: asymmetry by folding `seeded` out of `armed_but_uncut`.
+#: asymmetry by folding `seeded` out of `armed_but_uncut`. ⛔ "Their own keys" is
+#: exactly why ONE graph may appear under only ONE of them: each arm of
+#: :func:`note_uncut_graph` POPS the key out of the other map (#14610 review F2),
+#: so a mode transition retracts the superseded observation instead of publishing
+#: one graph as both halted and uncut. Do not "simplify" those two pops away — a
+#: registry that only ever adds is a latch, which is the same defect this module
+#: names for cumulative counters.
 _UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
@@ -3039,6 +3045,18 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     ⛔ `mode_halted` DOES NOT LAND HERE. See :data:`_UNCUT_HALTED`: a halted graph
     keeps its JSONL append and is an operator's decision, so it is published on
     its own key instead of being reported as an uncut graph.
+
+    ⛔ AND THE TWO MAPS ARE MUTUALLY EXCLUSIVE PER GRAPH (#14610 review F2). The
+    oldest observation about a graph must be RETRACTED when a newer one contradicts
+    it: each arm pops the key out of the OTHER map, because a graph is in exactly
+    one of the states and a payload that lists it under both is self-contradicting.
+    Pre-fix `mode_halted -> mode_seeded` (the `reopen -> seed` half-remedy this
+    module documents as the common operator path) left the graph published in BOTH
+    populations forever in one process: `armed_but_halted: 1` over a graph that is
+    no longer halted, whose documented clear route is "until an operator reopens
+    it" and which never moved when they did. `clear_uncut_graph` pops both, but it
+    is only reached on the USABLE path or a successful provision — i.e. once the
+    row is `active` again, which is the state this transition has not reached.
     """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
@@ -3046,6 +3064,9 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         if reason == f"mode_{record_projection.MODE_HALTED}":
             with _UNCUT_GUARD:
                 _UNCUT_HALTED[key] = reason
+                # It is not uncut any more — it is halted, and the halted
+                # population is the one that owns it now.
+                _UNCUT_GRAPHS.pop(key, None)
                 if len(_UNCUT_HALTED) > UNCUT_GRAPH_CAP:
                     _UNCUT_HALTED.pop(next(iter(_UNCUT_HALTED)))
                     # ⛔ COUNT THE DROP. The uncut arm below has always done this;
@@ -3056,6 +3077,13 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
             return
         with _UNCUT_GUARD:
             _UNCUT_OBSERVATIONS += 1
+            # It is not halted any more — the newest observation is the current
+            # one, and it says the graph is uncut. Pop unconditionally (not only
+            # in the tracked branch): when the map is full the observation lands
+            # in the overflow counter, and a halted entry kept for a graph that
+            # has since proven itself uncut would publish a sanctioned stop that
+            # is no longer the state.
+            _UNCUT_HALTED.pop(key, None)
             if key in _UNCUT_GRAPHS or len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
                 _UNCUT_GRAPHS[key] = reason
             else:

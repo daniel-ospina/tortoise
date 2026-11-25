@@ -609,6 +609,11 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
     is scoped `active`, and with the writer flag off the enumerated arm is refused
     because the row exists). The payload therefore publishes what a halted graph
     is actually losing, in `armed_but_halted_clears`.
+
+    ⛔ AND THE POPULATIONS ARE MUTUALLY EXCLUSIVE PER GRAPH (#14610 review F2).
+    Each observation RETRACTS the state it supersedes, so a graph moved between
+    modes is counted in one key and not both — see the `armed_but_halted == 0`
+    transition below, which is red on the pre-fix code.
     """
     rw.reset_uncut_graphs()
     try:
@@ -627,6 +632,40 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
             "NOTHING, so `ok: false` would red the deployment for the state the "
             "documented remedy leaves it in"
             "(`armed_but_halted_clears` states the cost and what clears it)")
+
+        # ── the transition the pre-fix code double-counted ──────────────────
+        # `mode_halted -> mode_seeded` is the `reopen -> seed` half-remedy this
+        # module documents as the common operator path. One graph, so exactly one
+        # population may carry it: pre-fix `armed_but_halted` stayed 1 for the
+        # life of the process over a graph the operator had already reopened.
+        rw.note_uncut_graph("org-14582", "graph-halted", reason="mode_seeded")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_halted"] == 0, (
+            "the graph was re-observed as `seeded`, so it is NOT halted any more — "
+            "`armed_but_halted` is published with the clear route 'until an "
+            "operator reopens it', and the operator did. Pre-fix this stayed 1 "
+            "forever, and a graph left `seeded` never clears it at all")
+        assert block["armed_but_uncut"] == 1, (
+            "the `seeded` half-remedy IS the gap: the row exists but allocates "
+            "nothing, so the graph is uncut from this observation on")
+        assert block["armed_but_uncut_reasons"] == {"mode_seeded": 1}, block
+        assert sum(block["armed_but_uncut_reasons"].values()) == block[
+            "armed_but_uncut"], "one snapshot, one population"
+        assert block["ok"] is False, (
+            "an ARMED deployment now carries an uncut graph, so `ok` must follow "
+            "the retractable per-graph map — this is the heal-in-reverse direction "
+            "of the same retraction")
+
+        # ── and the direction back: the newest observation owns the graph ────
+        rw.note_uncut_graph("org-14582", "graph-halted", reason="mode_halted")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_halted"] == 1, block
+        assert block["armed_but_uncut"] == 0, (
+            "a halted graph must leave `armed_but_uncut` — otherwise one graph is "
+            "published in BOTH populations, which is the self-contradicting "
+            "payload the split exists to prevent")
+        assert block["armed_but_uncut_reasons"] == {}, block
+        assert block["ok"] is True, block
     finally:
         rw.reset_uncut_graphs()
 
