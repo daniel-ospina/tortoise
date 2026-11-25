@@ -2255,7 +2255,7 @@ class AbuseEngine:
                 return hit[1]
         try:
             allowance = self.store.org_allowance(org_id)
-        except Exception:  # noqa: BLE001 — an unreadable tier is not a verdict
+        except Exception:  # an unreadable tier is not a verdict
             return 0
         allowance = _as_int(allowance) or 0
         ratio = _ratio_env("TORTOISE_ABUSE_TIER_FLOOR_RATIO", 0.5)
@@ -2558,7 +2558,7 @@ class AbuseEngine:
         try:
             return ("breach" if self.store.latest_flag_at(org_id, rule)
                     is not None else None)
-        except Exception as e:  # noqa: BLE001 — reduce alert volume, never raise
+        except Exception as e:  # reduce alert volume, never raise
             report_abuse_decision_fault("latest_flag_at", org_id, rule, e)
             return None
 

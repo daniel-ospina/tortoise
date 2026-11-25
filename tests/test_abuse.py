@@ -688,6 +688,200 @@ class TestSwitches:
         assert store.rows == []
 
 
+# ── #14687: R1 calibration (hysteresis, tier floor, payload cap) ───────────
+
+class _TierStore(MemoryAbuseStore):
+    """A store that also answers the org's tier allowance (#14687).
+
+    The selfhost lane has no tier registry, so the base store answers ``None``
+    there; this subclass is what a registry-backed deployment looks like at the
+    seam the engine reads.
+    """
+
+    def __init__(self, allowance=None, raiser=False, registry_write=None,
+                 registry_read=None):
+        super().__init__(registry_write=registry_write,
+                         registry_read=registry_read)
+        self._allowance = allowance
+        self._raiser = raiser
+        self.allowance_reads = 0
+
+    def org_allowance(self, org_id):
+        self.allowance_reads += 1
+        if self._raiser:
+            raise RuntimeError("tier registry unreadable")
+        return self._allowance
+
+
+class TestR1Calibration:
+    """#14687 — the R1 rate alert stops reporting our own telemetry as abuse.
+
+    One rule (`point_create` SUM(weight) > level over a rolling hour) produced
+    both customer alerts, fired on the fleet's own `session_capture` traffic, and
+    re-opened on every window that dipped under the level. The measured finding
+    is on the issue: no absolute constant separates the fleet from an attacker
+    (this org's ordinary p90 is 1 050 units/hour; the only other org ever
+    flagged peaked at 779).
+
+    Every test here drives the REAL engine (``AbuseEngine.record_point_create``
+    → ``_evaluate`` → the store). Nothing re-implements the rule: the window is
+    the store's own rolling window (shortened per test so one evaluation sees one
+    term), and the state changes are counted from the rows the engine writes.
+    """
+
+    #: The rows that ARE the alert's state transitions. `review_needed` is the
+    #: stage-2 escalation of the SAME episode, so counting it would count the
+    #: thing twice; `point_create` rows are the traffic being measured.
+    _STATE_TYPES = (abuse.EVENT_FLAG, abuse.EVENT_FLAG_CLEAR)
+
+    def _state_changes(self, store):
+        return [r for r in store.rows if r["event_type"] in self._STATE_TYPES]
+
+    def test_a_rate_in_the_band_neither_re_fires_nor_clears(self, notified,
+                                                          monkeypatch):
+        """THE defect, at the rule: a measurement under the fire level but
+        above the clear level used to END the episode, so the next window over
+        the level re-opened it — the oscillation that made yes/no noise out of a
+        steady rate."""
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 700, now=T0) == "flag"
+        # 400 units/hour: below the 500 fire level, above the 250 clear level.
+        assert eng.record_point_create("t1", 400,
+                                       now=T0 + timedelta(seconds=61)) == "breach"
+        assert eng.record_point_create("t1", 300,
+                                       now=T0 + timedelta(seconds=122)) == "breach"
+        assert [r["event_type"] for r in self._state_changes(store)] == [
+            abuse.EVENT_FLAG], (
+            "the band wrote a transition — a rate measurement inside it must "
+            "leave the episode exactly as it was")
+        assert store.org_flagged_at("t1") is not None
+
+    def test_a_drop_below_half_clears_and_a_return_re_fires(self, notified,
+                                                           monkeypatch):
+        """The other direction: hysteresis must not turn the alert PERMANENT.
+        At or below 0.5× the level the episode ends, and crossing the level
+        again is a new episode (a fresh notification, not a silent one)."""
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 700, now=T0) == "flag"
+        # 400 is in the band: still the same episode (RED on the pre-#14687
+        # engine, which cleared here).
+        assert eng.record_point_create("t1", 400,
+                                       now=T0 + timedelta(seconds=61)) == "breach"
+        assert store.org_flagged_at("t1") is not None
+        # 200 <= 0.5 × 500 → the rate really did stop.
+        assert eng.record_point_create("t1", 200,
+                                       now=T0 + timedelta(seconds=122)) is None
+        assert store.org_flagged_at("t1") is None
+        assert eng.record_point_create("t1", 700,
+                                       now=T0 + timedelta(seconds=183)) == "flag"
+        assert [r["event_type"] for r in self._state_changes(store)] == [
+            abuse.EVENT_FLAG, abuse.EVENT_FLAG_CLEAR, abuse.EVENT_FLAG]
+
+    def test_the_exact_state_change_count_on_an_oscillating_series(
+            self, notified, monkeypatch):
+        """The measured claim, as an exact number.
+
+        The series alternates across the level the way the org's real traffic
+        does (it sat above 500 in 55% of hours, and above 250 in nearly all).
+        Without hysteresis each sub-threshold term ends the episode and the next
+        one restarts it: **40 state changes** for these 40 evaluations. With the
+        0.5× clear level not one term falls below 250, so the episode opens ONCE
+        and never closes: **1 state change**.
+
+        Asserting the exact count is the point — "fewer" would pass for an
+        implementation that muted the detector entirely.
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        series = [620, 430, 560, 470, 640, 300, 610, 480] * 5
+        for i, units in enumerate(series):
+            eng.record_point_create("t1", units,
+                                    now=T0 + timedelta(seconds=61 * i))
+        changes = self._state_changes(store)
+        assert len(changes) == 1, (
+            f"{len(changes)} state changes for one continuous episode: "
+            f"{[r['event_type'] for r in changes]}")
+        assert changes[0]["event_type"] == abuse.EVENT_FLAG
+
+    def test_one_request_cannot_contribute_more_than_the_cap(self, notified):
+        """#14687 item 5: the payload cap, independent of alerting.
+
+        `len(conversation) + len(extracted)` is unbounded payload size, so ONE
+        request could dominate the rolling window (and the ledger the meter
+        itself is built on). The cap bounds the contribution at the single
+        recording entry point every caller uses.
+        """
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        cap = eng.point_request_cap()
+        eng.record_point_create("t1", 10 ** 6, now=T0)
+        recorded = [r for r in store.rows
+                    if r["event_type"] == abuse.EVENT_POINT_CREATE]
+        assert [r["weight"] for r in recorded] == [cap]
+        assert store.window_sum("t1", abuse.EVENT_POINT_CREATE, 3600, T0) == cap
+
+    def test_the_per_request_cap_is_the_turn_cap_twice(self):
+        """The bound is DERIVED, not picked: both terms of the weight formula
+        are limited by the session turn cap (one Point per stored turn, plus what
+        extraction mints from them), so 2 × `MAX_SESSION_TURNS` is the ceiling of
+        a legitimate single capture. Pinned so a future turn-cap change cannot
+        leave the abuse cap describing an older product."""
+        from tortoise.quota import MAX_SESSION_TURNS
+        assert AbuseEngine(MemoryAbuseStore()).point_request_cap() == \
+            2 * MAX_SESSION_TURNS
+
+    def test_the_level_is_half_the_orgs_own_allowance(self, notified,
+                                                     monkeypatch):
+        """#14687 item 4: the tier-relative level.
+
+        Measured: this org peaks at 3 001 units/hour, so a 500-unit level fires
+        on ordinary traffic; and raising the constant cannot work, because the
+        only other org ever flagged peaked at 779. Half of the org's OWN
+        allowance is abnormal by its own plan and is what makes the alert's
+        "if you need a higher limit, contact support" true.
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = _TierStore(allowance=100_000)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 50_000
+        # The fleet's measured peak (3 001 units/hour) is now silent…
+        for _ in range(3):
+            assert eng.record_point_create("t1", 1000, now=T0) is None
+        assert store.org_flagged_at("t1") is None
+        # …and half the tier allowance in one window is not. 51 × 1 000 units
+        # = 51 000 > 50 000; at 50 000 the level is not yet crossed (strict >).
+        for _ in range(47):
+            eng.record_point_create("t1", 1000, now=T0 + timedelta(seconds=1))
+        assert store.org_flagged_at("t1") is None, (
+            "50 000 units is not ABOVE a 50 000 level")
+        assert eng.record_point_create("t1", 1000,
+                                       now=T0 + timedelta(seconds=1)) == "flag"
+
+    def test_an_unreadable_allowance_keeps_the_absolute_level(self, notified):
+        """Fail toward the SENSITIVE level: a tier we cannot read must not
+        disable detection, and must not invent an allowance either."""
+        store = _TierStore(raiser=True)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 500
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+
+    def test_the_allowance_read_is_cached_per_org(self, notified):
+        """The read sits on the capture path, so it is cached; the cache is what
+        makes a per-org level affordable at all."""
+        store = _TierStore(allowance=2000)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 1000
+        assert eng.point_threshold("t1") == 1000
+        assert store.allowance_reads == 1
+        assert eng.point_threshold("t2") == 1000
+        assert store.allowance_reads == 2, "the cache must be per ORG"
+
+
 # ── R3: read velocity ───────────────────────────────────────────────────────
 
 class TestReadVelocity:

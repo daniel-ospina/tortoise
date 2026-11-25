@@ -1558,6 +1558,130 @@ class TestAlertRegistersAndAcks:
                 assert "nothing was changed" not in m.lower(), (etype, m)
                 assert "nothing has changed" not in m.lower(), (etype, m)
 
+    # ── #14687: the alert says why, and Acknowledge sticks ────────────────
+
+    def _seed_flag(self, fake, *, at, count=2309, threshold=500, window_s=3600,
+                   row_id=1):
+        """One R1 row exactly as the engine writes it (#14687)."""
+        fake.seed("abuse_events", [{
+            "id": row_id, "org_id": TEAM, "event_type": "flag",
+            "rule": "point_create",
+            "details": {"rule": "point_create", "count": count,
+                        "threshold": threshold, "window_s": window_s,
+                        "surface": "Memory writes"},
+            "created_at": at}])
+
+    def test_the_rate_alert_carries_the_numbers_it_was_computed_from(
+            self, env):
+        """#14687 item 1, on the endpoint the dashboard reads.
+
+        The engine recorded `{rule, count, threshold, window_s}` on every row and
+        `_alert_dict` dropped all of it, so the customer could only ever see a
+        label. The response must carry the NUMBERS (not just a `details` key)
+        and the message must render them — an assertion that only checks the key
+        exists would pass on `{}`.
+        """
+        self._owner(env)
+        self._seed_flag(env["fake"], at="2026-11-22T13:54:00+00:00")
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
+            assert r.status_code == 200, r.text
+            row = r.json()["alerts"][0]
+            assert row["details"] == {"count": 2309, "threshold": 500,
+                                      "window_s": 3600,
+                                      "surface": "Memory writes"}, row
+            msg = row["message"]
+            assert "2,309" in msg, msg
+            assert "500" in msg, msg
+            assert "1 hour" in msg, msg
+            # The internal rule token stays off the customer surface, in the
+            # payload AND in the prose.
+            assert "point_create" not in row["details"]
+            assert "point_create" not in msg
+            # …and the row is now an OBSERVATION, not an incident.
+            assert row["register"] == "activity", row
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_alert_with_no_recorded_numbers_says_so(self, env):
+        """Honesty, on the same seam: an OLD row predates the plumbing and a
+        rule that measures something else may carry no numbers. The message then
+        states that it does not know — it never renders a placeholder `0` or an
+        invented count."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [{
+            "id": 1, "org_id": TEAM, "event_type": "flag",
+            "rule": "point_create", "details": {},
+            "created_at": "2026-11-22T13:54:00+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                row = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"][0]
+            assert row["details"] == {}, row
+            msg = row["message"]
+            assert "did not record" in msg, msg
+            assert "None" not in msg and "0 units" not in msg, msg
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_acknowledged_rate_alert_sticks_when_the_next_window_fires(
+            self, env):
+        """#14687 item 3 — the reason "Acknowledge" never worked for this rule.
+
+        `_episode_acknowledged` refuses to cover a row that arrived after the
+        dismissal when the episode is in the INCIDENT register. `flag` was filed
+        there because the engine writes a `flagged_at` marker — but the marker is
+        re-derived from a rolling window, so the next window that crossed the
+        level landed after the ack and the dismissed episode came straight back.
+        Measured on the live table: `alert_ack` = 0 rows, ever.
+        """
+        self._owner(env)
+        self._seed_flag(env["fake"], at="2026-11-22T13:54:00+00:00")
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                ack = tc.post("/v1/team/alerts/ack",
+                              json={"org_id": TEAM, "episode": episode})
+                assert ack.status_code == 200, ack.text
+                # The NEXT window fires 20 minutes later (inside the 3h episode
+                # gap): the SAME episode, measured again — not a new event.
+                self._seed_flag(env["fake"], at="2026-11-22T14:14:00+00:00",
+                                count=2600, row_id=2)
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+            assert len(feed) == 1, feed
+            assert feed[0]["count"] == 2, feed
+            assert feed[0]["acked"] is True, (
+                "a rate measurement re-opened a dismissal")
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_a_new_SUSPENSION_still_re_opens_a_dismissal(self, env):
+        """The punitive path is untouched: a suspension is a real state change,
+        so a dismissal that predates it must NOT cover it. Pins that the register
+        move above did not disable the incident gate — only stopped applying it to
+        a rate."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [{
+            "id": 1, "org_id": TEAM, "event_type": "suspend", "details": {},
+            "created_at": "2026-11-22T13:54:00+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                assert tc.post("/v1/team/alerts/ack",
+                               json={"org_id": TEAM,
+                                     "episode": episode}).status_code == 200
+                env["fake"].seed("abuse_events", [{
+                    "id": 2, "org_id": TEAM, "event_type": "suspend",
+                    "details": {},
+                    "created_at": "2026-11-22T14:14:00+00:00"}])
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+            assert feed[0]["acked"] is False, (
+                "a second suspension was absorbed by a dismissal that never saw it")
+        finally:
+            env["app"].dependency_overrides.clear()
+
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a
         management act, so a plain member cannot perform it."""
