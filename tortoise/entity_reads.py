@@ -173,11 +173,14 @@ def list_layer(
         # DROPPED by `kind_fallbacks.named_kind` (which also TRIMS surrounding
         # whitespace, so the stored value is the caller's spelling apart from
         # that trim), an uninstalled NAMESPACE is refused by
-        # `hosted_api._require_approved_kind` WHEN THE GRAPH HAS AN APPROVAL SET
-        # (a graph with no `:PackInstall` records admits every namespace — the
-        # #2714 back-compat rule stated in `pack_state.kind_namespace_is_approved`)
-        # — a check on the namespace, never on the spelling — and nothing else
-        # rewrites the value. Measured: one
+        # `hosted_api._require_approved_kind` when the graph's approval set is
+        # not ``None`` — the #2714 back-compat rule in
+        # `pack_state.kind_namespace_is_approved`: ``None`` means no
+        # `:PackInstall` records AND no `:PackSelection` marker (every namespace
+        # admitted), while a graph CONFIGURED empty (`set_graph_packs(packs=[])`,
+        # #2728) resolves to ``frozenset()`` and refuses. That is a check on the
+        # namespace, never on the spelling — and nothing else rewrites the value.
+        # Measured: one
         # graph holds `team` and `core:team` side by side. So an EQUALITY filter
         # answered `200 count: 0, truncated: false` for the spelling that
         # happened not to be the stored one — the "byte-identical to *this graph
@@ -205,14 +208,23 @@ def list_layer(
     # holds only reads.
     #
     # ⚠️ INHERITED RESIDUE, stated rather than implied: this module's OWN calls
-    # hold the rule, but two helpers it DELEGATES to still resolve through
+    # hold the rule, but FOUR helpers it DELEGATES to still resolve through
     # GRAPH.QUERY — `projection._resolve_entity` (behind every by-id route and
-    # `/belief`) and `navigation._resolve_root` (behind `entity_relations`). So
-    # "the new GETs cannot mint a graph" is true of the Cypher below and NOT yet
-    # of the two identity resolutions; fixing those is pre-existing debt in
-    # their own homes, not a guarantee this module's comment can confer. A
-    # reviewer read the sentence above as covering them, which is why the
-    # residue is named here.
+    # `/belief`), `navigation._resolve_root` (behind `entity_relations`),
+    # `TortoiseSDK._list_sources` (`sdk.py:31639`, behind `GET /v1/sources`,
+    # which reaches it through `list_knowledge(kind='source')`) and
+    # `TortoiseSDK._provenance` (`sdk.py:38252`, behind `/belief`'s evidence arm
+    # for a Point). So "the new GETs cannot mint a graph" is true of the Cypher
+    # below and NOT yet of the four delegated reads; fixing those is pre-existing
+    # debt in their own homes, not a guarantee this module's comment can confer.
+    # ⛔ The list is FOUR, and it was two until a reviewer measured the other
+    # pair: a reader auditing the new GETs' write-verb exposure takes this
+    # paragraph as the complete residual, so an enumeration that is short by two
+    # is a false clean verdict on two of the eight routes — the same
+    # "claim wider than the measurement" class this comment exists to prevent.
+    # `proj.g.query` is the wrapper that dispatches the minting `query` verb
+    # (`projection/__init__.py::_ProjectionHandle.query` → `_dispatch_decided(…,
+    # "query", …)`), which is why it is residue and not a style note.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
