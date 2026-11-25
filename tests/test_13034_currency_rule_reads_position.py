@@ -624,8 +624,31 @@ _CENSUS_MODULES = (
     "tortoise/consistency.py",
     # #13450: EP's operator-input participation test was the consumer that read
     # only two of the four conditions (`status in TERMINAL_EXCLUDED_STATUSES or
-    # bool(outdated)`), so a position-axis-ended input still voted. Scanned here
-    # so the same re-spelling cannot come back.
+    # bool(outdated)`), so a position-axis-ended input still voted.
+    # ⛔ What this row DOES and DOES NOT guard, stated because the first cut of
+    # this comment claimed the row meant "the same re-spelling cannot come back"
+    # and that was FALSE for the exact defect it was written for (PR #14600's
+    # review, P2). `_currency_comparisons` inspects `ast.Eq`/`ast.NotEq` against a
+    # terminal WORD LITERAL and `status <> '<word>'` Cypher literals; the live
+    # spelling was an `ast.In` MEMBERSHIP against an IDENTIFIER
+    # (`TERMINAL_EXCLUDED_STATUSES`), which the detector never looks at — MEASURED
+    # over a mutant restoring that arm: zero hits, i.e. this row is detector-wise
+    # a no-op for this defect. What it DOES catch is a future hand-written
+    # `status == "retracted"`-shaped test in `ep.py` (verified by AST: the real
+    # module has zero hits today).
+    # ⛔ The membership arm is deliberately NOT added here. MEASURED at this head:
+    # teaching the detector `ast.In` produces ~10 pre-existing hits across
+    # `sdk.py` and `derived_invalidation.py`, and several are currency answers that
+    # read the word axis ALONE (`derived_invalidation.py:952`/`:999`,
+    # `sdk.py:27773`, `sdk.py:37107`, `sdk.py:37109`) — the SAME class #13450 fixed,
+    # whose widening is the ingest/direct-edge decision this PR states as a
+    # residual rather than a tidy-up. Landing the detector without that decision
+    # would either red four modules this PR does not own or exempt them by
+    # `(module, word)`, which is fail-open for any NEW bad membership there. The
+    # population is measured and filed instead; the ep.py reversion is caught
+    # STRUCTURALLY by `tests/test_13450_...::test_ep_imports_the_shared_answer...`
+    # (a real `ast.Call` to `ending_axes`, no `Name`/`Attribute` of the vocabulary),
+    # which is comment-immune — that is the arm the reversion trips.
     "tortoise/ep.py",
 )
 

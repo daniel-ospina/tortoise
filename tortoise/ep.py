@@ -233,7 +233,12 @@ def _input_status_label(status, ending: tuple[str, ...]) -> str:
     ``status`` is reported verbatim (it IS the word axis's own name, and a
     terminal word is the whole answer); every OTHER axis is appended in
     parentheses, in ``ending_axes`` order, so ``superseded`` reads plainly and
-    ``live(closed)``/``live(pipelineSlot)`` name what actually ended the input.
+    ``live(isClosed)``/``live(pipelineSlot)`` name what actually ended the input.
+
+    ⛔ The mark is the AXIS NAME ``ending_axes`` emits (``isClosed``), not the
+    prose word for the concept: a docstring naming ``live(closed)`` would point a
+    later lane at a string no code path produces, and "aligning" the code to it
+    would silently break the display this function's tests pin.
     """
     base = status or "live"
     marks = [axis for axis in ending if axis != "status"]

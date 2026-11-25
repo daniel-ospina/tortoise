@@ -11390,6 +11390,16 @@ ROWED_BY_THIS_FOLD = (
     # fold that kept only its own side would silently ungrade `main`'s entry, and nothing
     # but this tuple names it.
     "test_13722_stamp_chain_off_loop.py",
+    # #13450 (PR #14600) — the file this fold ADDED, carrying the issue's entire
+    # behavioural proof, and the one the PR's review found UNROWED (P1 blocking):
+    # `--integrity` reported `manifest drift: ['test_13450_…']` and the required
+    # `manifest-integrity` leg was red on the head. Listed here for the reason
+    # every row above states — the ENTRY-RULE pin iterates this EXPLICIT tuple, so
+    # a file nobody listed has no graded `durations:` row and nothing reds when one
+    # is dropped. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local reading:
+    # the refresher samples push-to-main runs, so a file a PR ADDS cannot have a
+    # junit figure yet (#3400/#4348).
+    "test_13450_ep_position_axis_participation.py",
 )
 
 

@@ -35,6 +35,7 @@ tests/test_13450_ep_position_axis_participation.py -v``). The
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import uuid
@@ -475,14 +476,122 @@ class TestTheWriteDoorsStateTheirPosture:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+#: The terminal WORD vocabularies a currency read used to be spelled from. Each
+#: is asserted to still exist in ``live`` before the pin below trusts the set, so
+#: a rename in the leaf reds here instead of quietly emptying the population.
+_TERMINAL_VOCABULARY_NAMES = (
+    "TERMINAL_EXCLUDED_STATUSES",
+    "TERMINAL_STATUS_VALUES",
+    "LEGACY_NON_CURRENT_STATUS_VALUES",
+)
+
+
+def _shared_answer_calls(source: str) -> list[str]:
+    """Every real CALL to the one declaration in ``source`` — comments excluded.
+
+    ⛔ STRUCTURAL rather than a substring test, and that is the whole point: a raw
+    ``"ending_axes" in source`` is satisfied by a COMMENT (this repo's ``ep.py``
+    comments name the function), so it stayed green over a mutant that deleted the
+    call and restored the two-column test — MEASURED on PR #14600's review (P2):
+    ``"ending_axes" in source`` was ``True`` on that mutant while the call was
+    gone. Comments and docstrings cannot produce an ``ast.Call`` node.
+    """
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else "")
+        if name == "ending_axes":
+            found.append(ast.unparse(node))
+    return found
+
+
+def _terminal_vocabulary_refs(source: str) -> list[str]:
+    """Every REAL reference to a terminal word vocabulary — comments excluded.
+
+    This is what catches the pre-fix spelling an AST-unaware or text-only pin
+    cannot see: ``status in set(TERMINAL_EXCLUDED_STATUSES) or bool(outdated)``
+    both dodges the bare substrings AND contains only real ``ast.Name`` /
+    ``ast.Attribute`` nodes, so a structural look finds it either way.
+    """
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name) and node.id in _TERMINAL_VOCABULARY_NAMES:
+            found.append(f"line {node.lineno}: {node.id}")
+        elif isinstance(node, ast.Attribute) and \
+                node.attr in _TERMINAL_VOCABULARY_NAMES:
+            found.append(f"line {node.lineno}: {ast.unparse(node)}")
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _TERMINAL_VOCABULARY_NAMES:
+                    found.append(f"line {node.lineno}: import {alias.name}")
+    return found
+
+
 def test_ep_imports_the_shared_answer_and_spells_no_filter():
     """The defect was a hand-written two-column test. Pin its absence AND the
     presence of the shared answer, so deleting the call reds here (#13034's
-    census convention, extended to this module)."""
+    census convention, extended to this module).
+
+    Both arms are STRUCTURAL (see the helpers), because the first cut of this
+    test asserted ``"ending_axes" in source`` — which the module's own comments
+    satisfy — and two bare forbidden substrings, which the ``set(...)``-wrapped
+    mutant slips past. The AST pairs below are what make the reversion trip.
+    """
     source = Path("tortoise/ep.py").read_text(encoding="utf-8")
-    assert "ending_axes" in source
+    for vocabulary in _TERMINAL_VOCABULARY_NAMES:
+        assert vocabulary in dir(live), (
+            f"live no longer declares {vocabulary!r}, so the population this pin "
+            "guards has silently emptied")
+    assert _shared_answer_calls(source), (
+        "ep.py no longer CALLS `ending_axes` — a mention in a comment or "
+        "docstring is not an answer, and the participation test must read the "
+        "ONE declaration of the currency rule")
+    assert _terminal_vocabulary_refs(source) == [], (
+        "ep.py names a terminal WORD vocabulary directly: "
+        f"{_terminal_vocabulary_refs(source)} — the participation test answers "
+        "from `live.ending_axes`, which reads BOTH axes; a word-only arm here is "
+        "exactly the defect #13450 removed")
     assert "is_terminal_status" in dir(live) and "ending_axes" in dir(live)
-    for hand_written in ("status in TERMINAL_EXCLUDED_STATUSES",
-                         "TERMINAL_EXCLUDED_STATUSES or bool(outdated)"):
-        assert hand_written not in source, (
-            f"ep.py re-spells the currency rule: {hand_written!r}")
+
+
+class TestThePresencePinCannotBeSatisfiedByAComment:
+    """Non-vacuity for the pin above, against the mutants the review MEASURED.
+
+    ⛔ These arms exist because the pin they guard was itself the defect: a
+    comment-satisfiable assertion reads as coverage while covering nothing, so
+    the replacement must be shown to bite on the shapes that defeated it.
+    """
+
+    def test_a_comment_mentioning_the_answer_is_not_a_call(self):
+        source = (
+            "# ``ending_axes`` is the ONE declaration of the rule\n"
+            "def f(status, outdated):\n"
+            "    return status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)\n")
+        assert _shared_answer_calls(source) == [], (
+            "a comment mentioning `ending_axes` satisfied the call pin")
+        assert _terminal_vocabulary_refs(source), (
+            "the membership spelling must be visible to the structural pin")
+
+    def test_both_measured_mutant_spellings_are_caught(self):
+        for mutant in (
+            "    is_terminal = status in set(TERMINAL_EXCLUDED_STATUSES) or "
+            "bool(outdated)\n",
+            "    is_terminal = TERMINAL_EXCLUDED_STATUSES or bool(outdated)\n",
+        ):
+            source = ("def f(status, outdated):\n" + mutant
+                      + "    return is_terminal\n")
+            assert _shared_answer_calls(source) == [], mutant
+            assert _terminal_vocabulary_refs(source), (
+                "this spelling defeated the substring pins and the structural "
+                f"pin did not see it: {mutant!r}")
+
+    def test_a_live_qualified_reference_is_also_seen(self):
+        source = ("from tortoise import live\n"
+                  "def f(status):\n"
+                  "    return status in live.TERMINAL_EXCLUDED_STATUSES\n")
+        assert _terminal_vocabulary_refs(source), (
+            "the `live.`-qualified spelling must be seen too — it is the other "
+            "way a module reaches the vocabulary")
