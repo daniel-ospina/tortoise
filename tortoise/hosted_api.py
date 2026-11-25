@@ -15708,9 +15708,24 @@ def _layer_payload(entry: dict) -> dict:
     store) that ``get_entity`` itself applies, so this route cannot re-open a
     disclosure that door closed. Every other layer's properties are returned as
     stored.
+
+    ⛔ ``:Source`` IS DECIDED BY THE NODE'S WHOLE LABEL SET, never by the branch
+    that resolved it. ``entry["label"]`` is the matched branch, and a HYBRID
+    ``(:Object:Source)`` resolves through the ``Object`` branch (``_RESOLVE_BRANCHES``
+    offers ``("Object", "id")`` before ``("Source", "id")`` and the dedupe keeps
+    that row), so a branch test would publish the Source half's denied
+    ``content``/``text`` verbatim on this route while ``filter_source_props``
+    withholds them one door over — measured, and the shape is a production one
+    (``mcp_server.py``'s #4649 case). ``labels`` is the column
+    ``FalkorProjection._resolve_entity`` emits for exactly this question; the
+    branch label is the fallback for an older callee, not the rule.
     """
     props = dict(entry.get("properties") or {})
-    if entry.get("label") == "Source":
+    labels = entry.get("labels")
+    is_source = (
+        "Source" in labels if labels is not None
+        else entry.get("label") == "Source")
+    if is_source:
         from tortoise.projection.entities import filter_source_props
 
         props, _denied = filter_source_props(props)
