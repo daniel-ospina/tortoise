@@ -143,6 +143,43 @@ class TestMarkerVocabulary:
         mark_truncation(sink, returned=10, candidates=11, exact=True)
         assert truncation_field(sink) == {"truncated": True, "total_available": 11}
 
+    def test_an_offset_page_asks_about_the_population_beyond_it(self):
+        """``offset`` is part of the question, not decoration (#14592 P1-2).
+
+        The defect: a ``SKIP``-paged route computing the verdict from
+        ``candidates > returned`` marks EVERY page truncated except an
+        exactly-full last one — measured on 3 rows at ``limit=1``: offsets 0 and
+        1 correctly said more remained, offsets 2 (the terminal page) and 3
+        (past the end, empty) ALSO said ``truncated: true`` while nothing
+        remained. A caller paging ``while truncated`` never terminates, and the
+        terminal page is indistinguishable from a truncated one.
+        """
+        # 3 matches, one row per page: only the pages with rows behind them cut.
+        for offset, delivered, expected in ((0, 1, True), (1, 1, True),
+                                            (2, 1, False), (3, 0, False)):
+            sink: dict = {}
+            mark_truncation(sink, returned=delivered, candidates=3,
+                            exact=True, offset=offset)
+            field = truncation_field(sink)
+            assert field[TRUNCATED_FIELD] is expected, (offset, field)
+            if expected:
+                # The total is the WHOLE population, never the remainder.
+                assert field[TOTAL_AVAILABLE_FIELD] == 3, field
+            else:
+                assert TOTAL_AVAILABLE_FIELD not in field, field
+
+    def test_offset_zero_is_the_pre_change_predicate(self):
+        """The default keeps every unpaged caller byte-identical."""
+        for returned, candidates in ((3, 3), (5, 20), (10, 11)):
+            unpaged: dict = {}
+            paged_at_zero: dict = {}
+            mark_truncation(unpaged, returned=returned, candidates=candidates,
+                            exact=True)
+            mark_truncation(paged_at_zero, returned=returned,
+                            candidates=candidates, exact=True, offset=0)
+            assert truncation_field(unpaged) == truncation_field(paged_at_zero), (
+                returned, candidates)
+
     def test_missing_verdict_is_a_refusal_never_a_default_false(self):
         """An absent marker must not be read as 'complete' — that is the bug."""
         with pytest.raises(RuntimeError, match="truncation marker missing"):
@@ -1624,7 +1661,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                 for module, _lineno, _name, owner in cls._scan(root)}
 
     def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
-        """All SEVEN call sites, not the three a two-name filter can match.
+        """All NINE call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
         and four further alias bindings introduced by
@@ -1638,13 +1675,18 @@ class TestTheMarkerSiteRegisterIsComplete:
         unrelated edit to `sdk.py` while an alias pin only breaks when a site is
         added or moved. The same alias NAME can legitimately appear in two
         modules, so the key is `(module, name)`.
+
+        ⚠️ The bare-name count in `hosted_api.py` is THREE: `list_points`
+        (pre-existing), plus `_paged` and `get_entity_relations` from #14592.
+        That pair shipped unregistered, and this test is what caught it.
         """
         from collections import Counter
 
         seen = Counter((module, name)
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
-            ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            # list_points, _paged, get_entity_relations
+            ("tortoise/hosted_api.py", "mark_truncation"): 3,
             ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
@@ -1675,11 +1717,13 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_four_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see all four."""
+    def test_the_scan_finds_every_site_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all six."""
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::_paged",
+            "tortoise/hosted_api.py::get_entity_relations",
             "tortoise/hosted_api.py::search",
             "tortoise/sdk.py::_issue_insight",
             "tortoise/sdk.py::_tortoise_fts_query",

@@ -148,23 +148,89 @@ def test_objects_list_filters_on_the_kind_the_write_door_writes(tmp_path):
 
 
 def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
-    """A FULL page must not be byte-identical to a COMPLETE one (#8447): the
-    marker is what separates them, and `offset` is how a caller continues."""
-    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
-        for name in ("A", "B", "C"):
+    """Paging: the marker must be true ONLY while matches remain, over a TOTAL order.
+
+    ⚠️ Three falsifiers, because the first version of this test could not red for
+    any of them:
+
+    * **the terminal page must not claim truncation** — computed from
+      ``total > page length`` (pre-fix), offsets 0 and 1 said "more remain"
+      correctly, but offset 2 (the last page) and offset 3 (past the end, empty)
+      ALSO said ``truncated: true``. That is the inverse of #8447: a caller paging
+      ``while truncated`` never terminates, and "more remain" becomes
+      indistinguishable from "this was the end".
+    * **the order must be TOTAL** — two of the four carriers share a NAME
+      (``#3590 D2`` makes same-named carriers legal), so ``ORDER BY name`` alone
+      is not a total order and each page's separate query returns a non-adjacent
+      slice: rows get dropped and repeated while the exact count still reports
+      the enumeration complete (``#5346``). With distinct names the mutant was
+      indistinguishable, which is why the fixture is not distinct.
+    * **the total is EXACT** — a real ``count()`` under the same WHERE, not a
+      lower bound wearing a total's clothes.
+
+    ⚠️ The same-name pair is planted BELOW the write door on purpose: the door is
+    idempotent by name (measured — two ``POST /v1/objects`` with one name leave
+    ONE row, ``count() == 1``), so a fixture built only from it cannot carry the
+    pair this test exists to page over.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        for name in ("SAME", "B", "C"):
             client.post("/v1/objects", json={"name": name, "objectKind": "goal"})
+        sdk = _sdk(ha)
+        try:
+            # A WRITE with no door, for the reason above. `_query(...,
+            # read_only=False)` states the arm (`_seed_registry` explains why).
+            sdk._get_proj().g._query(
+                "CREATE (o:Object {id:$id, name:'SAME', objectKind:'goal'})",
+                params={"id": "obj-dup-14592"}, read_only=False)
+        finally:
+            sdk.close()
         seen: list[str] = []
-        for offset in (0, 1, 2):
+        # 4 rows, one per page: offsets 0-2 have rows behind them, 3 is the
+        # terminal page, 4 is PAST the end and empty.
+        expected_truncated = {0: True, 1: True, 2: True, 3: False, 4: False}
+        for offset, truncated in expected_truncated.items():
             r = client.get("/v1/objects", params={"limit": 1, "offset": offset})
             assert r.status_code == 200, r.text
             body = r.json()
-            assert body["truncated"] is True, body
-            # The total is EXACT (a real count under the same WHERE), not a
-            # lower bound wearing a total's clothes.
-            assert body["total_available"] == 3, body
+            assert body["truncated"] is truncated, (offset, body)
+            if truncated:
+                assert body["total_available"] == 4, (offset, body)
+            else:
+                # A complete answer must not advertise a total it did not cut to.
+                assert "total_available" not in body, (offset, body)
             seen.extend(o["name"] for o in body["objects"])
-        # Total-order paging: every row exactly once, none dropped or repeated.
-        assert sorted(seen) == ["A", "B", "C"], seen
+        # Every row exactly once, none dropped or repeated — over the same-name
+        # pair, which a per-page query on a non-total order cannot guarantee.
+        assert sorted(seen) == ["B", "C", "SAME", "SAME"], seen
+
+
+def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
+    """The Python-paged route asks the same question as the store-paged one.
+
+    ``/v1/sources`` pages the whole-population answer in Python, so it carries its
+    own ``offset`` into the marker; a fix applied to one route family and not the
+    other would leave the same non-terminating walk here.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            for i in range(2):
+                sdk._create_point("statement", "extracted",
+                                  extractedFrom=f"https://example.test/src-{i}")
+        finally:
+            sdk.close()
+        pages = {
+            offset: client.get("/v1/sources",
+                               params={"limit": 1, "offset": offset}).json()
+            for offset in (0, 1, 2)
+        }
+        # 2 sources, one per page: offset 0 has one behind it, offset 1 is the
+        # terminal page, offset 2 is past the end. Pre-fix all three said True.
+        assert [p["truncated"] for p in pages.values()] == [True, False, False], pages
+        assert pages[0]["total_available"] == 2, pages
+        assert "total_available" not in pages[1], pages
+        assert pages[2]["sources"] == [], pages
 
 
 def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
@@ -427,6 +493,42 @@ def test_relations_reports_which_pack_declared_the_predicate(tmp_path):
         assert by_pred["causes"]["mechanism"] == "IMPL", by_pred
         assert by_pred["related"]["declaredBy"] == [], by_pred
         assert body["declarationsReadable"] is True, body
+
+
+def test_relations_reports_an_unreadable_registry_as_null_never_empty(
+        tmp_path, monkeypatch):
+    """The THIRD value is the point of `declaredBy`, and it needs its own test.
+
+    Every other assertion in this file drives the two READABLE arms, so a mutant
+    that collapses the third value into ``[]``
+    (``list((declared or {}).get(...))``) leaves the whole suite green. That is a
+    false claim, not a formatting preference: ``[]`` asserts *"no installed pack
+    declares this predicate"* about a vocabulary the read could not see.
+
+    ``declared_relation_packs`` returns ``None`` when the pack rows cannot be read
+    (it returns ``{}`` only for a readable registry that declares nothing), so
+    patching it to ``None`` drives exactly the state the route must not flatten.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        a = client.post("/v1/objects", json={"name": "ALPHA", "objectKind": "goal"}).json()
+        b = client.post("/v1/objects", json={"name": "BETA", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._create_edge("related", a["id"], b["id"])
+        finally:
+            sdk.close()
+
+        # `entity_relations` imports the function INSIDE the call, so patching the
+        # module attribute is what the read actually resolves.
+        import tortoise.pack_registry as pack_registry
+
+        monkeypatch.setattr(pack_registry, "declared_relation_packs", lambda: None)
+
+        body = client.get(f"/v1/entities/{a['id']}/relations").json()
+        assert body["relations"], body  # the row is still served
+        assert body["declarationsReadable"] is False, body
+        # `None`, never `[]`: an unasked registry is not a positive finding.
+        assert [r["declaredBy"] for r in body["relations"]] == [None], body
 
 
 def test_relations_is_layer_agnostic_and_404s_on_an_unknown_entity(tmp_path):

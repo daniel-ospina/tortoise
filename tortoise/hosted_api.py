@@ -15754,7 +15754,8 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     raise HTTPException(status_code=404, detail=f"{label} not found")
 
 
-def _paged(body_key: str, rows: list[dict], *, candidates: int) -> dict:
+def _paged(body_key: str, rows: list[dict], *, candidates: int,
+           offset: int) -> dict:
     """The capped-page envelope `/v1/points` publishes, one layer over.
 
     ``candidates`` is the candidate set the PRODUCER could see, before the
@@ -15765,12 +15766,25 @@ def _paged(body_key: str, rows: list[dict], *, candidates: int) -> dict:
     whole-population list it paged in Python (also exact, for the same reason —
     it is the complete set). A caller that ever fills it with a probe row must
     pass ``exact=False`` instead; that is why the flag is not defaulted here.
+
+    ⛔ ``offset`` is load-bearing, not bookkeeping. These routes are
+    ``SKIP``/``LIMIT`` paged, so the honest question is *"do matches exist beyond
+    what this RESPONSE delivered?"* — ``offset + delivered < candidates``, which
+    is what ``mark_truncation`` computes once it is told the offset. Without it
+    the verdict was ``candidates > delivered``, which marked the TERMINAL page
+    (and a page past the end) ``truncated: true``: the exact inverse of #8447's
+    contract, since nothing remained, and a client paging ``while truncated``
+    never terminated. The dropped rows here ARE reachable by continuing the walk,
+    which is why the marker must say "more remain" and never "the page was cut"
+    on a terminal page — ``truncation.py``'s register records this pair as its
+    offset-paged exception.
     """
     from tortoise.truncation import mark_truncation, truncation_field
 
     delivered = len(rows)
     sink: dict = {}
-    mark_truncation(sink, returned=delivered, candidates=candidates, exact=True)
+    mark_truncation(sink, returned=delivered, candidates=candidates, exact=True,
+                    offset=offset)
     body: dict = {body_key: rows, "count": delivered}
     body |= truncation_field(sink)
     return body
@@ -15787,7 +15801,7 @@ async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
         lambda: entity_reads.list_layer(
             sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),
         op=surface)
-    return _paged(body_key, rows, candidates=total)
+    return _paged(body_key, rows, candidates=total, offset=offset)
 
 
 @app.get("/v1/objects")
@@ -15888,7 +15902,7 @@ async def list_sources(
         lambda: sdk.list_knowledge(kind="source"), op="list_sources")
     rows = list(rows or [])
     page = rows[offset:offset + limit]
-    return _paged("sources", page, candidates=len(rows))
+    return _paged("sources", page, candidates=len(rows), offset=offset)
 
 
 @app.get("/v1/sources/{entity_id:path}")
