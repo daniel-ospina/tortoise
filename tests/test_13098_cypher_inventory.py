@@ -503,6 +503,12 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     Same class as the enumeration wrap, in the same verb: an uncaught
     `PermissionError`/`EIO` would exit 1, which this tool reserves for "the pins
     drifted", so a lane would re-cut 25 correct pins over a file it never read.
+
+    ⛔ BOTH HALVES OF `except (OSError, UnicodeDecodeError)` ARE GRADED HERE WITHOUT A
+    `chmod` PREMISE — the decode half by the latin-1 document, the `OSError` half by the
+    directory. Neither may sit behind `_skip_if_chmod_does_not_deny`: on a root runner
+    (this repo's containers, `unshare -r`) that skip is the ONLY coverage for `OSError`,
+    so the keyword could be deleted with the file green.
     """
     doc = tmp_path / "src.md"
     doc.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
@@ -516,6 +522,15 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     latin1.write_bytes(b"<!-- cypher-inventory:sites = 1327 -->\n" + b"\xff\xfe\n")
     assert census.check(latin1, {"sites": []}) == 2, (
         "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
+    # ⛔ AND THE `OSError` HALF NEEDS ITS OWN CHMOD-FREE ARM (#13098 round 4): the
+    # `chmod(0o000)` row below was the ONLY thing grading `except OSError` in
+    # `check()`, and it SKIPS on a root runner — so under `unshare -r` (or a root CI
+    # container) narrowing the guard to `except (UnicodeDecodeError,)` left the whole
+    # file green (`1 skipped, 109 deselected`, measured). A DIRECTORY is an `OSError`
+    # (`IsADirectoryError`) that needs no permission premise, so it grades the half on
+    # every runner — the same twin `render()`'s arm already carries.
+    assert census.check(tmp_path, {"sites": []}) == 2, (
+        "a DIRECTORY as the document must answer 2 (could not run), not 1 (drift)")
 
     doc.chmod(0o000)
     try:
@@ -665,7 +680,13 @@ def test_the_renderer_refuses_to_write_over_a_tracked_path(tmp_path, monkeypatch
     monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
     target = repo / "docs" / "architecture" / "refuse-me.md"
     target.parent.mkdir(parents=True)
-    assert not target.exists(), "a real file sits at the probe path — pick another"
+    # ⛔ THE PREMISE IS THE ISOLATION, NOT "nothing is there yet": the scratch repo is
+    # created fresh by `_scratch_repo`, so a pre-existence check on the target could
+    # never fire — it is unfalsifiable. What IS load-bearing is that a REGRESSED guard
+    # writes inside the throwaway tree, so that is what is asserted.
+    assert repo in target.parents, (
+        "the target must live inside the SCRATCH repo: a regressed guard writes into "
+        "`tmp_path`, never into this checkout")
     real_run = census.subprocess.run
 
     def fake_run(cmd, **kwargs):
