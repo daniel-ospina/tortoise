@@ -1191,43 +1191,60 @@ def main(argv: list[str] | None = None) -> int:
         # destruction that `git` cannot restore, from a verb §7 tells every lane to
         # run. So this guard asks git where the metadata LIVES rather than asking the
         # index: `--git-dir` and `--git-common-dir` one call, because a linked
-        # worktree's `.git` is a FILE (its metadata is elsewhere) and its refs are
-        # shared with the main checkout. Outside a git work tree (`128`) it does not
-        # fire, exactly like the tracked-path probe beside it.
-        try:
-            meta_probe = subprocess.run(
-                ["git", "rev-parse", "--git-dir", "--git-common-dir"],
-                cwd=ROOT, capture_output=True, text=True,
-                encoding="utf-8", errors="surrogateescape",
-            )
-        except OSError as err:
-            print(
-                f"render: could not probe {args.render} for git metadata: {err}",
-                file=sys.stderr,
-            )
-            return 2
-        if meta_probe.returncode == 0:
-            # ⛔ AN EMPTY LINE IS NOT `ROOT`: `Path("")` resolves to the current
-            # directory, so an unanswered probe would refuse EVERY destination —
-            # fail-closed in the wrong direction, and silently.
-            for line in meta_probe.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    meta = (ROOT / line).resolve()
-                except (OSError, RuntimeError):
-                    continue
-                if target == meta or meta in target.parents:
-                    print(
-                        f"refusing to render over GIT METADATA ({args.render}):\n"
-                        f"{target} is inside this repository's git directory "
-                        f"({meta}).\nThat is not a document destination, and git "
-                        "cannot restore what --render writes over. Pick another\n"
-                        "path (the default writes the gitignored `CYPHER-INVENTORY.md`).",
-                        file=sys.stderr,
-                    )
-                    return 2
+        # worktree's refs are shared with the main checkout, so the common dir is a
+        # second answer. Outside a git work tree (`128`) it does not fire, exactly like
+        # the tracked-path probe beside it.
+        #
+        # ⛔ AND THE PROBE ALONE IS NOT THE INVARIANT — it is the DIRECTORY case of it.
+        # A LINKED WORKTREE'S `.git` IS A REGULAR FILE holding `gitdir: …`, and it is
+        # NOT inside either dir the probe reports (measured: `git rev-parse --git-dir
+        # --git-common-dir` from a worktree answers `<common>/worktrees/<name>` and
+        # `<common>`, while the link is `<worktree>/.git`). Measured at `037d0c68`: in a
+        # real `git worktree add`, `--render .git` printed `render: wrote 4 lines`,
+        # exited **0**, replaced that file, and every later `git` call in the worktree
+        # answered **128** — the worktree detached from its repository, with no `git`
+        # command to restore it. So a destination carrying a `.git` COMPONENT is refused
+        # as metadata too, and that half needs no subprocess (which is also why it is
+        # decided first: it cannot be made to depend on git answering).
+        metadata_dirs = []
+        if ".git" in target.parts:
+            metadata_dirs.append(Path(*target.parts[: target.parts.index(".git") + 1]))
+        else:
+            try:
+                meta_probe = subprocess.run(
+                    ["git", "rev-parse", "--git-dir", "--git-common-dir"],
+                    cwd=ROOT, capture_output=True, text=True,
+                    encoding="utf-8", errors="surrogateescape",
+                )
+            except OSError as err:
+                print(
+                    f"render: could not probe {args.render} for git metadata: {err}",
+                    file=sys.stderr,
+                )
+                return 2
+            if meta_probe.returncode == 0:
+                # ⛔ AN EMPTY LINE IS NOT `ROOT`: `Path("")` resolves to the current
+                # directory, so an unanswered probe would refuse EVERY destination —
+                # fail-closed in the wrong direction, and silently.
+                for line in meta_probe.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        metadata_dirs.append((ROOT / line).resolve())
+                    except (OSError, RuntimeError):
+                        continue
+        for meta in metadata_dirs:
+            if target == meta or meta in target.parents:
+                print(
+                    f"refusing to render over GIT METADATA ({args.render}):\n"
+                    f"{target} is inside this repository's git directory "
+                    f"({meta}).\nThat is not a document destination, and git "
+                    "cannot restore what --render writes over. Pick another\n"
+                    "path (the default writes the gitignored `CYPHER-INVENTORY.md`).",
+                    file=sys.stderr,
+                )
+                return 2
 
     prefixes: tuple[str, ...] = ("tortoise",)
     if args.all_surface:
