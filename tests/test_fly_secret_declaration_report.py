@@ -1122,13 +1122,29 @@ def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     pins only the ORDER, so neither property can be lost silently when the other is
     edited.
 
+    ⛔ THE SEARCH IS SCOPED TO THE CLEAN ARM, and that is load-bearing rather than
+    tidy (a review round measured the unscoped version and an earlier draft of this
+    docstring was wrong): `if [ "${FILE_ISSUES:-true}" != "true" ]` occurs in BOTH
+    arms — the CLEAN arm's guard and the DRIFT arm's identical one — so an unscoped
+    `find` on a CLEAN-arm deletion silently re-anchors on the DRIFT arm and the
+    `!= -1` arms never fire: the row still reds, but it complains about ORDER when
+    the guard is GONE, which is a fair test reporting the wrong fault. Slicing to the
+    arm the sweep lives in gives each anchor exactly one occurrence, so a deletion
+    reds on its own message.
+
     `.find()` rather than `.index()`: a deleted guard must RED with a message that
     names it, not raise `ValueError: substring not found`.
     """
     run = _report_step()
-    dry_run_guard = run.find('if [ "${FILE_ISSUES:-true}" != "true" ]')
-    ref_guard = run.find('if [ -z "${DEFAULT_BRANCH:-}" ]')
-    sweep = run.find("auto-file-issue.sh resolve")
+    clean_start = run.find('if [ "${RC:-}" = "0" ]; then')
+    drift_start = run.find('if [ ! -s "$REPORT" ]; then')
+    assert clean_start != -1, "the CLEAN arm is gone — where does a clean reading go?"
+    assert drift_start != -1, "the DRIFT arm is gone — where does a drift reading go?"
+    assert clean_start < drift_start, "the CLEAN arm no longer precedes the DRIFT arm"
+    clean_arm = run[clean_start:drift_start]
+    dry_run_guard = clean_arm.find('if [ "${FILE_ISSUES:-true}" != "true" ]')
+    ref_guard = clean_arm.find('if [ -z "${DEFAULT_BRANCH:-}" ]')
+    sweep = clean_arm.find("auto-file-issue.sh resolve")
     assert dry_run_guard != -1, "the CLEAN arm no longer honours the dry-run input"
     assert ref_guard != -1, "the CLEAN arm no longer checks which branch it read"
     assert sweep != -1, "the resolve sweep is gone — would the ledger ever close (#8841)?"
