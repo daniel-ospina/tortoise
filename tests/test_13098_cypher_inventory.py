@@ -507,6 +507,7 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     doc.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
     doc.chmod(0o000)
     try:
+        _skip_if_chmod_does_not_deny(doc)
         rc = census.check(doc, {"sites": []})
     finally:
         doc.chmod(0o600)
@@ -549,6 +550,7 @@ def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
     unreadable.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
     unreadable.chmod(0o000)
     try:
+        _skip_if_chmod_does_not_deny(unreadable)
         with pytest.raises(SystemExit) as refused:
             census.render(unreadable, {"sites": []})
         assert refused.value.code == 2, (
@@ -595,17 +597,26 @@ def test_the_renderer_refuses_to_write_over_the_source(capsys):
         "the source-specific guard is then pinned by nothing")
 
 
-def test_the_renderer_refuses_to_write_over_a_tracked_path(monkeypatch):
+def test_the_renderer_refuses_to_write_over_a_tracked_path(tmp_path, monkeypatch):
     """…and over ANY tracked path, not only the source.
 
-    ⛔ THE TRACKED-PATH BRANCH IS PINNED WITHOUT RISKING A REAL FILE: the tool's
-    `git ls-files` probe is the thing under test, so it is the thing replaced — a
-    fake that reports "tracked" for a path that does not exist. If the guard is
-    present, nothing is written and the target stays absent; if it regressed, this
-    reds on the assertion below rather than after a 370 KB document has replaced a
-    real tracked file.
+    ⛔ THE TRACKED-PATH BRANCH IS PINNED WITHOUT RISKING A REAL FILE — not even under
+    this arm's own mutant: the target is built inside a THROWAWAY git work tree, so a
+    regressed guard writes its document into `tmp_path` and never into this
+    repository. The tool's `git ls-files` probe is the thing under test, so it is the
+    thing replaced — a fake that reports "tracked" for a path that does not exist. If
+    the guard is present, nothing is written and the target stays absent; if it
+    regressed, this reds on the assertion below.
     """
-    target = ROOT / "docs" / "architecture" / "refuse-me.md"
+    repo = _scratch_repo(tmp_path)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / "docs" / "architecture" / "refuse-me.md"
+    target.parent.mkdir(parents=True)
     assert not target.exists(), "a real file sits at the probe path — pick another"
     real_run = census.subprocess.run
 
@@ -615,7 +626,7 @@ def test_the_renderer_refuses_to_write_over_a_tracked_path(monkeypatch):
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(census.subprocess, "run", fake_run)
-    rc = census.main(["--render", target.relative_to(ROOT).as_posix()])
+    rc = census.main(["--render", target.relative_to(repo).as_posix()])
     assert rc == 2, f"`--render <tracked path>` must exit 2, got {rc}"
     assert not target.exists(), (
         "the guard must refuse before writing — a rendered document over a tracked "
@@ -746,6 +757,26 @@ def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys)
 # stderr emit them too.
 
 
+def _skip_if_chmod_does_not_deny(path: Path) -> None:
+    """Skip the row when `chmod(0o000)` does not actually deny THIS runner's user.
+
+    ⛔ A ROOT RUNNER READS A `0o000` FILE, so the "cannot be read" premise those two
+    arms rest on silently becomes false and each would grade a READABLE file instead
+    (`check()` answers 0/raises, `render()` succeeds) — failing with an unrelated error
+    rather than reporting a premise it could not construct. The repo already solved
+    this the same way in `tests/test_12483_12487_spool_integrity.py`'s `_lock()`.
+    """
+    try:
+        path.read_bytes()
+    except OSError:
+        return
+    path.chmod(0o600)
+    pytest.skip(
+        "chmod(0o000) does not deny this runner's user (root): the 'cannot be read'"
+        " premise these rows rest on cannot be constructed here, so they would grade"
+        " a READABLE file")
+
+
 def _scratch_repo(tmp_path: Path) -> Path:
     """A throwaway git work tree that can hold a non-UTF-8 filename.
 
@@ -754,6 +785,17 @@ def _scratch_repo(tmp_path: Path) -> Path:
     """
     repo = tmp_path / "repo"
     repo.mkdir()
+    # ⛔ THE PREMISE, ASSERTED WHERE THE PREMISE IS CONSTRUCTED: a name that is not
+    # valid UTF-8 is not accepted by every filesystem (macOS validates filenames as
+    # UTF-8). Without this probe the non-UTF-8 arms fail inside `write_text`/`git add`
+    # with an unrelated error instead of skipping, which is a red nobody can act on.
+    probe = repo / os.fsdecode(b"caf\xe9.probe")
+    try:
+        probe.write_bytes(b"x")
+        probe.unlink()
+    except OSError:
+        pytest.skip("this filesystem rejects a non-UTF-8 filename — the premise the"
+                    " non-UTF-8 arms rest on cannot be constructed here")
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "core.quotePath", "false"],
                    check=True)
