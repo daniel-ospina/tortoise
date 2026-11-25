@@ -260,6 +260,15 @@ def _same_module_call_graph(rel: str) -> dict[str, set[str]]:
     structural. Names rather than resolved objects because the only thing a route
     needs is "a call to a function defined in this module", which is what
     :func:`_reaches` follows.
+
+    ⛔ THE LIMITS, stated so a later reader does not read more into it than it does:
+    same-module resolution, by CALL NAME, with no dataflow and no control flow. A
+    full interprocedural reachability query is CodeQL's or Semgrep's job (CodeQL's
+    control-flow reachability is the documented answer to "can X be reached without
+    passing through Y"); this file deliberately keeps the stdlib-only AST form that
+    `_call_names`/`_hook_calls` already use, because a new analyser dependency for one
+    route pin is a bigger blast radius than the defect, and the pin only has to red
+    when a route is CUT, which a name walk sees.
     """
     tree = ast.parse(_source(rel))
     return {node.name: _call_names(node)
