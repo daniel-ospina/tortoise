@@ -254,12 +254,18 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2343`, at this head — re-derived by
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2379`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
 returns that one line; the sentence has followed the symbol through `2297` → `2313` →
-`2343` as `#13971`'s review round corrected the capture path's own docstring above and then
+`2343` → `2379` as `#13971`'s review round corrected the capture path's own docstring above and then
 added the restore-door residual there, and before that
-`2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
+`2257`, a comment at that head, and `1584` at `4f68a2aa7`; ⛔ the `2343` → `2379` step was NOT
+re-cut with the folds that caused it — `#14560` (`3bbe5567df`, +20 lines) and `#14552`
+(`939e37f664`, +16 more, both ABOVE the declaration) each grew this module and each left the
+citation behind, so `main` was RED on
+`tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
+(`cited 2343, that line is "#   * `sdk._update_entity`'s target-aware guard…"`) until this
+re-measure — the pointer follows the SYMBOL, so a fold that moves the symbol owes this line) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
