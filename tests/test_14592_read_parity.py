@@ -296,6 +296,7 @@ def test_by_id_routes_enforce_the_same_scope_as_the_list_routes(tmp_path):
             "name": "SCOPED-S", "subjectKind": "person"}).json()
     with _graph(str(tmp_path / "g.db")), _rest_client(_scoped_key) as client:
         assert client.get("/v1/objects").status_code == 403
+        assert client.get("/v1/subjects").status_code == 403
         assert client.get(f"/v1/objects/{obj['id']}").status_code == 403
         assert client.get(f"/v1/subjects/{who['id']}").status_code == 403
         assert client.get("/v1/sources").status_code == 403
@@ -605,15 +606,51 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
 
 def test_belief_refuses_an_uncalibrated_graph_rather_than_substituting_a_number(tmp_path):
     """A topology-only figure reported as EP is the silent-uncalibrated class
-    #7478 targets, so the read REFUSES (409) and names the remedy."""
-    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+    #7478 targets, so the read REFUSES (409) and names the remedy.
+
+    ⚠️ The fixture has to give the node a PERSISTED belief WITHOUT a prior: the
+    gate now asks the node first, so a node carrying no belief at all answers
+    `current: null` (200) and never reaches EP — there is nothing to refuse. The
+    case that still refuses is exactly the one the gate exists for: a node whose
+    belief the graph cannot attribute to any prior. `posterior_alpha/beta` alone
+    (no `baseline_set`) is that shape — measured: `check_confidence` raises
+    `CalibrationError: 1 uncalibrated evidence points`.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         p = client.post("/v1/points", json={
             "content": "an unmeasured claim", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            # A raw property WRITE has no SDK door (nothing sets a posterior
+            # without a prior), so it states its arm: `read_only=False`.
+            sdk._get_proj().g._query(
+                "MATCH (n:Point {id:$id}) "
+                "SET n.posterior_alpha = 8.0, n.posterior_beta = 2.0",
+                params={"id": p["id"]}, read_only=False)
+        finally:
+            sdk.close()
         r = client.get(f"/v1/entities/{p['id']}/belief")
         assert r.status_code == 409, r.text
         detail = r.json()["detail"]
         assert detail["error_code"] == "EP_UNCALIBRATED", detail
         assert detail["remedy"], detail
+
+
+def test_belief_does_not_run_ep_for_a_node_with_no_belief(tmp_path):
+    """Asking EP for a node with no belief would WRITE (the lazy-consistency
+    dream) to produce a number the handler then discards.
+
+    Pinned on the OBSERVABLE consequence rather than on call order: an
+    uncalibrated graph answers `200 current: null` for such a node, which is
+    reachable only if `check_confidence` was never asked (it raises
+    `CalibrationError` on that same graph — see the test above).
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "no belief at all", "kind": "statement"}).json()
+        r = client.get(f"/v1/entities/{p['id']}/belief")
+        assert r.status_code == 200, r.text
+        assert r.json()["current"] is None, r.text
 
 
 def test_belief_404s_on_an_unknown_entity(tmp_path):
@@ -660,3 +697,91 @@ def test_belief_reports_a_node_with_no_persisted_belief_as_null(tmp_path):
         assert body["currentUnavailable"]["error_code"] == "NO_PERSISTED_BELIEF", body
         # It NAMES the labels that can carry one, so the answer is diagnosable.
         assert "Object" in body["currentUnavailable"]["beliefCarriedBy"], body
+
+
+# ── the two readers that carry a three-valued / family-specific answer ──────
+
+def test_declared_relation_packs_reports_an_unreadable_row_set_as_none(monkeypatch):
+    """`None` must mean "could not be asked", never "nothing is declared".
+
+    `entity_relations` renders `declarationsReadable: false` + `declaredBy: null`
+    off this, so a `{}` here would publish "no installed pack is named" as a
+    positive finding about a vocabulary the registry could not answer for. There
+    is no route-level way to reach it (a working registry always answers), so the
+    reader is pinned directly — the alternative was an untested claim.
+
+    ⚠️ `monkeypatch`, never a hand-rolled save/restore: `domain_loader` calls
+    `_get_registry` as a bare module global, so an over-clever restore that drops
+    the attribute breaks EVERY later test in the session (measured: nine
+    `NameError: name '_get_registry' is not defined` in `tests/test_event_store.py`
+    from exactly that).
+    """
+    import tortoise.domain_loader as dl
+    from tortoise import pack_registry
+
+    class _Reg:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def list_relations(self):
+            return self._rows
+
+    def _answer(rows):
+        monkeypatch.setattr(dl, "_get_registry", lambda: rows_factory(rows))
+
+    def rows_factory(rows):
+        return rows if rows is None else _Reg(rows)
+
+    # (a) rows returned, NOT ONE readable -> None (the fail-closed direction)
+    _answer([1, None, {"pack": "venture"}, {"predicate": "   "}])
+    assert pack_registry.declared_relation_packs() is None
+    # (b) one usable row among garbage -> that row's attribution survives
+    _answer(["junk", {"pack": "venture", "predicate": "causes"}])
+    assert pack_registry.declared_relation_packs() == {"causes": ("venture",)}
+    # (c) an EMPTY row set is a real answer: no pack declares anything.
+    _answer([])
+    assert pack_registry.declared_relation_packs() == {}
+    # (d) declared but no pack named -> the predicate keeps a key with (),
+    #     so "declared, unattributed" is distinguishable from "absent".
+    _answer([{"predicate": "causes"}])
+    assert pack_registry.declared_relation_packs() == {"causes": ()}
+    # (e) no registry at all -> None
+    _answer(None)
+    assert pack_registry.declared_relation_packs() is None
+
+
+def test_layer_lists_use_the_layers_own_terminal_vocabulary():
+    """The Object/Subject lists must not be handed the POINT status family.
+
+    `live._terminal_excluded`'s default is the Point family ANDed with the legacy
+    `outdated` flag, and its docstring says the entity read surfaces "must pass
+    `commit_ops.OBJECT_TERMINAL_STATUSES` … and `include_outdated_flag=False`".
+    The two families are identical SETS today (which is why a revert would be
+    invisible in behaviour), so the discrimination is made on the PREDICATE, not
+    on a row: this is drift protection, and it fails if the family seam is
+    dropped.
+    """
+    from tortoise import entity_reads
+    from tortoise.commit_ops import (
+        OBJECT_TERMINAL_STATUSES,
+        SUBJECT_TERMINAL_STATUSES,
+    )
+    from tortoise.live import _terminal_excluded
+
+    point_default = _terminal_excluded("n.status")
+    obj = entity_reads._layer_terminal_predicate("Object")
+    subj = entity_reads._layer_terminal_predicate("Subject")
+    # The predicate must DIFFER from the Point default (the `outdated` conjunct
+    # and/or the vocabulary), and the two layers must be told apart.
+    assert obj != point_default, obj
+    assert "n.outdated" not in obj, obj
+    assert "n.outdated" not in subj, subj
+    # …and each layer's own family is the one that reached the predicate.
+    for word in OBJECT_TERMINAL_STATUSES:
+        assert f"'{word}'" in obj, (word, obj)
+    for word in SUBJECT_TERMINAL_STATUSES:
+        assert f"'{word}'" in subj, (word, subj)
+    assert obj == _terminal_excluded(
+        "n.status", OBJECT_TERMINAL_STATUSES, include_outdated_flag=False)
+    assert subj == _terminal_excluded(
+        "n.status", SUBJECT_TERMINAL_STATUSES, include_outdated_flag=False)

@@ -73,6 +73,8 @@ version: 1
 # and `api`, and at that same flat default ON PURPOSE: a `durations` row is written from a junit
 # census, not invented, so the row a CI can re-measure is the one the sweep replaces) — the verb
 # packs seven shards at 826.0 s
+# 2.0 s `DEFAULT_FAST_WEIGHT`), and THIS PR adds one too (`tests/test_14592_read_parity.py`,
+# `core`, the row that re-packed this pool) — the verb packs seven shards at 826.0 s
 # (a, f, g, h, i, j, k) and four at 825.9 s (b, c, d, e), so `ceil(826.0/60 x 2)` = 28 m governs
 # (a shard's job-level
 # wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with

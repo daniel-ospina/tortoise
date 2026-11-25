@@ -16050,19 +16050,50 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if not any(entry.get("label") for entry in resolved):
         raise HTTPException(status_code=404, detail="Entity not found")
     label = resolved[0].get("label")
-    try:
-        view = await _read_offload(
-            lambda: sdk.check_confidence(claim_id=entity_id),
-            op="get_entity_belief.confidence")
-    except CalibrationError as e:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "EP_UNCALIBRATED",
-                "message": str(e),
-                "remedy": ("calibrate the graph before reading EP confidence — "
-                           "`dream`/`compute_confidence` on a calibrated graph"),
-            }) from e
+    entity = resolved[0].get("properties") or {}
+    # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE first, and only then ask EP.
+    # EP's `_read_node` coalesces ABSENT params to Beta(1,1), so an Object, a
+    # Subject, or a Point EP never consumed comes back as a perfectly-shaped
+    # posterior over no evidence. Measured before this gate: an Object and a
+    # Subject both answered 200 with `{mean: 0.5, alpha: 1.0, beta: 1.0,
+    # effective_n: 2.0}`, which published as `current` is the substituted-number
+    # class #7478 targets, one level below the graph-level 409.
+    #
+    # The ORDER matters twice, so it is not a style choice: asking EP for a node
+    # with no belief would run `get_confidence`'s lazy-consistency pass — a WRITE
+    # — to produce a number this handler then discards, and any other exception
+    # out of that call would win over the honest `current: null`. Asking the node
+    # first means a no-belief request performs no EP work at all.
+    #
+    # The keys are exactly the ones a belief write stamps: EP's `_flush_cache`
+    # SET (`confidence`, `posterior_alpha`, `posterior_beta`, `ep_alpha`,
+    # `ep_beta` — `tortoise/ep.py`) and `set_point_baseline` (`ep_alpha`,
+    # `ep_beta`, `baseline_set` — `sdk._set_point_baseline`). ⛔ `baseline_alpha`/
+    # `baseline_beta` were listed here and are NOT graph properties (they are
+    # record COLUMN names in `cache_projection`), so they are gone: a key no
+    # writer stamps can only ever fail to broaden the gate while its presence in
+    # this tuple claims it is a stamp.
+    measured = any(
+        entity.get(k) is not None
+        for k in ("posterior_alpha", "posterior_beta", "ep_alpha", "ep_beta",
+                  "confidence")) \
+        or entity.get("baseline_set") is True
+    view = None
+    if measured:
+        try:
+            view = await _read_offload(
+                lambda: sdk.check_confidence(claim_id=entity_id),
+                op="get_entity_belief.confidence")
+        except CalibrationError as e:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "EP_UNCALIBRATED",
+                    "message": str(e),
+                    "remedy": ("calibrate the graph before reading EP "
+                               "confidence — `dream`/`compute_confidence` on a "
+                               "calibrated graph"),
+                }) from e
     proj = sdk._get_proj()
     last = await _read_offload(
         lambda: event_store.latest_for_node(proj, "ConfidenceChanged", entity_id),
@@ -16075,24 +16106,6 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if label == "Point":
         provenance = await _read_offload(
             lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
-    entity = resolved[0].get("properties") or {}
-    # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE, not the callee. `view` was
-    # already produced above (the calibration gate has therefore run), but EP's
-    # `_read_node` coalesces ABSENT params to Beta(1,1), so an Object/Subject — or
-    # a Point EP never consumed — comes back as a perfectly-shaped posterior over
-    # no evidence. Measured on the tree before this gate: an Object and a Subject
-    # both answered 200 with `{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n:
-    # 2.0}`. Published as `current` that is the substituted-number class #7478
-    # targets, one level below the graph-level 409.
-    #
-    # The keys are the ones a belief write actually stamps (EP's `_flush_cache`
-    # SET, and `set_point_baseline`): any one of them being present and non-null
-    # means a belief EXISTS on this node; the flag is the declared-prior form.
-    measured = any(
-        entity.get(k) is not None
-        for k in ("posterior_alpha", "posterior_beta", "ep_alpha", "ep_beta",
-                  "confidence", "baseline_alpha", "baseline_beta")) \
-        or entity.get("baseline_set") is True
     return {
         "entity": {
             "id": entity_id,

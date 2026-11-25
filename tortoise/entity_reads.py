@@ -84,7 +84,7 @@ def _layer_terminal_predicate(label: str) -> str:
     nothing can mark, so the family is chosen per label here rather than
     defaulted.
 
-    Behaviour-preserving TODAY — ``live.py:655`` records that the Object and
+    Behaviour-preserving TODAY — ``live.py:658`` records that the Object and
     Subject sets are subsets of the Point set and that no entity writer sets
     ``outdated`` — which is exactly why the wrong family would never show up as a
     visible bug, only as a silent drift when either set changes.
