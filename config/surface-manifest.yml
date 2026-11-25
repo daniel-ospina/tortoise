@@ -1114,7 +1114,7 @@ counts:
     link: 3
     operate: 1
 high_water_counts:
-  tools: 48
+  tools: 30
   sdk_public_methods: 39
 retired:
 - name: tortoise_annotate_operator
@@ -1971,7 +1971,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_overview
-  served_from: tortoise/mcp_server.py:baadcaea6747a211
+  served_from: tortoise/mcp_server.py:6b67a2ffcd2ea45c
   served_attributes: 03bd1202c5a73326
   family: reasoning
   family_rank: 3

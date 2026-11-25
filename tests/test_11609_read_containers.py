@@ -591,27 +591,24 @@ CONTAINERS = (
 # to protect — for every container, on the wire — instead of asserting the doors
 # still exist as a proxy for it. Reading a door's ANNOTATION was never the fact a
 # caller depends on; `structured_content` is.
-def _handler_sdk_reach(fn) -> set[str]:
-    """Every `<sdk>.<method>` the handler hands to `_safe` (`_get_org_sdk().<m>`)."""
-    import ast
-    import inspect
-    import textwrap
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-    reached = set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Call)):
-            continue
-        inner = node.value.func
-        inner_name = getattr(inner, "id", getattr(inner, "attr", ""))
-        if inner_name == "_get_org_sdk":
-            reached.add(node.attr)
-    return reached
+# ⛔ `_handler_sdk_reach` was DELETED here (#11609 lane P11): its only consumer was
+# `TestWrapEnvelopeDoorsStayLive`, the door-liveness class this batch replaces. A
+# zero-caller AST helper reads as "door-side reach is still measured" when nothing
+# measures it, so it goes with the class rather than being left as a decoy.
 
 
 #: Container × arm → whether the arm returns a LIST (wrapped) or a MAPPING (untouched).
 #: The pairs are (mcp container, payload the SDK arm returns, call kwargs).
+#: ⚠️ The kwargs name the arm whose SDK method returns that shape — NOT the container's
+#: default. `explore_connections(node_id=…)` alone returns the `entityProfile` MAPPING;
+#: the LIST is `node_id + include_content=True` (`_expand_relationships`). The two were
+#: swapped here until the #14645 review (P3), which left the one mapping arm a
+#: `list[dict] | dict` union would have re-wrapped unmeasured.
+#: ⚠️ AND THE PAYLOAD IS FORCED (`_PayloadSDK` below answers whatever it is given), so
+#: these tables DOCUMENT which arm owns each shape; they do not measure the SDK's return
+#: type. What keeps the documentation from rotting is
+#: `test_every_named_arm_is_a_kwarg_set_its_container_accepts`, which reads every kwarg
+#: back off the container's signature.
 LIST_ARMS = (
     ("tortoise_search_knowledge", {"query": "x"}),
     ("tortoise_search_knowledge", {"query": "x", "mode": "sessions"}),
@@ -619,7 +616,10 @@ LIST_ARMS = (
     ("tortoise_list_knowledge", {"kind": "batch"}),
     ("tortoise_list_knowledge", {"kind": "namespace"}),
     ("tortoise_check_confidence", {"calibrate": True}),
-    ("tortoise_explore_connections", {"node_id": "n"}),
+    # `topic=` is `_belief_timeline(...) -> list[dict]`, so the envelope wraps it
+    # (the retired `tortoise_belief_timeline` shipped the same `{"result": […]}`).
+    ("tortoise_check_confidence", {"topic": "t"}),
+    ("tortoise_explore_connections", {"node_id": "n", "include_content": True}),
     ("tortoise_graph_overview", {"section": "namespaces"}),
     ("tortoise_graph_overview", {"section": "structure_check"}),
 )
@@ -632,6 +632,9 @@ MAPPING_ARMS = (
     ("tortoise_search_knowledge", {"query": "x", "mode": "tag", "tag": "t"}),
     ("tortoise_search_knowledge", {"query": "x", "mode": "issue_insight",
                                    "title": "t"}),
+    # `entityProfile` is the arm this container's union WOULD have re-wrapped, so it
+    # is the one mapping that most needs to be measured as untouched (#14645 P3).
+    ("tortoise_explore_connections", {"node_id": "n"}),
 )
 
 
@@ -702,6 +705,32 @@ class TestTheContainersCarryTheEnvelope:
             "`list[dict] | dict` union would have caused on SIX live tools."
         )
         assert out == payload, f"{tool}{kwargs} altered a mapping arm: {out!r}"
+
+    @pytest.mark.parametrize("tool,kwargs", [*LIST_ARMS, *MAPPING_ARMS])
+    def test_every_named_arm_is_a_kwarg_set_its_container_accepts(self, tool, kwargs):
+        """The arm tables are DOCUMENTATION the forced payload cannot falsify — bound them.
+
+        `_PayloadSDK.__getattr__` answers the same payload for EVERY keyword set, so the
+        two cases above prove the WRAP property per CONTAINER and cannot notice a kwarg
+        the container no longer takes (#14645 review P3). Without this bound the tables
+        are free to rot into a description of arms that do not exist — which is exactly
+        what happened to `explore_connections(node_id=...)`, documented as a LIST arm when
+        it is the `entityProfile` MAPPING.
+
+        What IS checkable without a database is that every arm the tables name is still a
+        call the container accepts: a renamed or dropped parameter reds here instead of
+        only in a caller's `TypeError`.
+        """
+        import inspect
+
+        from tortoise import mcp_server as ms
+
+        params = inspect.signature(getattr(ms, tool)).parameters
+        unknown = sorted(k for k in kwargs if k not in params)
+        assert not unknown, (
+            f"{tool} does not take {unknown} — the arm table names a call the container "
+            "cannot be made with, so the shape it documents is unreachable and a "
+            "migrating caller gets a `TypeError`")
 
     def test_a_refusal_payload_is_not_wrapped(self, monkeypatch):
         """A `_safe` failure is a Mapping, so it passes through and #11153 grades it."""
