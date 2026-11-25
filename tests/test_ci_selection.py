@@ -9185,7 +9185,7 @@ _DERIVATION_LOOKAHEAD = 60
 #: `main`'s copy of that paragraph — where it reads "drift-reporter row" — and silently REVERTED
 #: the fix. The diff is comment-only, so no executable arm could notice; the WORD is the whole
 #: claim, which is why the word is graded rather than the sentence trusted.
-#: Both reversion shapes are read, because a matcher narrowed to one shape is how the same word
+#: Both ADJACENT shapes are read, because a matcher narrowed to one shape is how the same word
 #: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
 #: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
 #: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs 0
@@ -9194,17 +9194,15 @@ _DERIVATION_LOOKAHEAD = 60
 #: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
 #: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
 #: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
-#: ⛔ FOUR shapes are read, and the arm's remit is stated rather than implied: `<file>` row,
-#: `row (`A`, `B`)`, `rows:` then a comma-separated run, and the ENUMERATED
-#: `#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` (below). MEASURED at
-#: this head: 8 of the 9 files the block calls rows are graded, and deleting any of those 8 rows
-#: reds the arm.
-#: ⛔ THE ONE STATED RESIDUAL is `tests/test_sdk_privatise_sweep.py` (the
-#: `#14548` residue RATCHET): the block names its ROW only by PRONOUN — “plus the RATCHET's” in the
-#: ROW definition, with the file itself written four lines earlier as
-#: "`tests/test_sdk_privatise_sweep.py` at **28.0 s**", which carries no `row` token at all.
-#: A pronoun has no local evidence to anchor on, so it is DECLARED here rather than manufactured:
-#: deleting that file's `durations` row leaves this arm GREEN. The other eight red.
+#: ⛔ FOUR shapes are read, and the arm's remit is the shapes it actually reads rather than a
+#: universal property: `<file>` row, `row (`A`, `B`)`, `rows:` then a comma-separated run, and the
+#: ENUMERATED `#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` (the
+#: paragraph that sorts the block's named files into rows and registrations uses this one, with the
+#: files several tokens away from the word). MEASURED at this head: `_row_claims` returns TEN files
+#: the block calls rows, every one of them carries a `durations` row, and deleting the row for ANY
+#: one of the ten reds this arm — including `tests/test_sdk_privatise_sweep.py` (the `#14548`
+#: residue RATCHET) and `tests/test_14559_reaper_schedule.py` (`#14565`), which an earlier revision
+#: of this arm could not see at all.
 #: ⛔ CASE-INSENSITIVE ON PURPOSE (#14612 review round 3, P3). This block states its own vocabulary
 #: in CAPS — "A REGISTRATION IS NOT A ROW", "A ROW is an entry in `durations`" — so a matcher bound
 #: to lowercase `row` is bound to a spelling the block does not itself use. MEASURED: re-spelling
@@ -9245,7 +9243,7 @@ _ROW_CLAIM_ENUMERATED_RE = re.compile(
 
 
 def _row_claims(header: str) -> list[str]:
-    """Every test file the block calls a `durations` ROW, in either reversion shape.
+    """Every test file the block calls a `durations` ROW, in any shape it spells one.
 
     Double-quoted spans are masked FIRST, for the reason `_repeated_header_spans` masks them
     (`_QUOTED_SPAN_RE`, below): this block legitimately QUOTES dead claims for the record, and
@@ -9948,7 +9946,7 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "`ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and it is not a row: with no row the "
         "weight comes from `DEFAULT_FAST_WEIGHT`. "
         "Say `registration`, or add the row.")
-    # …and BOTH reversion shapes are read while `registration` is deliberately not, and while a
+    # …and every shape above is read while `registration` is deliberately not, and while a
     # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
     # one-spelling matcher is exactly how this word survived one review round and one fold, and a
     # bare-`tests/*.py` matcher would leave `durations`' 50 slash-carrying keys ungraded.
