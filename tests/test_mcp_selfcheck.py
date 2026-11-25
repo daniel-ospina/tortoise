@@ -1666,3 +1666,76 @@ def test_a_loopback_endpoint_without_a_credential_is_not_called_down(project, mo
     hosted = mcp_selfcheck.classify("pi", project_dir=project)
     assert hosted.status == mcp_selfcheck.NO_CREDENTIAL, (
         "the hosted endpoint DOES require a credential — that must stay a DOWN")
+
+
+def test_an_identical_launch_restatement_keeps_the_base_env(tmp_path, monkeypatch):
+    """`sameLaunch` compares command/cwd/args — a restatement is NOT a change.
+
+    Firing the `env` guard on mere mention dropped the base's `TORTOISE_MCP_URL`,
+    so `declared_endpoint` returned None and `check(live=True)` graded the CLI-ent
+    shell's endpoint — a hybrid no harness runs.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    base_env = {"TORTOISE_MCP_URL": "http://127.0.0.1:9/mcp"}
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": "python3", "args": ["-m", "tortoise.mcp_bridge"],
+        "env": base_env}}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": "python3", "args": ["-m", "tortoise.mcp_bridge"]}}}),
+        encoding="utf-8")
+    assert (mcp_selfcheck.declared_endpoint("pi", project_dir=repo)
+            == "http://127.0.0.1:9/mcp")
+
+
+def test_destination_identity_keeps_a_trailing_slash_significant():
+    """`/mcp` and `/mcp/` are routed separately and the harness keeps them apart."""
+    assert not mcp_selfcheck.same_destination("https://x/mcp", "https://x/mcp/"), (
+        "a trailing slash must count as a DIFFERENT destination — otherwise the "
+        "verifier keeps an inherited Authorization header the harness drops")
+    # …while a default port is not a difference (`new URL` maps :443 away).
+    assert mcp_selfcheck.same_destination("https://x:443/mcp", "https://x/mcp")
+
+
+def test_an_ipv6_loopback_endpoint_is_exempt_like_ipv4(tmp_path, monkeypatch):
+    """`partition(":")` splits inside `[::1]`, so the exemption never fired."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    (home / ".pi/agent").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    for url in ("http://[::1]:8000/mcp", "http://[::1]/mcp"):
+        (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "tortoise": {"type": "http", "url": url}}}), encoding="utf-8")
+        verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+        assert verdict.status != mcp_selfcheck.NO_CREDENTIAL, (url, verdict.line())
+
+
+def test_a_sanitised_away_base_is_not_inherited_but_an_empty_one_is(tmp_path, monkeypatch):
+    """`{"url": ""}` is dropped by the harness; `{}` is inherited (`hasOwn` + truthy)."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    repo_entry = {"url": "https://api.premiselabs.co/mcp/", "command": "python3"}
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"tortoise": repo_entry}}), encoding="utf-8")
+
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"url": ""}}}), encoding="utf-8")
+    dropped = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert dropped.status == mcp_selfcheck.RESOLVES_UNPROBED, dropped.line()
+
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {}}}), encoding="utf-8")
+    inherited = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert inherited.status == mcp_selfcheck.COMMAND_MISSING, inherited.line()

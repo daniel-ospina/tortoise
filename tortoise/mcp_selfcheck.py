@@ -298,8 +298,15 @@ def _is_loopback_endpoint(url: object) -> bool:
     """True for `localhost` / `127.0.0.0/8` / `[::1]` — where auth may be disabled."""
     if not isinstance(url, str):
         return False
-    host = url.strip().partition("://")[2].partition("/")[0].rpartition("@")[2]
-    host = host.partition(":")[0].strip("[]").lower()
+    authority = url.strip().partition("://")[2].partition("/")[0].rpartition("@")[2]
+    # ⛔ BRACKET-AWARE. `partition(":")` splits INSIDE `[::1]`, so the IPv6 loopback
+    # — a shape the docstring above advertises — yielded `""` and never matched,
+    # and a legitimately loopback-bound daemon was reported `no-credential`.
+    if authority.startswith("["):
+        host = authority[1:authority.find("]")] if "]" in authority else ""
+    else:
+        host = authority.partition(":")[0]
+    host = host.lower()
     return host in ("localhost", "::1", "0.0.0.0") or host.startswith("127.")
 
 
@@ -316,10 +323,25 @@ def same_destination(a: object, b: object) -> bool:
         return a == b
 
     def parts(value: str) -> tuple[str, str, str]:
-        text = value.strip().rstrip("/")
+        text = value.strip()
         scheme, _, rest = text.partition("://")
-        host, _, path = rest.partition("/")
-        return scheme.lower(), host.lower(), path
+        authority, _, path = rest.partition("/")
+        host, _, port = authority.partition(":")
+        scheme = scheme.lower()
+        host = host.lower()
+        # ⛔ A TRAILING SLASH IS SIGNIFICANT: `/mcp` and `/mcp/` are routed
+        # separately, and the harness keeps that distinction (fail-closed). An
+        # earlier version stripped it, so the verifier KEPT an inherited
+        # `Authorization` header the harness DROPS — the "never keep one the
+        # harness would drop" direction its own docstring promised — and reported
+        # `env-unset` ("would carry an empty bearer") for a config that works.
+        # ⛔ DEFAULT PORTS ARE NOT significant (`new URL` maps `:443`/`:80` away),
+        # so normalising THEM keeps a credential the harness keeps.
+        if (scheme, port) in (("https", "443"), ("http", "80")):
+            port = ""
+        return (scheme,
+                host if not port else f"{host}:{port}",
+                "/" + path.rstrip() if path else "")
 
     return parts(a) == parts(b)
 
@@ -463,10 +485,18 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
     # and each more specific layer is applied as a DELTA over what is accumulated.
     _base_source, base_entry = layers[-1]
-    base_survives = not _unloadable(base_entry)
-    if not base_survives:
+    base_dropped = _unloadable(base_entry)
+    if base_dropped:
         base_entry = {}          # the harness DROPS an entry with a bad transport
     merged: dict = _sanitized(base_entry)
+    # The harness ALSO drops a base entry left with no transport after the falsy
+    # strip (`deadTransports` → delete → `continue` when neither key remains). `{}`
+    # is NOT that case: `Object.hasOwn` is true and `{}` is truthy in JS, so an
+    # empty base entry IS inherited. Treating "sanitised to nothing" as inherited
+    # reported `command-missing` for a repo entry the harness keeps and runs.
+    sanitised_away = (not base_dropped and not merged.get("url")
+                      and not merged.get("command") and bool(base_entry))
+    base_survives = not base_dropped and not sanitised_away
     # ⛔ "There is no inherited entry" is a FACT that must survive: when the base
     # was dropped (or sanitised to nothing), a more specific layer is no longer a
     # delta over anything, and the harness then KEEPS a repo-only entry that
@@ -508,7 +538,22 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if "url" in delta and not same_destination(merged.get("url"), delta.get("url")):
             for field in HTTP_CREDENTIAL_FIELDS:
                 merged.pop(field, None)
-        if any(field in delta for field in ("command", "args", "cwd")):
+        # ⛔ Only when the launch actually CHANGES (`sameLaunch` compares command,
+        # cwd and args), and only when the projected entry has a command. Firing on
+        # mere MENTION dropped `env` on an identical restatement, so a repo entry
+        # that pins `{"command": ..., "args": ...}` and omits `env` lost the base's
+        # `TORTOISE_MCP_URL`: `declared_endpoint` returned None and `check(live)`
+        # graded the CLI-ent shell's endpoint — a hybrid no harness runs, and the
+        # false PASS this module exists to remove, one field over.
+        projected = {**merged, **delta}
+
+        def _same_launch(before: dict, after: dict) -> bool:
+            return (before.get("command") == after.get("command")
+                    and (before.get("cwd") or "") == (after.get("cwd") or "")
+                    and json.dumps(before.get("args") or [])
+                    == json.dumps(after.get("args") or []))
+
+        if "command" in projected and not _same_launch(merged, projected):
             merged.pop("env", None)
         merged.update(delta)
         # ⛔ Only when the layer declares EXACTLY ONE transport. A kept repo-only
@@ -851,7 +896,11 @@ def classify(harness: str, *, project_dir: Path | None = None
         # install as broken and blocked `onboard`'s instruction write. Abstain
         # instead — and note the class's own justification ("the server can only
         # answer -32001") is simply false for that daemon.
-        if _is_loopback_endpoint(entry.get("url")):
+        # ⛔ Expand first: a shared config may parameterise the endpoint
+        # (`{"url": "${TORTOISE_MCP_URL}"}`), and the raw string is not a URL — the
+        # exemption would never fire for a loopback value the verifier otherwise
+        # resolves correctly.
+        if _is_loopback_endpoint(_expand(entry.get("url") or "")[0]):
             return Verdict(
                 status=RESOLVES_UNPROBED,
                 detail=("the entry names a LOOPBACK endpoint and carries no "
