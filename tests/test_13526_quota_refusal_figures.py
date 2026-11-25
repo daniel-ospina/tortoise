@@ -862,9 +862,12 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
     #: Their roles REVERSE by pin kind, so neither is "the real test":
     #:
     #: * a year/month/day pin (`replace(day=1)`) keeps the time-of-day, so the
-    #:   six-hour shift passes it UNLESS that shift crosses the pinned component
-    #:   (it does not for most start instants, and does near a month end) — the
-    #:   year-crossing shift is what reliably exposes it;
+    #:   six-hour shift passes it UNLESS that shift crosses MIDNIGHT — once the
+    #:   shifted instant rolls to the next date the retained time-of-day lands
+    #:   ~18 h back, so the reading moves −64800 s instead of +21600 s. That is a
+    #:   property of the START time on any day, not of the month end (month end
+    #:   is only the subset where the midnight crossing also crosses the month).
+    #:   The year-crossing shift exposes it regardless;
     #: * a SUB-DAY pin is the inverse — `replace(hour=2)` moves exactly 0 s under
     #:   `+6h` (caught there) and exactly the shift under `+405d`, because 405
     #:   days is a whole number of days, so the year-crossing shift does NOT

@@ -3358,8 +3358,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # statement about `main`'s own history and nothing here is a branch commit's doing. No commit
     # on this branch carries that blob at all: **every** commit this branch AUTHORED, `840b74316332`
     # and back, carries `c05b92bdc6ac`, i.e. already post-`#14567` (the `remerge-14640` merge head and
-    # the two commits authored on top of it, `fcf04456b8` / `0ebb0d0266`, carry `main`'s own blob
-    # instead, which is the point of the merge). `main` then grew this module
+    # every commit authored on top of it carry `main`'s own blob instead, which is the point of the
+    # merge). `main` then grew this module
     # above all four twice — `#14596` (+29 above all
     # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
     # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
