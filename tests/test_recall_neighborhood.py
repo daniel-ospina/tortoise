@@ -18,7 +18,6 @@ These tests pin four things:
 from __future__ import annotations
 
 import os
-import re
 import tempfile
 
 import pytest
@@ -205,19 +204,31 @@ def _record_graph_door(sdk):
     return seen
 
 
-def test_the_turn_reads_no_statement_that_names_the_excerpt():
+def test_the_turn_reads_no_statement_that_names_the_excerpt(monkeypatch):
     """The excerpt is FREE: the RESOLVE hit already carries `quote` (#14607).
 
     A first cut of this change issued a batched Cypher read for `quote`, and on
     the hosted endpoint that pushed the reflex past its 300 ms ceiling
     (`degraded_reason: "timeout"`, caught by the contract suite).
 
-    ⛔ This is the guard that reds if the read comes back, and it is pinned on the
-    TURN'S OWN DOOR TRAFFIC rather than on the block: the block's content would be
-    IDENTICAL either way (the same excerpt reaches it), so a content assertion
-    cannot see the regression. Both halves are asserted together — the excerpt
-    ARRIVES, and nothing the turn ran SELECTS it — so a green cannot come from the
-    excerpt having stopped arriving.
+    ⛔ Pinned on the TURN'S OWN DOOR TRAFFIC rather than on the block: the block's
+    content would be IDENTICAL either way (the same excerpt reaches it), so a
+    content assertion cannot see the regression.
+
+    ⚠️ **SCOPE OF THIS GUARD, stated because it was MEASURED, not assumed.** It
+    reds when the EXPANSION issues a read of its own — mutation-checked: passing a
+    graph handle into `neighborhood` and reading `n.quote` with it reds it (the
+    mutation was applied, observed red, and reverted; `git diff tortoise/` empty
+    afterwards). It does NOT catch a fetch re-added elsewhere in the pipeline: that
+    mutant
+    was applied to `run_volunteer_pipeline` and this arm stayed GREEN, because both
+    halves of the turn execute it and no per-stage spy can see the difference. That
+    case has its own instrument — the hosted reflex's 300 ms ceiling, which is what
+    actually caught the original regression (`degraded_reason: "timeout"`) — and a
+    text assertion here cannot replace it without pinning Cypher text that rots.
+    The companion arm `test_the_excerpt_really_comes_from_the_hit` closes the other
+    hole: it proves the block is fed by the search hit, so a green here cannot mean
+    "no read happened AND no excerpt arrived".
     """
     sdk = _fresh_sdk()
     claim = sdk._create_point(
@@ -245,20 +256,48 @@ def test_the_turn_reads_no_statement_that_names_the_excerpt():
         "the excerpt must still reach the block — otherwise the no-read half below "
         "could pass for the wrong reason")
     assert seen, "the turn issued NO graph statements at all — the recorder is wrong"
-    # The point hydration read ALREADY carries `quote` (`RETURN …, n.quote,
-    # n.source_turn_id, …`) — that is where the excerpt comes from, so its presence
-    # is the point, not the defect. What must never appear is a SECOND, distinct
-    # statement that fetches the same column: that is the batched backfill this
-    # change removed. Pinning DISTINCT SHAPES rather than a count keeps the guard
-    # free of a magic number while still reding on the regression.
-    quote_shapes = sorted({stmt for _door, stmt in seen
-                           if re.search(r"\bquote\b", stmt, re.I)})
-    assert len(quote_shapes) == 1, (
-        "the turn issues more than one DISTINCT statement naming `quote` — the "
-        "excerpt must come from the hydration read that already runs, never from "
-        "a second fetch (that fetch put the hosted reflex into "
-        "`degraded_reason: timeout`):\n" +
-        "\n".join(f"  {s[:160]}" for s in quote_shapes))
+
+    # ⛔ THE GUARD MEASURES THE EXPANSION STAGE ITSELF, and it took three shapes to
+    # get right — each failure is instructive, so they are recorded rather than
+    # erased:
+    #
+    #   1. `len(distinct statements naming quote) == 1` — FALSIFIED by the tree: the
+    #      turn already issues three such statements (point hydration, the FTS
+    #      selection, the decorated search), so it reds on a correct tree.
+    #   2. an equality between "turn calls with expansion" and "turn calls with
+    #      `neighborhood` patched out" — a FALSE PASS: a fetch re-added anywhere in
+    #      the PIPELINE runs in both runs, so the counts match and the regression
+    #      sails through.
+    #   3. this: a spy around the expansion call that records how many statements it
+    #      issued. Any read inside the expansion (`neighborhood` or
+    #      `excerpt_from_hit`) reds; nothing outside it can move the number.
+    from tortoise import volunteer as _volunteer
+
+    issued: list[str] = []
+    calls: list[int] = []
+    real = _volunteer.neighborhood
+
+    def spy(block, quote, **kwargs):
+        before = len(seen)
+        calls.append(before)
+        result_hood = real(block, quote, **kwargs)
+        for _door, stmt in seen[before:]:
+            issued.append(stmt)
+        return result_hood
+
+    monkeypatch.setattr(_volunteer, "neighborhood", spy)
+    window = [{"role": "user", "content": "What is the Zephyr rollout waiting on?"}]
+    expanded = sdk._volunteer_context(window, session_id="14607-expanded", why=True)
+
+    assert calls, "the expansion never ran — the spy is not wired to the pipeline"
+    assert "from source:" in expanded["block"], (
+        "the run must still carry the excerpt, or an empty `issued` list below "
+        "could pass for the wrong reason")
+    assert not issued, (
+        "expanding the neighbourhood issued graph statements of its own — the "
+        "excerpt must come from the hydrated hit the turn already has, never from a "
+        "second fetch (that fetch put the hosted reflex into `degraded_reason: "
+        "timeout`):\n" + "\n".join(f"  {s[:160]}" for s in issued))
 
 
 def test_excerpt_is_bounded_and_marked_when_cut():
@@ -324,3 +363,36 @@ def test_the_injected_block_fits_the_hook_budget(prompt):
     assert (result["block"] == "" or
             rn.estimate_tokens(result["block"]) <= rn.NEIGHBORHOOD_TOKEN_BUDGET)
     assert DEFAULT_MAX_POINTERS >= 1
+
+
+def test_the_excerpt_really_comes_from_the_hit(monkeypatch):
+    """MUTATION-VERIFIED half: the block's excerpt is `excerpt_from_hit`'s output.
+
+    Without this, a green on the no-extra-read arm above could mean "no read
+    happened AND no excerpt arrived". Patching the extractor to return nothing must
+    REMOVE the excerpt from the block — which proves the block is fed by the hit and
+    not by some other path.
+    """
+    from tortoise import volunteer as _volunteer
+
+    sdk = _fresh_sdk()
+    claim = sdk._create_point(
+        "decision", "Zephyr rollout is gated on the audit sign-off")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.quote=$q, n.confidence=0.9",
+        params={"id": claim, "q": "Ops note: the Zephyr rollout waits."})
+    window = [{"role": "user", "content": "What is the Zephyr rollout waiting on?"}]
+
+    with_excerpt = sdk._volunteer_context(window, session_id="14607-hit", why=True)
+    assert "from source:" in with_excerpt["block"]
+
+    monkeypatch.setattr(_volunteer, "excerpt_from_hit", lambda *a, **k: "")
+    without = sdk._volunteer_context(window, session_id="14607-hit", why=True)
+    assert [p["synopsis"] for p in without["pointers"]] == \
+        [p["synopsis"] for p in with_excerpt["pointers"]], (
+        "the two runs must resolve the same pointers for the comparison to mean "
+        "anything")
+    assert "from source:" not in without["block"], (
+        "the excerpt survived `excerpt_from_hit` returning nothing — so the block is "
+        "NOT fed by the search hit, and the no-extra-read guard above is measuring "
+        "the wrong path")
