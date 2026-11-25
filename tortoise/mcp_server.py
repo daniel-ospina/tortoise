@@ -8384,7 +8384,29 @@ def _overview_section(section: str, entity_id: str | None,
 
 
 def _row_section_envelope(result: Any) -> Any:
-    """Give a ROW-returning ``overview`` section the wire shape its alias ships.
+    """Give a LIST-returning arm the wire shape its retired alias ships.
+
+    ⛔ SCOPE (#11609 lane P11): this is the envelope mechanism for EVERY
+    ``-> Any`` container, not only the ``overview`` row sections it was
+    introduced for (#10085). It is applied at four container boundaries —
+    ``search_knowledge``, ``list_knowledge``, ``check_confidence`` and
+    ``explore_connections`` — so the list arms those containers absorbed from
+    the retired doors keep answering ``{"result": [...]}``.
+
+    Why this and not a ``list[dict] | dict`` annotation (the S1 shape in
+    ``docs/architecture/11609-STRUCTURAL-BLOCKERS.md`` §2.1): the union's stated
+    cost is that it RE-WRAPS every already-dict arm of the container (worst case
+    ``list_knowledge(kind="claim")``, the default, whose ``{results,total,hasMore}``
+    a client reads at ``sc["results"]``) — a customer-visible ``structuredContent``
+    change on six live tools, and therefore a surface change needing Daniel's
+    approval. Building the envelope at the container does the one thing the
+    retirement actually requires and nothing else: a LIST is wrapped exactly as
+    the door wrapped it, and a MAPPING (or a ``_SafeError`` refusal payload) is
+    returned untouched, so no existing dict arm changes shape and no approval
+    surface is touched. §1.1 of that document records the premise this rests on:
+    "a container may also build the same ``ToolResult`` by hand".
+
+    #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
 
     #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
     output schema for it, and its ``Tool.convert_result``
@@ -8609,14 +8631,18 @@ def tortoise_search_knowledge(query: str | None = None, mode: str = "hybrid",
     sessions | entry_points | issue_insight). Every arm answers with the rows its
     own read returned, and an unknown mode refuses naming the valid set.
     """
-    return _safe(
+    # ⛔ `_row_section_envelope` at the CONTAINER boundary (#11609 lane P11):
+    # the list arms (`hybrid`, `sessions`, `entry_points`) ship `{"result": [...]}`
+    # exactly as the doors they absorbed did; the dict arms (`tag`'s page,
+    # `issue_insight`) and any `_SafeError` refusal pass through untouched.
+    return _row_section_envelope(_safe(
         _get_org_sdk().search_knowledge, query, mode, kind=kind, tag=tag,
         entity_type=entity_type, limit=limit, offset=offset,
         include_retracted=include_retracted, min_confidence=min_confidence,
         order_by=order_by, threshold=threshold,
         relationship_filter=relationship_filter,
         traversal_path=traversal_path, agent=agent, topics=topics, after=after,
-        before=before, title=title, body=body, repo=repo)
+        before=before, title=title, body=body, repo=repo))
 
 
 def tortoise_list_knowledge(kind: str = "claim",
@@ -8635,10 +8661,16 @@ def tortoise_list_knowledge(kind: str = "claim",
     Browse and filter without a text search; an unknown kind refuses naming the
     valid set.
     """
-    return _safe(
+    # ⛔ `_row_section_envelope` at the CONTAINER boundary (#11609 lane P11):
+    # `source` / `batch` (id-less) / `namespace` / `diary` are lists and ship
+    # `{"result": [...]}` as their absorbed doors did; `claim`'s page,
+    # `source_reliability`, `topic` and `batch` with an `id` are mappings and are
+    # returned untouched — the default arm's `{results,total,hasMore}` keeps its
+    # shape, which is the change the union annotation would have made.
+    return _row_section_envelope(_safe(
         _get_org_sdk().list_knowledge, kind, point_kind=point_kind, id=id,
         url=url, entity_id=entity_id, agent=agent, wing=wing, limit=limit,
-        offset=offset, include_retracted=include_retracted)
+        offset=offset, include_retracted=include_retracted))
 
 
 def tortoise_check_confidence(claim_id: str | None = None,
@@ -8820,10 +8852,14 @@ def tortoise_check_confidence(claim_id: str | None = None,
             centrality_weight=centrality_weight,
             seed=seed, depth=depth, completeness=completeness,
             min_load=min_load, max_support=max_support, max_nodes=max_nodes)
-    return _safe(
+    # ⛔ `_row_section_envelope` at the CONTAINER boundary (#11609 lane P11):
+    # `calibrate=True` and the no-selector default return a LIST (the graph-wide
+    # audit) and ship `{"result": [...]}` as `tortoise_calibrate_summary` did;
+    # `claim_id` / `topic` / `session=True` return mappings and pass through.
+    return _row_section_envelope(_safe(
         _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
         calibrate=calibrate, include_provenance=include_provenance,
-        limit=limit, require_calibration=require_calibration)
+        limit=limit, require_calibration=require_calibration))
 
 
 def tortoise_explore_connections(node_id: str | None = None,
@@ -8837,10 +8873,14 @@ def tortoise_explore_connections(node_id: str | None = None,
     node_id | node_id + include_content (the expand payload) | query (resolve a
     name, then walk from it). `hops` bounds the walk.
     """
-    return _safe(
+    # ⛔ `_row_section_envelope` at the CONTAINER boundary (#11609 lane P11):
+    # the walk arms return a LIST and ship `{"result": [...]}` as
+    # `tortoise_expand_relationships` did; the `error`/`entityProfile` mappings
+    # pass through untouched.
+    return _row_section_envelope(_safe(
         _get_org_sdk().explore_connections, node_id, query=query, hops=hops,
         include_content=include_content, point_kind=point_kind,
-        confidence_min=confidence_min)
+        confidence_min=confidence_min))
 
 
 def tortoise_review_link_candidates(kind: str = "connections",
