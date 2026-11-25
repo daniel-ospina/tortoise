@@ -561,7 +561,7 @@ insertions, before any review fix. The P3-1 fix moved **135** of them again (`ho
 defect this section polices, caught by reading the table's own diff instead of trusting the last cut.
 **RE-CUT at the #14587 P2 fix, which hooks the two `kind='default'` minting arms in
 `set_graph_name` / `set_graph_recording`:** its comments add **49** lines to `supabase_control.py` (no
-site below them, so no row of that file moves) and **2** to `sdk.py`, which moves **104** rows THERE —
+site below them, so no row of that file moves) and **7** to `sdk.py` (**2** removed), which moves **104** rows THERE —
 measured by diffing `--markdown` at the two heads, 0 rows added, 0 removed, 1,327 either side. Counts
 are unmoved (`--check` → **25 pinned counts match**): the two calls are Python calls to a
 door-side helper, not door calls and not statements. The same regeneration re-derives the **233**

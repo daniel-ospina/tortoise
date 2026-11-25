@@ -263,7 +263,14 @@ def _hook_call_names(node: ast.AST) -> list[str]:
         func = sub.func
         name = func.id if isinstance(func, ast.Name) else (
             func.attr if isinstance(func, ast.Attribute) else None)
-        if name and name.startswith(_HOOK_PREFIX):
+        # ⛔ THE DOOR-SIDE HELPERS COUNT TOO (#14587 review P3): a door that calls
+        # `_provision_default_graph_record` IS calling the creation hook, and the
+        # prefix alone does not match it (`default` sits in the middle). Without
+        # this, wiring `sdk._graph_create` to the helper left this absence pin
+        # GREEN over the exact arm it exists to keep unhooked — and that arm
+        # persists no `graphs` row, so every create would fail the FK and pin
+        # `/health` red over a healthy deployment.
+        if name and (name.startswith(_HOOK_PREFIX) or name in _HOOK_HELPERS):
             found.append(name)
     return found
 
@@ -386,9 +393,20 @@ _GRAPH_MINT_SITES = {
     # The one mint helper. Its two production callers are `_DOORS` entries
     # (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`),
     # which is what makes this entry a DECLARATION and not an exemption.
-    ("tortoise/supabase_control.py", "insert_graph"): "delegated",
-    ("tortoise/supabase_control.py", "set_graph_name"): "hooked",
-    ("tortoise/supabase_control.py", "set_graph_recording"): "hooked",
+    #
+    # ⛔ KEYED BY SITE, NOT BY FUNCTION (#14587 review P2): `(module, function,
+    # ORDINAL)` — the ordinal is the site's position among the INSERTs of that
+    # function, in source order. Keyed by function alone, a SECOND mint added
+    # inside an already-`hooked` function was INVISIBLE, because the hook the
+    # existing arm calls satisfied the whole function body: measured by adding a
+    # second unhooked `cp.query("graphs", method="POST", …)` beside the hooked one
+    # in `set_graph_name` — this pin and its non-vacuity test both stayed green.
+    # The ordinal makes a new site a new KEY, so it cannot ride a neighbour's
+    # declaration, and the pin's promise ("the next arm added anywhere reds
+    # HERE") is what the code now does.
+    ("tortoise/supabase_control.py", "insert_graph", 0): "delegated",
+    ("tortoise/supabase_control.py", "set_graph_name", 0): "hooked",
+    ("tortoise/supabase_control.py", "set_graph_recording", 0): "hooked",
 }
 
 
@@ -426,14 +444,17 @@ def _is_graphs_insert(node: ast.AST) -> bool:
     return isinstance(method, ast.Constant) and method.value == "POST"
 
 
-def _enclosing_sites(predicate) -> dict[tuple[str, str], ast.AST]:
-    """`{(module, INNERMOST enclosing function): function node}` for every call
-    in `tortoise/**` that `predicate` accepts.
+def _enclosing_sites(predicate) -> dict[tuple[str, str], list[ast.AST]]:
+    """`{(module, INNERMOST enclosing function): [matching nodes, source order]}`
+    for every call in `tortoise/**` that `predicate` accepts.
 
     Innermost on purpose: a mint inside a nested helper is reported as that
     helper, which is the thing a reader has to classify, not its outer shell.
+    The LIST is what lets :func:`_mint_sites` key site by site (see
+    :data:`_GRAPH_MINT_SITES`): one function can carry several INSERTs, and
+    collapsing them to one key is how a new arm hid behind a neighbour's hook.
     """
-    found: dict[tuple[str, str], ast.AST] = {}
+    per: dict[tuple[str, str], list[ast.AST]] = {}
 
     def walk(rel: str, node: ast.AST, current: ast.AST | None) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -442,14 +463,28 @@ def _enclosing_sites(predicate) -> dict[tuple[str, str], ast.AST]:
             assert current is not None, (
                 "a `public.graphs` INSERT outside any function — this pin cannot "
                 "attribute it to a door")
-            found[(rel, current.name)] = current
+            per.setdefault((rel, current.name), []).append(node)
         for child in ast.iter_child_nodes(node):
             walk(rel, child, current)
 
     for path in sorted((_ROOT / "tortoise").rglob("*.py")):
         rel = str(path.relative_to(_ROOT))
         walk(rel, ast.parse(path.read_text()), None)
-    return found
+    return per
+
+
+def _mint_sites() -> dict[tuple[str, str, int], ast.AST]:
+    """Every `public.graphs` INSERT, keyed BY SITE — `(module, function, ordinal)`.
+
+    The ordinal is source order within the function, so adding a second mint to a
+    function whose first mint is already declared produces a NEW key that the
+    declaration table does not hold, and the pin reds. That is the whole point of
+    the third component: function-level keys let a new arm inherit its
+    neighbour's hook (measured, #14587 review P2).
+    """
+    return {(rel, fn, idx): node
+            for (rel, fn), nodes in _enclosing_sites(_is_graphs_insert).items()
+            for idx, node in enumerate(nodes)}
 
 
 def _call_sites(callee: str) -> set[tuple[str, str]]:
@@ -480,7 +515,7 @@ def test_every_graph_minting_site_is_declared():
     issue and its reason (which is what `_UNHOOKED` does for the doors that must
     NOT be hooked). What is not a close is leaving it out of the table.
     """
-    measured = _enclosing_sites(_is_graphs_insert)
+    measured = _mint_sites()
     undeclared = sorted(set(measured) - set(_GRAPH_MINT_SITES))
     assert not undeclared, (
         f"these functions INSERT a `public.graphs` row and are NOT in "
@@ -497,9 +532,9 @@ def test_every_graph_minting_site_is_declared():
         "table to the measured set rather than leaving a name that outlived its "
         "mint")
 
-    unhooked = [f"{rel}::{fn}" for (rel, fn), node in measured.items()
-                if _GRAPH_MINT_SITES[(rel, fn)] == "hooked"
-                and not _calls_a_door_hook(node)]
+    unhooked = [f"{rel}::{fn}#{idx}" for (rel, fn, idx), _node in measured.items()
+                if _GRAPH_MINT_SITES[(rel, fn, idx)] == "hooked"
+                and not _calls_a_door_hook(_functions(rel)[fn])]
     assert not unhooked, (
         f"these `public.graphs` minters are declared `hooked` and call no "
         f"creation hook: {unhooked} — the declaration is now the lie the defect "
@@ -507,8 +542,8 @@ def test_every_graph_minting_site_is_declared():
 
     doors = {(rel, fn) for rel, fn, _callee in _DOORS}
     unprovisioned = sorted(
-        site for (rel, fn), node in measured.items()
-        if _GRAPH_MINT_SITES[(rel, fn)] == "delegated"
+        site for (rel, fn, _idx), _node in measured.items()
+        if _GRAPH_MINT_SITES[(rel, fn, _idx)] == "delegated"
         for site in _call_sites(fn) - doors)
     assert not unprovisioned, (
         f"these functions call a `public.graphs` mint HELPER without being a "
