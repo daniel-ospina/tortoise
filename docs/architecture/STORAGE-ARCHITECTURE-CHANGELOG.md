@@ -2745,3 +2745,45 @@ Two further sites in the same class, both introduced by this branch's own review
 
 **Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (17) — offender scan 0 on
 `STORAGE-ARCHITECTURE.md` after the rewrite; the design document keeps every design claim it carried.
+
+## §13 gains row 46 — `#14592`'s relations preview is an all-edge reader (`2026-11-25`, `cy-14593`)
+
+`tortoise/entity_reads.py` is new on `#14592` (Phase A read parity), and its `entity_relations` walks
+**every** relationship type in both orientations — `MATCH (n:{root_label} {key:$eid})-[r]->(m)` and
+the `UNION ALL` reverse. Nothing declared it, so `tests/test_7948_about_object_read_sites.py`'s
+empty-pattern class found a live site owning neither a row nor an entry, and
+`test_the_empty_pattern_class_is_derived_and_declared` reddened with `30 derived, 12 registered`.
+
+**A ROW (46), not an `EMPTY_PATTERN` entry**, for row 42's reason: the walk reads the edge for a
+referent — `type(r) AS mechanism` IS part of the answer the route returns — so the entry form
+("a code fact keeping the walk out of a referent read") would assert something untrue. The type
+cannot be restricted either: a `type(r) IN [...]` filter would answer only for the predicates this
+build knows and would hide every edge it does not name, which is the opposite of what a relations
+preview is for. The facts that bound it are stated on the row (one hop from one identity-resolved
+root, `CALL { … } … SKIP/LIMIT` paging, the `id(m) <> id(n)` self-loop exclusion on the reverse arm,
+and the `:Source` coalesce arm that withholds the denied `content`).
+
+**Both documents re-derive every figure the row moves** — the section states these twice each, and
+`tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
+read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
+`FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
+`GET /v1/entities/{entity_id}/relations`), cell occurrences `21` → `22`. Derived, not hand-counted:
+`_rows()` 44, `_customer_callable_doors()` 16 over 22 cells, `_door_reaches()` accepting 28 pairs
+(was 27 — the new row accepts exactly ONE, its own door, and no older row's set moved; the worst-row
+bound stays 4). `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the same figures and enumerates the same
+readers, so it moves with it, including its `Outside this nineteen` list marker.
+
+**Also in this change, a stale cite the branch's own `+1082` lines in `hosted_api.py` created:**
+`tools/graphevent_home.py`'s export-scan sentence (and the README and `readers.json` that mirror it)
+still named `hosted_api.py`'s `:35810` for `_export_graph_snapshot`. Re-derived BY CONTENT at this head —
+the def at `:36892`, the `"GraphEvent" in labels` branch at `:36922`, the `events.append(d)` at
+`:36930` — and the artifact regenerated from the verb
+(`python tools/graphevent_home.py readers > docs/evidence/13094-graphevent/readers.json`), never
+hand-edited. `test_the_export_scan_cites_open_on_the_statements_they_name` reddened on the carried
+`35810` and is green on the re-derived triple.
+
+**Gates at this change.** `tests/test_7948_about_object_read_sites.py` 61 passed ·
+`tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs` + `test_12184_shifted_cites`
++ `test_substrate_map` + `test_7949_capstone_measure` + `test_13098_cypher_inventory` (DOC_PIN=1) +
+`test_ci_selection` 947 passed, 1 skipped · `tools/cypher_inventory.py --check` 25 pins ·
+`tools/hosted_api_cite_census.py --check` every stated figure · `tools/ci_selection.py --integrity` clean.
