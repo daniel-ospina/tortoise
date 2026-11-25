@@ -87,6 +87,14 @@ _DOORS = (
      "_provision_default_graph_record"),
 )
 
+#: The `graphs`-row POST sites that are NOT doors: `insert_graph` is the C2 mint
+#: HELPER, and both of its callers are doors pinned above (`_provision_graph` and
+#: `ensure_default_graph_row`), so hooking it again would double-provision and
+#: would also fire for a row the caller is about to hook itself. Declared rather
+#: than skipped, so the census below has an explicit place to say "not a door"
+#: instead of silently not looking.
+_GRAPHS_MINT_HELPERS = (("tortoise/supabase_control.py", "insert_graph"),)
+
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
 #: yields an id from THREE arms (active-row short-circuit, mint, convergent adopt)
 #: and hooks each; a refactor that collapses them to one silently drops two. ⛔ The
@@ -227,6 +235,78 @@ def _calls_with_enclosing_tests(
 
     walk(node, [])
     return found
+
+
+def _graphs_post_functions(rel: str) -> set[str]:
+    """Every function in `rel` whose OWN body POSTs a `public.graphs` row.
+
+    ⛔ THE POPULATION, DERIVED — which is the whole point (#14610 review, P2).
+    The wiring pin enumerated doors BY HAND under a test named
+    `test_every_creation_door_calls_the_hook`, so the two control-plane mints sat
+    outside it while this list, the hook's docstring and the CLI's cutover ack all
+    claimed "every create door". Growing the list is not the fix — it is the same
+    edit that has to be remembered next time. A derivation does not have to be
+    remembered: it reads the source.
+    """
+    found: set[str] = set()
+    for name, node in _functions(rel).items():
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            callee = func.attr if isinstance(func, ast.Attribute) else (
+                func.id if isinstance(func, ast.Name) else None)
+            if callee != "query" or not sub.args:
+                continue
+            table = sub.args[0]
+            if not (isinstance(table, ast.Constant) and table.value == "graphs"):
+                continue
+            for kw in sub.keywords:
+                if (kw.arg == "method" and isinstance(kw.value, ast.Constant)
+                        and kw.value.value == "POST"):
+                    found.add(name)
+    return found
+
+
+def test_every_graphs_mint_site_is_a_pinned_door():
+    """⛔ THE CENSUS, DERIVED — so the NEXT mint cannot be silent too.
+
+    #14610 review (P2): `set_graph_name` and `set_graph_recording` both POST a
+    `kind='default'` `graphs` row, so both create a graph — the same population
+    `ensure_default_graph_row`'s mint arm belongs to. Neither called the hook, so
+    a row minted by a rename or a recording-override was born UNCUT: the exact
+    #14582 defect, and one no credential traffic heals (a resolver that finds the
+    row returns before reaching the hook).
+
+    Growing `_DOORS` fixes those two. It does not fix the REASON they were
+    invisible — a hand-written list cannot answer a question about a population,
+    and "the listing is the gate" means the next mint is as invisible as these
+    two were. This test reads the source instead: any function that POSTs a
+    `graphs` row must be a pinned door (and therefore hooked) or a declared mint
+    helper whose callers are.
+
+    NON-VACUITY: on the pre-fix tree both mint sites are unhooked, so this reds
+    even with `_DOORS` reverted to its two pinned entries.
+    """
+    rel = "tortoise/supabase_control.py"
+    sites = _graphs_post_functions(rel)
+    assert {"insert_graph", "set_graph_name", "set_graph_recording"} <= sites, (
+        "the derivation no longer finds the mint sites it exists to police, so a "
+        f"green run here proves nothing: {sorted(sites)}")
+    doors = {f for r, f, _ in _DOORS if r == rel}
+    helpers = {f for r, f in _GRAPHS_MINT_HELPERS if r == rel}
+    unaccounted = sites - doors - helpers
+    assert not unaccounted, (
+        "these functions POST a `public.graphs` row and are neither a pinned "
+        f"creation door nor a declared mint helper: {sorted(unaccounted)}. A row "
+        "minted there is born UNCUT — every record it writes is refused "
+        "`cursor_not_active` while `write_live_record`, fail-soft by contract, "
+        "reports success — and traffic does not heal it. Add the door to `_DOORS` "
+        "AND hook it (with its `_DOOR_HOOK_CALLS` count), or add it to "
+        "`_GRAPHS_MINT_HELPERS` with the reason its callers are the doors")
+    assert "insert_graph" not in doors, (
+        "`insert_graph` is the mint HELPER: hooking it double-provisions, because "
+        "both of its callers are doors that hook themselves")
 
 
 def test_every_creation_door_calls_the_hook():
