@@ -69,9 +69,13 @@ version: 1
 # ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1335 files here
 # against 1334 on `origin/main` `a29b5f24ce9`, and the set difference is exactly ONE entry —
 # `tests/test_14592_read_parity.py`, this PR's (`#14592` Phase A) own suite. ⛔ Deliberately NOT
-# claimed as this branch's: `tests/test_14592_operating_model_evidence.py` is registered on
-# `tier1` + `core` and NOT in `fast_pool()` (measured by set difference of `fast_pool()` at both
-# trees), so it moves no bin and is not the added entry.
+# claimed as this branch's: `tests/test_14592_operating_model_evidence.py` IS in `fast_pool()` at
+# BOTH trees (it landed on `origin/main` as #14606), so it is in NEITHER side of that difference and
+# is not the added entry — measured, not inferred: `fast_pool()` holds it here AND on
+# `a29b5f24ce9`, and `--emit-push-matrix` bins it into shard `a`. An earlier revision of this
+# sentence said the opposite ("registered on `tier1` + `core` and NOT in `fast_pool()`"), which the
+# `core` registration block below contradicts; the conclusion was right and its stated premise was
+# false, which is exactly the class this block exists to re-derive rather than carry.
 # ⛔ THIS BLOCK ARRIVED SPLICED, and the repair is recorded rather than hidden:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold applied BOTH parents'
 # derivations under a dangling `# reader of the prose can see.` fragment — one naming `939e37f664e5`
