@@ -6185,6 +6185,63 @@ _EPIC_CITE_SOURCES = {
 }
 
 
+# The sweep above resolves a cite that NAMES its file. The bundle also writes a BARE
+# continuation for the second half of a pair — the `def` line and the line that
+# CALLS it, in one parenthetical — and `_BUNDLE_CITE` cannot see that half (it
+# requires the filename). `#14560`'s own `sdk.py` insertion moved the call, the
+# re-derivation carried only the `def`, and the pair then printed the head's `def`
+# line beside the PRE-insert call line: internally inconsistent, agreeing with no
+# tree, and green everywhere because nothing read the continuation.
+# ⛔ A bare `:N` is only resolvable where the SENTENCE names one file for it, so
+# this stays a TARGETED pin rather than a general rule: the `called at`
+# continuation of the entry-point pair must open the line that CALLS it. No line
+# number is typed here — the arm reads both sides from the tree and the document.
+_CALLED_AT = re.compile(r"called at\s+`{1,2}:(\d+)`{1,2}")
+
+_ENTRY_POINT_CALL_DOCS = (
+    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    ("probes/capstone_run.py",
+     _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
+)
+
+
+def test_the_entry_points_called_at_continuation_is_the_line_that_calls_it():
+    """The `def` and the `called at` halves of one pair must agree with ONE tree.
+
+    A bare ``:N`` continuation is invisible to `_BUNDLE_CITE`, and the repo has
+    already paid for that twice: the sweep's own comment records the README's
+    `:12487` citing the stale `:12401` with every gate green (PR #9850 review).
+    This arm is the narrow case the rule CAN resolve — the same sentence names
+    `sdk.py` once, so the continuation's file is not in doubt.
+
+    It reds on the tree this lane was handed: `#14560`'s gate block inserted 29
+    lines into `sdk.py`, which moved BOTH halves; the re-derivation carried the
+    `def` and left the call on its pre-insert number.
+    """
+    lines = SDK_SOURCE.splitlines()
+    call_hits = [i + 1 for i, line in enumerate(lines)
+                 if "self._extract_session_v2(" in line]
+    assert len(call_hits) == 1, (
+        f"`self._extract_session_v2(` is on {len(call_hits)} lines of sdk.py "
+        f"{call_hits} — this pin names ONE, so it must stay unique")
+    call_line = call_hits[0]
+    call_text = lines[call_line - 1].strip()
+    assert call_text.startswith("extracted, meta = self._extract_session_v2("), (
+        f"sdk.py:{call_line} is {call_text!r}, not the entry point's call site")
+    for doc_name, path in _ENTRY_POINT_CALL_DOCS:
+        text = path.read_text(encoding="utf-8")
+        match = _CALLED_AT.search(text)
+        assert match is not None, (
+            f"{doc_name} no longer writes a `called at `:N`` continuation for the "
+            "entry point — if the pair was reworded, re-point or delete this arm")
+        cited = int(match.group(1))
+        assert cited == call_line, (
+            f"{doc_name} names the entry point as `called at :{cited}`, but "
+            f"`self._extract_session_v2(` is on sdk.py:{call_line} at this head. "
+            "A bare `:N` is unresolvable in general, which is exactly why it "
+            "rotted: re-derive it WITH the `def` half of the same parenthetical")
+
+
 #: A BARE line cite — `` `:NNNN` `` / `` `:NNNN-NNNN` `` with no file in front of
 #: it. `_BUNDLE_CITE` cannot match it (a bare number names no tree to look in), so
 #: the sweep below cannot resolve it: that is the blind spot this leg covers from
