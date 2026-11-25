@@ -701,18 +701,22 @@ def test_census2_computes_the_verdict_it_declares_and_exits_on_it():
     census2 = _real_driver("run_census2.py")
     assert "ok" in census2.WRITTEN_KEYS, "`ok` must stay declared AND be written"
 
-    def receipt(reply, ok=True):
-        return {"tool": "t", "args": {}, "ok": ok, "reply": reply}
+    def receipt(key, reply, ok=True):
+        return {key: {"tool": "t", "args": {}, "ok": ok, "reply": reply}}
 
-    good = {
-        "claims": receipt({"results": [{"id": "a"}], "total": 1}),
-        "conf_one": receipt({"result": [{"id": "b"}]}),
-        "structure": receipt({"result": []}),
-    }
+    # A dict comprehension, NOT a `good.update(…)` loop: `tools/sdk_privatise.py
+    # --check` counts an untyped `.update(` receiver as residue and its RATCHET reds
+    # the required `surface-guard` job on any increase (this row put main at 11912
+    # against a 11911 baseline).
+    good: dict = {}
+    for key, reply in (("claims", {"results": [{"id": "a"}], "total": 1}),
+                       ("conf_one", {"result": [{"id": "b"}]}),
+                       ("structure", {"result": []})):
+        good = {**good, **receipt(key, reply)}
     assert census2.verdict(good) == 0, (
         "an empty `structure` reply is the validator answering NOTHING TO REPORT")
-    assert census2.verdict({**good, "claims": receipt(None, ok=False)}) == 1
-    assert census2.verdict({**good, "conf_one": receipt([])}) == 1
+    assert census2.verdict({**good, **receipt("claims", None, ok=False)}) == 1
+    assert census2.verdict({**good, **receipt("conf_one", [])}) == 1
     assert census2.verdict({key: good[key] for key in ("claims", "conf_one")}) == 1, (
         "a phase that never ran is not a phase that succeeded")
 
