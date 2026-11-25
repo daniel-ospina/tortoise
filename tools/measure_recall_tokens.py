@@ -64,19 +64,15 @@ QUIET_PROMPTS = [
 def build_graph(sdk: TortoiseSDK) -> dict:
     """A small, realistic slice: two decisions, their supports, a conflict, quotes."""
     def point(kind: str, content: str, quote: str | None = None) -> dict:
-        created = sdk._create_point(kind, content)
-        if quote:
-            sdk._get_proj().g.query(
-                "MATCH (n:Point {id:$id}) SET n.quote=$q",
-                params={"id": created["id"], "q": quote})
-        return created
+        # ⛔ The TYPED SDK, never raw Cypher: this harness measures the product's
+        # own reflex, so it must arrange its fixture through the same doors a
+        # caller has (and an untyped `.query(` receiver raises the `sdk_privatise`
+        # residue count, which is a ratchet).
+        return sdk._create_point(kind, content, **( {"quote": quote} if quote else {} ))
 
     def posterior(pid: str, alpha: float, beta: float) -> None:
-        sdk._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) SET n.confidence=$c, "
-            "n.posterior_alpha=$a, n.posterior_beta=$b",
-            params={"id": pid, "a": alpha, "b": beta,
-                    "c": round(alpha / (alpha + beta), 4)})
+        sdk._update_point(pid, posterior_alpha=alpha, posterior_beta=beta,
+                          confidence=round(alpha / (alpha + beta), 4))
 
     # Decision 1 — the storage choice, with two supports and one attack.
     storage = point(

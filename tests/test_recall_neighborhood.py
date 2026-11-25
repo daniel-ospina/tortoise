@@ -265,15 +265,13 @@ def test_the_turn_reads_no_statement_that_names_the_excerpt(monkeypatch):
     support = sdk._create_point(
         "evidence", "Zephyr audit sign-off was requested on March 3")["id"]
     sdk._create_operator("IMPL", support, [claim])
-    # Setup is OUTSIDE the recording window on purpose: this write names `quote`.
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.quote=$q",
-        params={"id": claim,
-                "q": "Ops note: the Zephyr rollout waits on the audit sign-off."})
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.confidence=0.9, "
-        "n.posterior_alpha=9.0, n.posterior_beta=1.0",
-        params={"id": claim})
+    # ⛔ Setup goes through the TYPED SDK, not raw Cypher (#14607 / the
+    # `sdk_privatise` ratchet): an untyped `.query(` receiver raises the residue
+    # count, and a test that needs raw graph writes to arrange its fixture is
+    # exercising a door the product does not own.
+    sdk._update_point(claim,
+                      quote="Ops note: the Zephyr rollout waits on the audit sign-off.",
+                      confidence=0.9, posterior_alpha=9.0, posterior_beta=1.0)
 
     seen = _record_graph_door(sdk)
     result = sdk._volunteer_context(
@@ -344,14 +342,9 @@ def test_pipeline_injects_relations_and_source_for_a_real_entity():
     support = sdk._create_point(
         "evidence", "Zephyr audit sign-off was requested on March 3")["id"]
     sdk._create_operator("IMPL", support, [claim])
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.quote=$q",
-        params={"id": claim,
-                "q": "Ops note: the Zephyr rollout waits on the audit sign-off."})
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.confidence=0.9, "
-        "n.posterior_alpha=9.0, n.posterior_beta=1.0",
-        params={"id": claim})
+    sdk._update_point(claim,
+                      quote="Ops note: the Zephyr rollout waits on the audit sign-off.",
+                      confidence=0.9, posterior_alpha=9.0, posterior_beta=1.0)
 
     result = sdk._volunteer_context(
         [{"role": "user", "content": "What is the Zephyr rollout waiting on?"}],
@@ -383,9 +376,8 @@ def test_the_injected_block_fits_the_hook_budget(prompt):
     sdk = _fresh_sdk()
     claim = sdk._create_point(
         "decision", "Zephyr rollout is gated on the audit sign-off")["id"]
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.confidence=0.9",
-        params={"id": claim})
+    sdk._update_point(claim, confidence=0.9, posterior_alpha=9.0,
+                      posterior_beta=1.0)
     result = sdk._volunteer_context(
         [{"role": "user", "content": prompt}], session_id="14607-budget", why=True)
     assert len(result["block"]) <= 8 * 1024
@@ -406,9 +398,8 @@ def test_the_excerpt_really_comes_from_the_hit(monkeypatch):
     sdk = _fresh_sdk()
     claim = sdk._create_point(
         "decision", "Zephyr rollout is gated on the audit sign-off")["id"]
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.quote=$q, n.confidence=0.9",
-        params={"id": claim, "q": "Ops note: the Zephyr rollout waits."})
+    sdk._update_point(claim, quote="Ops note: the Zephyr rollout waits.",
+                      confidence=0.9)
     window = [{"role": "user", "content": "What is the Zephyr rollout waiting on?"}]
 
     with_excerpt = sdk._volunteer_context(window, session_id="14607-hit", why=True)
