@@ -35,9 +35,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import recall_neighborhood  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.volunteer import (  # noqa: E402
+from tortoise import recall_neighborhood
+from tortoise.sdk import TortoiseSDK
+from tortoise.volunteer import (
     DEFAULT_MAX_POINTERS,
     RESOLVE_POOL_MAX,
     RESOLVE_POOL_MIN,
@@ -147,7 +147,7 @@ def percentile(values: list[int], fraction: float) -> int:
         return 0
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1,
-                       int(round(fraction * (len(ordered) - 1)))))
+                       round(fraction * (len(ordered) - 1))))
     return ordered[index]
 
 

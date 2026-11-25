@@ -293,7 +293,7 @@ def _missing_module(command: str, module: str) -> str:
     """
     import subprocess
     try:
-        proc = subprocess.run(  # noqa: S603 — a fixed, non-shell argv
+        proc = subprocess.run(
             [command, "-c", f"import {module.split('.')[0]}"],
             capture_output=True, text=True, timeout=20, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -454,12 +454,12 @@ def _classify_probe_failure(exc: BaseException) -> str:
     """
     try:
         from . import mcp_client
-    except Exception:  # noqa: BLE001 — classification must not raise
+    except Exception:
         return PROBE_UNKNOWN
     text = str(exc)
     try:
         described = mcp_client.describe_failure(exc)
-    except Exception:  # noqa: BLE001
+    except Exception:
         described = text
     lowered = f"{described} {text}".lower()
     if getattr(mcp_client, "MCPKeyEmptyError", None) and \
@@ -504,7 +504,7 @@ def probe(*, project_dir: Path | None = None) -> Verdict:
     try:
         from . import mcp_client
         from .mcp_client import _BearerProvider, _client
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return Verdict(
             status=PROBE_UNKNOWN,
             detail=f"the MCP client could not be imported ({type(exc).__name__})",
@@ -519,7 +519,7 @@ def probe(*, project_dir: Path | None = None) -> Verdict:
 
     try:
         tools = mcp_client._run(_call())
-    except Exception as exc:  # noqa: BLE001 — a probe failure is a verdict
+    except Exception as exc:
         status = _classify_probe_failure(exc)
         return Verdict(status=status, detail=_first_line(exc),
                        fix=_FIX_BY_CLASS.get(status, ""),

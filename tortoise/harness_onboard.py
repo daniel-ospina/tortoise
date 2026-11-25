@@ -272,7 +272,7 @@ def _git_tracks(path: Path) -> bool:
     """Is `path` tracked by git? Unknown ⇒ False (write the backup, be safe)."""
     import subprocess
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.run(
             ["git", "ls-files", "--error-unmatch", str(path.name)],
             cwd=str(path.parent), capture_output=True, text=True, timeout=10,
             check=False)
@@ -398,7 +398,7 @@ def onboard(harness: str = "pi", *, project_dir: Path | None = None,
     if hooks:
         try:
             from .capture_install import CAPTURE_SEAM, install_capture
-        except Exception as exc:  # noqa: BLE001 — an import failure is a refusal
+        except Exception as exc:
             out.refusals.append(
                 f"hooks: capture installer unavailable ({type(exc).__name__}); "
                 f"recall/retain are NOT automatic — re-run after fixing that")

@@ -19,7 +19,6 @@ So there are three properties, and each has its own arm here:
 from __future__ import annotations
 
 import json
-import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -156,7 +155,7 @@ def test_an_unprobed_entry_is_an_abstention_never_ok(project):
 class _Refusing(BaseHTTPRequestHandler):
     """An endpoint that answers 401 for everything — the auth-rejected layer."""
 
-    def do_POST(self):  # noqa: N802 — http.server's spelling
+    def do_POST(self):
         self.send_response(401)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -361,7 +360,7 @@ def test_onboard_writes_instructions_only_after_verification(project, monkeypatc
 class _Ok(BaseHTTPRequestHandler):
     """A minimal endpoint that answers an MCP `initialize` + `tools/list`."""
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
         method = payload.get("method")
