@@ -344,14 +344,43 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
     def boom(*_args, **_kwargs):
         raise FileNotFoundError("No such file or directory: 'git'")
 
-    monkeypatch.setattr(census, "census", boom)
     out = tmp_path / "never.md"
-    for argv in (["--render", str(out)], ["--check"], []):
+    monkeypatch.setattr(census, "census", boom)
+    for argv in (["--render", str(out)], ["--check"], [], ["--markdown"], ["--json"]):
         rc = census.main(argv)
         assert rc == 2, (
             f"`{' '.join(argv) or '(bare census)'}` must exit 2 (could not run), got {rc} — "
             "1 is this tool's DRIFT verdict and would misreport an unreadable tree")
     assert not out.exists(), "the failure precedes the write, so nothing is rendered"
+    monkeypatch.undo()
+
+    # ⛔ AND `--json` ENUMERATES TWICE: `rg_totals()` re-reads the index, so a PARTIAL
+    # failure (first walk fine, second refused) escaped the first guard and exited 1 —
+    # measured with a `git` shim that delegates the first `ls-files` and exits 128 on
+    # the second (#13098 review round 12, P2).
+    def boom_totals(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(128, ["git", "ls-files"])
+
+    monkeypatch.setattr(census, "rg_totals", boom_totals)
+    assert census.main(["--json"]) == 2, (
+        "`--json` re-enumerates for `rg_totals`; that second call must answer 2 as well")
+
+
+def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
+    """A doc that exists but cannot be READ is 2 (could not run), never 1 (drift).
+
+    Same class as the enumeration wrap, in the same verb: an uncaught
+    `PermissionError`/`EIO` would exit 1, which this tool reserves for "the pins
+    drifted", so a lane would re-cut 25 correct pins over a file it never read.
+    """
+    doc = tmp_path / "src.md"
+    doc.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
+    doc.chmod(0o000)
+    try:
+        rc = census.check(doc, {"sites": []})
+    finally:
+        doc.chmod(0o600)
+    assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
 
 
 def test_the_renderer_refuses_to_write_over_the_source(capsys):

@@ -806,7 +806,15 @@ def check(doc: Path, result: dict) -> int:
     if not doc.exists():
         print(f"check: no doc at {doc}", file=sys.stderr)
         return 2
-    text = doc.read_text(encoding="utf-8")
+    # ⛔ A DOC THAT IS PRESENT BUT UNREADABLE IS "COULD NOT RUN" (2), NOT DRIFT (1) —
+    # same class as the census wrap in `main()`, in the same verb: an uncaught
+    # PermissionError/EIO would exit 1, the code reserved for "the pins drifted", and a
+    # lane would re-cut 25 pins that were correct.
+    try:
+        text = doc.read_text(encoding="utf-8")
+    except OSError as err:
+        print(f"check: could not read {doc}: {err}", file=sys.stderr)
+        return 2
     rows = CENSUS_ROW.findall(text)
     if rows:
         print(
@@ -972,6 +980,18 @@ def main(argv: list[str] | None = None) -> int:
     # own enumeration, which runs on EVERY path.
     try:
         result = census(prefixes, drop_test_modules=not args.all_surface)
+        # ⛔ `--json` NEEDS A SECOND, UNGUARDED-UNTIL-NOW ENUMERATION: `rg_totals()`
+        # re-reads the index through `surface_files()`, so a PARTIAL failure (the first
+        # walk succeeds, the second is refused — a transient EAGAIN, an index that
+        # becomes unreadable mid-run) escaped this guard and exited 1, the DRIFT code,
+        # from a verb that has no drift verdict. Measured with a `git` shim that
+        # delegates the first call and exits 128 on the second. It is inside the guard
+        # for the same reason as the first: this tool's "could not run" must be total.
+        rg = (
+            rg_totals(prefixes, drop_test_modules=not args.all_surface)
+            if args.json
+            else None
+        )
     except (OSError, subprocess.CalledProcessError) as err:
         print(
             f"census: could not enumerate {prefixes}: {err} — this is 'could not "
@@ -1010,7 +1030,7 @@ def main(argv: list[str] | None = None) -> int:
             "shape_matrix": shape_matrix(result["sites"]),
             "verdicts": dict(Counter(s.verdict for s in result["sites"])),
             "partial": result["partial"],
-            "rg_totals": rg_totals(prefixes, drop_test_modules=not args.all_surface),
+            "rg_totals": rg,
             "rows": [s.as_row() for s in sorted(result["sites"], key=lambda s: (s.path, s.line))],
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
