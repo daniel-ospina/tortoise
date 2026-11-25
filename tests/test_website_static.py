@@ -5969,10 +5969,16 @@ def _beat_ground_margin_candidates(
     specificity, then source order — the same ranking `_css_block_end_cascade`
     applies to the pricing card's insets.
 
-    A rule conditional on something OTHER than height (a `max-width` block) is
-    not a candidate: it does not fire wherever the height-based hatch fires,
-    and per-block attribution is what keeps the 400px-block fail-open closed
-    (#14683 review P2).
+    A rule inside a media condition this reader does NOT model is ranked as a
+    BASE candidate (`height` inf, `floor` -inf), i.e. fail-CLOSED. It used to
+    be skipped, on the theory that "it does not fire wherever the height-based
+    hatch fires" — false: `@media (max-width: 760px)` and `@media
+    (max-height: 820px)` both fire at 375x812, so a `margin-top: 0` added to
+    this page's own `max-width` block top-aligned all seven beats while this
+    reader reported no problem (#14683 independent review, P1: `[]` over a
+    page whose titles were back at y=52). Skipping an unmodelled condition is
+    the same fail-open the 400px-block read was (#14683 review P2), one query
+    family over.
 
     ⛔ BOTH height families are read. Leaving out `min-height` was the same
     residual one query family over: `@media (min-height: 500px) { #beat-hero >
@@ -5988,7 +5994,6 @@ def _beat_ground_margin_candidates(
     blanked = _css_blanked(html)
     height_spans = _max_height_media_spans(html)
     floor_spans = _min_height_media_spans(html)
-    other_media = _media_block_spans(html)
     grounds = _beat_ground_elements(html)
     out: dict[str, dict[str, list[_GroundMargin]]] = {}
     for match in re.finditer(r"([^{}]+)\{", blanked):
@@ -6019,9 +6024,6 @@ def _beat_ground_margin_candidates(
             # inside `height >= 400` is `height >= 500`, so the LARGEST floor
             # is the one that applies.
             floor = float(max(floors))
-        if not enclosing and not floors and any(
-                start <= match.start() < end for start, end in other_media):
-            continue
         for part in (p for p in prelude.split(",") if p.strip()):
             specificity = _css_specificity(part) or (9, 9, 9)
             for side, declaration in declarations.items():
@@ -6249,8 +6251,9 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         ⛔ AND WHY THE HATCH CANNOT SAY `justify-content: safe center`, although
         the base `.beat` rule does: `safe` cannot express this on a browser that
         does not honour it, and declaration ORDER does not rescue that. Chrome
-        52-114 RECOGNISES the value but ignores the modifier (MDN BCD: "before
-        version 115, this value is recognized, but has no effect"), so it keeps
+        before 115 (and Safari before 17.6) RECOGNISES the value but ignores the
+        modifier (MDN BCD: `version_added` 115, note "Before version 115, this
+        value is recognized, but has no effect"), so it keeps
         the declaration, applies a plain `center`, and any `flex-start` written
         above it never runs — on that band the hero is centred unsafely, top
         clipped and h1 under the pill, which is worse than the bug being fixed.
@@ -6260,10 +6263,22 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         ground's first and last child), not the spelling of a keyword that a
         browser may accept and ignore.
 
-        It is also what keeps the ≤320px pill clearance intact: the hero
-        overflows at every phone width measured (722.5px of copy in a 700px box
-        at 375x812), so ITS auto margins resolve to zero and its `5rem`
-        `padding-top` still holds its h1 clear of the pill.
+        It is also what keeps the ≤320px pill clearance intact, in BOTH arms of
+        the auto-margin predicate — the margins decide which arm, not whether
+        the clearance holds. Measured at this head (Chromium, hero box =
+        viewport − 80px top − 32px bottom padding):
+
+            375x764   copy 687.95 in a 652px box  → overflows; margins 0px;
+                      h1 top 80.0
+            375x812   copy 687.95 in a 700px box  → fits;     margins
+                      6.03/6.02; h1 top 86.03
+
+        Both clear the Login pill's 54.4; the fit arm differs only in that the
+        free space is shared instead of the copy being top-pinned on the
+        padding. An earlier version of this paragraph said the hero "overflows
+        at every phone width measured (722.5px in a 700px box at 375x812)" —
+        false at the viewport it names, and corrected by measurement (#14683
+        independent review, P2).
         """
         text = PRODUCT_TEAMS_HTML.read_text(encoding="utf-8")
         blocks = _max_height_media_blocks(text)
@@ -6295,7 +6310,8 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"{' '.join(selector.split())} declares "
                 f"`justify-content: safe center` ({values!r}). A browser that "
                 "recognises `safe` but ignores the modifier KEEPS that "
-                "declaration and applies a plain `center` (Chrome 52-114), so "
+                "declaration and applies a plain `center` (before Chrome 115, "
+                "before Safari 17.6), so "
                 "the alignment it is ordered after never runs and an "
                 "over-flowing beat is clipped at the top with its heading "
                 "under the Login pill. Centre the beat with `margin-*: auto` "
