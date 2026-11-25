@@ -234,11 +234,22 @@ def list_layer(
     ).result_set
     out: list[dict] = []
     for r in rows:
-        props = dict(r[0])
+        raw = dict(r[0])
+        props = raw
         if "Source" in (r[1] or ()):
             from .projection.entities import filter_source_props
 
             props, _denied = filter_source_props(props)
+            # ⛔ THE HYBRID KEEPS ITS OWN LAYER'S KIND. `filter_source_props` is an
+            # ALLOWLIST (`_SOURCE_NODE_PROP_NAMES`), so filtering a
+            # `(:Object:Source)` drops `objectKind` — and a list filtered on
+            # `?kind=goal` then returned a row that did not echo the field it was
+            # selected by (measured). The kind is the LAYER's declaration, not a
+            # `:Source` payload, and it came from the same `MATCH … {where}`, so it
+            # is re-attached from the pre-filter bag. Everything else stays denied.
+            kind_name = LAYER_KIND_PROP[label]
+            if kind_name in raw and kind_name not in props:
+                props[kind_name] = raw[kind_name]
         out.append(props)
     return out, total
 

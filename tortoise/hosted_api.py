@@ -15728,7 +15728,17 @@ def _layer_payload(entry: dict) -> dict:
     if is_source:
         from tortoise.projection.entities import filter_source_props
 
+        raw = dict(props)
         props, _denied = filter_source_props(props)
+        # ⛔ …and a HYBRID keeps its own layer's KIND: the filter is an ALLOWLIST,
+        # so it drops `objectKind`/`subjectKind` too, and this route would stop
+        # echoing the field the row is keyed by (the list read re-attaches it for
+        # the same reason). The KIND is the layer's declaration, never a `:Source`
+        # payload — everything the filter denied stays denied.
+        _kind_prop = {"Object": "objectKind", "Subject": "subjectKind"}.get(
+            entry.get("label") or "")
+        if _kind_prop and _kind_prop in raw and _kind_prop not in props:
+            props[_kind_prop] = raw[_kind_prop]
     return props
 
 

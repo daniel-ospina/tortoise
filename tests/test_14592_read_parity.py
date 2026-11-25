@@ -1030,9 +1030,16 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         by_id = client.get(f"/v1/sources/{hyb}")
         assert by_id.status_code == 200, by_id.text
         assert raw not in by_id.text, by_id.text
-        body = client.get("/v1/objects", params={"limit": 100}).text
-        assert raw not in body, body
-        assert hyb in body, body  # …and it IS listed, filtered
+        body = client.get("/v1/objects", params={"limit": 100}).json()
+        assert raw not in repr(body), body
+        listed = [o for o in body["objects"] if o["id"] == hyb]
+        assert listed, body  # …and it IS listed, filtered
+        # ⛔ AND IT STILL ECHOES THE FIELD IT WAS SELECTED BY. `filter_source_props`
+        # is an ALLOWLIST, so it drops `objectKind` too — without the re-attach a
+        # `?kind=goal` page returned a row that did not carry the kind it was
+        # filtered on (measured). The kind is the LAYER's declaration, not a
+        # `:Source` payload, so it survives; the denied `content` does not.
+        assert listed[0]["objectKind"] == "goal", listed[0]
 
         # A second hybrid on the OTHER layer, so the Subject routes have a row to
         # withhold: the first one carries `objectKind`, which the subject listing
