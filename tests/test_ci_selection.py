@@ -21760,13 +21760,16 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # path still takes the docs-only early return, so the outcome is `surfaces: []` with
     # a docs-only remainder — the census suite is ABSENT, the selection is NOT empty
     # (measured WITH THAT ENTRY REMOVED: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)`
-    # -> `surfaces=[]` and a `test_files` set that does NOT contain this suite, against a
-    # `core` selection for `STORAGE-ARCHITECTURE.md`; with the entry in place the same
+    # -> `surfaces=[]` and a `test_files` set that does NOT contain this suite, while a docs
+    # path that DOES match a named surface — `STORAGE-ARCHITECTURE.md`, which the manifest
+    # maps to `onboarding` — still selects a non-empty set; with the entry in place the same
     # call answers `surfaces=['core']` and INCLUDES the suite).
-    # ⛔ No `test_files` TOTAL is typed on any side: it is a population that moves every
-    # time a `core` test file lands — this comment said `968` until the merge that brought
-    # `tests/test_expansion_fusion_14344.py` took it to `969`, which is the rot this file's
-    # neighbours de-rot for the same reason. Re-derive from `_sel`, never copy.
+    # ⛔ No `test_files` TOTAL is typed on either side, deliberately: it is a population that
+    # moves every time a `core` test file lands. An earlier revision of this comment typed the
+    # then-current total and a merge moved it (the merge brought
+    # `tests/test_expansion_fusion_14344.py`, itself a `core` member, into the selection),
+    # which is the rot this file's neighbours de-rot for the same reason. Re-derive from
+    # `_sel`, never copy.
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
