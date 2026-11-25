@@ -891,6 +891,34 @@ def test_an_unrelated_object_named_tortoise_is_never_rewritten(project):
     assert result.wrote, "the entry WAS added, so the write must be reported"
 
 
+def test_a_duplicate_tortoise_key_refuses_RATHER_than_writing_a_divergent_file(project):
+    """The splice's ROUND-TRIP guard: byte surgery that parses differently is REFUSED.
+
+    `mcpServers` holding `tortoise` TWICE is the reachable shape. `json.loads` keeps
+    the LAST key while the splice rewrites the FIRST occurrence, so the merged text
+    parses to a document that is not the one this installer intended to build. That
+    must be a refusal with the file untouched — never `wrote:` over a file whose
+    parsed content differs from `entry`. Measured by a fresh reviewer at
+    `f4c14b0f3616`: `if rewritten != data:` -> `if False:` left the suite green.
+    """
+    path = project / ".mcp.json"
+    original = (
+        '{\n  "mcpServers": {\n'
+        '    "tortoise": {"type": "stdio", "command": "python3", '
+        '"args": ["-m", "old"]},\n'
+        '    "tortoise": {"type": "http", "url": "https://old/mcp"}\n'
+        '  }\n}\n')
+    path.write_text(original, encoding="utf-8")
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.refusals, "a divergent round-trip must be a REFUSAL"
+    assert not result.wrote, result.wrote
+    assert "round-trip" in " ".join(result.refusals), result.refusals
+    assert path.read_text(encoding="utf-8") == original, (
+        "the file was rewritten even though its text does not round-trip")
+
+
 def test_the_splice_targets_mcpservers_when_the_name_appears_twice(project):
     """Both objects hold `tortoise`; only the `mcpServers` one may move."""
     path = project / ".mcp.json"

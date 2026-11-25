@@ -856,7 +856,10 @@ def write_instructions(harness: str, project_dir: Path, *,
         # being a no-op on a (0, 0) file, the substring test would silently rewrite a
         # fenced example. The protection itself comes from `_strip_block`'s idempotence,
         # not from this predicate; do not read this line as the guard.
-        # Idempotent: replace the block in place, preserving everything around it.
+        # Idempotent: the block is STRIPPED and RE-APPENDED at the end of the file,
+        # preserving everything else around it — ⛔ NOT "in place": the user's own
+        # text keeps its bytes but not its position relative to the block (measured: a
+        # block sitting mid-file comes back below the user's trailing lines).
         # ⛔ Edits the user made INSIDE the block are NOT preserved — the block is
         # ours and is rewritten whole. (The previous comment claimed otherwise; the
         # `v1` tag in `BEGIN_MARK` is the seam for changing what we own — bump it and

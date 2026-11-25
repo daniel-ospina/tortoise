@@ -134,6 +134,35 @@ def test_no_neighbourhood_is_byte_identical_to_the_legacy_block():
 
 # ── 3 · the budget, and the DOCUMENTED drop order ────────────────────────
 
+def test_the_shipped_budget_is_a_pinned_LITERAL_and_it_is_what_trims():
+    """The SHIPPED ceiling is graded, not just measured against itself.
+
+    The rows that assert `estimate_tokens(block) <= rn.NEIGHBORHOOD_TOKEN_BUDGET`
+    move BOTH sides with the constant, and the trimmer rows below pass `budget=`
+    explicitly — so the one number the hook spends on every prompt was pinned
+    nowhere. Measured by a fresh reviewer at `f4c14b0f3616`: raising
+    `NEIGHBORHOOD_TOKEN_BUDGET` to `10**9` left the whole suite green.
+
+    Two angles, because either alone is a proxy: the LITERAL (a product decision,
+    so it is changed deliberately or not at all) and the BEHAVIOUR at the shipped
+    default (the `budget=` default really is that constant — an assembly far over
+    the ceiling must come back under it when no budget is passed).
+    """
+    assert rn.NEIGHBORHOOD_TOKEN_BUDGET == 600, (
+        "the injected block's budget is the contract the hook spends on EVERY "
+        "prompt — changing it is a product decision, so move this literal with it")
+    header = ["header line"]
+    bullets = [[f"- bullet {i}", '  · from source: "' + "x" * 400 + '"']
+               for i in range(20)]
+    untrimmed = rn.trim_to_budget(header, bullets, budget=10**9)
+    assert rn.estimate_tokens(untrimmed) > 600, (
+        "the fixture must overflow the ceiling, or the row below grades nothing")
+    defaulted = rn.trim_to_budget(header, bullets)   # ⛔ no `budget=` on purpose
+    assert rn.estimate_tokens(defaulted) <= 600, (
+        "the DEFAULT budget must be the shipped 600 — a ceiling raised out from "
+        "under the trimmer leaves the hook spending the whole fixture")
+
+
 def test_budget_is_enforced_and_drops_the_tail_source_first():
     """The drop order is a product decision, so it is pinned, not incidental.
 
