@@ -1,0 +1,4310 @@
+{
+  "graph": "xv14592_operating_model",
+  "fullscan_object": {
+    "tool": "tortoise_search",
+    "args": {
+      "entity_type": "object",
+      "limit": 100
+    },
+    "ok": true,
+    "reply": {
+      "result": []
+    }
+  },
+  "fullscan_subject": {
+    "tool": "tortoise_search",
+    "args": {
+      "entity_type": "subject",
+      "limit": 100
+    },
+    "ok": true,
+    "reply": {
+      "result": []
+    }
+  },
+  "fullscan_event": {
+    "tool": "tortoise_search",
+    "args": {
+      "entity_type": "event",
+      "limit": 100
+    },
+    "ok": true,
+    "reply": {
+      "result": []
+    }
+  },
+  "fullscan_source": {
+    "tool": "tortoise_search",
+    "args": {
+      "entity_type": "source",
+      "limit": 100
+    },
+    "ok": true,
+    "reply": {
+      "result": []
+    }
+  },
+  "query_operators": {
+    "tool": "tortoise_query",
+    "args": {
+      "kind": "operator",
+      "limit": 200
+    },
+    "ok": true,
+    "reply": {
+      "result": []
+    }
+  },
+  "recall_people": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "Marta Reyes Dev Patel Priya Nair who owns what",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "pt_42343e10b8c408edab87bd4e694e674234224236e015d52122c0a6421b77fa",
+          "content": "If a cold-chain temperature log entry is missing, Marta Reyes is accountable for it",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038190c-da8561d7aa4b",
+              "related_id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.06362,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:41.475061+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-04",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "If a cold-chain temperature log entry is missing, Marta Reyes is accountable for it",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f576-4ff0e1fbd786",
+            "name": "Marta Reyes",
+            "kind": "core:naturalPerson",
+            "status": "live"
+          },
+          "quote": "if a log entry is missing, Marta Reyes is accountable for it",
+          "source_turn_id": 1,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.2,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.1,
+            "final_score": 0.105,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21038190c-da8561d7aa4b",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f576-4ff0e1fbd786",
+              "entity_type": "subject",
+              "content": "Marta Reyes"
+            },
+            {
+              "id": "1a21038124d-aa5c6c6cfc8f",
+              "entity_type": "object",
+              "content": "cold-chain temperature log"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_2ae10dd60b53442580ddca5fb7a7df45f053edfe588371df72d93188c4862f",
+          "content": "No capital spend is approved unless Dev Patel approves it",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a2103819ba-0fb4e0a52258",
+              "related_id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.06362,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:41.475061+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-04",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.6,
+          "snippet": "No capital spend is approved unless Dev Patel approves it",
+          "scores": {
+            "fts": 3.6,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.6
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f586-adbeff52ccd8",
+            "name": "Dev Patel",
+            "kind": "core:naturalPerson",
+            "status": "live"
+          },
+          "quote": "No capital spend is approved unless Dev Patel approves it.",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.16,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.08,
+            "final_score": 0.084,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a2103819ba-0fb4e0a52258",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f586-adbeff52ccd8",
+              "entity_type": "subject",
+              "content": "Dev Patel"
+            },
+            {
+              "id": "1a210381266-cfc6aa838e51",
+              "entity_type": "object",
+              "content": "capital spending approvals"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "1a21036f53b-f2127b29ae77",
+          "content": "our own refrigerated van",
+          "point_kind": "other",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.0,
+          "snippet": "our own refrigerated van",
+          "scores": {
+            "fts": 3.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.1,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 6,
+            "centrality_norm": 1.0,
+            "base_score": 0.05,
+            "final_score": 0.055,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+              "content": "Buying our own refrigerated van needs 48,000 pounds of capital spending",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+              "content": "The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+              "content": "Dev Patel ruled the capital spend for our own refrigerated van not approvable this quarter",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_be1246fb14b68484f40178eb8764d1fb29b35294c16f9e540039aa0283da62",
+              "content": "The affordability constraint tempers the own-van option out of contention entirely",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "content": "We choose ColdPath Logistics as our delivery partner",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+              "content": "The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        },
+        {
+          "id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+          "content": "The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fe8d-839a76fd73df",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21036fe8d-839a76fd73df",
+              "related_id": "1a210370019-534024145152",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210370019-534024145152",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T00:59:29.689240+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036feee-a2d1cbbe46cc",
+              "related_id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.595177+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.0,
+          "snippet": "The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows",
+          "scores": {
+            "fts": 3.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 1,
+              "nand_count": 0,
+              "total": 1
+            },
+            "contention": 0.0,
+            "variance": 0.070911,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "The own-van option needs 48,000 pounds of capital spending, which is more than our current cash buffer allows.",
+          "source_turn_id": 3,
+          "span_start": 241,
+          "span_end": 351,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.1,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.05,
+            "final_score": 0.0525,
+            "variance": 0.070911,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036fe8d-839a76fd73df",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21036feee-a2d1cbbe46cc",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "mitigations": [
+            {
+              "id": "1a210370019-534024145152",
+              "content": "[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+              "strength": 0.5,
+              "operator_id": "1a21036fe8d-839a76fd73df"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f53b-f2127b29ae77",
+              "entity_type": "object",
+              "content": "our own refrigerated van"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+          "content": "Buying our own refrigerated van needs 48,000 pounds of capital spending",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036ff42-2a150ef5fcc6",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21036ff42-2a150ef5fcc6",
+              "related_id": "1a21036ffa1-35d87bd8d4db",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21036ffa1-35d87bd8d4db",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T00:59:29.570011+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 2.66666666666667,
+          "snippet": "Buying our own refrigerated van needs 48,000 pounds of capital spending",
+          "scores": {
+            "fts": 2.66666666666667,
+            "vector": null,
+            "structural": null,
+            "rrf": 2.66666666666667
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "it needs 48,000 pounds of capital spending",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.066667,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.333333,
+            "base_score": 0.033333,
+            "final_score": 0.034444,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036ff42-2a150ef5fcc6",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "mitigations": [
+            {
+              "id": "1a21036ffa1-35d87bd8d4db",
+              "content": "[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+              "strength": 0.5,
+              "operator_id": "1a21036ff42-2a150ef5fcc6"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f53b-f2127b29ae77",
+              "entity_type": "object",
+              "content": "our own refrigerated van"
+            }
+          ],
+          "contested": true
+        }
+      ]
+    }
+  },
+  "recall_vendors": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "NordicFreight ColdPath Logistics delivery partner",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+          "content": "We choose ColdPath Logistics as our delivery partner",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fcf1-9443c1763746",
+              "related_id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.317098+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fd59-902554c18806",
+              "related_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.404745+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fdb8-f7b7900ef2f5",
+              "related_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.174327+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fe14-f8b801531161",
+              "related_id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.702420+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fe8d-839a76fd73df",
+              "related_id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.070911,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:28.293927+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21036fe8d-839a76fd73df",
+              "related_id": "1a210370019-534024145152",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210370019-534024145152",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T00:59:29.689240+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036ff42-2a150ef5fcc6",
+              "related_id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.506524+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21036ff42-2a150ef5fcc6",
+              "related_id": "1a21036ffa1-35d87bd8d4db",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21036ffa1-35d87bd8d4db",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T00:59:29.570011+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.25,
+          "snippet": "We choose ColdPath Logistics as our delivery partner",
+          "scores": {
+            "fts": 6.25,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.25
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 6,
+              "nand_count": 0,
+              "total": 6
+            },
+            "contention": 0.0,
+            "variance": 0.04895,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "Decision: we choose ColdPath Logistics as our delivery partner.",
+          "source_turn_id": 7,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.946809,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 7,
+            "centrality_norm": 1.0,
+            "base_score": 0.473404,
+            "final_score": 0.520744,
+            "variance": 0.04895,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036fcf1-9443c1763746",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21036fd59-902554c18806",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21036fdb8-f7b7900ef2f5",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f53b-f2127b29ae77",
+              "entity_type": "object",
+              "content": "our own refrigerated van"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+          "content": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fcf1-9443c1763746",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.5,
+          "snippet": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "scores": {
+            "fts": 6.5,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.5
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "ColdPath Logistics supports the choice because it offers a 9pm cutoff that meets the morning slots",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 1.0,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.285714,
+            "base_score": 0.5,
+            "final_score": 0.514286,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036fcf1-9443c1763746",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f52c-bd9822c36fa6",
+              "entity_type": "subject",
+              "content": "ColdPath Logistics"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+          "content": "The growth goal depends on the delivery partner keeping morning slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "The growth goal depends on the delivery partner keeping morning slots",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21037b6db-fc82b4e2c384",
+            "name": "delivery partner",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "the goal depends on the delivery partner keeping morning slots",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.893617,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 4,
+            "centrality_norm": 0.571429,
+            "base_score": 0.446809,
+            "final_score": 0.472341,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037be44-7ee2667a2578",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            },
+            {
+              "id": "1a21037b6db-fc82b4e2c384",
+              "entity_type": "subject",
+              "content": "delivery partner"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+          "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a210388976-d2fb28a92550",
+              "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.867372+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a2103889d1-7e8ea741b732",
+              "related_id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.865174+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.16666666666667,
+          "snippet": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "scores": {
+            "fts": 4.16666666666667,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.16666666666667
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 2,
+              "total": 2
+            },
+            "contention": 1.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.503546,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.428571,
+            "base_score": 0.251773,
+            "final_score": 0.262563,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "counter_evidence": [
+            {
+              "id": "1a210388976-d2fb28a92550",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            },
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            }
+          ],
+          "nands": [
+            {
+              "id": "1a210388976-d2fb28a92550",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            },
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f52c-bd9822c36fa6",
+              "entity_type": "subject",
+              "content": "ColdPath Logistics"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+          "content": "Growth is gated by delivery capacity, not sales effort",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd18-dccade26063c",
+              "related_id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.808382+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd92-dd15aabed099",
+              "related_id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.992544+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:17.201956+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.565849+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "1a21037bf2c-3e42badd50e5",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21037bf2c-3e42badd50e5",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:00:18.605019+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "Growth is gated by delivery capacity, not sales effort",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 4,
+              "nand_count": 0,
+              "total": 4
+            },
+            "contention": 0.0,
+            "variance": 0.054424,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "growth is gated by delivery capacity, not sales effort",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.468085,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 6,
+            "centrality_norm": 0.857143,
+            "base_score": 0.234043,
+            "final_score": 0.254104,
+            "variance": 0.054424,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037bd18-dccade26063c",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21037bd92-dd15aabed099",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21037be44-7ee2667a2578",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            }
+          ],
+          "contested": true
+        }
+      ]
+    }
+  },
+  "recall_constraints": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "cold chain below four degrees temperature log licence",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+          "content": "The food safety auditor requires a temperature log for every single delivery, retained for twelve months",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a210375f51-0f9195b4f906",
+              "related_id": "pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.116095,
+                "variance": 0.016206,
+                "contested": false,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:51.478289+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-02",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 7.0,
+          "snippet": "The food safety auditor requires a temperature log for every single delivery, retained for twelve months",
+          "scores": {
+            "fts": 7.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 7.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 1,
+              "total": 1
+            },
+            "contention": 1.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a2103754e8-4120a46a353d",
+            "name": "food safety auditor",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "Our food safety auditor requires a temperature log for every single delivery, and the log must be retained for twelve months.",
+          "source_turn_id": 3,
+          "span_start": 31,
+          "span_end": 156,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.578947,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.289474,
+            "final_score": 0.303948,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "counter_evidence": [
+            {
+              "id": "1a210375f51-0f9195b4f906",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            }
+          ],
+          "nands": [
+            {
+              "id": "1a210375f51-0f9195b4f906",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a210375480-b497e8bf7cad",
+              "entity_type": "object",
+              "content": "per-delivery temperature log rule"
+            },
+            {
+              "id": "1a2103754e8-4120a46a353d",
+              "entity_type": "subject",
+              "content": "food safety auditor"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "1a210375480-b497e8bf7cad",
+          "content": "per-delivery temperature log rule",
+          "point_kind": "agent-ops:rule",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "per-delivery temperature log rule",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.473684,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 5,
+            "centrality_norm": 0.833333,
+            "base_score": 0.236842,
+            "final_score": 0.256579,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+              "content": "The food safety auditor requires a temperature log for every single delivery, retained for twelve months",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_76e490f7f96e09a63017f4e55f8f4bde4607bb9c823fe41677573063e4a478",
+              "content": "Without a log entry for a delivery, that delivery cannot happen at all",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+              "content": "The sub-4\u00b0C floor and the per-delivery log requirement together mean the log is a precondition of delivery, not documentation after the fact",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_4df595e659bbdeb3e73127f8a0c8dfba7661d774e3a510bd6316ed7587ef85",
+              "content": "Logging should be treated as part of the delivery flow itself",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_3348906c77f41897f5fda6a3fb9b8ee4141ed7ab29539aafc18314e9b2a282",
+              "content": "Ownership of the cold-chain and audit compliance rules sits with Marta Reyes as Operations Lead",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        },
+        {
+          "id": "1a21037546c-b56cbbc22d49",
+          "content": "cold-chain temperature floor rule",
+          "point_kind": "agent-ops:rule",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "cold-chain temperature floor rule",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.473684,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 4,
+            "centrality_norm": 0.666667,
+            "base_score": 0.236842,
+            "final_score": 0.252631,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+              "content": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_fde1fd75797312b9dfbe74a860aa3e11a57140a9a0e2d304c9102ded219a6c",
+              "content": "Route length cannot be used to justify a cold-chain lapse",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+              "content": "The sub-4\u00b0C floor and the per-delivery log requirement together mean the log is a precondition of delivery, not documentation after the fact",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_3348906c77f41897f5fda6a3fb9b8ee4141ed7ab29539aafc18314e9b2a282",
+              "content": "Ownership of the cold-chain and audit compliance rules sits with Marta Reyes as Operations Lead",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        },
+        {
+          "id": "pt_4df595e659bbdeb3e73127f8a0c8dfba7661d774e3a510bd6316ed7587ef85",
+          "content": "Logging should be treated as part of the delivery flow itself",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a210375d80-9f4fea7e98b6",
+              "related_id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:52.583843+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-02",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 5.75,
+          "snippet": "Logging should be treated as part of the delivery flow itself",
+          "scores": {
+            "fts": 5.75,
+            "vector": null,
+            "structural": null,
+            "rrf": 5.75
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 1,
+              "nand_count": 0,
+              "total": 1
+            },
+            "contention": 0.0,
+            "variance": 0.07091,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "which supports treating logging as part of the delivery flow itself",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.447368,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.223684,
+            "final_score": 0.234868,
+            "variance": 0.07091,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a210375d80-9f4fea7e98b6",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037541e-8a5e60059bc1",
+              "entity_type": "object",
+              "content": "chilled-goods operation"
+            },
+            {
+              "id": "1a210375480-b497e8bf7cad",
+              "entity_type": "object",
+              "content": "per-delivery temperature log rule"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "1a2103754d5-084abce66665",
+          "content": "wholesale licence",
+          "point_kind": "core:standard",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "wholesale licence",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.263158,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 6,
+            "centrality_norm": 1.0,
+            "base_score": 0.131579,
+            "final_score": 0.144737,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_a89214cb42b12779daa21c0cc7dc856845038c5bb2e7a32ef19744099884e5",
+              "content": "The wholesale licence forbids subcontracting chilled-goods delivery to any partner that does not hold a validated cold-chain certificate",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_19d8e55033f7354df8ebe4a8d73e6eea0ebe942f9156657ab46c8f729e10fb",
+              "content": "The subcontracting restriction is a licence constraint, not a preference",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_bc497592bc4b8847863cafe5e3995842561d5a22e063e077e387225e41577c",
+              "content": "The licence constraint on subcontracting undermines any plan to flex chilled capacity through third-party partners who lack certification",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+              "content": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_39611ee7e9cb3dcd37cc1e13b03c71f87c47d40974c80ec3919c97af5be235",
+              "content": "The ColdPath choice is not viable \u2014 this is a licence constraint, not a preference, so it forecloses the option rather than merely tempering it",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_c16f78b34d83298a04d5b3df09db781314e3e804e8fd70f0ec6de123f1869e",
+              "content": "The revert to NordicFreight is forced by the licence constraint and the audit failure, not by preference",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        }
+      ]
+    }
+  },
+  "recall_goal": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "forty restaurant accounts by December growth goal",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "1a21037b62e-0afbdd2fccbe",
+          "content": "restaurant account growth goal",
+          "point_kind": "core:goal",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 7.0,
+          "snippet": "restaurant account growth goal",
+          "scores": {
+            "fts": 7.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 7.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.471698,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 6,
+            "centrality_norm": 1.0,
+            "base_score": 0.235849,
+            "final_score": 0.259434,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+              "content": "The year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "content": "Growth is gated by delivery capacity, not sales effort",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+              "content": "Every new restaurant account requires a morning delivery slot",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+              "content": "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that slot",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+              "content": "The growth goal depends on the delivery partner keeping morning slots",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_6458f1182ca40c28529f5e600932eb5d89b873bcd55b76a3429b15d295f6c9",
+              "content": "The constraint on account growth is operational \u2014 delivery slots plus cold-chain compliance \u2014 and a counted account is a signed agreement plus a temperature-logged first delivery",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        },
+        {
+          "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+          "content": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038891c-48081fb35e04",
+              "related_id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.07091,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.766857+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.5,
+          "snippet": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "scores": {
+            "fts": 4.5,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.5
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f51d-f158cff53888",
+            "name": "NordicFreight",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "source_turn_id": 7,
+          "span_start": 84,
+          "span_end": 157,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.283019,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.333333,
+            "base_score": 0.141509,
+            "final_score": 0.146226,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21038891c-48081fb35e04",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f51d-f158cff53888",
+              "entity_type": "subject",
+              "content": "NordicFreight"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+          "content": "Every new restaurant account requires a morning delivery slot",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd18-dccade26063c",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.75,
+          "snippet": "Every new restaurant account requires a morning delivery slot",
+          "scores": {
+            "fts": 3.75,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.75
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "Every new account requires a morning delivery slot",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.226415,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.5,
+            "base_score": 0.113208,
+            "final_score": 0.118868,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037bd18-dccade26063c",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+          "content": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fdb8-f7b7900ef2f5",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.6,
+          "snippet": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots",
+          "scores": {
+            "fts": 3.6,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.6
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f51d-f158cff53888",
+            "name": "NordicFreight",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "the incumbent, NordicFreight, is structurally unable to serve our morning restaurant slots \u2014 its 6pm order cutoff caused four missed slots in January",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.215094,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.333333,
+            "base_score": 0.107547,
+            "final_score": 0.111132,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036fdb8-f7b7900ef2f5",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f51d-f158cff53888",
+              "entity_type": "subject",
+              "content": "NordicFreight"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+          "content": "The year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "1a21037bf2c-3e42badd50e5",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21037bf2c-3e42badd50e5",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:00:18.605019+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.33333333333333,
+          "snippet": "The year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+          "scores": {
+            "fts": 3.33333333333333,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.33333333333333
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "the year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.194969,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.333333,
+            "base_score": 0.097484,
+            "final_score": 0.100733,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037beb5-d3ee8c22b54e",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "mitigations": [
+            {
+              "id": "1a21037bf2c-3e42badd50e5",
+              "content": "[MITIGATION] Growth is gated by delivery capacity, not sales effort",
+              "strength": 0.3,
+              "operator_id": "1a21037beb5-d3ee8c22b54e"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            }
+          ],
+          "contested": true
+        }
+      ]
+    }
+  },
+  "recall_decision": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "we choose ColdPath Logistics as our delivery partner",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+          "content": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fcf1-9443c1763746",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.5,
+          "snippet": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "scores": {
+            "fts": 6.5,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.5
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "ColdPath Logistics supports the choice because it offers a 9pm cutoff that meets the morning slots",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 1.0,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.285714,
+            "base_score": 0.5,
+            "final_score": 0.514286,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21036fcf1-9443c1763746",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f52c-bd9822c36fa6",
+              "entity_type": "subject",
+              "content": "ColdPath Logistics"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+          "content": "The growth goal depends on the delivery partner keeping morning slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "The growth goal depends on the delivery partner keeping morning slots",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21037b6db-fc82b4e2c384",
+            "name": "delivery partner",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "the goal depends on the delivery partner keeping morning slots",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.903226,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 4,
+            "centrality_norm": 0.571429,
+            "base_score": 0.451613,
+            "final_score": 0.477419,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037be44-7ee2667a2578",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            },
+            {
+              "id": "1a21037b6db-fc82b4e2c384",
+              "entity_type": "subject",
+              "content": "delivery partner"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+          "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a210388976-d2fb28a92550",
+              "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.867372+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a2103889d1-7e8ea741b732",
+              "related_id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.865174+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.16666666666667,
+          "snippet": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "scores": {
+            "fts": 4.16666666666667,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.16666666666667
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 2,
+              "total": 2
+            },
+            "contention": 1.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.548387,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.428571,
+            "base_score": 0.274194,
+            "final_score": 0.285945,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "counter_evidence": [
+            {
+              "id": "1a210388976-d2fb28a92550",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            },
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            }
+          ],
+          "nands": [
+            {
+              "id": "1a210388976-d2fb28a92550",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            },
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f52c-bd9822c36fa6",
+              "entity_type": "subject",
+              "content": "ColdPath Logistics"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+          "content": "Growth is gated by delivery capacity, not sales effort",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd18-dccade26063c",
+              "related_id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.808382+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd92-dd15aabed099",
+              "related_id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.992544+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:17.201956+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.565849+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "1a21037bf2c-3e42badd50e5",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21037bf2c-3e42badd50e5",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:00:18.605019+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "Growth is gated by delivery capacity, not sales effort",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 4,
+              "nand_count": 0,
+              "total": 4
+            },
+            "contention": 0.0,
+            "variance": 0.054424,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "growth is gated by delivery capacity, not sales effort",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.516129,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 6,
+            "centrality_norm": 0.857143,
+            "base_score": 0.258065,
+            "final_score": 0.280185,
+            "variance": 0.054424,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037bd18-dccade26063c",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21037bd92-dd15aabed099",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a21037be44-7ee2667a2578",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+          "content": "Every new restaurant account requires a morning delivery slot",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd18-dccade26063c",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "Every new restaurant account requires a morning delivery slot",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "Every new account requires a morning delivery slot",
+          "source_turn_id": 3,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.516129,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.428571,
+            "base_score": 0.258065,
+            "final_score": 0.269125,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21037bd18-dccade26063c",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21037b62e-0afbdd2fccbe",
+              "entity_type": "object",
+              "content": "restaurant account growth goal"
+            },
+            {
+              "id": "1a21037b687-5f607ae2b25a",
+              "entity_type": "object",
+              "content": "delivery capacity"
+            }
+          ],
+          "contested": true
+        }
+      ]
+    }
+  },
+  "recall_reversal": {
+    "tool": "tortoise_recall",
+    "args": {
+      "query": "revert to NordicFreight ColdPath failed the audit",
+      "mode": "state",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "mode": "state",
+      "results": [
+        {
+          "id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+          "content": "The cold-chain audit failed ColdPath Logistics last week",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a2103889d1-7e8ea741b732",
+              "related_id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.697250+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 9.0,
+          "snippet": "The cold-chain audit failed ColdPath Logistics last week",
+          "scores": {
+            "fts": 9.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 9.0
+          },
+          "ep": {
+            "confidence_mean": 0.3294,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 1,
+              "total": 1
+            },
+            "contention": 1.0,
+            "variance": 0.073855,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "ColdPath Logistics failed its cold-chain audit last week.",
+          "source_turn_id": 1,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 1.0,
+            "confidence": 0.329383,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.285714,
+            "base_score": 0.329383,
+            "final_score": 0.338794,
+            "variance": 0.073855,
+            "contested": true
+          },
+          "counter_evidence": [
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "content": "[NAND operator NAND]",
+              "is_operator": true
+            }
+          ],
+          "nands": [
+            {
+              "id": "1a2103889d1-7e8ea741b732",
+              "label": "",
+              "op_type": "NAND",
+              "precision": 0.5,
+              "mechanism": "NAND"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21038820e-9508b38d44fa",
+              "entity_type": "object",
+              "content": "the cold-chain audit"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "1a210388253-b38cc3526614",
+          "content": "the revert to NordicFreight",
+          "point_kind": "core:decision",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.0,
+          "snippet": "the revert to NordicFreight",
+          "scores": {
+            "fts": 3.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.0
+          },
+          "status": "live",
+          "entity_type": "object",
+          "recall_ranking": {
+            "relevance_norm": 0.324808,
+            "confidence": 0.481115,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.428571,
+            "base_score": 0.15627,
+            "final_score": 0.162967,
+            "variance": 0.0,
+            "contested": false
+          },
+          "related_points": [
+            {
+              "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+              "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+              "content": "The revert does not restore full delivery capability",
+              "point_kind": "statement"
+            },
+            {
+              "id": "pt_c16f78b34d83298a04d5b3df09db781314e3e804e8fd70f0ec6de123f1869e",
+              "content": "The revert to NordicFreight is forced by the licence constraint and the audit failure, not by preference",
+              "point_kind": "statement"
+            }
+          ],
+          "contested": false
+        },
+        {
+          "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+          "content": "The revert does not restore full delivery capability",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038891c-48081fb35e04",
+              "related_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.510080+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 2.5,
+          "snippet": "The revert does not restore full delivery capability",
+          "scores": {
+            "fts": 2.5,
+            "vector": null,
+            "structural": null,
+            "rrf": 2.5
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 1,
+              "nand_count": 0,
+              "total": 1
+            },
+            "contention": 0.0,
+            "variance": 0.07091,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "the revert does not restore full delivery capability",
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.268542,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.285714,
+            "base_score": 0.134271,
+            "final_score": 0.138107,
+            "variance": 0.07091,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21038891c-48081fb35e04",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a210388253-b38cc3526614",
+              "entity_type": "object",
+              "content": "the revert to NordicFreight"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+          "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038885e-04c766e361a4",
+              "related_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.982862+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21038885e-04c766e361a4",
+              "related_id": "1a210388a48-0473eea44122",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210388a48-0473eea44122",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:01:10.600408+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a2103888c6-46223b4e5bfb",
+              "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.867372+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a2103888c6-46223b4e5bfb",
+              "related_id": "1a210388aab-ab691e5d2954",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210388aab-ab691e5d2954",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:01:10.699588+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 2.58333333333333,
+          "snippet": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "scores": {
+            "fts": 2.58333333333333,
+            "vector": null,
+            "structural": null,
+            "rrf": 2.58333333333333
+          },
+          "ep": {
+            "confidence_mean": 0.4622,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 2,
+              "nand_count": 0,
+              "total": 2
+            },
+            "contention": 0.0,
+            "variance": 0.067128,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "quote": "we revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "source_turn_id": 5,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.27792,
+            "confidence": 0.46223,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 3,
+            "centrality_norm": 0.428571,
+            "base_score": 0.128463,
+            "final_score": 0.133969,
+            "variance": 0.067128,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21038885e-04c766e361a4",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            },
+            {
+              "id": "1a2103888c6-46223b4e5bfb",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "mitigations": [
+            {
+              "id": "1a210388a48-0473eea44122",
+              "content": "[MITIGATION] NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+              "strength": 0.3,
+              "operator_id": "1a21038885e-04c766e361a4"
+            },
+            {
+              "id": "1a210388aab-ab691e5d2954",
+              "content": "[MITIGATION] NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+              "strength": 0.3,
+              "operator_id": "1a2103888c6-46223b4e5bfb"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a210388253-b38cc3526614",
+              "entity_type": "object",
+              "content": "the revert to NordicFreight"
+            }
+          ],
+          "contested": true
+        },
+        {
+          "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+          "content": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038891c-48081fb35e04",
+              "related_id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.07091,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.766857+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 2.25,
+          "snippet": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "scores": {
+            "fts": 2.25,
+            "vector": null,
+            "structural": null,
+            "rrf": 2.25
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f51d-f158cff53888",
+            "name": "NordicFreight",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "source_turn_id": 7,
+          "span_start": 84,
+          "span_end": 157,
+          "entity_type": "point",
+          "recall_ranking": {
+            "relevance_norm": 0.240409,
+            "confidence": 0.5,
+            "confidence_source": "posterior",
+            "ep_state": "measured",
+            "belief_informed_order": true,
+            "degree": 2,
+            "centrality_norm": 0.285714,
+            "base_score": 0.120205,
+            "final_score": 0.123639,
+            "variance": 0.083333,
+            "contested": true
+          },
+          "arguments": [
+            {
+              "id": "1a21038891c-48081fb35e04",
+              "label": "",
+              "op_type": "IMPL",
+              "precision": 0.5,
+              "mechanism": "IMPL"
+            }
+          ],
+          "related_objects": [
+            {
+              "id": "1a21036f51d-f158cff53888",
+              "entity_type": "subject",
+              "content": "NordicFreight"
+            }
+          ],
+          "contested": true
+        }
+      ]
+    }
+  },
+  "decision_search": {
+    "tool": "tortoise_search",
+    "args": {
+      "query": "we choose ColdPath Logistics as our delivery partner",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "result": [
+        {
+          "id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+          "content": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21036fcf1-9443c1763746",
+              "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.04895,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T00:59:27.985104+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-01",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.5,
+          "snippet": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "scores": {
+            "fts": 6.5,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.5
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "ColdPath Logistics supports the choice because it offers a 9pm cutoff that meets the morning slots",
+          "source_turn_id": 3
+        },
+        {
+          "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+          "content": "The growth goal depends on the delivery partner keeping morning slots",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.054424,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.686497+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "The growth goal depends on the delivery partner keeping morning slots",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21037b6db-fc82b4e2c384",
+            "name": "delivery partner",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "the goal depends on the delivery partner keeping morning slots",
+          "source_turn_id": 3
+        },
+        {
+          "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+          "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a210388976-d2fb28a92550",
+              "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.867372+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "NAND",
+              "operator_id": "1a2103889d1-7e8ea741b732",
+              "related_id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+              "related_kind": "statement",
+              "direction": "outgoing",
+              "role": "source",
+              "peer": {
+                "id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.865174+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.16666666666667,
+          "snippet": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+          "scores": {
+            "fts": 4.16666666666667,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.16666666666667
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 2,
+              "total": 2
+            },
+            "contention": 1.0,
+            "variance": 0.083333,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f52c-bd9822c36fa6",
+            "name": "ColdPath Logistics",
+            "kind": "core:organization",
+            "status": "live"
+          },
+          "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+          "source_turn_id": 3
+        },
+        {
+          "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+          "content": "The revert does not restore full delivery capability",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038891c-48081fb35e04",
+              "related_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:09.510080+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "The revert does not restore full delivery capability",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 1,
+              "nand_count": 0,
+              "total": 1
+            },
+            "contention": 0.0,
+            "variance": 0.07091,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "quote": "the revert does not restore full delivery capability"
+        },
+        {
+          "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+          "content": "Growth is gated by delivery capacity, not sales effort",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd18-dccade26063c",
+              "related_id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.808382+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037bd92-dd15aabed099",
+              "related_id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.992544+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037be44-7ee2667a2578",
+              "related_id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:17.201956+00:00"
+              },
+              "family_size": 2,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:00:16.565849+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21037beb5-d3ee8c22b54e",
+              "related_id": "1a21037bf2c-3e42badd50e5",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a21037bf2c-3e42badd50e5",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:00:18.605019+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-03",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "Growth is gated by delivery capacity, not sales effort",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": 0.5,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 4,
+              "nand_count": 0,
+              "total": 4
+            },
+            "contention": 0.0,
+            "variance": 0.054424,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "quote": "growth is gated by delivery capacity, not sales effort"
+        }
+      ]
+    }
+  },
+  "decision_point_id": null,
+  "reversal_search": {
+    "tool": "tortoise_search",
+    "args": {
+      "query": "we revert to NordicFreight and stop using ColdPath",
+      "limit": 5
+    },
+    "ok": true,
+    "reply": {
+      "result": [
+        {
+          "id": "doc-05_t3",
+          "content": "[assistant] Marta Reyes (Operations Lead): It means we cannot keep using ColdPath Logistics for chilled deliveries. Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate, so the ColdPath choice is not viable.",
+          "point_kind": "event",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "[assistant] Marta Reyes (Operations Lead): It means we cannot keep using ColdPath Logistics for chilled deliveries. Our wholesale licence forbids subcontracting chilled goods to a partner without a va",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "ep": {
+            "confidence_mean": null,
+            "ep_state": "absent",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.0,
+            "contested": false,
+            "has_ep": false,
+            "measured": false,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "draft"
+        },
+        {
+          "id": "doc-04_t0",
+          "content": "[user] Let us write down the ownership so it stops being ambiguous.",
+          "point_kind": "event",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-04",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 6.0,
+          "snippet": "[user] Let us write down the ownership so it stops being ambiguous.",
+          "scores": {
+            "fts": 6.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 6.0
+          },
+          "ep": {
+            "confidence_mean": null,
+            "ep_state": "absent",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.0,
+            "contested": false,
+            "has_ep": false,
+            "measured": false,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "draft"
+        },
+        {
+          "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+          "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a21038885e-04c766e361a4",
+              "related_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.5,
+                "variance": 0.083333,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.982862+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a21038885e-04c766e361a4",
+              "related_id": "1a210388a48-0473eea44122",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210388a48-0473eea44122",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:01:10.600408+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "IMPL",
+              "operator_id": "1a2103888c6-46223b4e5bfb",
+              "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "related_kind": "statement",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+                "kind": "statement",
+                "status": "live",
+                "confidence": 0.329383,
+                "variance": 0.073855,
+                "contested": true,
+                "ep_state": "measured",
+                "created_at": "2026-11-25T01:01:08.867372+00:00"
+              },
+              "family_size": 3,
+              "op_created_at": null
+            },
+            {
+              "predicate": "",
+              "mechanism": "mitigated_by",
+              "operator_id": "1a2103888c6-46223b4e5bfb",
+              "related_id": "1a210388aab-ab691e5d2954",
+              "related_kind": "mitigation",
+              "direction": "incoming",
+              "role": "target",
+              "peer": {
+                "id": "1a210388aab-ab691e5d2954",
+                "kind": "mitigation",
+                "status": "live",
+                "confidence": null,
+                "variance": null,
+                "contested": false,
+                "created_at": "2026-11-25T01:01:10.699588+00:00"
+              },
+              "family_size": 0,
+              "op_created_at": null
+            }
+          ],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.375,
+          "snippet": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "scores": {
+            "fts": 4.375,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.375
+          },
+          "ep": {
+            "confidence_mean": 0.4622,
+            "ep_state": "measured",
+            "evidence": {
+              "impl_count": 2,
+              "nand_count": 0,
+              "total": 2
+            },
+            "contention": 0.0,
+            "variance": 0.067128,
+            "contested": true,
+            "has_ep": true,
+            "measured": true,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "quote": "we revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+          "source_turn_id": 5
+        },
+        {
+          "id": "pt_27cbd158fd8306ff6d0713815bb9bc3f51fe6ccc97a629b07a47164b0b7fc3",
+          "content": "The licence constraint tempers the appeal of using uncertified couriers for short or overflow routes",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-02",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 4.0,
+          "snippet": "The licence constraint tempers the appeal of using uncertified couriers for short or overflow routes",
+          "scores": {
+            "fts": 4.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 4.0
+          },
+          "ep": {
+            "confidence_mean": null,
+            "ep_state": "absent",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.0,
+            "contested": false,
+            "has_ep": false,
+            "measured": false,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "quote": "tempers the appeal of using uncertified couriers for short or overflow routes"
+        },
+        {
+          "id": "pt_0ffba412ed47976bb6d94ad9b0a74beea65fc6391502b25d2116d748e98681",
+          "content": "Marta Reyes owns renegotiating with NordicFreight",
+          "point_kind": "statement",
+          "match_source": "fts",
+          "relationships": [],
+          "topics": [],
+          "summary": "",
+          "sessionId": "doc-05",
+          "eventId": "",
+          "sourcePath": "",
+          "similarity": 3.0,
+          "snippet": "Marta Reyes owns renegotiating with NordicFreight",
+          "scores": {
+            "fts": 3.0,
+            "vector": null,
+            "structural": null,
+            "rrf": 3.0
+          },
+          "ep": {
+            "confidence_mean": null,
+            "ep_state": "absent",
+            "evidence": {
+              "impl_count": 0,
+              "nand_count": 0,
+              "total": 0
+            },
+            "contention": 0.0,
+            "variance": 0.0,
+            "contested": false,
+            "has_ep": false,
+            "measured": false,
+            "baseline": false,
+            "informed_order": "not_consulted"
+          },
+          "status": "live",
+          "subject": {
+            "id": "1a21036f576-4ff0e1fbd786",
+            "name": "Marta Reyes",
+            "kind": "core:naturalPerson",
+            "status": "live"
+          },
+          "quote": "Marta Reyes (Operations Lead) owns renegotiating with NordicFreight.",
+          "source_turn_id": 5
+        }
+      ]
+    }
+  },
+  "reversal_point_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+  "expand_reversal": {
+    "tool": "tortoise_expand_relationships",
+    "args": {
+      "point_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f"
+    },
+    "ok": true,
+    "reply": {
+      "result": [
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+          "related_kind": "statement",
+          "related_content": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
+          "direction": "incoming",
+          "operator_id": "1a21038885e-04c766e361a4",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "1a210388a48-0473eea44122",
+          "related_kind": "statement",
+          "related_content": "[MITIGATION] NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "direction": "incoming",
+          "operator_id": "1a21038885e-04c766e361a4",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+          "related_kind": "statement",
+          "related_content": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+          "direction": "incoming",
+          "operator_id": "1a2103888c6-46223b4e5bfb",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "1a210388aab-ab691e5d2954",
+          "related_kind": "statement",
+          "related_content": "[MITIGATION] NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+          "direction": "incoming",
+          "operator_id": "1a2103888c6-46223b4e5bfb",
+          "related_status": "live"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "artifact": "census.json",
+    "producer": "run_census.py",
+    "producer_path": "docs/evidence/14592-operating-model-validation/run_census.py",
+    "artifact_status": "pre-producer",
+    "produced_by_committed_producer": false,
+    "provenance_key_shape": "call-receipt",
+    "renamed_receipt_key": "provenance -> confidence_provenance_read",
+    "missing_producer_keys": [],
+    "hardcoded_point_ids": [
+      "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f"
+    ],
+    "regenerate_with": "TORTOISE_VENV=<checkout>/.venv TORTOISE_DB_URI=<uri to xv14592_operating_model> ./run.sh run_census.py",
+    "note": "Carried from the 2026-11-25 run, made before this producer was committed, so it is NOT this script's output. It cannot be regenerated: xv14592_operating_model lived in a lane container that was torn down (REPORT.md \u00a79). The deviations above are measured by stamp_provenance.py, not asserted.",
+    "stamp_probe": "stamp_provenance.py"
+  },
+  "confidence_provenance_read": {
+    "tool": "tortoise_check_confidence",
+    "args": {
+      "topic": "cold chain constraint",
+      "include_provenance": true,
+      "limit": 5
+    },
+    "ok": true,
+    "reply": []
+  }
+}
