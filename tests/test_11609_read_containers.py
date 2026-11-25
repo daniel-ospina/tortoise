@@ -578,35 +578,20 @@ CONTAINERS = (
 )
 
 
-# ── the six doors that stay live, and the envelope that is the reason ────────
+# ── the containers carry the envelope; the doors they absorbed are retired ────
 #
-# `tortoise/tool_registry.py`'s retirement block, this file's `TestApprovedNames`
-# docstring and the PR body all point at `TestWrapEnvelopeDoorsStayLive` as the
-# pin for the six doors this batch deliberately does NOT retire (#12951 review
-# P2: the citation named a class that did not exist, so the load-bearing
-# exception was pinned by nothing). This is that class.
+# Until #11609 lane P11 this section pinned SIX LIVE DOORS (`WRAP_ENVELOPE_DOORS`)
+# and the reason they could not retire: each declared `-> list[dict]`, so each
+# shipped `{"result": [...]}`, while its `-> Any` container's list arm shipped a
+# bare text block with NO `structuredContent` (#10085) — a caller migrating from
+# the door to the container would have silently lost its structured reply.
 #
-# The exception is the #8482 failure repair: these six declare `-> list[dict]`,
-# and the array schema is what carries a `_safe` failure payload. Their
-# containers return `Any`, so retiring a door before the container declares an
-# envelope would move the repair off the advertised path. The pin therefore has
-# three halves — the door is LIVE, its declared envelope is a LIST, and its
-# handler reaches an SDK door that RESOLVES — and it is asserted for every one
-# of the six rather than for a representative.
-WRAP_ENVELOPE_DOORS = (
-    # tool name, the SDK door its handler reaches
-    ("tortoise_search_sessions", "search_knowledge"),
-    ("tortoise_suggest_entry_points", "search_knowledge"),
-    # `list_batches` is the one member whose SDK method is the EXACT read
-    # `list_knowledge(kind='batch')` delegates to, so this door reaches the method
-    # itself rather than the container — privatised to `_list_batches` by #12901 FINAL.
-    ("tortoise_list_batches", "_list_batches"),
-    ("tortoise_list_namespaces", "graph_overview"),
-    ("tortoise_diary_read", "list_knowledge"),
-    ("tortoise_expand_relationships", "explore_connections"),
-)
-
-
+# ⛔ THE OBJECT OF THE ASSERTION MOVED, and that is the point of the retirement
+# rather than a weakening of it. The nine doors now retire FORWARD, so
+# `TestTheContainersCarryTheEnvelope` (below) asserts the property they were held
+# to protect — for every container, on the wire — instead of asserting the doors
+# still exist as a proxy for it. Reading a door's ANNOTATION was never the fact a
+# caller depends on; `structured_content` is.
 def _handler_sdk_reach(fn) -> set[str]:
     """Every `<sdk>.<method>` the handler hands to `_safe` (`_get_org_sdk().<m>`)."""
     import ast
@@ -626,80 +611,120 @@ def _handler_sdk_reach(fn) -> set[str]:
     return reached
 
 
-class TestWrapEnvelopeDoorsStayLive:
-    @pytest.mark.parametrize("tool,sdk_door", WRAP_ENVELOPE_DOORS)
-    def test_the_door_is_live_and_keeps_its_list_envelope(self, tool, sdk_door):
-        """Live in the registry, still `-> list[dict]`, and its reach RESOLVES."""
-        import inspect
+#: Container × arm → whether the arm returns a LIST (wrapped) or a MAPPING (untouched).
+#: The pairs are (mcp container, payload the SDK arm returns, call kwargs).
+LIST_ARMS = (
+    ("tortoise_search_knowledge", {"query": "x"}),
+    ("tortoise_search_knowledge", {"query": "x", "mode": "sessions"}),
+    ("tortoise_search_knowledge", {"query": "x", "mode": "entry_points"}),
+    ("tortoise_list_knowledge", {"kind": "batch"}),
+    ("tortoise_list_knowledge", {"kind": "namespace"}),
+    ("tortoise_check_confidence", {"calibrate": True}),
+    ("tortoise_explore_connections", {"node_id": "n"}),
+    ("tortoise_graph_overview", {"section": "namespaces"}),
+    ("tortoise_graph_overview", {"section": "structure_check"}),
+)
 
+#: The arms that are MAPPINGS and must NOT be re-wrapped. This is the half that
+#: made the `list[dict] | dict` union expensive: `claim` is `list_knowledge`'s
+#: DEFAULT arm and a client may read `sc["results"]` off it.
+MAPPING_ARMS = (
+    ("tortoise_list_knowledge", {"kind": "claim"}),
+    ("tortoise_search_knowledge", {"query": "x", "mode": "tag", "tag": "t"}),
+    ("tortoise_search_knowledge", {"query": "x", "mode": "issue_insight",
+                                   "title": "t"}),
+)
+
+
+class _PayloadSDK:
+    """An SDK whose every door answers `payload` — enough to read the WIRE shape."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __getattr__(self, _name):
+        def _call(*_a, **_k):
+            return self.payload
+        return _call
+
+
+class TestTheContainersCarryTheEnvelope:
+    """The nine doors retired BECAUSE this holds; it is what replaces holding them.
+
+    #11609 lane P11: `_row_section_envelope` is applied at four container
+    boundaries, so a container's LIST arm answers the same `{"result": [...]}`
+    bytes the door it absorbed did, and its MAPPING arms keep their shape. Both
+    halves are asserted, because the second is the one a careless fix breaks: a
+    `list[dict] | dict` annotation would pass the first and silently re-wrap
+    `list_knowledge(kind="claim")`.
+    """
+
+    @staticmethod
+    def _call(monkeypatch, tool, payload, kwargs):
+        from tortoise import mcp_auth
         from tortoise import mcp_server as ms
 
-        live = {t.name: t for t in TOOL_REGISTRY}
-        assert tool in live, (
-            f"{tool} is one of the six doors this batch keeps live (#8482 repair). "
-            "Retiring it before its container declares an envelope moves the "
-            "repair off the advertised path")
-        assert tool not in RETIRED_USE_INSTEAD, (
-            f"{tool} was retired forward — that is the exact move the six-door "
-            "exception forbids until the container declares `-> list[dict]`")
-        assert tool not in {t.name for t in RETIRED_TOOL_REGISTRY}, tool
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: _PayloadSDK(payload))
+        # `_safe`'s transport gate is fail-closed; http trusts the transport, which
+        # is exactly the wiring these shape assertions need and nothing more.
+        token = mcp_auth._transport_mode.set("http")
+        try:
+            return getattr(ms, tool)(**kwargs)
+        finally:
+            mcp_auth._transport_mode.reset(token)
 
-        fn = getattr(ms, tool)
-        # `eval_str=True`: `mcp_server` defers annotations (`from __future__ import
-        # annotations`), so the raw annotation is the STRING `'list[dict]'` and a
-        # string comparison would pass on `'list[dict] | None'` too.
-        annotation = inspect.signature(fn, eval_str=True).return_annotation
-        assert annotation == list[dict], (
-            f"{tool} declares {annotation!r}: the array schema is what carries the "
-            "#8482 `_safe` failure payload, so a non-list envelope defeats the "
-            "reason this door is still live")
+    @pytest.mark.parametrize("tool,kwargs", LIST_ARMS)
+    def test_a_list_arm_ships_the_wrap_envelope(self, tool, kwargs, monkeypatch):
+        import json
 
-        reached = _handler_sdk_reach(fn)
-        assert sdk_door in reached, (
-            f"{tool} no longer answers through `{sdk_door}` (reaches {sorted(reached)})"
-            " — the door must keep answering through a door that resolves")
-        assert hasattr(TortoiseSDK, sdk_door), (
-            f"{tool} answers through `TortoiseSDK.{sdk_door}`, which does not exist "
-            "— the live door would raise on its first call")
+        payload = [{"id": "row-1"}]
+        out = self._call(monkeypatch, tool, payload, kwargs)
+        assert getattr(out, "structured_content", None) == {"result": payload}, (
+            f"{tool}{kwargs} did not ship the #10085 envelope — a caller migrating off "
+            "the door it absorbed gets a bare text block instead of `{'result': [...]}`"
+        )
+        assert out.meta == {"fastmcp": {"wrap_result": True}}, (
+            f"{tool}{kwargs} lost the `wrap_result` meta claim, which is what a client "
+            "that unwraps keys off"
+        )
+        # The DOOR's own bytes: compact JSON, no spaces, non-ASCII preserved.
+        assert out.content[0].text == json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")), (
+            f"{tool}{kwargs} shipped different `content` bytes than the door did")
 
-    def test_the_six_are_the_whole_exception(self):
-        """No live door OUTSIDE these six both declares `-> list[dict]` and reaches a container.
+    @pytest.mark.parametrize("tool,kwargs", MAPPING_ARMS)
+    def test_a_mapping_arm_is_not_re_wrapped(self, tool, kwargs, monkeypatch):
+        payload = {"results": [{"id": "1"}], "total": 1, "hasMore": False}
+        out = self._call(monkeypatch, tool, payload, kwargs)
+        assert not hasattr(out, "structured_content"), (
+            f"{tool}{kwargs} now returns a ToolResult. A MAPPING arm already ships "
+            "`structuredContent` under a `-> Any` annotation, so wrapping it nests the "
+            "caller's payload one level deeper — the customer-visible re-wrap the "
+            "`list[dict] | dict` union would have caused on SIX live tools."
+        )
+        assert out == payload, f"{tool}{kwargs} altered a mapping arm: {out!r}"
 
-        The parametrized case above asserts the six individually, which makes a
-        `kept <= live_names` / `not retired_forward` restatement of it tautological
-        (#12951 review round 2, P3). The property that is NOT implied is the one this
-        exception is actually about: the envelope is kept for doors that answer through
-        a read/query CONTAINER, so a seventh such door must be a deliberate decision
-        recorded here, not an addition this file cannot see. Measured over the live
-        registry: three live doors also declare `-> list[dict]` and reach NO container
-        (`tortoise_calibrate_summary`, `tortoise_check_structure`, `tortoise_search`),
-        so a container reach — not the envelope alone — is what makes a door a member.
-        """
-        import inspect
-
+    def test_a_refusal_payload_is_not_wrapped(self, monkeypatch):
+        """A `_safe` failure is a Mapping, so it passes through and #11153 grades it."""
+        from tortoise import mcp_auth
         from tortoise import mcp_server as ms
 
-        live_names = {t.name for t in TOOL_REGISTRY}
-        kept = {tool for tool, _ in WRAP_ENVELOPE_DOORS}
-        assert kept <= live_names
-        retired_forward = kept & set(RETIRED_USE_INSTEAD)
-        assert not retired_forward, retired_forward
+        class _Boom:
+            def __getattr__(self, _name):
+                def _call(*_a, **_k):
+                    raise RuntimeError("backend down")
+                return _call
 
-        offenders = {}
-        for tool in sorted(live_names - kept):
-            fn = getattr(ms, tool, None)
-            if fn is None:  # a registered name with no handler is another test's finding
-                continue
-            annotation = inspect.signature(fn, eval_str=True).return_annotation
-            if annotation != list[dict]:
-                continue
-            hit = _handler_sdk_reach(fn) & set(CONTAINERS)
-            if hit:
-                offenders[tool] = sorted(hit)
-        assert not offenders, (
-            f"{offenders} declare `-> list[dict]` AND answer through a container: the "
-            "wrap-envelope exception is exactly these six doors, so a seventh carries "
-            "the same #8482/#10914 decision and belongs in WRAP_ENVELOPE_DOORS")
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: _Boom())
+        token = mcp_auth._transport_mode.set("http")
+        try:
+            out = ms.tortoise_list_knowledge(kind="batch")
+        finally:
+            mcp_auth._transport_mode.reset(token)
+        assert not hasattr(out, "structured_content"), (
+            "a refusal was wrapped into the success envelope — the failure channel is "
+            "`isError` (#11153), and wrapping it would make the refusal read as data")
+        assert "error" in out
 
 
 class TestSuggestEntryPointsFallback:

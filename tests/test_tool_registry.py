@@ -135,14 +135,24 @@ class TestRegistryEquivalence:
         out at `tortoise/tool_registry.py:2596-2601`). The membership above is
         re-derived from `RETIRED_USE_INSTEAD`, not typed: `config/surface-order.yml`
         records the same nine.
-        ⛔ SIX of the family's members are DELIBERATELY still live —
+        ⛔ SIX of the family's members were DELIBERATELY live through the waves above —
         `search_sessions`, `suggest_entry_points`, `list_batches`,
         `list_namespaces`, `diary_read`, `expand_relationships` — because each
-        declares a list envelope, which is what carries the #8482 failure repair a
-        `-> Any` container cannot; they answer through their containers today and
-        retire with the envelope (the same reasoning #10914 applied to
-        `check_structure`). Pinned by
-        `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+        declares a list envelope, which is what carries the #8482 failure repair; they
+        answered through their containers from the start and retired in **#11609 lane P11**
+        with the envelope, in the batch that gave the containers one.
+
+        #11609 lane P11 (THIS PR): NINE envelope doors retire FORWARD and NO container is
+        added — 39 − 9 = **30** live, 73 + 9 = **82** retired. The nine are `search`,
+        `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`,
+        `diary_read`, `expand_relationships`, `check_structure` and `calibrate_summary`.
+        The enabling change is NOT an annotation: `_row_section_envelope` is applied at
+        four container boundaries, so a LIST arm ships the door's own
+        `{"result": [...]}` bytes and a MAPPING arm is returned untouched — which is why
+        the `list[dict] | dict` union (and its customer-visible re-wrap of
+        `list_knowledge(kind="claim")`) was not needed. What is left off-target is THREE:
+        `tortoise_query` (the paged destination of two already-retired pointers) plus
+        `tortoise_org_create` and `tortoise_ingest` (no MCP destination — archive batches).
 
         #11609 lane B (#4282 Phase 2, the WRITE/MUTATE containers): FOURTEEN advertised
         names retire into SIX approved containers and the six containers arrive —
@@ -209,7 +219,10 @@ class TestRegistryEquivalence:
         # the same change (`create_edge`, `create_operator`, `events_poll`, `delete`,
         # `list_graphs`). The count is a derived fact; the pins that matter are in
         # `tests/test_11609_door_retirement.py` and `…_p7_target_registration.py`.
-        assert len(TOOL_REGISTRY) == 39, f"Expected 39, got {len(TOOL_REGISTRY)}"
+        # #11609 lane P11: 39 -> 30 — nine envelope doors retired forward once the
+        # CONTAINERS carried the envelope (`_row_section_envelope` at four boundaries),
+        # with no container row added in either term.
+        assert len(TOOL_REGISTRY) == 30, f"Expected 30, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -220,7 +233,8 @@ class TestRegistryEquivalence:
         # #11609 lane P7: 68 -> 73 — FIVE doors retired forward in the change that
         # registered their destinations (`create_edge`, `create_operator`,
         # `events_poll`, `delete`, `list_graphs`).
-        assert len(retired) == 73, f"Expected 73 retired, got {len(retired)}"
+        # #11609 lane P11: 73 -> 82 — the nine envelope doors (see the paragraph above).
+        assert len(retired) == 82, f"Expected 82 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -320,9 +334,15 @@ class TestRegistryEquivalence:
             "without `recall=True` lands the caller on the calibration view, a "
             "different read")
         # #454-era surface tools covered by this PR's tests
-        for name in ("tortoise_query", "tortoise_suggest_entry_points",
-                     "tortoise_graph_overview"):
+        for name in ("tortoise_query", "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
+        # #11609 lane P11: `tortoise_suggest_entry_points` retired FORWARD into the
+        # `search_knowledge` container's `mode="entry_points"` arm, so the assertion
+        # follows the CAPABILITY rather than re-asserting a name the approved target
+        # removes (the same treatment `validate_domain` and `review_connections` get).
+        assert "entry_points" in _rui["tortoise_suggest_entry_points"], (
+            "a pointer without `mode=\"entry_points\"` lands the caller on the hybrid "
+            "relevance read, which is a different question")
 
         # Phase-4 mining/promotion/dedup/timeline surface (#787). `tortoise_promote_point`
         # retired into the `tortoise_refresh_confidence` container (#11609 lane B,

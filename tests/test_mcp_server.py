@@ -1278,12 +1278,20 @@ class TestStdioEntrypointToolRegistration:
             #                       `tortoise_list_graphs`, retired forward into
             #                       `tortoise_graph_overview(section="graphs")`, whose
             #                       section arm has dispatched to that body since #4282)
+            #   39 -  9 + 0 = 30   (#11609 lane P11: the NINE envelope doors retire
+            #                       forward once `_row_section_envelope` was applied at
+            #                       four container boundaries — `search`,
+            #                       `search_sessions`, `suggest_entry_points`,
+            #                       `list_batches`, `list_namespaces`, `diary_read`,
+            #                       `expand_relationships`, `check_structure`,
+            #                       `calibrate_summary`. No container row is added: every
+            #                       destination was already advertised)
             # ⛔ Not the HTTP-filtered view: that one is 34 at this head
             # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 34
             # and 32 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
-            assert len(names) >= 39, f"expected >=39 tools, got {len(names)}"
+            assert len(names) >= 30, f"expected >=30 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.

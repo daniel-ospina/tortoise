@@ -2846,10 +2846,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_recall":
         'tortoise_check_confidence(recall=True, query=..., mode="state", '
         'min_confidence=..., limit=...)',
-    # ⛔ `tortoise_expand_relationships` is NOT retired here either: it declares a LIST
-    # envelope (`-> list[dict]`) and so carries the #8482 repair, which a `-> Any`
-    # container cannot. Its handler already answers through the container
-    # (`include_content=True`); the name retires with the container's envelope.
+    # ⛔ `tortoise_expand_relationships` retires HERE, in the batch that gave
+    # `explore_connections` the list envelope (#11609 lane P11). Its handler already
+    # answered through the container (`include_content=True`); what held it was that
+    # the container was `-> Any`, so a list came back as a bare text block where the
+    # door shipped `{"result": [...]}` — the #10085 shape. `_row_section_envelope`
+    # at the container boundary closes exactly that, so the reason is now false.
     "tortoise_entity_profile": 'tortoise_explore_connections(node_id, hops=...)',
     "tortoise_traverse": 'tortoise_explore_connections(node_id, hops=...)',
     "tortoise_review_connections": 'tortoise_review_link_candidates(kind="connections", mode=...)',
@@ -3192,6 +3194,47 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # HTTP tenant filter that is the reason it is a section rather than an SDK
     # read — so "no container row yet" is false, and the door retires forward.
     "tortoise_list_graphs": 'tortoise_graph_overview(section="graphs")',
+    # ── #11609 lane P11 — the LAST NINE envelope doors retire forward ──
+    #
+    # Every one of these was held by the SAME reason: it declares `-> list[dict]`, so
+    # it ships `{"result": [...]}` (FastMCP's `x-fastmcp-wrap-result` envelope), and
+    # its container is annotated `-> Any`, so the container's list arm shipped a bare
+    # text block with NO `structuredContent` (#10085, measured through a connector as
+    # `{"text": "[\"org_…\"]"}`). Retiring the door first would have moved a caller
+    # from a structured reply to an opaque one — the silent shape change those doors
+    # existed to prevent.
+    #
+    # ⛔ THE ENABLING CHANGE IS AT THE CONTAINER, NOT IN THIS MAP. Each container now
+    # runs its result through `_row_section_envelope` (`mcp_server.py`), which wraps a
+    # LIST exactly as FastMCP wraps a wrap-annotated tool and returns a MAPPING
+    # untouched — so the list arms ship the retired door's own bytes, every already-dict
+    # arm keeps its shape, and no customer-visible `structuredContent` re-wrap occurs.
+    # That is why this batch needs no `list[dict] | dict` annotation and therefore no
+    # surface approval: the approval gate was written for the RE-WRAP, and there is none.
+    #
+    # Arguments are named wherever the container RENAMES one — `agent_name` → `agent` and
+    # `last_n` → `limit` on the diary, `kind_filter` → `kind` on entry points,
+    # `point_id` → `node_id` on the relationship walk — because a pointer that drops a
+    # renamed argument either raises `TypeError` for the migrating caller or silently
+    # widens the read. `mode=`/`kind=`/`section=`/`calibrate=` are the containers' OWN
+    # discriminators (bridge table Part A) and every pointer resolves in ONE hop.
+    "tortoise_search":
+        'tortoise_search_knowledge(query=..., kind=..., limit=..., entity_type=..., '
+        'order_by=..., min_confidence=..., threshold=..., relationship_filter=..., '
+        'traversal_path=...)',
+    "tortoise_search_sessions":
+        'tortoise_search_knowledge(mode="sessions", query=..., agent=..., topics=..., '
+        'after=..., before=..., limit=..., offset=...)',
+    "tortoise_suggest_entry_points":
+        'tortoise_search_knowledge(mode="entry_points", query=..., limit=..., kind=...)',
+    "tortoise_list_batches": 'tortoise_list_knowledge(kind="batch", limit=...)',
+    "tortoise_list_namespaces": 'tortoise_graph_overview(section="namespaces")',
+    "tortoise_diary_read":
+        'tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)',
+    "tortoise_expand_relationships":
+        'tortoise_explore_connections(node_id, include_content=True, hops=...)',
+    "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',
+    "tortoise_calibrate_summary": 'tortoise_check_confidence(calibrate=True)',
 }
 
 
