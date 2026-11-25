@@ -380,7 +380,11 @@ count this PR re-derived
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
-change to what the code does.
+change to what the code does. ⛔ A reader comparing these with a PRE-#13098 reading sees larger
+figures, and neither reading is a hand-count error: the census appendix used to be a TRACKED
+document, and its machine-written rows carried cite targets of their own — 244 distinct ones, of
+which 242 were cited nowhere else — so untracking it shrank this population by exactly those 242.
+`tortoise/activation_scorecard.py`'s `--refresh` note carries the reconciliation.
 
 ---
 
