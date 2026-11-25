@@ -3291,8 +3291,11 @@ def uncut_graph_remedy(org_id: str = "<org>", *,
     `arm` alone there would send them to a no-op).
 
     So the callers that KNOW the reason and the graph pass them. A caller with
-    no reason (`:3303`'s pre-fix call shape, a static site) still gets the
-    population verb, which is correct for the state it can name.
+    no reason (`_warn_uncut_graph`'s pre-fix zero-argument call, a static site)
+    still gets the population verb, which is correct for the state it can name.
+    ⛔ NO LINE NUMBER IS QUOTED HERE ON PURPOSE (#13589): a `file.py:<line>`
+    locator is head-bound, and this file's own caller moved when this docstring
+    grew — the SYMBOL is the address, the number would already be stale.
     """
     prefix = "`tools/record_allocator_cli.py "
     mode = None
