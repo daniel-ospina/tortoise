@@ -411,3 +411,29 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
     assert ids.index("newcomer") < ids.index("shared"), (
         f"at 1-based 65 in both lists the single-term rank-0 candidate must "
         f"lead — got {ids}")
+
+
+def test_the_dense_fixture_pin_does_not_restate_the_symmetric_case_as_necessary():
+    """Round 18's P2-1 residue, in the file that review did not enumerate.
+
+    ``tests/test_entity_key_expansion.py``'s dense-fixture comment said "two
+    terms beat a single-list rank only inside the <=61-in-both bound" — the
+    SYMMETRIC case published as a NECESSARY condition, i.e. the same false
+    generalization round 18 blocked in the three carriers, surviving in a fifth
+    place because the sentence was copied rather than cited. The authoritative
+    statement therefore lives ONCE (``expansion_merge.fuse_expansion_pass``'s
+    docstring, graded by ``test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance``
+    above), and this arm pins the copy's absence instead of adding a guard over
+    new prose.
+
+    Non-vacuity (measured at ``3ce7407dfddd``, the head this arm was added for):
+    with the pre-fix comment restored on that tree this REDS naming the phrase;
+    against the fixed comment it is green.
+    """
+    src = (Path(__file__).resolve().parent / "test_entity_key_expansion.py").read_text()
+    stale = "only inside the <=61-in-both bound"
+    assert stale not in src, (
+        "the dense-fixture comment restates the two-term advantage as a NECESSARY "
+        f"condition ({stale!r}) — that reading is the SYMMETRIC case only, and the "
+        "PAIR condition is stated once, in `expansion_merge.fuse_expansion_pass`'s "
+        "docstring (round 18, P2-1). Re-word the copy to cite the carrier.")
