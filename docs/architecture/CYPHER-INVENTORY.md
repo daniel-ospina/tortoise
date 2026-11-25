@@ -522,7 +522,8 @@ the `file:line`-versus-SCALAR gap this section names, from yet another side — 
 regenerated at the merged tree, not carried from the branch head.
 
 **The cut this PR (#14624, `cy-14610`) makes — ONE non-Cypher door call and NOT a single Cypher
-statement — re-derived by RUNNING the tool at the tree merged with `origin/main` `a3cedc2b96fac`.**
+statement — re-derived by RUNNING the tool at the tree merged with `origin/main`, the merge base at
+this head (`git merge-base HEAD origin/main`).**
 `tortoise/record_allocator.py::provision_graph_record` derives the seed's floor from the record's own
 enumeration, so it issues `cur.execute(JOURNAL_COUNT_SQL, …)` — a Postgres door call sharing the same
 `execute` predicate as every graph statement, which the census folds to `non_cypher_door_calls`

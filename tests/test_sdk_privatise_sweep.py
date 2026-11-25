@@ -539,9 +539,12 @@ def _origin_branches_containing(rev: str) -> set[str]:
     `pull/14108/merge`. On a REUSED self-hosted runner workspace that ref OUTLIVES the job that
     fetched it, and it contains `83e94826a8a` by construction (the PR head it merges does), so
     the premise arm reds forever against a BRANCH it never measured — a checkout artifact read
-    as a branch. `refs/remotes/origin/*` is exactly the browser-visible branch set the block's
-    narrow claim is about; `remotes/pull/*` is not, and a "remote" a checkout invented is not
-    one of the repo's remotes.
+    as a branch. `refs/remotes/origin/*` is the browser-visible branch set the block's narrow claim
+    is about — on a clone whose `remote.origin.fetch` maps all of `refs/heads/*`. ⛔ A NARROWED
+    refspec (a single-branch fetch, which a CI checkout commonly performs) narrows this answer to
+    that one ref, and the non-vacuity probe below is satisfied by `origin/main` alone — so the probe
+    grades the NAMESPACE being readable, never the branch set being complete. `remotes/pull/*` is
+    not that set, and a "remote" a checkout invented is not one of the repo's remotes.
 
     `refs/remotes/origin/HEAD` is dropped: it is a SYMREF onto a branch already in the set, so
     keeping it would only make one containment read as two.
