@@ -848,13 +848,23 @@ def test_the_health_payload_takes_the_count_and_its_reasons_from_one_snapshot(
 def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
     """⛔ F3 (#14610 review): the payload must not name a remedy that leaves it red.
 
-    The register is PROCESS memory. `record_allocator_cli.py backfill` heals the
-    RECORD in ANOTHER process and cannot retract this process's entry, and on a
-    quiescent graph — or with the allocator flag off, where `record_owns_position`
-    returns before its read — no later observation happens at all, so the entry
-    and the `ok` it drives clear only on a restart. Publishing the count alone
-    left an operator who ran the documented remedy staring at a red `ok` with no
-    way to know why.
+    The register is PROCESS memory. `record_allocator_cli.py backfill --arm
+    --acknowledge-cutover` cuts the RECORD over in ANOTHER process and cannot
+    retract this process's entry, and on a quiescent graph — or with the
+    allocator flag off, where `record_owns_position` returns before its read — no
+    later observation happens at all, so the entry and the `ok` it drives clear
+    only on a restart. Publishing the count alone left an operator who ran the
+    documented remedy staring at a red `ok` with no way to know why.
+
+    ⛔ AND ONE COMMAND DOES NOT REACH BOTH POPULATIONS (#14610 review, P2 —
+    ported here). The pre-F1 sentence said a bare `backfill` "heals the RECORD",
+    which is false twice: a bare `backfill` only SEEDS the row (a `seeded` row
+    allocates nothing), and `backfill`'s population is graphs with NO cursor row
+    — so a graph whose row already exists in mode `seeded` is outside it
+    entirely (`backfill` prints `considered: 0` and exits 0) and needs the `arm`
+    verb, while a `halted` one needs `reopen` first. An operator following the
+    old sentence on either of those populations got a green command and an
+    unchanged red field. The assertions below pin the verbs, not the prose.
     """
     rw.reset_uncut_graphs()
     try:
@@ -872,6 +882,19 @@ def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
         assert "backfill" in note and "another process" in note, (
             "the note must say that `backfill` repairs the RECORD in another "
             "process — otherwise it reads as the clear route for this field")
+        # ⛔ THE TWO POPULATIONS, TWO VERBS (#14610 review P2, ported). A note
+        # that names only `backfill` is a remedy that silently no-ops on the two
+        # states where the field is red — so the verbs are asserted by name.
+        assert "--arm" in note and "--acknowledge-cutover" in note, (
+            "a bare `backfill` only SEEDS the row and a `seeded` row allocates "
+            "nothing; the note must carry `--arm --acknowledge-cutover`")
+        assert "mode_seeded" in note and "considered: 0" in note, (
+            "a graph already in mode `seeded` is OUTSIDE `backfill`'s population "
+            "— an operator needs to see that its exit 0 and `considered: 0` do "
+            "not mean the row was cured")
+        assert "arm --org-id" in note and "reopen" in note, (
+            "the `seeded` population is cured by `arm`, and a `halted` one needs "
+            "`reopen` first — naming neither leaves both red with no verb")
         # ...and it is published on the UNARMED arm too, because it is a constant
         # rather than a measurement (a `None` there would read as "not evaluated").
         assert _health(monkeypatch, dsn=None)["armed_but_uncut_clears"] == note

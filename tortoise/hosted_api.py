@@ -8437,20 +8437,30 @@ def _backup_watcher_health() -> dict:
 #: HOW `record.armed_but_uncut` CAN BE RETRACTED, published BESIDE it (#14610
 #: review F3). The register is PROCESS MEMORY fed from this process's own
 #: observations, so ⛔ an OUT-OF-PROCESS repair cannot retract an entry:
-#: `record_allocator_cli.py backfill` heals the RECORD, while the entry clears on
-#: that graph's next ARMED write to THIS process, a successful provision, or a
-#: restart. A QUIESCENT graph never gets that later write, and with the allocator
-#: flag OFF `record_owns_position` returns before its read at all — so there the
-#: entry, and the `ok` it drives, clear ONLY on a restart. Publishing the count
-#: without that sentence names a remedy that leaves the field red: the latch
-#: class the fold exists to avoid. `ok` is therefore a statement about THIS
-#: PROCESS, not about the deployment's population (which is a `sweep` query).
+#: `record_allocator_cli.py backfill --arm --acknowledge-cutover` cuts the RECORD
+#: over (a bare `backfill` only SEEDS the row, and a `seeded` row allocates
+#: nothing — #14610 review F1), while the entry clears on that graph's next ARMED
+#: write to THIS process, a successful provision, or a restart. A QUIESCENT graph
+#: never gets that later write, and with the allocator flag OFF
+#: `record_owns_position` returns before its read at all — so there the entry, and
+#: the `ok` it drives, clear ONLY on a restart. Publishing the count without that
+#: sentence names a remedy that leaves the field red: the latch class the fold
+#: exists to avoid. `ok` is therefore a statement about THIS PROCESS, not about
+#: the deployment's population (which is a `sweep` query).
 _UNCUT_CLEARS_NOTE = (
     "a restart, or an observation of that graph by THIS process (an armed write "
     "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
-    "`record_allocator_cli.py backfill` heals the RECORD but runs in another "
-    "process, so on a quiescent graph — or with the allocator flag off — this "
-    "process's entry, and `ok`, clear only on restart"
+    "⛔ TWO STATES, TWO VERBS — one command does not reach both (#14610 review, "
+    "P2): for a graph with NO cursor row `record_allocator_cli.py backfill "
+    "--org-id <org> --arm --acknowledge-cutover` cuts the RECORD over (a bare "
+    "`backfill` only seeds the ROW, and a `seeded` row allocates nothing), "
+    "while a graph whose row already exists in mode `seeded` (`reason: "
+    "mode_seeded`) is OUTSIDE that verb's population — `backfill` prints "
+    "`considered: 0` and exits 0 — and is cured by `record_allocator_cli.py "
+    "arm --org-id <org> --graph-id <graph> --acknowledge-cutover`; a `halted` "
+    "one needs `reopen` first. Either runs in another process, so on a quiescent "
+    "graph — or with the allocator flag off — this process's entry, and `ok`, "
+    "clear only on restart"
 )
 
 
