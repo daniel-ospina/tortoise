@@ -5609,6 +5609,32 @@ def _max_height_media_spans(css: str) -> list[tuple[int, int, int]]:
     return spans
 
 
+#: `@media (min-height: Npx) {` — the OTHER half of the height axis. A
+#: `min-height` block fires on TALL viewports, so a rule inside it is a cascade
+#: candidate only ABOVE its threshold; without this reader a
+#: `@media (min-height: 500px) { #beat-hero > :first-child { margin-top: 0 } }`
+#: fires at the 820px arm, wins the cascade there, and is invisible to the
+#: guard — #14697 residual 1, one query family over (measured GREEN before this
+#: reader existed).
+MIN_HEIGHT_MEDIA_RE = re.compile(
+    r"@media\s*\(\s*min-height:\s*(\d+)\s*px\s*\)\s*\{")
+
+
+def _min_height_media_spans(css: str) -> list[tuple[int, int, int]]:
+    """Every `@media (min-height: Npx) { … }` block as `(N, start, end)`.
+
+    The mirror of `_max_height_media_spans` on the same axis, with the same
+    same-length indexing into `_css_blanked(css)`.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int, int]] = []
+    for match in MIN_HEIGHT_MEDIA_RE.finditer(blanked):
+        start = match.end() - 1
+        body = _brace_block(blanked, start)
+        spans.append((int(match.group(1)), match.start(), start + len(body) + 2))
+    return spans
+
+
 def _compact_selector(selector: str) -> str:
     """`selector` with its whitespace collapsed and `>` tight on both sides.
 
@@ -5799,8 +5825,10 @@ def _beats_whose_ground(
 class _GroundMargin(NamedTuple):
     """One declaration that can set a ground end, with its CASCADE weight.
 
-    `height` is the `N` of the `@media (max-height: Npx)` block the rule lives
-    in, or `math.inf` for a BASE rule — a base rule fires at every viewport.
+    `height`/`min_height` are the `max-height`/`min-height` bounds of the media
+    block the rule lives in (`math.inf` / `-math.inf` for a BASE rule), so the
+    rule is ACTIVE at viewport height H when `min_height <= H <= height` — a
+    base rule is active everywhere.
     """
 
     value: str
@@ -5808,6 +5836,7 @@ class _GroundMargin(NamedTuple):
     specificity: tuple[int, int, int]
     order: int
     height: float
+    min_height: float = -math.inf
 
 
 #: The shorthands that also set a ground end, and the value each END takes out
@@ -5898,13 +5927,20 @@ def _beat_ground_margin_candidates(
     and per-block attribution is what keeps the 400px-block fail-open closed
     (#14683 review P2).
 
+    ⛔ BOTH height families are read. Leaving out `min-height` was the same
+    residual one query family over: `@media (min-height: 500px) { #beat-hero >
+    :first-child { margin-top: 0 } }` fires at the 820px arm, wins the cascade
+    there, and a max-only reader cannot see it at all.
+
     Stated, because a guard is trusted for what it claims: a selector whose
     specificity cannot be modelled (`:is()`/`:where()`/`:not()`/`:has()`) is
-    ranked MAXIMALLY specific by `_css_specificity`, i.e. fail-closed; `@layer`,
-    `@supports` and inheritance are not modelled (this page uses none).
+    ranked MAXIMALLY specific by `_css_specificity`, i.e. fail-closed;
+    `@layer`, `@supports`, inheritance and the RANGE syntax (`height >= 400px`)
+    are not modelled (this page uses none).
     """
     blanked = _css_blanked(html)
     height_spans = _max_height_media_spans(html)
+    floor_spans = _min_height_media_spans(html)
     other_media = _media_block_spans(html)
     grounds = _beat_ground_elements(html)
     out: dict[str, dict[str, list[_GroundMargin]]] = {}
@@ -5920,6 +5956,8 @@ def _beat_ground_margin_candidates(
         height = math.inf
         enclosing = [block_height for block_height, start, end in height_spans
                      if start <= match.start() < end]
+        floors = [block_height for block_height, start, end in floor_spans
+                  if start <= match.start() < end]
         if enclosing:
             # ⛔ INNERMOST, not first (#14683 review F1, measured). Nested
             # at-rules are valid CSS and the effective condition is the
@@ -5928,7 +5966,14 @@ def _beat_ground_margin_candidates(
             # credited with 820 — which the first-match read did, leaving the
             # guard GREEN over a page top-aligned at 375x812.
             height = float(min(enclosing))
-        elif any(start <= match.start() < end for start, end in other_media):
+        floor = -math.inf
+        if floors:
+            # The same intersection on the OTHER bound: `height >= 500` nested
+            # inside `height >= 400` is `height >= 500`, so the LARGEST floor
+            # is the one that applies.
+            floor = float(max(floors))
+        if not enclosing and not floors and any(
+                start <= match.start() < end for start, end in other_media):
             continue
         for part in (p for p in prelude.split(",") if p.strip()):
             specificity = _css_specificity(part) or (9, 9, 9)
@@ -5939,7 +5984,7 @@ def _beat_ground_margin_candidates(
                 for beat in _beats_whose_ground(part, side, grounds):
                     out.setdefault(beat, {}).setdefault(side, []).append(
                         _GroundMargin(value, important, specificity,
-                                      match.start(), height))
+                                      match.start(), height, floor))
     return out
 
 
@@ -5947,12 +5992,11 @@ def _winning_ground_margin(candidates: list[_GroundMargin],
                           height: int) -> str | None:
     """The value that OWNS the end at viewport height `height`, or `None`.
 
-    A candidate fires at every height at or below its block's `max-height`
-    (`math.inf` for a base rule), so only candidates ACTIVE at `height`
-    compete; among those the winner is decided by importance, then
-    specificity, then source order.
+    A candidate fires only inside the height band its block declares, so the
+    candidates ACTIVE at `height` compete; among those the winner is decided by
+    importance, then specificity, then source order.
     """
-    active = [c for c in candidates if c.height >= height]
+    active = [c for c in candidates if c.min_height <= height <= c.height]
     if not active:
         return None
     return max(active, key=lambda c: (c.important, c.specificity,
@@ -6715,6 +6759,24 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert any("beat-ingest > :first-child" in p for p in problems), problems
         assert _short_viewport_centring_problems(page("h2")) == [], (
             "`#beat-ingest > h2:first-child` DOES name the first child")
+
+    def test_a_min_height_override_also_wins_the_cascade(self):
+        """The other half of the height axis: a `min-height` rule can override.
+
+        `@media (min-height: 500px)` fires at the 820px arm (a phone in portrait
+        is taller than 500px), so it overrides the `auto` there exactly as a
+        same-block rule does — and a max-height-only reader does not see the
+        block at all. Measured GREEN before that reader existed: the same
+        residual #14697 recorded, one query family over.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra=("    @media (min-height: 500px) {\n"
+                   "      #beat-hero > :first-child { margin-top: 0; }\n"
+                   "    }"))
+        problems = _short_viewport_centring_problems(page)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
 
     def test_the_ground_element_is_read_from_the_markup(self):
         """The reader resolves the child's tag/class/id, not just the combinator."""
