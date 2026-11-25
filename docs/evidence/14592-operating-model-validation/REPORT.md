@@ -424,6 +424,14 @@ Nothing else in the old parenthetical held either: the run wrote exactly **one**
 (2 `related` + 1 `managedBy`), not a `managedBy` count. The run's totals are **22 structural / 4
 direct** across the five documents.
 
+Where the inversion is introduced is visible in the writer: the structural arm of
+`tortoise/relation_write.py` passes the model's endpoints straight through —
+`sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)`, with no direction argument and no
+re-ordering (the module's only two `ownedBy` mentions, `:512` and `:546`, are prose about the
+direction table; it holds no `ownedBy`-specific branch) — so the row is written in the word order the
+relation was stated in, and nothing canonicalises it to `ownedBy`'s documented sense. The fix
+therefore belongs at that seam or in the extraction prompt, not in the report.
+
 So the gap is not "the extractor has nowhere to put ownership" — it has the relation, the endpoints
 and the predicate, and writes them the wrong way round. That is a smaller fix and a worse defect
 than the one this section used to report.
