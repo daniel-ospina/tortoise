@@ -1662,12 +1662,13 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — their
-#: guards landed earlier, or, for `tools/graphevent_home.py`,
-#: `tools/claim_dense_leg_13732.py` and `tools/record_runner.py`, in the very change
-#: that added the row — so "landed and pinned in one act" is not unique to any one
-#: file here. This file PINS each choice, and its newest row
-#: (`tools/fly_secret_declaration_report.py`, `#5128`) is itself such a row — and the
+#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — some of
+#: these guards landed in earlier changes and some in the very change that added
+#: their row, so "landed and pinned in one act" is a shape several rows share
+#: rather than a property of one of them, and no list here is exhaustive: a count
+#: or an enumeration in this comment has gone stale twice already. This file PINS
+#: each choice, and its newest row is `tools/fly_secret_declaration_report.py`
+#: (`#5128`) — and the
 #: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
 #: CPython, so for two of these files an old interpreter was reported as the
 #: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
