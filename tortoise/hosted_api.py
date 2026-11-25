@@ -15839,7 +15839,16 @@ def _names_this_layer(kind: str, vocabulary: frozenset[str]) -> bool:
     if kind in vocabulary:
         return True
     namespace, sep, bare = kind.partition(":")
-    return bool(sep) and namespace == "core" and bare in vocabulary
+    if not sep:
+        # ⛔ The BARE form of a `core:`-declared kind, and it is not symmetric by
+        # accident: §5's subject vocabulary is namespaced (`core:team`,
+        # `core:role`, …), so `?kind=team` — the spelling `POST /v1/subjects`
+        # itself writes — would otherwise be refused while `core:team` is
+        # admitted. `kind_layers.declares_subject` states this rule for the
+        # binder; the read door has to apply it too, or the two disagree about a
+        # value the write door stores.
+        return f"core:{kind}" in vocabulary
+    return namespace == "core" and bare in vocabulary
 
 
 async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,

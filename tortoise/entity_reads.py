@@ -167,8 +167,19 @@ def list_layer(
     conditions = [_layer_terminal_predicate(label)]
     params: dict[str, Any] = {}
     if kind:
-        conditions.append(f"n.{kind_prop} = $kind")
-        params = {"kind": kind}
+        # ⛔ THE TWO SPELLINGS OF ONE KIND ARE THE SAME KIND, so the filter is an
+        # equivalence set, not equality. `core:team` and `team` are both admitted
+        # by the route's validator and BOTH are storable (`kind_is_known` strips
+        # the namespace on the write side, so a graph can hold either), and an
+        # equality filter answered `200 count: 0, truncated: false` for the
+        # spelling that happened not to be the stored one — the "byte-identical
+        # to *this graph names no such thing*" page this read exists not to
+        # produce, recommended by the route's own refusal list. The set is
+        # exactly {bare, core:bare} for a `core:`-namespaced kind and its bare
+        # form; an ARBITRARY namespace stays exact, because `zzz:goal` is a
+        # vocabulary item of its own and must not pull in the bare `goal` rows.
+        conditions.append(f"n.{kind_prop} IN $kinds")
+        params = {"kinds": _kind_equivalents(kind)}
     where = " AND ".join(conditions)
 
     # ⛔ `ro_query` (GRAPH.RO_QUERY), never `query`, on every read in this module.
@@ -198,6 +209,27 @@ def list_layer(
         params={**params, "skip": offset, "limit": limit},
     ).result_set
     return [dict(r[0]) for r in rows], total
+
+
+def _kind_equivalents(kind: str) -> list[str]:
+    """The spellings that NAME THE SAME KIND as ``kind`` — ``[bare, core:bare]``.
+
+    Deliberately NOT a namespace-stripping generalisation: an arbitrary namespace
+    (``zzz:goal``) is its own vocabulary item, so it answers only itself, while
+    the repo's ``core:`` namespace and the bare form are two spellings of one
+    value (``kind_layers.declares_subject`` states the same equivalence for the
+    binder). ``NIL_KINDS`` is its own pair for the same reason.
+    """
+    from tortoise.kind_layers import NIL_KINDS
+
+    if kind in NIL_KINDS:
+        return sorted(NIL_KINDS)
+    namespace, sep, bare = kind.partition(":")
+    if not sep:
+        return [kind, f"core:{kind}"]
+    if namespace == "core":
+        return [kind, bare]
+    return [kind]
 
 
 def layer_kind_values(proj: Any, label: str) -> frozenset[str]:

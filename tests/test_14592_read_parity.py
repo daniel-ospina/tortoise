@@ -435,6 +435,40 @@ def test_layer_lists_refuse_an_invented_NAMESPACE_but_read_a_carried_one(tmp_pat
         assert [o["name"] for o in ok.json()["objects"]] == ["NS"], ok.json()
 
 
+def test_layer_lists_treat_the_two_spellings_of_one_kind_as_one_kind(tmp_path):
+    """⛔ review P2/P3: `team` and `core:team` are ONE kind on both sides.
+
+    §5's subject vocabulary is NAMESPACED (`subject_kind_names()` = `core:team`,
+    `core:role`, …), so a validator that only compared against the vocabulary's
+    own spellings refused `?kind=team` — the spelling `POST /v1/subjects` itself
+    writes — with a 400. And once both spellings are admitted, an EQUALITY filter
+    answers `200 count: 0, truncated: false` for whichever spelling the rows do
+    not happen to use, which is the misleading-complete page this whole
+    validation exists to remove.
+
+    ⛔ An ARBITRARY namespace is a different vocabulary item and stays exact:
+    `zzz:goal` must not pull in the bare `goal` rows.
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/subjects", json={"name": "Ops", "subjectKind": "team"})
+        client.post("/v1/subjects", json={"name": "QA", "subjectKind": "core:team"})
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        client.post("/v1/objects", json={"name": "NS", "objectKind": "zzz:goal"})
+
+        # The bare spelling is admitted (not a 400) and finds BOTH rows.
+        for kind in ("team", "core:team"):
+            r = client.get("/v1/subjects", params={"kind": kind})
+            assert r.status_code == 200, (kind, r.text)
+            assert sorted(s["name"] for s in r.json()["subjects"]) == ["Ops", "QA"], \
+                (kind, r.json())
+        # …and the equivalence is `core:`-only: an arbitrary namespace is exact.
+        for kind, expected in (("goal", ["ACME"]), ("core:goal", ["ACME"]),
+                               ("zzz:goal", ["NS"])):
+            r = client.get("/v1/objects", params={"kind": kind})
+            assert r.status_code == 200, (kind, r.text)
+            assert [o["name"] for o in r.json()["objects"]] == expected, (kind, r.json())
+
+
 def test_layer_lists_admit_the_nil_kind_and_never_name_a_value_they_refuse(tmp_path):
     """⛔ review P2: `other` was REFUSED while the refusal listed it as allowed.
 
