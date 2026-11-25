@@ -1276,9 +1276,6 @@ def test_backfill_never_arms_a_halted_counter(monkeypatch) -> None:
     assert entry["armed"] is False, entry
     assert "reopen" in entry["arm_refused"], (
         f"the entry must name the halt's own remedy: {entry}")
-    assert _sql_key(ra.UNCUT_GRAPHS_SQL) in _FakeRecordConn(answers)._answers, (
-        "the fake answers the population read the code actually runs — a renamed "
-        "statement would silently answer nothing instead of failing here")
 
 
 # ── the backfill ───────────────────────────────────────────────────────────

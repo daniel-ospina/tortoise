@@ -366,7 +366,7 @@ def test_the_sweep_reports_which_not_cut_over_state_each_graph_is_in() -> None:
     assert payload["count"] == 3, payload
     assert {e["graph_id"]: e["counter_mode"] for e in payload["uncut_graphs"]} == {
         "g-seeded": "seeded", "g-halted": "halted", "g-born": None}, payload
-    assert "NOT ALLOCATING" in payload["count_means"], (
+    assert "allocating" in payload["count_means"] and "seeded" in payload["count_means"], (
         f"the payload must say what `count: 0` means: {payload.get('count_means')!r}")
 
 

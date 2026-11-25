@@ -520,10 +520,10 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # graph has a counter row", which was FALSE for a `seeded` graph before
         # this fix — the state `backfill` without `--arm` leaves behind.
         "count_means": (
-            "no graph the record can see is NOT ALLOCATING — a counter row is "
-            "absent or in a non-terminal mode (`seeded`, `halted`) for every "
-            "one it has seen writing. A `seeded` graph allocates nothing, so "
-            "it keeps appearing here until it is `active`"),
+            "every graph the record has seen WRITING is allocating: it has a "
+            "counter row and that row is `active`. A graph with NO counter row, "
+            "or with one in a non-terminal mode (`seeded`, `halted`), allocates "
+            "nothing and is counted here until it is `active`"),
     }
     if payload["floor_is_the_journals_count"] is None:
         # ⛔ THE REASON MUST NAME THE CAUSE THE `null` ACTUALLY HAD (#13043
