@@ -3225,7 +3225,7 @@ def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
     ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
     (`projection/entities.py:3236`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
     the denominator while the capture count reported it as a turn row it is not. The same predicate
-    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1138`, which tests
+    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1307`, which tests
     `is_episodic` ALONE and would count an operator Point as a claim (#10982 review round 2).
     """
     where = ""

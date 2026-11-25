@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2333 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2299 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
@@ -279,7 +279,7 @@ def _residue_block() -> str:
     the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
     ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
     defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
-    penultimate branch reading as the resolved one. Only the figure ABOVE is graded
+    penultimate branch reading as the resolved one. Only that figure is graded
     (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
     lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
     the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
