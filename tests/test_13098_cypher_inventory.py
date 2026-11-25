@@ -60,7 +60,7 @@ from tools import cypher_inventory as census  # noqa: E402
 #
 # ⛔ WHY. The appendix's rows carry a line number each, so any product commit
 # that moves a statement restamps every later row. While that output was
-# COMMITTED, every such PR had to carry its own regenerated 1,327-row copy —
+# COMMITTED, every such PR had to carry its own regenerated copy —
 # measured 2026-11-24 at `939e37f664`: 8 of 11 open PRs held an edited copy, it
 # was in 6 of 6 then-conflicting PRs, and 3 of the last 20 commits on `main`
 # regenerated it. A committed generated artifact plus N open branches is a
@@ -329,7 +329,7 @@ def test_the_renderer_refuses_to_write_over_the_source(capsys):
 
     `render()`'s own refusal guards the SOURCE'S CONTENT, never the DESTINATION, so
     pointing `--render` at `CYPHER-INVENTORY.src.md` read the clean source, passed
-    that refusal, and wrote source + 1,327 rows over the tracked file. That is
+    that refusal, and wrote source + the appendix rows over the tracked file. That is
     self-locking: `--check` then exits 1 (it carries rows) and `--render` exits 2 (it
     refuses a rowed source), so the tool can neither grade nor repair the tree it
     just wrote. §7 tells every lane to run this verb, so a mistyped path is the
@@ -830,9 +830,10 @@ def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, meas
     """EACH ARM's uniqueness guard reds on its own duplicate (`#13458` review P2-3).
 
     The sibling mutant test proves arm (b) end to end, including the false PASS a first-match
-    search reproduces. That is one arm. `_grade_doc_text` makes SEVEN `_exactly_one` arms, and
-    a guard no test can redden is exactly the "quietly re-opened false PASS" the arms exist to
-    refuse — so this test drives the REAL grading path once per row of `_GRADED_LOOKUPS`:
+    search reproduces. That is one arm. `_grade_doc_text` makes one `_exactly_one` arm per
+    `_GRADED_LOOKUPS` row, and a guard no test can redden is exactly the "quietly re-opened
+    false PASS" the arms exist to refuse — so this test drives the REAL grading path once per
+    row of `_GRADED_LOOKUPS`:
 
       1. locate the line this arm binds, INSIDE the section it is scoped to;
       2. duplicate that line ABOVE itself — a CORRECT restatement, which is the decoy shape
@@ -1961,7 +1962,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     The doc-vs-tree arms above skip unless `TORTOISE_CYPHER_DOC_PIN=1`, and the ONE
     place that sets it is a step of `cypher-diff.yml` — a workflow this module does
     not control. Delete, rename or detach that `env:` entry and every gated arm — each
-    single one plus the 7 parametrized duplicate-arm cases — goes back to SKIPPING in
+    single one plus each parametrized duplicate-arm case, counted from
+    `_GRADED_LOOKUPS` rather than typed here — goes back to SKIPPING in
     every job in the repo, with no red anywhere to notice: a pin that appears to
     protect the census and enforces nothing, which is the INERT-ENFORCER class the
     decoupling was allowed to create only because this pin closes it.
@@ -1998,9 +2000,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "pytest errors in session setup and no census arm runs at all")
     # …and the arms it produces for are still here. A structural count, not a
     # reading of the file's content: the decorator is applied at 8 arms + 1
-    # parametrized one (7 cases) — 8 since #13098 split the table-shape arm, whose
-    # rendered half now renders a document — and an arm leaving this module is a
-    # diff a reviewer sees; what is invisible is the ENV disappearing, which is above.
+    # parametrized one (one case per `_GRADED_LOOKUPS` row) — 8 since #13098 split the
+    # table-shape arm, whose rendered half now renders a document — and an arm leaving
+    # this module is a diff a reviewer sees; what is invisible is the ENV disappearing,
+    # which is above.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
     # is 18 at this head — 9 decorator lines PLUS 9 prose/format mentions: FIVE in

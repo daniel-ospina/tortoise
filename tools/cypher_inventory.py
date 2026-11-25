@@ -92,10 +92,11 @@ USAGE
 
 ⛔ THE DOCUMENT IS GENERATED, NOT COMMITTED. `docs/architecture/CYPHER-INVENTORY.src.md`
 is the tracked source (prose + the 25 pins); `docs/architecture/CYPHER-INVENTORY.md` is
-`--render`'s output — Appendix A's 1,327 `file:line` rows (1,329 lines with the
-table's two header lines) restamp on any commit that moves a statement, so
-committing them made every such PR carry its own copy and conflict with every
-other one (#13098).
+`--render`'s output — Appendix A, one `file:line` row per classified statement
+site, so its length moves with the tree — restamps on any commit that moves a
+statement, so committing it made every such PR carry its own copy and conflict
+with every other one (#13098). ⛔ No row or line count is typed here: the
+appendix's own length is the number, and a copy of it in prose rots.
 """
 
 from __future__ import annotations
@@ -141,7 +142,7 @@ DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
 #: BUILD ARTIFACT and is NOT tracked: the appendix carries one `file:line` row
 #: per statement site, so committing it made every product commit that moved a
 #: statement restamp every later row, and every open PR then carried its own
-#: 1,327-row copy of a census stamped against a different tree. Measured
+#: whole-census copy of it, stamped against a different tree. Measured
 #: 2026-11-24 at `939e37f664`: it appeared in 8 of 11 open PRs and in 3 of the
 #: last 20 commits on `main` (reproducible: `git rev-list -20 main` + a
 #: `diff-tree` per commit), and it was in 6 of 6 then-conflicting PRs.
@@ -885,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ `--render` MUST NOT OVERWRITE A TRACKED PATH. The refusal inside `render()`
     # guards the SOURCE'S CONTENT (a source that already carries rows), never the
     # DESTINATION — so `--render docs/architecture/CYPHER-INVENTORY.src.md` read the
-    # clean source, passed that refusal, and wrote source+1,327 rows over the tracked
+    # clean source, passed that refusal, and wrote source + the appendix rows over the tracked
     # file. That is self-locking: afterwards `--check` exits 1 ("carries N census
     # row(s)") and `--render` exits 2 (refuses the rowed source), so the tool can
     # neither grade nor repair the tree it just corrupted. A mistyped path is the
