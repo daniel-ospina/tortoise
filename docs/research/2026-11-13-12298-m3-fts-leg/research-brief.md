@@ -124,7 +124,7 @@ contain):
 | the leg | `tortoise/search_engine.py:2945` `run_fts_query`, Cypher at `:3157-3166` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2787` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
 | the score discard | `tortoise/search_engine.py:5074` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
-| the index | `tortoise/projection/__init__.py:21042` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:21485`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21927` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
+| the index | `tortoise/projection/__init__.py:21191` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:21634`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:22076` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
 
