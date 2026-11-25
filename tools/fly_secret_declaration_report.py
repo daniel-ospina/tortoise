@@ -161,9 +161,16 @@ TITLE_SUFFIX = (
 #: fix. ⛔ `\S+` is NOT permissive enough and the earlier spelling was self-refuting:
 #: a WHITESPACE-BEARING name (`A B`) is accepted by `read_fly_secret_names`, filed
 #: under a title `\S+` cannot re-read, and so never resolved — the very
-#: "ledger that can only grow" defect (#8841) this comment claimed to prevent. The
-#: group is NON-GREEDY so a name that itself CONTAINS the suffix still round-trips
-#: to the shortest (i.e. the name's own) spelling.
+#: "ledger that can only grow" defect (#8841) this comment claimed to prevent.
+#:
+#: ⛔ WHAT MAKES A SUFFIX-BEARING NAME ROUND-TRIP IS THE `$` ANCHOR, NOT THE
+#: NON-GREEDINESS — an earlier revision of this comment claimed the opposite and a
+#: review measured it false: with the anchor kept, replacing `(.+?)` by `(.+)` leaves
+#: every row in the suite green (49 passed), because a hard `$` forces the group's
+#: extent either way. The non-greedy spelling is kept as the narrower default — it
+#: cannot over-capture on a line carrying the suffix twice — but the PROPERTY this
+#: comment exists to protect is the anchor's.
+#: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` pins it.
 _TITLE_RE = re.compile(
     r"^" + re.escape(TITLE_PREFIX) + r"(.+?)" + re.escape(TITLE_SUFFIX) + r"$"
 )

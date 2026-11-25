@@ -641,15 +641,22 @@ def test_a_whitespace_bearing_name_round_trips_through_the_title_grammar():
 def test_a_name_that_contains_the_title_suffix_still_round_trips():
     """The grammar's `$` anchor is what makes a NON-GREEDY capture safe, so pin it.
 
-    The comment above `_TITLE_RE` states the group is non-greedy "so a name that
-    itself CONTAINS the suffix still round-trips". That property does not come from
-    the non-greediness at all — a shortest-match group is free to stop early — it
-    comes from the ESCAPED SUFFIX being anchored with `$`, which forces the match to
-    run to the end of the line. Removing that anchor (or turning the pattern into a
-    `search` over a longer string) would break exactly this class while leaving every
-    underscore-shaped name green, so the class gets its own row rather than living as
-    prose a reader has to trust. `read_fly_secret_names` accepts such a name: it
-    requires only a non-empty string.
+    An earlier revision of the comment above `_TITLE_RE` claimed the NON-GREEDINESS was
+    what made a suffix-bearing name round-trip. That claim was wrong, and it was
+    measured: with the anchor kept, replacing `(.+?)` by `(.+)` leaves every row in
+    this file green (49 passed), because a hard `$` forces the group's extent either
+    way. What protects the class is the ESCAPED SUFFIX being anchored with `$`, and
+    nothing else pins that — the sibling whitespace row exercises `A B`, `A\tB` and an
+    underscore shape, none of which contains the suffix, so dropping the anchor leaves
+    it green.
+
+    Measured here, not asserted: drop the trailing `r"$"` from `_TITLE_RE` and
+    `pytest -k round_trips` gives `1 failed, 1 passed` — this row reds with
+    `'BEFORE\n'`-style truncation while the sibling whitespace row STAYS GREEN, which is
+    the point. `read_fly_secret_names` accepts any non-empty name and a shortest-match
+    group is free to stop early, so the class is reachable in production. The comment
+    above `_TITLE_RE` states the same causal fact this docstring does, so the two
+    cannot drift apart.
     """
     suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
     for name in (
@@ -1139,13 +1146,24 @@ def test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN():
 def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     """A ledger-closing guard placed BELOW the sweep guards nothing.
 
-    `_Harness.run()` hands the shipped step its `env:` itself, so no behavioural row
-    can see WHERE in the step the guards sit: move either one below the `resolve`
-    call and every row stays green while the sweep has already closed the issue.
-    The guards' VALUES are pinned by
-    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event`; this row
-    pins only the ORDER, so neither property can be lost silently when the other is
-    edited.
+    ⛔ THIS ROW IS A DIAGNOSIS, NOT THE ONLY NET — an earlier revision of this
+    docstring claimed "no behavioural row can see WHERE in the step the guards sit",
+    and a review measured that FALSE: the behavioural rows run the SHIPPED step, so
+    lifting the CLEAN arm's dry-run guard from `:399` to just after `done < "$mine"`
+    gives 4 failed, including `test_a_dispatched_dry_run_resolves_nothing`,
+    `test_a_dispatched_dry_run_files_nothing` and
+    `test_a_dirty_tick_files_one_issue_per_name_and_never_twice`. What this row adds is
+    that it NAMES the fault: a deletion or a reordering reds here with
+    "the CLEAN arm no longer honours the dry-run input" / "a ledger-closing guard sits
+    BELOW the sweep", rather than off a downstream behaviour diff — and it catches a
+    CLEAN-arm deletion at all, which is what the scoping note below exists for.
+
+    The guards' VALUES are pinned separately and both halves exist: `REF` and
+    `DEFAULT_BRANCH` by
+    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event`, and
+    `FILE_ISSUES` by `test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN`
+    (#14601 — that wire is FAIL-OPEN, unlike the other two). This row pins only the
+    ORDER, so neither property can be lost silently when the other is edited.
 
     ⛔ THE SEARCH IS SCOPED TO THE CLEAN ARM, and that is load-bearing rather than
     tidy (a review round measured the unscoped version and an earlier draft of this
