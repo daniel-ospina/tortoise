@@ -1411,6 +1411,7 @@ def test_pi_install_refuses_to_overwrite_a_preserved_entry_point(home):
 
     res = install_capture("pi", home=home)
 
+    assert not res.ok, res.actions
     assert (preserved_dir / "index.ts.disabled").read_text() == "// DO NOT LOSE ME\n", (
         "a preserved entry point was overwritten by the retirement")
     assert (preserved_dir / "index.ts").exists(), (
