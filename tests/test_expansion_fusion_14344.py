@@ -293,6 +293,12 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     i.e. it was wrong on 21 769 of 28 420 sampled (h1, h2, r) triples. The
     carriers now state the exact reduction, and this row REJECTS the inverted
     form so a re-cut cannot quietly restore it.
+
+    ⛔ AND THE RELATION ITSELF IS GRADED, not only the operands — the gap that let
+    that first fix ship. `pair_condition` alone certified a carrier that stated
+    `(h1*h2 - 3721) / (122 + h1 + h2)` with the inequality INVERTED, so a third
+    re-cut could flip `r >` to `r <` and stay green. Both directions are asserted
+    per carrier: the relation that goes with that pair form is `r >`.
     """
     import re
 
@@ -319,6 +325,20 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     # necessity (see the docstring), so its presence is a regression, not a
     # stylistic difference.
     inverted = re.compile(r"\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)\s*/\s*2")
+    # ⛔ THE OPERATOR IS THE HALF THAT WAS STILL UNGRADED, and it is the half that
+    # actually shipped wrong — TWICE. Round 18's first fix carried the right two
+    # operands with the relation INVERTED (`r <`), and this row was GREEN over it,
+    # because `pair_condition` below grades the pair form's OPERANDS and nothing
+    # grades which way the inequality points. The arithmetic points ONE way: the
+    # worse the single-list rank (the larger `r`), the EASIER a two-term candidate
+    # clears it, so the relation is `r > (<pair form>)` — and the mirrored
+    # `r < (<pair form>)` is the same false necessity as the `(h1 + h2 - 61)/2`
+    # form, restated with the right operands. Graded in both directions because a
+    # positive-only test is what let this through.
+    pair_args = (r"h1\s*[*\u00b7]\s*h2\s*[-\u2212]\s*"
+                 r"(?:3721|61\s*(?:\*\*|\u00b2|\^)\s*2?)")
+    pair_direction = re.compile(r"\br\s*>\s*[(\s]*" + pair_args)
+    mirrored_direction = re.compile(r"\br\s*<\s*[(\s]*" + pair_args)
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
@@ -336,6 +356,20 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
             "which is false in both directions: `h1 == h2 == 0` at `r == 13` WINS "
             "(2/61 > 1/74) and `h1 == h2 == 64` at `r == 0` LOSES (2/125 < 1/61). "
             "The exact reduction is `r > (h1*h2 - 3721) / (122 + h1 + h2)`")
+        assert pair_direction.search(text), (
+            f"{where} states the pair form `(h1*h2 - 3721) / (122 + h1 + h2)` "
+            "without the relation that goes with it — the condition is "
+            "`r > (h1*h2 - 3721) / (122 + h1 + h2)`, an inequality in the "
+            "SINGLE-LIST candidate's rank (a worse rank clears it more easily). "
+            "Round 18's first fix stated these operands with `r <`, which is false "
+            "in both directions: `h1 == h2 == 0` at `r == 13` WINS (2/61 > 1/74) "
+            "and `h1 == h2 == 64` at `r == 0` LOSES (2/125 < 1/61).")
+        assert not mirrored_direction.search(text), (
+            f"{where} states the MIRRORED pair condition `r < (h1*h2 - 3721) / "
+            "(122 + h1 + h2)` — the right operands with the relation inverted, "
+            "i.e. the same false necessity the `(h1 + h2 - 61)/2` form published. "
+            "A worse single-list rank clears the pair MORE easily, so the "
+            "relation is `r >`.")
 
 
 def test_the_two_term_advantage_is_bounded_at_1based_61():
