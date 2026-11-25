@@ -498,6 +498,7 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
     assert census.emit("x") == 2, (
         "a closed fd 1 (sys.stdout is None) must answer 2 — 1 is DRIFT")
     monkeypatch.undo()
+
     assert census.emit("x", FailsOnFlush()) == 2, (
         "a write that buffers and fails at FLUSH must answer 2 — returning 0 lets the "
         "shutdown flush become exit 120, which is neither 'could not run' nor DRIFT")
@@ -542,6 +543,35 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
     assert census.main(["--render", str(tmp_path / "out.md")]) == 2, (
         "`--render`'s `render: wrote …` line must go through `emit` for the same "
         "reason: the document WAS written, but the tool still cannot report it")
+
+
+def test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_120():
+    """The `_detach_stdout()` half is graded END-TO-END on a REAL file descriptor.
+
+    ⛔ EVERY DOUBLE THE ARM ABOVE USES HAS NO `fileno()`, so `_detach_stdout()` is a
+    SUPPRESSED NO-OP in all of them — which means the two calls that make that arm's
+    2 survive the interpreter's teardown were graded by NOTHING (#13098 round 11,
+    P2). Measured with both calls deleted: `tools/cypher_inventory.py >/dev/full`
+    exited **120** (`Exception ignored … OSError: [Errno 28]`) while this suite still
+    read `97 passed / 15 skipped`, i.e. a guard the writer's own docstring calls
+    "load-bearing" was deletable in silence.
+
+    Graded on the FD, not through a `subprocess` with a real census: the failure this
+    protects against happens at TEARDOWN, so re-flushing the object after `emit()`
+    returns IS the shutdown flush, and it costs no tree walk inside the required gate.
+    """
+    if not Path("/dev/full").exists():  # pragma: no cover - Linux/BSD only
+        pytest.skip("this platform has no /dev/full to fail a write on")
+    with open("/dev/full", "w", encoding="utf-8") as stream:
+        assert census.emit("x", stream) == 2, (
+            "a full disk on a real FD must answer 2 — 1 is DRIFT")
+        # ⛔ THE DETACH ITSELF: without it the failed `flush()` leaves its bytes in
+        # the buffer and the interpreter's shutdown flush retries them, replacing the
+        # 2 with 120. A re-flush here is that retry, one frame earlier.
+        stream.flush()
+        assert os.fstat(stream.fileno()).st_rdev == os.stat(os.devnull).st_rdev, (
+            "the stream that could not be written was NOT re-pointed at devnull, so "
+            "the shutdown flush will re-raise and turn this 'could not run' into 120")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
@@ -2723,6 +2753,29 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "the step that runs this file satisfies neither half of the session URI gate "
         f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
         "pytest errors in session setup and no census arm runs at all")
+    # ⛔ AND THE TRIGGER, not only the step. Everything above asserts that the step
+    # which RUNS this file is intact — but that step is reached only when the
+    # workflow's `paths:` filter fires, and this split is what rewrote that filter
+    # (`CYPHER-INVENTORY.md` -> `.src.md`). Deleting the source's entry left the whole
+    # suite GREEN (measured: `97 passed / 15 skipped` with the line removed), and the
+    # failure is silent in the other direction too: a source-only pin edit would run
+    # NO job at all, so every gated arm above would simply never be asked and
+    # `TORTOISE_CYPHER_DOC_PIN` would have no producer for that diff — the same
+    # inert-enforcer shape one level out from the `env:` entry this pin already grades.
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    paths = (triggers.get("pull_request") or {}).get("paths") or []
+    for required in (
+        "tortoise/**",
+        "tools/cypher_inventory.py",
+        "tools/cypher_diff_harness.py",
+        "docs/architecture/CYPHER-INVENTORY.src.md",
+        "tests/test_13098_cypher_inventory.py",
+    ):
+        assert required in paths, (
+            f"the `cypher-diff` trigger does not fire on {required!r} (its paths are "
+            f"{paths!r}) — that diff would run NO census job, so the gated arms this "
+            "pin protects are never asked, which is identical to their being absent")
     # …and the arms it produces for are still here. A structural count, not a
     # reading of the file's content: the decorator is applied at 8 arms + 1
     # parametrized one (one case per `_GRADED_LOOKUPS` row) — 8 since #13098 split the
@@ -2788,6 +2841,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_reports_an_unreadable_source_as_could_not_run",
         "test_check_reports_an_unreadable_document_as_could_not_run",
         "test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift",
+        # ⛔ AND THE DETACH THAT MAKES THAT 2 SURVIVE TEARDOWN (#13098 round 11, P2):
+        # every double the arm above uses has no `fileno()`, so `_detach_stdout()` was
+        # a suppressed no-op under test and BOTH call sites were deletable with the
+        # suite green — measured, `>/dev/full` then exits 120 instead of 2.
+        "test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_120",
         "test_a_hand_authored_prose_row_is_not_read_as_a_census_row",
         # ⛔ THE NON-UTF-8 FIVE (#13098 round 7, P2). This set is the pin's answer to
         # "an arm left the module and nothing noticed"; the five behaviours below were
