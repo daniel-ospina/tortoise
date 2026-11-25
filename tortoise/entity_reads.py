@@ -201,14 +201,18 @@ def list_layer(
     # holds only reads.
     #
     # ⚠️ INHERITED RESIDUE, stated rather than implied: this module's OWN calls
-    # hold the rule, but two helpers it DELEGATES to still resolve through
+    # hold the rule, but THREE delegations it reaches still resolve through
     # GRAPH.QUERY — `projection._resolve_entity` (behind every by-id route and
-    # `/belief`) and `navigation._resolve_root` (behind `entity_relations`). So
+    # `/belief`), `navigation._resolve_root` (behind `entity_relations`), and the
+    # SDK arm `/v1/sources` delegates to: `TortoiseSDK.list_knowledge(kind=
+    # 'source')` -> `TortoiseSDK._list_sources`, which runs
+    # `MATCH (s:Source) …` over `proj.g.query` (`sdk.py::_list_sources`). So
     # "the new GETs cannot mint a graph" is true of the Cypher below and NOT yet
-    # of the two identity resolutions; fixing those is pre-existing debt in
-    # their own homes, not a guarantee this module's comment can confer. A
-    # reviewer read the sentence above as covering them, which is why the
-    # residue is named here.
+    # of those three; fixing them is pre-existing debt in their own homes, not a
+    # guarantee this module's comment can confer. A reviewer read the sentence
+    # above as covering them, which is why the residue is named here — and read
+    # it as covering only the two IDENTITY resolutions, which is why the third is
+    # named with the route that reaches it.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
