@@ -5684,6 +5684,28 @@ def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
     return homes
 
 
+def _base_beat_justify_values(html: str) -> list[str] | None:
+    """The base `.beat` rule's `justify-content` values, or `None` if absent.
+
+    Reads the COMMENT-BLANKED sheet, and here that is LOAD-BEARING: the raw
+    scan this replaces was a fail-open measured by #14683's review (F2). With
+    the live `justify-content: safe center` commented out — the ≤320px pill
+    clearance GONE from the page — the raw regex still matched the text inside
+    `/* … */` and the row stayed GREEN, so the one regression this assertion
+    exists to catch could ship with CI green. Blanking makes a commented
+    declaration invisible (red) while a comment merely QUOTING one no longer
+    leaks a bogus value into the list (no false red).
+
+    `None` and `[]` are kept distinct on purpose: an absent rule and a rule
+    with no `justify-content` are different defects and get different messages.
+    """
+    base = re.search(r"\n    \.beat \{([^{}]*)\}", _css_blanked(html))
+    if base is None:
+        return None
+    return [" ".join(d.split()) for d in re.findall(
+        r"justify-content\s*:\s*([^;}]+)", base.group(1))]
+
+
 def _short_viewport_centring_problems(html: str) -> list[str]:
     """Beats whose auto-margin centring does not fire where the hatch top-aligns.
 
@@ -5919,10 +5941,12 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         # The base rule is what still protects the beats the hatch does NOT
         # cover (a viewport 821px or taller). Those arms rely on `safe center`
         # for the ≤320px pill clearance, and nothing else pins it.
-        base = re.search(r"\n    \.beat \{([^{}]*)\}", text)
-        assert base, f"{PRODUCT_TEAMS_HTML.name}: no base `.beat` rule found."
-        base_values = [" ".join(d.split()) for d in re.findall(
-            r"justify-content\s*:\s*([^;}]+)", base.group(1))]
+        # Read off the BLANKED sheet: a commented-out declaration is not on
+        # the page, and a comment quoting one is not a declaration (#14683
+        # review F2 — the raw scan was green with the live rule commented out).
+        base_values = _base_beat_justify_values(text)
+        assert base_values is not None, (
+            f"{PRODUCT_TEAMS_HTML.name}: no base `.beat` rule found.")
         assert base_values and base_values[-1] == "safe center", (
             f"{PRODUCT_TEAMS_HTML.name}: the base `.beat` rule's "
             f"`justify-content` is {base_values!r}, not a trailing "
@@ -6114,6 +6138,62 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert any("beat-hero > :last-child" in p and "margin-bottom" in p
                    for p in problems), problems
         assert not any("beat-hero > :first-child" in p for p in problems), problems
+
+
+class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
+    """The base `.beat` guard must read the LIVE sheet, not the comment text.
+
+    PR #14683's review (F2, `origin: diff`) measured the assertion above going
+    GREEN with the `safe center` that keeps the hero's 5rem pill clearance
+    commented out: the reader scanned the raw page, so a declaration parked in
+    `/* … */` — dead to the browser — still satisfied it. That is a false PASS
+    on the one arm the row exists to protect (#14677's ≤320px clearance), so it
+    is graded here in both directions: the fail-open, and the over-block where
+    a comment merely QUOTING the declaration invented a bogus value.
+
+    Both cases were run against the PRE-FIX reader and behaved as recorded in
+    the names below, so each is a behaviour that changed rather than a
+    restatement of the row.
+    """
+
+    @staticmethod
+    def _page(declaration: str) -> str:
+        return (
+            "<!doctype html>\n<html><head><style>\n"
+            "    .beat {\n"
+            f"{declaration}\n"
+            "      padding: 2rem;\n"
+            "    }\n"
+            "</style></head><body>\n"
+            '<section id="beat-hero" class="beat"><div>copy</div></section>\n'
+            "</body></html>\n"
+        )
+
+    def test_the_live_declaration_is_read(self):
+        values = _base_beat_justify_values(
+            self._page("      justify-content: safe center;"))
+        assert values == ["safe center"], values
+
+    def test_a_commented_out_declaration_is_NOT_read(self):
+        """The fail-open: dead CSS satisfied the reader and the row went GREEN."""
+        values = _base_beat_justify_values(
+            self._page("      /* justify-content: safe center; */"))
+        assert values == [], (
+            "a commented-out `justify-content` was read as live — the row stays "
+            "GREEN with the ≤320px pill clearance deleted from the page")
+
+    def test_a_comment_quoting_the_declaration_does_not_leak_a_value(self):
+        """The over-block: prose quoting the declaration must not add a value."""
+        values = _base_beat_justify_values(
+            self._page(
+                "      justify-content: safe center;\n"
+                "      /* the old rule was: justify-content: safe center */"))
+        assert values == ["safe center"], (
+            "a comment quoting the declaration invented a value, which reds a "
+            "correct page")
+
+    def test_the_absent_rule_is_None_not_empty(self):
+        assert _base_beat_justify_values("<html><style>.x{}</style></html>") is None
 
 
 class TestARenderedCodeElementGetsAMonoFace:
