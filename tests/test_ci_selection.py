@@ -9168,6 +9168,27 @@ _HISTORICAL_LETTERS_RE = re.compile(
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
+#: A test file the block calls a `durations` ROW. The map's own vocabulary separates a ROW (an
+#: entry in `durations`, and the ONLY thing that records a weight) from a surface REGISTRATION (a
+#: `core`/`api` entry, which only puts the file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT`
+#: apply), so calling a registration a row is a false claim about the map.
+#: ⛔ MEASURED 2026-11-25 on `4cdd732ab7ab`: `tests/test_fly_secret_declaration_report.py` is
+#: `core`-registered on `main` and carries NO `durations` row (measured: 0 rows in the map), which
+#: is why this PR's own review had the clause read "drift-reporter registration". The fold kept
+#: `main`'s copy of that paragraph — where it reads "drift-reporter row" — and silently REVERTED
+#: the fix. The diff is comment-only, so no executable arm could notice; the WORD is the whole
+#: claim, which is why the word is graded rather than the sentence trusted.
+#: Both spellings the block uses are read, because a matcher narrowed to one shape is how the same
+#: word rotted twice: `<file>` row, and `row (<file>`.
+_ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[A-Za-z0-9_]+\.py)`\s+rows?\b")
+_ROW_CLAIM_BEFORE_FILE_RE = re.compile(r"\brows?\s*\(`tests/(?P<file>[A-Za-z0-9_]+\.py)`")
+
+
+def _row_claims(header: str) -> list[str]:
+    """Every test file the block calls a `durations` ROW, in either spelling it uses."""
+    found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(header)}
+    found |= {m.group("file") for m in _ROW_CLAIM_BEFORE_FILE_RE.finditer(header)}
+    return sorted(found)
 
 
 def _emission_names(phrase: str) -> set[str]:
@@ -9794,6 +9815,45 @@ fast_shards: 11
     assert _repeated_header_spans(balanced), (
         "a spliced block whose quotes are BALANCED must still be reported — otherwise the parity "
         "check has become a way for a spliced header to pass")
+
+
+def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
+    """#14612: a file the block calls a `durations` ROW must actually have one.
+
+    The block's vocabulary is load-bearing: a ROW records a weight, while a surface REGISTRATION
+    merely puts the file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT` apply. Measured
+    2026-11-25: `tests/test_fly_secret_declaration_report.py` is `core`-registered on `main` and
+    carries NO `durations` row, so this PR's review had the clause read "drift-reporter
+    registration". The `4cdd732ab7ab` fold kept `main`'s copy of the paragraph, where it reads
+    "drift-reporter row", and reverted that fix — a comment-only diff, so nothing noticed. This
+    arm is what notices: the word is the entire claim.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    rows = set(cs.load_manifest()["durations"])
+    claimed = _row_claims(header)
+    # NON-VACUITY: an empty subject set makes the assertion below decoration — the no-op-gate class
+    # this block's siblings name. The block still calls one file a row after the sentence is
+    # re-spelled, so if this ever empties, re-point the pattern rather than pass over nothing.
+    assert claimed, (
+        "the `fast_shards` header block names no test file as a `durations` row, so this arm "
+        "grades nothing at all — re-point `_ROW_CLAIM_AFTER_FILE_RE` / "
+        "`_ROW_CLAIM_BEFORE_FILE_RE` at the sentence the block actually uses")
+    missing = [name for name in claimed if name not in rows]
+    assert not missing, (
+        f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
+        "no row for it. A REGISTRATION (a `core`/`api` surface entry) only puts the file in "
+        "`fast_pool()`; its weight then comes from `DEFAULT_FAST_WEIGHT`, which is not a row. "
+        "Say `registration`, or add the row.")
+    # …and BOTH spellings are read while `registration` is deliberately not: measured on this PR,
+    # a one-spelling matcher is exactly how this word survived one review round and one fold.
+    fixture = (
+        "`#1`'s `tests/test_row_claim_after.py` row, `#2`'s drift-reporter row "
+        "(`tests/test_row_claim_before.py`, `core`, flat 2.0 s) and `#3`'s "
+        "`tests/test_registration_not_a_row.py` registration")
+    assert _row_claims(fixture) == ["test_row_claim_after.py", "test_row_claim_before.py"], (
+        "the row-claim matcher no longer reads BOTH spellings the block uses (a file then `row`, "
+        "and `row (` then the file) — or it reads a `registration` as a row: "
+        f"{_row_claims(fixture)!r}")
 
 
 def test_the_emission_block_guard_is_not_vacuous():

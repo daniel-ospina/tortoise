@@ -60,7 +60,7 @@ version: 1
 # reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
 # `#14548`'s residue RATCHET, `#14415`'s two batch rows, `#14560`'s
 # `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule row, `#14574`'s
-# drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
+# drift-reporter registration (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
 # `tests/test_record_read_point_vector_keys.py`, `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` and `#14597`'s
 # `tests/test_expansion_fusion_14344.py` (that last trio `core`, all at the same flat 2.0 s
