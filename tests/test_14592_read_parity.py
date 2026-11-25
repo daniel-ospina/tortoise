@@ -1984,6 +1984,53 @@ def _plant_malformed_event(sdk, seq: int) -> None:
     )
 
 
+def test_belief_reports_the_NEWEST_write_not_the_oldest(tmp_path):
+    """#14593 review F1 (P2): the `ORDER BY e.seq DESC` had no row that could red.
+
+    ``latest_for_node``'s central promise is "the NEWEST matching event, ordered by
+    the store's own total order". Every belief row before this one planted exactly
+    ONE ``ConfidenceChanged`` for the node, so ``DESC`` and ``ASC`` answered
+    byte-identically and the ordering SURVIVED the revert — measured: flipping to
+    ``ASC`` left all 15 belief rows green, while the flipped build reports the
+    OLDEST committed write as ``lastBeliefWrite`` (a silently wrong answer on a
+    brand-new read surface, which is exactly the class this PR exists to close).
+
+    ⛔ Two writes, SAME node id, different seqs, and the assert names the NEWER
+    one — the fixture is what makes the ordering load-bearing. Asserting only that
+    *a* write comes back is the shape that stayed green.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a claim that is measured twice",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._set_point_baseline(p["id"], 8.0, 2.0)
+            older = _plant_confidence_event(
+                sdk, p["id"], confidence=0.2, alpha=2.0, beta=8.0)
+            newer = _plant_confidence_event(
+                sdk, p["id"], confidence=0.9, alpha=9.0, beta=1.0)
+        finally:
+            sdk.close()
+        assert newer > older, (
+            f"the fixture's second write has to be NEWER ({older=} {newer=})")
+
+        r = client.get(f"/v1/entities/{p['id']}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # The NEWER row, by the store's own order.
+        assert body["lastBeliefWrite"]["seq"] == newer, body["lastBeliefWrite"]
+        # …and it is not merely "some" row: the oldest is named so an ASC scan is
+        # caught by a row that says which one it should NOT be.
+        assert body["lastBeliefWrite"]["seq"] != older, body["lastBeliefWrite"]
+        # The committed figures ride the SAME row as the seq — a route that took
+        # the seq from one write and the numbers from another would pass a
+        # seq-only assertion.
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": 0.9, "posteriorAlpha": 9.0, "posteriorBeta": 1.0,
+        }, body
+
+
 def test_belief_matches_the_parsed_id_and_skips_a_malformed_payload(tmp_path):
     """`latest_for_node`'s TWO hardening promises, each pinned by its own row.
 
