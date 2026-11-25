@@ -193,7 +193,8 @@ class ProvisionedRecord:
     seq: int
     mode: str
     #: The row was ALREADY `active`: this call wrote nothing. The door may be
-    #: re-entered (a retry, a self-heal) and must not be punished for it.
+    #: re-entered (a retry, a re-provision of the default row) and must not be
+    #: punished for it.
     already_cut_over: bool
     #: This call wrote the seed (fresh row, or a monotone re-seed).
     seeded: bool
