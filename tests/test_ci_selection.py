@@ -21740,9 +21740,11 @@ def test_the_write_path_cost_instrument_and_its_evidence_select_the_pin():
 
 def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # #13098: `tests/test_13098_cypher_inventory.py` is `core`-registered, and its pins
-    # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN
-    # `docs/architecture/CYPHER-INVENTORY.md` — so both the tool and the doc are subjects
-    # of the suite. Without the CORE_ALSO entries this was the #3261/#6388 silent-drop
+    # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN THE
+    # CENSUS SOURCE — so both the tool and that file are subjects of the suite. ⛔ The
+    # subject is `CYPHER-INVENTORY.src.md` (tracked), NOT `CYPHER-INVENTORY.md`: the
+    # document is `--render`'s gitignored output, so no diff carries it. Without the
+    # CORE_ALSO entries this was the #3261/#6388 silent-drop
     # class: `tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only diff was filtered out
     # BEFORE the `core` fallback and took the docs-only early return, and the harness's
     # exit-code contract was graded by nothing.
@@ -21752,7 +21754,7 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
-        "docs/architecture/CYPHER-INVENTORY.md",
+        "docs/architecture/CYPHER-INVENTORY.src.md",
     ):
         r = _sel([subject])
         assert "core" in r["surfaces"], (subject, r)
