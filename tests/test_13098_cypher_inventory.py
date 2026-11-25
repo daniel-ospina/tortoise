@@ -1140,6 +1140,13 @@ TABLE_CANDIDATES_PATTERN = (
     r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$")
 PRODUCT_SURFACE_PATTERN = (
     r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|")
+# §1's POPULATION sentence — how many files the census scans, keyed on the tool's own name
+# for that count (`py_files`) rather than on the sentence's wording, so a legitimate reword
+# does not red while a SECOND `N files … py_files` statement inside §1 does (`#14669` review
+# FINDING 1: §1 restated this population six times, none of them graded, and a re-cut on that
+# very PR moved all six a file behind the tool's number with every pin, table row and
+# `--check` run still green).
+POPULATION_PATTERN = r"\b(\d+) files\b(?=[^\n]{0,60}`py_files`)"
 
 _GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
     ("a", "§1's decomposition line (publishes §0's operands)", SECTION1_BOUNDS,
@@ -1154,6 +1161,8 @@ _GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
      NARRATIVE_PATTERN),
     ("c-product-surface", "§1's product-surface table row", SECTION1_BOUNDS,
      PRODUCT_SURFACE_PATTERN),
+    ("d-population", "§1's population sentence (publishes `py_files`)", SECTION1_BOUNDS,
+     POPULATION_PATTERN),
 )
 
 # The ONLY bare `re.search` lookups `_grade_doc_text` is allowed to make: the §0 and §1 region
@@ -1202,7 +1211,7 @@ def _exactly_one(pattern: str, text: str, *, what: str, flags: int = re.MULTILIN
 
 
 def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: int,
-                    files_with_sites: int) -> None:
+                    files_with_sites: int, files_scanned: int) -> None:
     """Grade EVERY publication of §0's operand pair in `doc_text`, or red.
 
     ⛔ EXTRACTED FROM THE TEST ON PURPOSE (`#13424` review P2-1): a guard nothing can be
@@ -1223,7 +1232,7 @@ def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: i
     """
     # ⛔ REGION BOUNDS, established ONCE for every arm below.
     #
-    # Each of the four publications this test grades lives in a SPECIFIC section, and a
+    # Each of the five publications this test grades lives in a SPECIFIC section, and a
     # whole-document `re.search` takes the FIRST match ANYWHERE in the file. So a decoy —
     # say a correct `= 1314 … + 258` planted above §0, or any other prose quoting the
     # phrase — silently re-points the arm at the decoy while the real publication rots
@@ -1338,6 +1347,30 @@ def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: i
         f"doc={row_sites} sites / {row_files} files, "
         f"measured={sites} / {files_with_sites}")
 
+    # (d) §1's POPULATION sentence: how many files the census SCANS, which is `files_scanned`
+    # and NOT any of the operands above (§0's row and §1's row both count something else).
+    #
+    # ⛔ WHY IT EXISTS (`#14669` review FINDING 1, P2). §1 restated this population SIX times
+    # and NOTHING graded any of them: `--check` grades only the HTML pins, and this function's
+    # other arms read `sites` / `non_cypher` / `candidates` / `files_with_sites`. A re-cut on
+    # that very PR moved all six a file BEHIND the tool's number — `313` where `census()`
+    # reports `314`, because `census()` and `rg_totals()` filter the SAME list — while §0's
+    # table row, §0's restatement, the re-cut note and
+    # `<!-- cypher-inventory:files_scanned = 314 -->` all carried the measured one. 604 passing
+    # assertions and 20 new guards shipped it; the document contradicted itself inside one file
+    # and every gate stayed green.
+    #
+    # ⛔ THE RESTATEMENTS ARE GONE, not merely corrected: §1 now publishes the count ONCE (this
+    # sentence, keyed on `py_files`) and refers back to it, so the cross-check has one operand
+    # to grade. `_exactly_one` makes a SECOND `N files … py_files` statement a red rather than a
+    # re-pointed arm — the decoy mechanism every other arm here refuses.
+    (population_raw,) = _exactly_one(
+        POPULATION_PATTERN,
+        section1.group(0), what="§1's population sentence (publishes `py_files`)")
+    assert int(population_raw) == files_scanned, (
+        "§1's population sentence disagrees with the census: "
+        f"doc={population_raw} scanned files, measured={files_scanned}")
+
 
 @requires_doc_pin
 def test_the_published_decomposition_names_the_measured_operands():
@@ -1371,10 +1404,14 @@ def test_the_published_decomposition_names_the_measured_operands():
     handover item 2): it pins §1's decomposition line (§0's operand pair, published
     in §1's block), §0's narrative
     pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
-    `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
-    It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
+    `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls` —
+    and, since `#14669` review FINDING 1, §1's POPULATION sentence (`files_scanned`), which
+    was published six times with no cross-check until that arm existed. It does NOT pin
+    the shape-split rows under them (`860 (579 read, 281 write)`,
     `adjacency` / `ep` / `traversal` / `fulltext` / `ddl` / `unresolved`) nor §0's
-    scanned-file count: those are INDEPENDENT census quantities, NOT derived from the
+    scanned-file count — §0's table row and its restatement publish the SAME `files_scanned`
+    scalar §1's arm now grades, and neither of those two copies is read here: those are
+    INDEPENDENT census quantities, NOT derived from the
     four that are graded, so any of them CAN go stale here and stay green. (The files
     carrying a site ARE pinned, by (c).) That is a declared trade-off, not a property:
     pinning nine more scalars buys a wider re-cut obligation, and this test chooses not
@@ -1403,7 +1440,8 @@ def test_the_published_decomposition_names_the_measured_operands():
     # the in-section decoy mutant (`test_the_narrative_pin_refuses_an_in_section_decoy`);
     # that function's comments carry the region-bounds and per-arm reasoning.
     _grade_doc_text(doc_text, sites=sites, non_cypher=non_cypher,
-                    candidates=candidates, files_with_sites=result["files_with_sites"])
+                    candidates=candidates, files_with_sites=result["files_with_sites"],
+                    files_scanned=result["files_scanned"])
 
 @requires_doc_pin
 def test_the_narrative_pin_refuses_an_in_section_decoy():
@@ -1423,7 +1461,7 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
     baseline-GREEN on the unmutated doc — refuses it. Either half alone is won't-do:
     the first is what makes this test FAIL on the pre-fix arm, the second is what makes it
     fail if arm (b) — the one this mutant duplicates — is ever reverted to first-match.
-    ⛔ IT PROVES ARM (b) ONLY, and says so: the other six lookups have their own rows in
+    ⛔ IT PROVES ARM (b) ONLY, and says so: the other seven lookups have their own rows in
     `test_every_anchored_arm_refuses_a_duplicate`, which is where their proof lives
     (`#13458` review P2-3: this docstring used to claim "an arm", i.e. any arm).
     """
@@ -1462,13 +1500,14 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
 
     # 2. AND THE REAL GRADING PATH REFUSES IT — not a helper in isolation: the same
     #    `_grade_doc_text` the pin above runs is handed the mutant, so reverting arm (b)
-    #    to a first-match `re.search` reds THIS test. The OTHER six lookups are not this
+    #    to a first-match `re.search` reds THIS test. The OTHER seven lookups are not this
     #    mutant's business (it duplicates only the narrative line) — each has its own
     #    duplicate, and its own case, in `test_every_anchored_arm_refuses_a_duplicate`.
     #    ⛔ Do not read "the arms share one helper" as "this test covers them": that is
     #    precisely the overclaim `#13458` review P2-3 returned.
     kwargs = dict(sites=sites, non_cypher=result["non_cypher_door_calls"],
-                  candidates=candidates, files_with_sites=result["files_with_sites"])
+                  candidates=candidates, files_with_sites=result["files_with_sites"],
+                  files_scanned=result["files_scanned"])
     _grade_doc_text(doc_text, **kwargs)  # baseline GREEN, so step 3's red is the mutant's
     with pytest.raises(AssertionError) as refused:
         _grade_doc_text(mutant, **kwargs)
@@ -1491,6 +1530,7 @@ def measured_census() -> dict[str, int]:
         "non_cypher": result["non_cypher_door_calls"],
         "candidates": sum(1 for s in result["sites"] if s.verdict.startswith("candidate")),
         "files_with_sites": result["files_with_sites"],
+        "files_scanned": result["files_scanned"],
     }
 
 
@@ -1591,6 +1631,41 @@ def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, meas
     assert f"{what} now appears 2 times" in message, (
         f"arm ({arm}) has a uniqueness guard no test can redden: duplicating its own line did\n"
         f"not red THAT arm. The refusal raised was:\n{message}")
+
+
+@requires_doc_pin
+def test_the_population_arm_refuses_a_count_one_off_the_census(measured_census):
+    """Arm (d) reds on a DISAGREEING population, not only on a duplicate (`#14669` F1).
+
+    `test_every_anchored_arm_refuses_a_duplicate` proves every arm's UNIQUENESS guard. That is
+    the wrong half for arm (d): the defect `#14669` review FINDING 1 shipped was not a second
+    copy of the sentence, it was the ONE value being wrong — §1 read `313` scanned files while
+    `census()` reported `314`, and `--check` grades only the HTML pins, so nothing saw it.
+
+    This is that mutant, reproduced: the document with its population figure moved ONE file off
+    the measured value, everything else untouched. The unmutated doc is asserted GREEN first, so
+    the red below is the mutant's, and the refusal must NAME the arm — otherwise a re-cut that
+    deleted the `files_scanned` comparison would still pass on some other arm's red.
+    """
+    doc_text = _source_text()
+    hit = re.search(POPULATION_PATTERN, doc_text, re.MULTILINE)
+    assert hit, (
+        "§1's population sentence moved or changed shape — the mutant below would prove nothing\n"
+        f"about arm (d); pattern={POPULATION_PATTERN!r}")
+    real = int(hit.group(1))
+    mutant = doc_text[:hit.start(1)] + str(real - 1) + doc_text[hit.end(1):]
+    assert mutant != doc_text, "the fixture's rot did not take; this proof would be vacuous"
+
+    # Baseline GREEN, so the red below is the MUTANT's and not the fixture's.
+    _grade_doc_text(doc_text, **measured_census)
+    with pytest.raises(AssertionError) as refused:
+        _grade_doc_text(mutant, **measured_census)
+    message = str(refused.value)
+    assert "§1's population sentence disagrees with the census" in message, (
+        "arm (d) does not grade the VALUE it exists for — a population one file off the census\n"
+        f"was not refused by the arm that names it. The refusal raised was:\n{message}")
+    assert f"doc={real - 1} scanned files, measured={measured_census['files_scanned']}" in message, (
+        f"the refusal does not publish both operands (doc vs measured); got:\n{message}")
 
 
 def test_the_census_reconciles_arithmetically():
@@ -2720,14 +2795,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
         "pytest errors in session setup and no census arm runs at all")
     # …and the arms it produces for are still here. A structural count, not a
-    # reading of the file's content: the decorator is applied at 8 arms + 1
+    # reading of the file's content: the decorator is applied at 9 arms + 1
     # parametrized one (one case per `_GRADED_LOOKUPS` row) — 8 since #13098 split the
-    # table-shape arm, whose rendered half now renders a document — and an arm leaving
-    # this module is a diff a reviewer sees; what is invisible is the ENV disappearing,
-    # which is above.
+    # table-shape arm, whose rendered half now renders a document, and 9 since `#14669`
+    # review FINDING 1 added `test_the_population_arm_refuses_a_count_one_off_the_census`
+    # — and an arm leaving this module is a diff a reviewer sees; what is invisible is
+    # the ENV disappearing, which is above.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
-    # is 18 at this head — 9 decorator lines PLUS 9 prose/format mentions: FIVE in
+    # is 19 at this head — 10 decorator lines PLUS 9 prose/format mentions: FIVE in
     # four docstrings (one of them names it twice), TWO in block comments (this one
     # included), ONE in an f-string and ONE in an assertion literal. ⛔ Re-measure
     # rather than trusting these numbers: `#13098`'s own review rounds added mentions
@@ -2735,8 +2811,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # of the eight gated arms left the count at `1 decorator + 7 prose = 8` and this
     # row stayed GREEN, so the arm it claims to protect ("the arms this pin exists for
     # are gone") did not fire until seven eighths of them were gone. The AST cannot
-    # see prose; `== 9` rather than `>= 9` means a TENTH gated arm is a red a reviewer
-    # reads instead of slack that a silently-deleted arm can absorb.
+    # see prose; `== 10` rather than `>= 10` means an ELEVENTH gated arm is a red a
+    # reviewer reads instead of slack that a silently-deleted arm can absorb.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     decorated = [
         node.name
@@ -2748,8 +2824,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
             for dec in node.decorator_list
         )
     ]
-    assert len(decorated) == 9, (
-        "expected EXACTLY 9 `@requires_doc_pin` arms (8 single + 1 parametrized); got "
+    assert len(decorated) == 10, (
+        "expected EXACTLY 10 `@requires_doc_pin` arms (9 single + 1 parametrized); got "
         f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
         "delete this pin with them, or restore them")
     # AND THE UNGATED HALF. The count above sees only DECORATED arms; the arms that
@@ -2800,7 +2876,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # `main()`'s enumeration wrap, `report()`'s wrap, and the render target's
         # `Path.resolve()` guard (`RuntimeError` on ELOOP, not an `OSError`).
         # Measured by deleting each `def` block: BOTH structural pins stayed GREEN.
-        # These are undecorated, so the `len(decorated) == 9` pin above cannot see them
+        # These are undecorated, so the `len(decorated) == 10` pin above cannot see them
         # — this set is their only pin, which is why its comment promises names.
         "test_an_enumeration_failure_is_could_not_run_never_drift",
         "test_an_unresolvable_render_target_is_could_not_run",

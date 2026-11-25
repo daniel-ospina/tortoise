@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 313 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 314 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -109,17 +109,20 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (313 files; the tool
-prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
-cannot do. Measured on this tree:
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py`, scanned as WHOLE
+TEXT — so `\s` spans a newline, which a line-based `rg` cannot do. ⛔ Its SIZE is published once, in
+the block above (`py_files`), and the rest of this section refers back to it rather than restating
+the count: six restatements with no cross-check is how a re-cut left every one of them a file BEHIND
+the tool's own number while §0's rows and the pin all carried the measured one (`#14669` review).
+Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,648** across **112** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those files>` → **1,648** across **112** files: exactly the
 tool's number. A bare `rg … tortoise/` gives **1,654 / 113**, the 6 extra occurrences living in
 the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,648 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 313 files>` → **2,388** across **149** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those files>` → **2,388** across **149** files, while the tool
 reports 2,401 / 150. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -132,7 +135,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 313 files finds exactly 13 — the verb-at-end-of-line scan alone finds **185**,
+predicate over the same files finds exactly 13 — the verb-at-end-of-line scan alone finds **185**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **172** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -144,7 +147,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,117, and `-i` without the exclusion 2,478 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 313
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over those
 `.py` files the same two predicates read **2,114** and **2,388**; with `-t py` and the test-module
 exclusion dropped they read **2,116** and **2,391**. The 87-occurrence 2,391→2,478 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
