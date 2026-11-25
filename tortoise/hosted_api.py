@@ -24758,6 +24758,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # count. Conservative over-count when turns dedupe is accepted (the
             # dedup check runs inside the SDK write; recounting here would cost a
             # second query).
+            #
+            # #14687: this expression is PAYLOAD SIZE, not a request count, so it
+            # is unbounded by construction — the per-REQUEST cap that bounds the
+            # contribution lives in ``AbuseEngine.record_point_create`` (the entry
+            # point every recorder shares, including the MCP path), not here.
+            # Do not add a second cap at this call site: two bounds would drift.
             await _abuse_record_points(_audit_request, org, len(body.conversation) + len(extracted))
 
         # #1727 Slice 2 (Task 12, T1-P15): entity-linking pass — Session +
