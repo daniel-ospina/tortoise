@@ -538,8 +538,11 @@ no door call, so `--check` prints `25 pinned counts match` at the merged tree an
 reads `files_scanned` **313**, `sites` **1327**, `files` **102**, `plain` **875** (read **589**, write
 **286**), `partial` **321**, `unresolved` **105**, `candidates` **589**, `non_cypher_door_calls`
 **267** and `ast_door_calls` **1594** — every one of them the pin the `#14552` cut above corrected.
-Appendix A is regenerated with `--markdown` HERE, so its `ep.py`, `live.py`, `sdk.py` and
-`github_indexer.py` rows move by the insertions above them and nothing else, and §1 is re-measured
+Appendix A is regenerated with `--markdown` HERE, so its `ep.py`, `live.py`, `sdk.py`,
+`github_indexer.py` and `audit.py` rows move by the insertions above them and nothing else —
+MEASURED at this head: the regenerated table and the committed one differ in exactly ONE row
+(`audit.py:2745`'s `_legacy_repair` statement, which this branch's +1 comment line moved off
+`:2744`), and `TORTOISE_CYPHER_DOC_PIN=1` passes once that row is regenerated — and §1 is re-measured
 here by command rather than carried: over the same 313 `py_files`, door **1,648 / 112** whole-text
 (bare `rg … tortoise/` **1,654 / 113**), verb **2,388 / 149** line-based against the tool's **2,401 /
 150** — the 13-occurrence WHOLE-TEXT gap §1 enumerates. ⛔ This is the per-tree rule §1 states, from
