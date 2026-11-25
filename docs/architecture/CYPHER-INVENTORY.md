@@ -441,10 +441,13 @@ to assume) — a Postgres statement named by a module constant, exactly the shap
 the new call is not a statement site, so the migration metric §0 is about does not move. ⛔
 `files_scanned` reads **314** here only because this merge carries `main`'s `#14344` file (313→**314**);
 this branch adds NO scanned module (`git diff --name-status origin/main...HEAD -- tortoise/` has no
-`A` row; ⛔ the THREE-dot form is load-bearing — a two-dot range from the `#14582` fold base
-(`c3dca699..HEAD`) spans `main`'s own `#14344` landing and prints its `A tortoise/expansion_merge.py`,
-which is the very file this sentence says is not this branch's), so that move is `main`'s and is
-narrated at the `#14344` paragraph below, not re-narrated here.
+`A` row), so that move is `main`'s and is narrated at the `#14344` paragraph below, not re-narrated
+here. ⛔ **The BASE REF is what isolates the branch, not the dot count, and it must be a FRESHLY
+fetched `origin/main`:** `origin/main` is an ancestor of this head, so `origin/main..HEAD` and
+`origin/main...HEAD` print the same six `M` rows and no `A` row, while a range from the `#14582` fold
+base (`c3dca699`) prints `A tortoise/expansion_merge.py` — `main`'s `#14344` landing — under EITHER
+dot count. A stale `origin/main` that is still an ancestor degrades `...` to that same error, which is
+why the fetch is part of the command's meaning.
 §1's door
 predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
 **1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
