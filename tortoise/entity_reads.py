@@ -359,6 +359,28 @@ def layer_kind_values(proj: Any, label: str) -> frozenset[str]:
     return frozenset(str(r[0]) for r in rows if r[0] is not None)
 
 
+#: The most characters of a neighbour's own text a relation row carries. The
+#: same bound ``search_engine.get_relationships`` applies to its ``related_content``
+#: — a relation list is per-EDGE, so an unbounded preview scales as
+#: ``limit × largest neighbour body`` (#14593 review P2, measured at 4000 chars
+#: through a Point). Deliberately NOT read from ``search_engine``: that constant
+#: is private to its own rendering, and coupling the two would mean a change there
+#: silently re-caps a public REST field here.
+_ENDPOINT_NAME_MAX = 200
+
+#: Which property answers "the neighbour's own name" — PER LAYER, not one blanket
+#: ``coalesce``. ⛔ A ``:Source`` is answered by ``url`` ONLY: the blanket form fell
+#: through to ``content``, which is a Source's stored payload — the ``#3998``
+#: disclosure ``filter_source_props`` exists to stop, arriving through the name
+#: field on a route that never asked for it. A ``:Point`` has no ``name`` in any
+#: writer's vocabulary, so its own text is ``content``.
+_RELATION_ENDPOINT_NAME = (
+    "CASE WHEN m:Source THEN m.url "
+    "     WHEN m:Point THEN coalesce(m.content, m.name) "
+    "     ELSE coalesce(m.name, m.content, m.url) END"
+)
+
+
 def _endpoint_preview(row: Any) -> dict:
     """The OTHER endpoint of one edge, as identity + label + its own name.
 
@@ -367,16 +389,35 @@ def _endpoint_preview(row: Any) -> dict:
     nodes multiplies a dense node's fan-out by its neighbours' size; (2) a
     ``:Source`` neighbour would hand back its stored payload — the exact
     disclosure ``#3998``'s filter exists to stop, on a route that never asked for
-    it. The name falls back through each layer's own primary text property
-    (``name`` for Object/Subject/Event, ``content`` for Point, ``url`` for
-    Source), which is the same coalesce ``search_engine.get_relationships`` uses
-    for ``related_content``.
+    it.
+
+    ⛔ THE BOUND IS PART OF THE CONTRACT, not a nicety (#14593 review P2). The
+    field is a *preview*, and ``_ENDPOINT_NAME_MAX`` is the same 200-character
+    limit ``search_engine.get_relationships`` applies to the equivalent
+    ``related_content``. Without it this route's per-request size scaled as
+    ``limit × largest neighbour body``: MEASURED on this tree, one ``related``
+    edge between two Points whose ``content`` was 4000 characters returned
+    ``other.name`` at 4000 — a ``:Point`` carries no ``name``, so the fallback
+    landed on ``content`` — and ``limit`` is ``le=1000``. A cut is MARKED
+    (``nameTruncated`` below) rather than silent, because a shortened value a
+    caller cannot detect is the "absence read as an answer" class this PR
+    removes elsewhere.
+
+    ⛔ And the per-layer SELECTION is done in Cypher (``_relation_endpoint_name``
+    above the two UNION branches), because a single blanket ``coalesce(m.name,
+    m.content, m.url)`` reached ``content`` for a ``:Source`` too — the ``#3998``
+    payload disclosure arriving through the name field, which
+    ``filter_source_props`` never sees. A Source is answered by its ``url``; a
+    Point by its ``content``; everything else by its ``name``.
     """
     labels = row[1] or []
+    raw = row[2]
+    name = None if raw is None else str(raw)
     return {
         "id": row[0],
         "label": (labels[0] if labels else None),
-        "name": row[2],
+        "name": None if name is None else name[:_ENDPOINT_NAME_MAX],
+        "nameTruncated": name is not None and len(name) > _ENDPOINT_NAME_MAX,
     }
 
 
@@ -467,7 +508,7 @@ def entity_relations(
     inner = (
         f"MATCH (n:{root_label} {{{root_key}:$eid}})-[r]->(m) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        "       coalesce(m.name, m.content, m.url) AS name, "
+        f"       {_RELATION_ENDPOINT_NAME} AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'out' AS direction, id(r) AS rid "
         "UNION ALL "
@@ -487,7 +528,7 @@ def entity_relations(
         # and no neighbour is filtered out for lacking a name.
         "WHERE id(m) <> id(n) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        "       coalesce(m.name, m.content, m.url) AS name, "
+        f"       {_RELATION_ENDPOINT_NAME} AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'in' AS direction, id(r) AS rid"
     )

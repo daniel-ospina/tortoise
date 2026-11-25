@@ -822,7 +822,8 @@ def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
         assert rels[0]["direction"] == "out", rels
         assert rels[0]["predicate"] == "dependsOn", rels
         assert rels[0]["other"] == {
-            "id": b["id"], "label": "Object", "name": "BETA"}, rels
+            "id": b["id"], "label": "Object", "name": "BETA",
+            "nameTruncated": False}, rels
 
         # The SAME edge, read from the other end, is the other DIRECTION — the
         # fact `navigation.entityProfile` cannot report (its per-hop query UNIONs
@@ -830,6 +831,94 @@ def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
         back = client.get(f"/v1/entities/{b['id']}/relations").json()["relations"]
         assert [r["direction"] for r in back] == ["in"], back
         assert back[0]["other"]["id"] == a["id"], back
+
+
+def test_relations_bounds_and_marks_a_long_neighbour_body(tmp_path):
+    """The `other.name` preview is BOUNDED, and the cut is MARKED (#14593 P2).
+
+    MEASURED before the fix, on a real ASGI app: one `related` edge between two
+    Points whose `content` was 4000 characters returned `other.name` at 4000
+    characters with `truncated: false` — a `:Point` carries no `name`, so the
+    blanket `coalesce(name, content, url)` landed on the body. With `limit` at
+    `le=1000` that is a per-request size of `limit × largest neighbour body` on a
+    brand-new public GET, and the function's own docstring gives fan-out
+    amplification as its reason for not returning whole nodes.
+
+    ⛔ The assertion is on the LENGTH AND THE FLAG, not on a prefix: a shortened
+    value a caller cannot detect is the "absence read as an answer" class this PR
+    removes elsewhere, so bounding without marking would trade one defect for
+    another. The suite could not see any of it before — its only relation fixture
+    used Object neighbours, whose `name` is short.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        long_body = "x" * 4000
+        far = client.post("/v1/points", json={
+            "content": long_body, "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            assert sdk._create_edge("related", hub["id"], far["id"])
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        rels = r.json()["relations"]
+        assert len(rels) == 1, rels
+        other = rels[0]["other"]
+        assert other["id"] == far["id"], other
+        # A Point is answered by its content, and the preview is capped.
+        assert len(other["name"]) == 200, len(other["name"])
+        assert other["name"] == long_body[:200], other["name"][:40]
+        assert other["nameTruncated"] is True, other
+        # The page itself was NOT truncated — the two are different facts, and a
+        # route that conflated them would hide the cut behind the page flag.
+        assert r.json()["truncated"] is False, r.json()["truncated"]
+
+
+def test_relations_never_puts_a_Sources_payload_in_the_name_field(tmp_path):
+    """A `:Source` neighbour is answered by its `url`, never by its `content`.
+
+    The blanket `coalesce(m.name, m.content, m.url)` reached an UNDECLARED
+    `content` on a `:Source` neighbour — the `#3998` class (a property no
+    declaration covers, surfacing through a read path that never asked for it),
+    on a route that has no business returning a source's stored text. This arm
+    writes that property below the write door and asserts the payload appears
+    NOWHERE in the response body (not just in `name`: a regression that moved it
+    to another key would otherwise pass).
+    """
+    payload = "SK-SOURCE-PAYLOAD-DO-NOT-SERVE"
+    url = "https://example.test/doc"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            src = sdk._create_source(url, "web")
+            assert src["id"] == url, src
+            # ⛔ `content`, deliberately — NOT `text`. This asserts the property
+            # the blanket coalesce actually READ, and the distinction was
+            # measured: `text` is filtered by `filter_source_props` and the old
+            # query never looked at it, so a `text`-only fixture passes on the
+            # BUGGY code (it did, on the first attempt at this arm — a vacuous
+            # test is a false PASS, which is the class this PR is about).
+            # `content` is neither declared on `:Source` nor read through the
+            # filter, so it is a node property an out-of-band writer can leave
+            # behind and the coalesce would hand straight back.
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.content = $t, s.text = $t",
+                params={"u": url, "t": payload}, read_only=False)
+            assert sdk._create_edge("related", hub["id"], url)["created"] is True
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        assert payload not in r.text, "a Source's stored text rode the response"
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Source", other
+        assert other["name"] == url, other
 
 
 def test_relations_pages_and_offset_actually_advances(tmp_path):
