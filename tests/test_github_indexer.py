@@ -3363,12 +3363,16 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # above all four twice — `#14596` (+29 above all
     # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
     # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
-    # `56446` / `56598` / `57113`, and the table below is re-cut to those. The branch's own
+    # `56446` / `56598` / `57113`. ⚠️ Those are NOT this table's addresses: the `#14621` merge onto
+    # `origin/main` `1aef0b618bcf` took main's `sdk.py`, so the table below is re-cut to the MERGED
+    # tree's addresses (`23111` / `56477` / `56629` / `57144` — see the ⛔ block below) and the
+    # `a29b5f24ce95` figures survive only as the history of how they moved. The branch's own
     # `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
-    # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
-    # ⛔ The un-supersede arm's start text occurs TWICE (`56598`, `56637`), so its row is located
-    # by its own `continue` terminator (`56607`) — never by the start text alone, which would
+    # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to the MERGED tree's
+    # measurements, not to `a29b5f24ce95`'s.
+    # ⛔ The un-supersede arm's start text occurs TWICE (`56629`, `56668`), so its row is located
+    # by its own `continue` terminator (`56638`) — never by the start text alone, which would
     # admit either occurrence.
     # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
     # re-derive every address at the current tree), so the note that "no landing re-derived
@@ -3387,7 +3391,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # ALREADY holds a non-scalar` -> `56477`-`56479`, `if (_np_dead == [_SUPERSEDED_STATUS]` ->
     # `56629`-`56638` (its own `continue` terminator — that start text occurs TWICE, `56629` and
     # `56668`), the per-label `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props` -> `57144`
-    # (occurs ONCE, while bare `SET n += $props` occurs 40x), and `def update_knowledge(` ->
+    # (occurs ONCE, while the bare `SET n += $props` occurs on 42 OTHER lines — 43 lines and 43
+    # occurrences in the whole module), and `def update_knowledge(` ->
     # `23111`-`23286`, which DID move (+1; the previous revision's "RE-MEASURED UNCHANGED" at
     # `23110` described this branch's own `sdk.py`, not this one). The `+31` is the consistency
     # check on that measurement, never its input. The citations quoting the four rows were re-cut

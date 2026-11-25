@@ -2764,7 +2764,9 @@ root, `CALL { … } … SKIP/LIMIT` paging, the `id(m) <> id(n)` self-loop exclu
 and the `_RELATION_ENDPOINT_NAME` arm that never reaches a `:Source`'s denied `content` — it selects
 `m.url` for a `:Source`, and the preview is cut to `_ENDPOINT_NAME_MAX` with a `nameTruncated` flag).
 
-**Both documents re-derive every figure the row moves** — the section states these twice each, and
+**Both documents re-derive every figure the row moves** — the section states the customer-callable
+and distinct-door figures TWICE each, and the read-site total and the cell-occurrence figure ONCE
+(measured with the guard's own `_SITE_COUNT` / `_CALLABLE_SITE_COUNT` over `_section_13()`) — and
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
 `FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
