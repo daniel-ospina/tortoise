@@ -928,10 +928,10 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
 def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path, monkeypatch):
     """#14593 review P1: a null ``lastBeliefWrite`` must not speak for the store.
 
-    MEASURED: the GRAPH event store only receives the types in
-    ``sdk._GRAPH_EVENT_TYPES`` (the one product ``append_event`` call site is
-    ``sdk._emit_event``'s gated arm), and ``ConfidenceChanged`` is not among
-    them — so ``latest_for_node(..., "ConfidenceChanged", …)`` cannot return a
+    MEASURED: the GRAPH event store receives the types its emitter ADMITS —
+    ``sdk._GRAPH_EVENT_TYPES``, plus ``PointRevised`` when the change feed is on
+    (every product ``append_event`` call site is ``sdk._emit_event``'s gated
+    arm) — and ``ConfidenceChanged`` is in neither arm, so ``latest_for_node(..., "ConfidenceChanged", …)`` cannot return a
     row on a real graph, and the field was null while the docstring promised
     "when it last moved… from the store's own record rather than inferred".
     A client reading that null concludes the belief never moved, which is false:

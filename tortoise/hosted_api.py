@@ -16207,10 +16207,11 @@ def _belief_changes_reach_the_graph_store() -> bool:
     """Can a ``ConfidenceChanged`` row exist in the GRAPH event store at all?
 
     ⛔ This is a property of the EMITTER, not of this route, and it is read from
-    the emitter's own gate rather than assumed: `sdk._emit_event` writes a
-    `:GraphEvent` row only for a type in `_GRAPH_EVENT_TYPES`, and that frozenset
-    does not contain ``ConfidenceChanged`` (measured at this head: the single
-    product `append_event(` call site is `sdk.py::_emit_event`'s gated arm). So
+    the emitter's own gate rather than assumed: `sdk._emit_event` admits a type on
+    TWO paths — membership in `_GRAPH_EVENT_TYPES`, or `PointRevised` when the
+    change feed is on — and ``ConfidenceChanged`` is in NEITHER, so no
+    `:GraphEvent` row of that type can exist (measured at this head: every product
+    `append_event(` call site is `sdk.py::_emit_event`'s gated arm). So
     `event_store.latest_for_node(..., "ConfidenceChanged", …)` has nothing to
     find on a real graph, and `/belief` must say that instead of letting a null
     `lastBeliefWrite` be read as "this belief never moved".
