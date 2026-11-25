@@ -1485,6 +1485,39 @@ def test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository(
     assert fresh.is_file()
 
 
+def test_an_UPPERCASE_dot_GIT_component_is_refused_too(tmp_path, monkeypatch, capsys):
+    """…and the component test is CASE-INSENSITIVE, which nothing used to grade.
+
+    ⛔ A ROUND-3 REVIEWER FOUND THIS ARM MISSING (#14625 review, P2): the guard matches
+    `part.lower() == ".git"` precisely so that `.GIT/config` — the same directory on a
+    case-insensitive filesystem, i.e. macOS's default — cannot slip past it, and
+    `grep -c '.GIT'` in this module answered **0**, so reverting `part.lower()` to
+    `part` left the whole suite green while re-opening the fail-open on every
+    case-insensitive checkout. On a case-SENSITIVE filesystem the arm is still exact:
+    the destination carries a `.GIT` component, the guard refuses it as metadata before
+    anything is written, and the directory is not created.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / ".GIT" / "config"
+    assert ".GIT" in target.parts and ".git" not in target.parts, (
+        "the premise: the component is upper-case, so only a case-insensitive test "
+        "can recognise it")
+    rc = census.main(["--render", ".GIT/config"])
+    assert rc == 2, (
+        f"a `.GIT` component is git metadata on a case-insensitive filesystem and is "
+        f"refused on every filesystem — got {rc}")
+    assert not target.exists(), (
+        "the render created `.GIT/config`: the component test is case-SENSITIVE, which "
+        "is the fail-open this arm exists to grade")
+    assert "GIT METADATA" in capsys.readouterr().err
+
+
 def test_the_retargeting_env_list_is_the_one_lane_stash_already_scrubs():
     """The scrubber is ONE list, not a seventh copy of it.
 
@@ -3623,6 +3656,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # `_tracked_destination_refusal` to the `rel is not None` gate reds the second.
         "test_a_git_directory_that_lost_objects_is_STILL_refused",
         "test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository",
+        # ⛔ AND THE COMPONENT TEST'S OWN CASE-INSENSITIVITY, which a round-3 reviewer
+        # found ungraded: `part.lower() == ".git"` is what stops `.GIT/config` on a
+        # case-insensitive filesystem, and reverting it to `part` reds nothing else.
+        "test_an_UPPERCASE_dot_GIT_component_is_refused_too",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3703,8 +3740,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 38, (
-        f"expected EXACTLY 38 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 39, (
+        f"expected EXACTLY 39 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3726,8 +3763,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 97, (
-        f"expected EXACTLY 97 test functions in this module; got "
+    assert len(test_functions) == 98, (
+        f"expected EXACTLY 98 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
