@@ -18,6 +18,7 @@ These tests pin four things:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 import pytest
@@ -162,17 +163,102 @@ def _fresh_sdk() -> TortoiseSDK:
 
 
 def test_excerpt_comes_from_the_search_hit_with_no_extra_read():
-    """The excerpt is FREE: the resolve hit already carries `quote`.
+    """`excerpt_from_hit` is a pure function over the hit — it takes no reader.
 
-    A first cut of this change issued a batched Cypher read for it and pushed the
-    hosted reflex past its 300 ms ceiling (`degraded_reason: "timeout"`). This
-    pins the cheaper contract so the read cannot come back.
+    ⛔ This is a UNIT test of the extractor, and its old docstring claimed more
+    than that: *"this pins the cheaper contract so the read cannot come back"* —
+    which was not true, because the body never touches `run_volunteer_pipeline`
+    and would stay green with a batched read restored. The pipeline-level guard is
+    `test_the_turn_reads_no_statement_that_names_the_excerpt`, immediately below.
+
+    `quote` may also arrive as `content`; both are normalised here, and a
+    non-string is "no excerpt" rather than a crash.
     """
     hit = {"id": "pt_1", "quote": "  Decision log:   we selected FalkorDB  "}
     assert rn.excerpt_from_hit(hit) == "Decision log: we selected FalkorDB"
     assert rn.excerpt_from_hit({"id": "pt_2"}) == ""
     assert rn.excerpt_from_hit(None) == ""
     assert rn.excerpt_from_hit({"quote": 42}) == ""
+
+
+def _record_graph_door(sdk):
+    """Record every statement the turn hands to the graph handle.
+
+    `proj.g` is a `_GuardedGraph` with `__slots__`, so the door cannot be replaced
+    on it; its INNER handle is where the statements actually land. Confined to a
+    per-test embedded SDK (`_fresh_sdk`), so nothing global is mutated.
+    """
+    seen: list[tuple[str, str]] = []
+    inner = sdk._get_proj().g._g
+    for door in ("query", "ro_query", "execute"):
+        original = getattr(inner, door, None)
+        if original is None:
+            continue
+
+        def make(original=original, door=door):
+            def spy(statement, *args, **kwargs):
+                seen.append((door, " ".join(str(statement).split())))
+                return original(statement, *args, **kwargs)
+            return spy
+
+        setattr(inner, door, make())
+    return seen
+
+
+def test_the_turn_reads_no_statement_that_names_the_excerpt():
+    """The excerpt is FREE: the RESOLVE hit already carries `quote` (#14607).
+
+    A first cut of this change issued a batched Cypher read for `quote`, and on
+    the hosted endpoint that pushed the reflex past its 300 ms ceiling
+    (`degraded_reason: "timeout"`, caught by the contract suite).
+
+    ⛔ This is the guard that reds if the read comes back, and it is pinned on the
+    TURN'S OWN DOOR TRAFFIC rather than on the block: the block's content would be
+    IDENTICAL either way (the same excerpt reaches it), so a content assertion
+    cannot see the regression. Both halves are asserted together — the excerpt
+    ARRIVES, and nothing the turn ran SELECTS it — so a green cannot come from the
+    excerpt having stopped arriving.
+    """
+    sdk = _fresh_sdk()
+    claim = sdk._create_point(
+        "decision", "Zephyr rollout is gated on the audit sign-off")["id"]
+    support = sdk._create_point(
+        "evidence", "Zephyr audit sign-off was requested on March 3")["id"]
+    sdk._create_operator("IMPL", support, [claim])
+    # Setup is OUTSIDE the recording window on purpose: this write names `quote`.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.quote=$q",
+        params={"id": claim,
+                "q": "Ops note: the Zephyr rollout waits on the audit sign-off."})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.confidence=0.9, "
+        "n.posterior_alpha=9.0, n.posterior_beta=1.0",
+        params={"id": claim})
+
+    seen = _record_graph_door(sdk)
+    result = sdk._volunteer_context(
+        [{"role": "user", "content": "What is the Zephyr rollout waiting on?"}],
+        session_id="14607-no-extra-read", why=True)
+
+    assert "from source:" in result["block"]
+    assert "Ops note: the Zephyr rollout waits" in result["block"], (
+        "the excerpt must still reach the block — otherwise the no-read half below "
+        "could pass for the wrong reason")
+    assert seen, "the turn issued NO graph statements at all — the recorder is wrong"
+    # The point hydration read ALREADY carries `quote` (`RETURN …, n.quote,
+    # n.source_turn_id, …`) — that is where the excerpt comes from, so its presence
+    # is the point, not the defect. What must never appear is a SECOND, distinct
+    # statement that fetches the same column: that is the batched backfill this
+    # change removed. Pinning DISTINCT SHAPES rather than a count keeps the guard
+    # free of a magic number while still reding on the regression.
+    quote_shapes = sorted({stmt for _door, stmt in seen
+                           if re.search(r"\bquote\b", stmt, re.I)})
+    assert len(quote_shapes) == 1, (
+        "the turn issues more than one DISTINCT statement naming `quote` — the "
+        "excerpt must come from the hydration read that already runs, never from "
+        "a second fetch (that fetch put the hosted reflex into "
+        "`degraded_reason: timeout`):\n" +
+        "\n".join(f"  {s[:160]}" for s in quote_shapes))
 
 
 def test_excerpt_is_bounded_and_marked_when_cut():

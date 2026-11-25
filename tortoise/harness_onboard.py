@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,22 @@ from . import mcp_selfcheck
 #: credential anyway (co-source, #2369 D1.1), so this value cannot aim a stored
 #: key at a host of its choosing.
 DEFAULT_MCP_URL = "https://api.premiselabs.co/mcp/"
+
+
+def default_url() -> str:
+    """The endpoint an install targets when the caller does not name one.
+
+    The operator's own configuration WINS over the built-in hosted default. A box
+    that sets `TORTOISE_MCP_URL` (a self-hosted or local endpoint) must not have
+    the installer write the HOSTED default into its config: that is exactly how
+    the entry and the environment came apart — `onboard` wrote the hosted default
+    while `mcp_selfcheck`'s probe graded the shell's endpoint, so the verification
+    reported a working install for a config that pointed somewhere else. The
+    probe now grades the ENTRY (`mcp_selfcheck.declared_endpoint`), so the two
+    must AGREE at write time rather than only at verify time.
+    """
+    configured = (os.environ.get("TORTOISE_MCP_URL") or "").strip()
+    return configured or DEFAULT_MCP_URL
 
 #: The interpreter a written entry names. `python3` (PATH), NOT
 #: `sys.executable`: a config that is COMMITTED carries this value to every
@@ -103,7 +120,7 @@ class InstallResult:
 
 # ── The credential-free entry ─────────────────────────────────────────────
 
-def bridge_entry(*, url: str = DEFAULT_MCP_URL,
+def bridge_entry(*, url: str | None = None,
                  python: str | None = None) -> dict:
     """The harness entry for the bridge: no credential, no `${VAR}`, nothing stale.
 
@@ -118,7 +135,7 @@ def bridge_entry(*, url: str = DEFAULT_MCP_URL,
         "type": "stdio",
         "command": python or DEFAULT_PYTHON,
         "args": ["-m", "tortoise.mcp_bridge"],
-        "env": {"TORTOISE_MCP_URL": url},
+        "env": {"TORTOISE_MCP_URL": url or default_url()},
         "_comment": (
             "Registered by `tortoise onboard`. Deliberately carries NO "
             "credential: the bridge resolves the key on every request from "
@@ -192,7 +209,7 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     return text[:start] + body + text[end:]
 
 
-def write_config(harness: str, project_dir: Path, *, url: str = DEFAULT_MCP_URL,
+def write_config(harness: str, project_dir: Path, *, url: str | None = None,
                  dry_run: bool = False, python: str | None = None,
                  scope: str = "project") -> InstallResult:
     """Merge the bridge entry into the harness config — never overwrite the file.
@@ -365,7 +382,7 @@ def remove_instructions(harness: str, project_dir: Path, *,
 # ── The one command ───────────────────────────────────────────────────────
 
 def onboard(harness: str = "pi", *, project_dir: Path | None = None,
-            url: str = DEFAULT_MCP_URL, dry_run: bool = False,
+            url: str | None = None, dry_run: bool = False,
             verify_only: bool = False, live: bool = True,
             hooks: bool = True, instructions: bool = True,
             uninstall: bool = False, scope: str = "project") -> InstallResult:

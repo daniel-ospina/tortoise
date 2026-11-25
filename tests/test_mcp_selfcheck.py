@@ -384,3 +384,100 @@ class _Ok(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+# ── 5 · a nested `${A:-${B}}` default is expanded with BRACE BALANCE ─────
+#
+# Both arms below red on the `[^}]*` group this used to use, and the second is
+# the one that matters: the classifier named the WRONG LAYER on this repo's own
+# recorded config shape (`docs/evidence/14607-mcp-not-loaded.md`), sending the
+# reader to replace an interpreter when the fault was an unset variable.
+
+def test_a_nested_default_expands_instead_of_leaking_its_braces(monkeypatch):
+    """`${A:-${B}/x}` must resolve to a real path, and must report what it lost."""
+    monkeypatch.delenv("TORTOISE_HOME_14607", raising=False)
+    value, unset = mcp_selfcheck._expand(
+        "${TORTOISE_HOME_14607:-${HOME}/Documents/GitHub/tortoise}")
+    assert value == f"{Path.home()}/Documents/GitHub/tortoise"
+    assert "${" not in value, f"the expansion leaked an unexpanded expression: {value!r}"
+    # A usable default is not a lost variable: the entry CAN be built.
+    assert unset == []
+
+
+def test_a_nested_default_with_nothing_set_names_every_lost_variable(monkeypatch):
+    """The unset list is the payload — a nested default must not swallow the name."""
+    monkeypatch.delenv("OUTER_14607", raising=False)
+    monkeypatch.delenv("INNER_14607", raising=False)
+    value, unset = mcp_selfcheck._expand("${OUTER_14607:-${INNER_14607}}")
+    assert value == ""
+    assert unset == ["INNER_14607", "OUTER_14607"]
+
+
+def test_the_repos_own_nested_config_shape_is_not_diagnosed_as_a_bad_interpreter(
+        project, monkeypatch):
+    """The defect, end to end: a MANGLED expression must never reach the verdict."""
+    monkeypatch.delenv("TORTOISE_HOME_14607", raising=False)
+    _write_config(project, {
+        "type": "stdio",
+        "command": "${TORTOISE_HOME_14607:-${HOME}/not-here-14607/.venv/bin/python3}",
+        "args": ["-m", "tortoise.mcp_bridge"],
+    })
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING
+    assert "${" not in verdict.detail, (
+        "the verdict quotes an unexpanded/mangled expression — it is reasoning "
+        f"about a string that is not the path: {verdict.detail!r}")
+    assert f"{Path.home()}/not-here-14607" in verdict.detail, (
+        "the verdict must name the path it actually checked")
+
+
+# ── 6 · the probe grades the endpoint the ENTRY names ────────────────────
+#
+# `tortoise onboard --url http://localhost:8000/mcp` writes the target into the
+# entry's `env`, while `mcp_client.mcp_url()` reads the CALLING SHELL. Grading the
+# shell's endpoint is wrong in both directions: OK while the entry points at a
+# dead local endpoint (a FALSE PASS in the verifier), and a transport/auth verdict
+# about a host the harness never contacts.
+
+def test_the_probe_grades_the_endpoint_the_entry_names(
+        project, refusing_endpoint, monkeypatch):
+    """A dead endpoint in the ENTRY wins over a LIVE one in the shell.
+
+    The shell's endpoint here is a real server that REFUSES the credential, so
+    grading it would produce `auth-rejected`. The entry's endpoint is closed, so
+    `endpoint-unreachable` is the verdict only when the ENTRY was graded.
+    """
+    dead = f"http://127.0.0.1:{_dead_port()}/mcp"
+    _write_config(project, {
+        "type": "stdio",
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": dead},
+    })
+    monkeypatch.setenv("TORTOISE_MCP_URL", refusing_endpoint)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_present-but-wrong-endpoint-14607")
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.status == mcp_selfcheck.UNREACHABLE, verdict.line()
+    assert dead in verdict.line(), (
+        "the verdict must say WHICH endpoint it graded — otherwise a green is "
+        f"about an unnamed host: {verdict.line()!r}")
+
+
+def test_declared_endpoint_prefers_the_entry_env_over_the_top_level_url(project):
+    """`onboard` writes `env.TORTOISE_MCP_URL`; that is the bridge's real target."""
+    _write_config(project, {
+        "type": "http",
+        "url": "https://top-level-14607.invalid/mcp",
+        "env": {"TORTOISE_MCP_URL": "https://env-wins-14607.invalid/mcp"},
+    })
+    assert (mcp_selfcheck.declared_endpoint("pi", project_dir=project)
+            == "https://env-wins-14607.invalid/mcp")
+
+
+def test_declared_endpoint_is_none_for_a_bare_stdio_entry(project):
+    """No declared endpoint ⇒ the client's own resolution is the right answer."""
+    _write_config(project, {
+        "type": "stdio", "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+    })
+    assert mcp_selfcheck.declared_endpoint("pi", project_dir=project) is None
