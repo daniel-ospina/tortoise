@@ -1672,12 +1672,13 @@ _RESTART_CUE = "Restart your client"
 # what produced both defects this pin was re-cut to fix, and a rule that reds
 # legitimate copy is how a pin gets deleted (#3429).
 #
-# ⛔ EVERY FORM IS CASE-INSENSITIVE. A clause that starts after a full stop
+# ⛔ EVERY FORM IS CASE-INSENSITIVE. A clause that starts after a separator
 # begins capitalised, and the `^`-anchored adversative form could otherwise
-# NEVER fire on ordinary prose: "Restart your client. But first confirm the
-# tools are actually there." was GREEN while its lower-case twin was RED — all
-# six forms had this false PASS, measured, before the flag went on (form (f) is
-# the one that cannot work WITHOUT it: a pre-cue imperative begins capitalised).
+# NEVER fire on ordinary prose: "Delete the old entry. But first confirm the
+# tools are actually there. Restart your client, …" was GREEN while its
+# lower-case twin was RED — measured, before the flag went on. Form (f) cannot
+# work without it at all, being a pre-cue imperative that always begins
+# capitalised ("Confirm the tools are actually there. Restart your client, …").
 # The predicate stems carry their OWN morphology: `verify\w*` (an earlier cut)
 # cannot match "verified" (y→i), and `ensure\w*` cannot match "ensuring" (the
 # silent e) — both measured as false PASSES of the very form this set grades.
@@ -1804,7 +1805,11 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     session's tools too and is an inversion — it was GREEN (measured) before a
     coordinating `and` between the two was treated as breaking the exclusion.
     """
-    tools_at = clause.find("tools")
+    # `lower()` is length-preserving, so `tools_at` indexes the ORIGINAL clause:
+    # a capitalised object ("… the config lists the Tools") must route through
+    # the same exclusion, and was a FALSE RED while this lookup was
+    # case-sensitive (measured).
+    tools_at = clause.lower().find("tools")
     if tools_at < 0:
         return False
     before = clause[:tools_at]
@@ -1823,6 +1828,29 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     # session's tool list and is graded.
     return bool(_CONFIG_PREP_RE.search(after_object)
                 or _CONFIG_NOUN_RE.search(tail[and_match.end():]))
+
+
+def _tools_appear_after_cue(quick: str) -> bool:
+    """The POSITIVE half of the pin: does the cue's sentence, or the one
+    immediately after it, name the tools?
+
+    ⛔ NOT A PARAGRAPH-WIDE SEARCH. A paragraph-wide search is satisfiable by an
+    UNRELATED later mention — this paragraph ends "if the tools are missing, run
+    `tortoise mcp-status`" — so any paragraph that says "restart" and mentions
+    the tools anywhere would pass. The window is the cue's sentence plus the
+    next one, and no further: measured, "Restart your client. The config is
+    reloaded. The tools appear later." must NOT satisfy it.
+    """
+    para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
+    flat = " ".join(para.split())
+    after = flat[flat.index(_RESTART_CUE) + len(_RESTART_CUE):]
+    # ⛔ DO NOT `lstrip` THE TERMINATOR. Stripping it turns "the cue's sentence or
+    # the next one" into "the next TWO", because the empty first part is then
+    # filled from further along — measured: "Restart your client. The config is
+    # reloaded. The tools appear later." wrongly satisfied the bound. Only the
+    # separating whitespace/comma that continues the cue is stripped.
+    parts = re.split(r"[.;—]", after.lstrip(" \t,"), maxsplit=2)
+    return re.search(r"\btools\b", " ".join(parts[:2])) is not None
 
 
 def _restart_cue_order_violation(quick: str) -> str | None:
@@ -1879,7 +1907,10 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # measured, that is how "Restart your client. When you check the tools, …"
     # came back RED. Only the separating punctuation that continues the cue
     # (spaces, a comma) is stripped here.
-    post_sentence = re.split(r"[.;]", after.lstrip(" \t,"), maxsplit=1)[0]
+    # An em dash ends it too: "Restart your client — once the tools are listed,
+    # run `tortoise mcp-status --live`." is a separate statement (measured RED
+    # while the dash was inside the window), exactly as the `;` twin is.
+    post_sentence = re.split(r"[.;—]", after.lstrip(" \t,"), maxsplit=1)[0]
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
@@ -1894,7 +1925,11 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         # the tools are there, run …" all put the confirmation AFTER the restart
         # and were RED (measured). The sequencer is what says so; the
         # subordinator that follows it does not make it a deferral.
-        if (not clause or _FORWARD_SEQUENCER_RE.match(clause)
+        # Leading punctuation must not hide the sequencer: "Restart your client
+        # — once the tools are listed, run …" and "… (then once the tools are
+        # listed, run …)" are the same forward continuation as the `;` twin and
+        # were RED (measured) while it was GREEN.
+        if (_FORWARD_SEQUENCER_RE.match(clause.lstrip('—–-:;(\'" \t'))
                 or _confirmation_scopes_the_config(clause)):
             continue
         for pattern in _INVERSION_FORMS:
@@ -1962,25 +1997,20 @@ def test_3232_generic_restart_lines_are_exact():
     assert cue in quick, (
         "docs/quickstart-cloud.md must keep its restart cue — the config is "
         "read at client start, so a written config is not a loaded one")
-    para = next(p for p in quick.split("\n\n") if cue in p)
-    flat_para = " ".join(para.split())
-    after_cue = flat_para[flat_para.index(cue) + len(cue):]
     # ⛔ THE CLAUSE MUST BE IN THE CUE'S SENTENCE, NOT MERELY SOMEWHERE LATER IN
-    # THE PARAGRAPH. A paragraph-wide search is satisfiable by an UNRELATED
-    # later mention — this paragraph ends "if the tools are missing, run
-    # `tortoise mcp-status`". A COMMA does not bound it — "Restart your client
-    # after changing the config, then confirm the tools …" is forward and must
-    # pass — so only a sentence terminator does. Note the leading `lstrip`
-    # removes a terminator that directly follows the cue, so "the cue's
-    # sentence" here means the cue's own sentence OR the one immediately after
-    # it. The paragraph's sentence-before shape ("Confirm the tools are actually
-    # there. Restart your client …") is graded by form (f) only when the cue's
-    # own or next sentence ALSO names the tools; when it does not, THIS bound
-    # fails first, with the tools-appear message below rather than the
-    # inversion one (measured both ways).
-    cue_window = " ".join(re.split(
-        r"[.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=2)[:2])
-    assert re.search(r"\btools\b", cue_window), (
+    # THE PARAGRAPH — that is what `_tools_appear_after_cue` bounds, and the
+    # bound is pinned by `test_3232_the_tools_appear_bound_is_sentence_bounded`
+    # (measured: reverting it to a paragraph-wide search reds a row there). A
+    # COMMA does not bound it — "Restart your client after changing the config,
+    # then confirm the tools …" is forward and must pass — so only a sentence
+    # terminator does. Note the leading `lstrip` removes a terminator that
+    # directly follows the cue, so "the cue's sentence" means the cue's own
+    # sentence OR the one immediately after it. The paragraph's sentence-before
+    # shape ("Confirm the tools are actually there. Restart your client …") is
+    # graded by form (f) only when the cue's own or next sentence ALSO names the
+    # tools; when it does not, THIS bound fails first, with the tools-appear
+    # message rather than the inversion one (measured both ways).
+    assert _tools_appear_after_cue(quick), (
         "docs/quickstart-cloud.md must keep a tools-appear clause AFTER its "
         "restart cue — 'restart' alone never tells the user what to look for, "
         "and a clause placed before the cue points them at tools the running "
@@ -2132,6 +2162,27 @@ def test_3232_generic_restart_lines_are_exact():
     # a determiner/modifier other than a bare `the` in form (e):
     ("Restart your client once all the tools appear.", True),
     ("Restart your client once your tools appear.", True),
+    # a capitalised OBJECT must still route through the config exclusion (its
+    # own lookup was case-sensitive — measured FALSE RED):
+    ("Restart your client after verifying the config lists the Tools.", False),
+    ("Restart your client once you have checked the Tools are enabled in your "
+     "client settings.", False),
+    # the typographic apostrophe, which no other row exercised:
+    ("Restart your client after you\u2019ve verified the tools are actually there.",
+     True),
+    # the other two forward sequencers, and the `.mcp.json` config noun — each
+    # was an unexercised arm before these rows existed:
+    ("Restart your client, next check that the tools appear, then run "
+     "`tortoise mcp-status`.", False),
+    ("Restart your client; afterwards the tools appear in the list — nothing "
+     "to do.", False),
+    ("Restart your client after editing `.mcp.json` so the tools are listed.",
+     False),
+    # leading punctuation must not hide a forward sequencer:
+    ("Restart your client — once the tools are listed, run `tortoise "
+     "mcp-status --live`.", False),
+    ("Restart your client (then once the tools are listed, run `tortoise "
+     "mcp-status`).", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -2142,3 +2193,22 @@ def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     else:
         assert violation is None, (
             f"false red on forward copy ({violation!r}): {line!r}")
+
+
+# The POSITIVE bound's window, pinned. Without these rows the window is unpinned:
+# reverting `_tools_appear_after_cue` to a paragraph-wide search left the whole
+# suite GREEN (measured), which is exactly the false PASS its docstring forbids.
+@pytest.mark.parametrize("line, appears", [
+    # the cue's own sentence, and the one immediately after it, both count:
+    ("Restart your client, then confirm the tools are actually there.", True),
+    ("Restart your client. The tools then appear in the list.", True),
+    # a mention TWO sentences later does not, and neither does silence:
+    ("Restart your client. The config is reloaded. The tools appear later.",
+     False),
+    ("Restart your client. Nothing to see here.", False),
+])
+def test_3232_the_tools_appear_bound_is_sentence_bounded(line, appears):
+    doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
+    assert _tools_appear_after_cue(doc) is appears, (
+        f"the tools-appear window is wrong for {line!r} (expected "
+        f"{'a tools clause' if appears else 'no tools clause'})")
