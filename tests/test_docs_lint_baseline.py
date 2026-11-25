@@ -1866,24 +1866,25 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # The removal was measured, not assumed: `markdownlint-cli2@0.23.3` on that
     # file reports `0 issues` and the baseline differ reports `0 new, 0 known`.
     # Both numbers moved WITH the list in this commit, per the #9193 lesson above.
-    # 2026-11-25 (#14607): burned down by ONE, and the entry had STOPPED
-    # REPRODUCING at the pinned linter before it was fixed — this is a hole in the
-    # ceiling, not a change of taste. The row was recorded as
-    # `AGENTS.md|MD028|1|Blank line inside blockquote` while
-    # `markdownlint-cli2@0.23.3` reports that finding at **line 4** (the blank line
-    # between the file's two opening blockquotes), and `markdownlint_key` is the
-    # exact `path|rule|line|detail` join — so the inherited finding matched NOTHING
-    # in the snapshot and every change that touched `AGENTS.md` was charged for
-    # debt already on main (measured on `origin/main`'s own `AGENTS.md`, same
-    # finding, same line). The deficit was repaired at the SOURCE and the row burnt
-    # down with it: `AGENTS.md:4` now carries a bare `>` (the blockquote's own
-    # continuation marker), where the pinned linter reports `0 issues` on the file
-    # and the changed-set differ reports `0 new, 0 known`. No WORD changed — but the
-    # HTML does: two adjacent `<blockquote>` elements become ONE blockquote holding
-    # two paragraphs (measured with `markdown_it`: base 2 blockquotes, head 1;
-    # `identical html: False`), which renders as the continuous quote it always read
-    # as. An earlier revision of this comment and the commit message said "the
-    # rendered page is unchanged", which was wrong.
+    # 2026-11-25 (#14607): burned down by ONE. The finding was repaired AT THE
+    # SOURCE and the ceiling followed the code, which is the only direction
+    # `end_state` allows: `AGENTS.md:4` now carries a bare `>` (the blockquote's own
+    # continuation marker) where it carried a blank line, the pinned linter reports
+    # `0 issues` on the file, and the changed-set differ reports `0 new, 0 known`
+    # against the base snapshot — so the row that recorded that MD028 IS now
+    # unreproducible and must go, with the count and the digest in the same change.
+    # ⛔ Two claims made in an earlier revision of this comment were WRONG and are
+    # corrected here: (a) it said `markdownlint_key` is `path|rule|line|detail`, so
+    # the row could never match. It is NOT — `parse_markdownlint` returns
+    # `(path, code, COLUMN, detail)` and MD028 always reports column 1, so the row
+    # `AGENTS.md|MD028|1|…` DID match the line-4 finding and the finding was never a
+    # "hole in the ceiling"; the docs red on this PR was caused by the OTHER
+    # finding (the quickstart's MD038), and the AGENTS.md fix is debt paid down on
+    # purpose, not a gate repair. (b) it said "the rendered page is unchanged". It
+    # is not: two adjacent `<blockquote>` elements become ONE blockquote holding two
+    # paragraphs (measured with `markdown_it`: base 2 blockquotes, head 1,
+    # `identical html: False`) — the continuous quote it already read as, but a
+    # different DOM.
     assert _canonical_digest(baseline["markdownlint"]) == (
         "df12d1b614112e91d2e3fdbe1665aacc7d79a57f360da730cb8bbb670bbdb67c"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"

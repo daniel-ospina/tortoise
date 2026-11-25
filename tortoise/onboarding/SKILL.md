@@ -310,6 +310,13 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 
 ### Claude Code (self-install)
 
+> **Prefer `tortoise onboard --harness claude`** — it registers the
+> credential-free stdio bridge and verifies with a live call. The recipe below is
+> the hand path when the installer cannot run, and it uses Claude Code's own
+> `${VAR}` expansion in a header: that value is captured when the client starts,
+> so a re-minted or rotated key is not picked up until a restart, and an unset one
+> expands to an empty bearer. The bridge has neither problem.
+
 ```bash
 export TORTOISE_API_KEY=tt_YOUR_KEY   # this shell
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
@@ -456,10 +463,23 @@ entry — even one that only lives in the home/base config — run the collision
 protocol below BEFORE writing):
 
 ```json
-{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "command": "python3", "args": ["-m", "tortoise.mcp_bridge"], "env": { "TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/" } } } }
 ```
 
-Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
+(`type` is deliberately absent: the harness dispatches on `command`/`url`, and a
+`type` field is an agreement constraint rather than a selector — `tortoise
+mcp-status` grades the merge the same way.)
+
+⛔ **This is the SAME entry `tortoise onboard --harness pi` writes, and it is
+deliberately credential-free.** The older recipe here expanded
+`${TORTOISE_API_KEY}` in an `Authorization` header; that is a **capture** — the
+value is frozen at the harness's process start, an unset variable expands to an
+empty bearer the server can only answer `-32001`, and a rotated key changes
+nothing until restart. The bridge resolves the key **per request** (env →
+`./.tortoise` → `~/.tortoise/credentials.json`) and refuses a missing one by name
+(`MCP-KEY-EMPTY`). Never re-introduce `${TORTOISE_API_KEY}` into a config file —
+`docs/quickstart-cloud.md` states the same prohibition, and `docs/evidence/14607-mcp-not-loaded.md`
+records the defect it came from.
 
 > **Resolution order — BOTH layers are read, and they MERGE PER FIELD.** Pi
 > walks up from the current directory to the git top-level for the repo's
@@ -494,7 +514,8 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    each field it omits — see the resolution-order note). Never write blind. A
 >    field inherited from the base DOES count: an entry that looks empty in the
 >    repo file may still be complete once merged. If the effective entry already matches the intended shape
->    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
+>    (the same `TORTOISE_MCP_URL` AND a credential-free entry — the bridge, with no
+>    `${VAR}` in any `headers`), report
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
 >    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: a

@@ -604,6 +604,47 @@ def tool_less_endpoint():
         server.server_close()
 
 
+class _ForeignTools(BaseHTTPRequestHandler):
+    """An endpoint that completes the handshake and advertises SOMEBODY ELSE's tool."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        method = payload.get("method")
+        if method == "initialize":
+            result = {"protocolVersion": "2024-11-05",
+                      "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "not-tortoise", "version": "test"}}
+        elif method == "tools/list":
+            result = {"tools": [{"name": "foo_bar",
+                                 "description": "somebody else's tool",
+                                 "inputSchema": {"type": "object"}}]}
+        else:
+            result = {}
+        body = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"),
+                           "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture()
+def foreign_tool_endpoint():
+    server = HTTPServer(("127.0.0.1", 0), _ForeignTools)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_a_handshake_with_zero_tools_is_a_failure_not_a_pass(
         tool_less_endpoint, monkeypatch):
     """⛔ THE SYMPTOM ARRIVING THROUGH A HEALTHY TRANSPORT.
@@ -621,9 +662,30 @@ def test_a_handshake_with_zero_tools_is_a_failure_not_a_pass(
     assert verdict.status == mcp_selfcheck.SERVER_ERROR, verdict.line()
     assert not verdict.ok
     assert verdict.exit_code == 1
-    assert "0 tools" in verdict.line(), (
+    assert "0 tool(s)" in verdict.line(), (
         "the verdict must name what was found, not just which class it is")
     assert "DOWN [server-error]" in verdict.line()
+
+
+def test_a_server_advertising_someone_elses_tools_is_not_a_pass(
+        foreign_tool_endpoint, monkeypatch):
+    """THE SAME FAIL-OPEN, ONE CASE OVER: the count is not the surface.
+
+    A server that completes the handshake and advertises tools that are NOT
+    `tortoise_*` leaves the agent with exactly the symptom #14607 is about — no
+    `tortoise_*` tool to call — while a count-based verdict says `OK — 1 tools
+    registered` and `onboard` writes the two "reads go through the MCP" sentences
+    on it. The product registers every MCP tool behind the `tortoise_` prefix
+    (`TOOL_REGISTRY`), so that prefix is what the probe grades.
+    """
+    monkeypatch.setenv("TORTOISE_MCP_URL", foreign_tool_endpoint)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_present-but-foreign-14607")
+    verdict = mcp_selfcheck.probe()
+    assert verdict.status == mcp_selfcheck.SERVER_ERROR, verdict.line()
+    assert not verdict.ok
+    assert verdict.exit_code == 1
+    assert "tortoise_*" in verdict.line(), (
+        "the verdict must say what is missing, by name: " + verdict.line())
 
 
 def test_the_default_install_verifies_although_the_shell_declares_no_endpoint(
@@ -881,6 +943,34 @@ def test_a_withheld_credential_is_not_classified_as_a_server_error():
         f"only its host disagrees: {fix!r}")
     assert "re-mint" not in fix.lower(), (
         f"re-minting a valid key does not fix a host mismatch: {fix!r}")
+
+
+def test_an_unset_cwd_variable_is_not_described_as_an_empty_bearer(project, monkeypatch):
+    """The empty-bearer story belongs to a HEADER, so it is emitted only for one.
+
+    A stdio entry whose unset variable is its WORKING DIRECTORY has no
+    `Authorization` header at all: telling the reader its request "would carry
+    `Authorization: Bearer ` (empty)" and earn `-32001` names a layer that entry
+    never uses — the wrong-layer claim this module exists to remove. The class
+    (`env-unset`) and the fix are unchanged; only the mechanism sentence must not
+    be invented.
+    """
+    for name in mcp_selfcheck.CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(mcp_selfcheck, "CREDENTIAL_FILES", ())
+    monkeypatch.delenv("WORKDIR_14607", raising=False)
+    _write_config(project, {
+        "type": "stdio",
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "cwd": "${WORKDIR_14607}",
+    })
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.ENV_UNSET, verdict.line()
+    assert "WORKDIR_14607" in verdict.line(), verdict.line()
+    assert "Bearer" not in verdict.line(), (
+        "this entry has no Authorization header, so a sentence about an empty "
+        "bearer names a layer it never uses: " + verdict.line())
 
 
 def test_a_missing_credential_still_carries_a_remedy():

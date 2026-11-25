@@ -573,9 +573,15 @@ def classify(harness: str, *, project_dir: Path | None = None
             source=source, transport="stdio", configs_read=read)
     if unset:
         names = ", ".join(f"${n}" for n in unset)
-        blank_credential = any(
-            "author" in p.lower() for p, _v in leaves) or \
-            not credentials_present(project_dir)
+        # ⛔ THE EMPTY-BEARER SENTENCE IS ABOUT A HEADER, so it is emitted only when
+        # the unset variable is IN one. It used to fire on
+        # `any("author" in path) or not credentials_present(...)`, and the second
+        # disjunct sent a stdio entry whose unset variable is a WORKING DIRECTORY
+        # (`"cwd": "${WORKDIR_14607}"`) a story about `Authorization: Bearer ` and
+        # `-32001` — a layer that entry never uses, which is the same wrong-layer
+        # claim this module exists to remove. The genuine capture is always the
+        # first disjunct: the variable's leaf path runs through `headers`.
+        blank_credential = any("author" in p.lower() for p, _v in leaves)
         detail = (f"the entry interpolates {names}, which the harness "
                   f"environment does not set — an unset variable expands to an "
                   f"empty string")
@@ -869,26 +875,31 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
         return Verdict(status=status, detail=f"{_first_line(exc)} (graded {graded})",
                        fix=_fix_for(exc, status),
                        transport="http")
-    if not tools:
+    if not _tortoise_tools(tools):
         # ⛔ A HANDSHAKE IS NOT A TOOL SURFACE. The endpoint answered `initialize`
-        # and `tools/list` correctly and returned ZERO tools — the harness then
-        # loads a server that exposes no `tortoise_*` tool at all, which is the
-        # #14607 symptom (`the tortoise_* tools are absent`) reached through a
-        # HEALTHY transport. Grading that `OK` would be the fail-open this module
-        # exists to remove, one layer further down than the empty-bearer capture:
-        # every earlier layer passed truthfully and the outcome is still a door
-        # that does not open. `server-error` is the class because the endpoint
-        # answered (not transport, not auth) and its answer is unusable; the fix
-        # is stated here rather than taken from `_FIX_BY_CLASS`, whose generic
-        # "read its body" has no body to read.
+        # and `tools/list` correctly and returned EITHER no tools at all OR tools
+        # that are not OURS — the harness then loads a server exposing no
+        # `tortoise_*` tool, which is the #14607 symptom (`the tortoise_* tools are
+        # absent`) reached through a HEALTHY transport. Grading that `OK` would be
+        # the fail-open this module exists to remove, one layer further down than
+        # the empty-bearer capture: every earlier layer passed truthfully and the
+        # outcome is still a door that does not open. The COUNT alone was not enough
+        # — a server advertising `foo_bar` was graded `OK — 1 tools registered` and
+        # `onboard` then wrote the "reads go through the MCP" sentences on it — so
+        # the names are what is graded, against the prefix the product actually
+        # registers (`TOOL_REGISTRY`). `server-error` is the class because the
+        # endpoint answered (not transport, not auth) and its answer is unusable;
+        # the fix is stated here rather than taken from `_FIX_BY_CLASS`, whose
+        # generic "read its body" has no body to read.
         return Verdict(
             status=SERVER_ERROR,
             detail=(f"the endpoint answered a valid MCP handshake and advertised "
-                    f"0 tools (graded {graded}) — the harness would load no "
-                    f"tortoise_* tool from it"),
-            fix=("the server registered NO tools — check that the endpoint is "
-                 "Tortoise's MCP (not another MCP server on that URL) and that "
-                 "the credential's organization can see the tool registry"),
+                    f"{len(tools)} tool(s), NONE of them `tortoise_*` "
+                    f"(graded {graded}) — the harness would load no Tortoise tool "
+                    f"from it"),
+            fix=("the server exposes no `tortoise_*` tool — check that the "
+                 "endpoint is Tortoise's MCP (not another MCP server on that URL) "
+                 "and that the credential's organization can see the tool registry"),
             transport="http")
     return Verdict(
         status=OK,
@@ -928,6 +939,32 @@ def _as_the_child(endpoint: str):
             os.environ.pop("TORTOISE_MCP_URL", None)
         else:
             os.environ["TORTOISE_MCP_URL"] = previous
+
+
+def _tortoise_tools(tools: list) -> list:
+    """The tools on this server that are OURS, by the prefix the product registers.
+
+    `TOOL_REGISTRY` (`tortoise/tool_registry.py`) registers every MCP tool as
+    `tortoise_<verb>`, so the prefix is the product's own claim about what an
+    agent can see — not a guess. A server answering the MCP handshake with
+    somebody else's tools is the same failure as one answering with none.
+    """
+    return [t for t in tools if _tool_name(t).startswith("tortoise_")]
+
+
+def _tool_name(tool) -> str:
+    """A tool's name whether the client handed back a pydantic `Tool` or a dict.
+
+    `mcp_client._run` returns the SDK's models (`mcp.types.Tool`, a pydantic
+    object), NOT mappings — the first cut of this helper used `tool.get("name")`
+    and every probe call raised `AttributeError: 'Tool' object has no attribute
+    'get'`. Dicts are still accepted because a test double or a future client may
+    hand back the raw JSON shape.
+    """
+    name = getattr(tool, "name", None)
+    if name is None and isinstance(tool, dict):
+        name = tool.get("name")
+    return str(name or "")
 
 
 def _first_line(exc: BaseException, limit: int = 240) -> str:

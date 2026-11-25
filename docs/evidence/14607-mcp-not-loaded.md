@@ -60,8 +60,15 @@ The **tracked** harness config in this repo, as shipped **before this change**
 }
 ```
 
-and, at user scope, `~/.pi/agent/.mcp.json` declares a **different** server under
-the same name:
+and, at user scope, `~/.pi/agent/.mcp.json` **declared** a **different** server
+under the same name — past tense on purpose: **the installer has since rewritten
+that file on this cell** (`tortoise onboard --harness pi --scope user`, run at
+2026-11-25T01:51Z), so the object below is the *before* state, quoted ABRIDGED (the
+real entry also carried `PYTHONPATH`, `purpose`, `whenToLoad` and `cost`). The
+pre-rewrite file is kept alongside it as `~/.pi/agent/.mcp.json.bak-14607` — the
+only rollback, so it is deliberately NOT deleted — and the file `~/.pi/agent/.mcp.json`
+now holds the credential-free bridge. **Anyone quoting this block as the current
+state is quoting the defect, not the box.**
 
 ```json
 "tortoise": {
@@ -72,7 +79,8 @@ the same name:
 }
 ```
 
-Two entries, same name, **different transports**, and neither is verified.
+Two entries, same name, **different transports**, and neither was verified — which
+is the state the two defects below were diagnosed from.
 
 ## 3. The four independent things that are wrong, measured
 
