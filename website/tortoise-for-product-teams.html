@@ -753,12 +753,44 @@
        video alone is 398px — so the hatch is widened from product.html's 520px
        (`test_each_tall_beat_declares_the_css_escape_hatch` only floors it at
        480px) and extended to every beat whose copy can exceed a landscape
-       phone's viewport. `justify-content: flex-start` + `overflow-y: auto` lets
-       the stack scroll instead of clipping. */
+       phone's viewport. `overflow-y: auto` is what lets the stack scroll
+       instead of clipping.
+
+       ⛔ THE ALIGNMENT IS `safe center`, NOT A BARE `flex-start`, and the
+       `flex-start` here is a FALLBACK rather than the behaviour. A bare
+       `flex-start` aligned EVERY beat to `padding-top` whenever this breakpoint
+       fired — not only the beats that overrun it — and the breakpoint fires on
+       essentially every phone in portrait, because 820px is measured against
+       the CSS viewport AFTER browser chrome (a 390x844 phone reports ~675px
+       once the address bar is up). So the hatch was choosing the layout for the
+       whole page.
+
+       Measured before this at 375x812 (the hatch's own arm), content riding at
+       y=32 in a box with 748px of room: #beat-onboard 189.2px of copy with
+       590.8px empty below it, #beat-ingest 173.9px with 606.1px empty, and every
+       beat's title box at y=52 — i.e. 2.4px UNDER the fixed Login pill
+       (`padding: 18px 24px`, so its button ends at 54.4), 72-187px² of painted
+       overlap on five of the seven beats. That is the owner's "title+body
+       appears too high … looks weirdly cropped … instead of centre on the
+       screen": not clipping, top-alignment plus the radial `#vignette`, which
+       is transparent only inside its central 55% and therefore dimmed the copy
+       it pushed into the top band.
+
+       Cascaded on purpose: `flex-start` is the last resort for a browser
+       without `safe` alignment (it drops the next declaration and keeps this
+       one), `safe center` overrides it everywhere else. `safe center` is
+       exactly the predicate a `max-height` query cannot express — align-centred
+       when the copy FITS, `start` when it OVERFLOWS — which is what the hatch
+       always meant. The hero keeps its `padding-top: 5rem` clearance in both
+       arms: at every phone width measured it is the one beat that still
+       overflows (722.5px of copy in a 700px box at 375x812), so `safe center`
+       resolves to `start` there and its h1 stays at y=80, clear of the pill. */
     @media (max-height: 820px) {
       #beat-hero, #beat-intro, #beat-compute, #beat-ingest, #beat-organize,
       #beat-reason, #beat-onboard {
-        justify-content: flex-start; overflow-y: auto;
+        justify-content: flex-start;
+        justify-content: safe center;
+        overflow-y: auto;
       }
       /* The video is 398 px tall at its 224 px width — taller than a landscape
          phone's whole viewport, so on a short window it is what pushes the CTA
