@@ -59,6 +59,7 @@ and production.
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import math
@@ -4360,6 +4361,15 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     VISIBLE (`/health` `record.armed_but_uncut`), never raised — and the remedy
     it prints is the PER-GRAPH `seed` + `arm`, not `backfill`, which cannot
     reach a graph the record has never seen write (#14587 review P1-2).
+
+    ⛔ "VISIBLE" IS THE REGISTRY CALL BELOW, not the ERROR line beside it
+    (#14587 review P3-1): the hook's own seam import (`record_allocator`) is
+    guarded INSIDE the hook, so an unimportable allocator is reported on
+    `/health` there. THIS arm is the residual — the hook's module itself did not
+    import, in which case the registry it would report into is gone too and the
+    ERROR is the only channel — OR the hook RAISED despite its never-raise
+    contract, in which case the module DID import and the call below counts the
+    graph instead of leaving `/health` green over it.
     """
     try:
         from tortoise.record_writer import provision_graph_record
@@ -4368,7 +4378,8 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     except Exception:
         _logger.error(
             "the default graph row %s (%s) exists but its record cursor could "
-            "NOT be provisioned (the record seam is unimportable) — every "
+            "NOT be provisioned (the seam could not be imported, or the hook "
+            "raised) — every "
             "record this org writes is refused until it is seeded. Remedy, PER "
             "GRAPH: `uv run python tools/record_allocator_cli.py seed "
             "--org-id %s --graph-id %s --enumerated-floor 0`, then `arm "
@@ -4376,6 +4387,16 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
             "cannot reach a graph the record has never seen write)",
             graph_id, org_id, org_id, graph_id, org_id, graph_id,
             exc_info=True)
+        with contextlib.suppress(Exception):
+            # ⛔ A LOG LINE IS NOT A HEALTH FIELD (#14587 review P3-1): record the
+            # graph in the registry `/health` folds, so this arm is a COUNTED gap
+            # whenever the module that owns that registry imported (the hook
+            # RAISED despite its never-raise contract). Suppressed for the other
+            # way in — the hook's own module not importing at all — which is the
+            # residual no call from here can report into.
+            from tortoise.record_writer import note_uncut_graph
+
+            note_uncut_graph(org_id, graph_id, reason="provision_failed")
 
 
 def ensure_default_graph_row(cp, org_id: str,

@@ -30985,10 +30985,19 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     `tortoise.record_writer.provision_graph_record` is the hook; this wrapper
     exists for ONE reason: the import itself can fail (a partially-shipped
     install, an import-time error in the seam's dependencies) and a graph
-    creation must not fail for it. ⛔ A failed import is NOT silent — it is
-    logged at ERROR naming the graph as UNCUT and the verb that heals it, which
-    is the same failure class the hook's own best-effort arm reports on
-    `/health`.
+    creation must not fail for it.
+
+    ⛔ WHAT REACHES THIS ARM, stated exactly (#14587 review P3-1). The hook's OWN
+    seam import (`record_allocator`) is guarded INSIDE the hook, so an
+    unimportable allocator is counted and reported on `/health` THERE, not here.
+    This arm is the residual: the hook's own module could not be imported
+    (`from tortoise.record_writer import provision_graph_record`). The registry
+    `/health` folds lives in that same module, so in the RESIDUAL case nothing
+    here can write a health field — the ERROR below is the only channel, and it
+    names the graph as UNCUT and the verb that heals it. The arm is ALSO reached
+    when the hook RAISES despite its never-raise contract, and then the module
+    IS imported: the body records the graph in that registry, so the health
+    surface cannot go silent over a bug in the hook (see the note below).
 
     ⛔ THE HOOK IS BEST-EFFORT AND THAT IS A DECISION, not an oversight. It is
     called AFTER every rollback arm of the mint (see the call site), so nothing
@@ -31023,7 +31032,8 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     except Exception:
         _logger.error(
             "graph %s (%s) was created but its record cursor could NOT be "
-            "provisioned (the record seam is unimportable) — every record this "
+            "provisioned (the seam could not be imported, or the hook "
+            "raised) — every record this "
             "graph writes is refused until it is seeded: run "
             "`uv run python tools/record_allocator_cli.py seed --org-id %s "
             "--graph-id %s --enumerated-floor 0` then `arm --org-id %s "
@@ -31032,6 +31042,16 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
             "never silently wrong)",
             graph_id, org_id, org_id, graph_id, org_id, graph_id,
             exc_info=True)
+        with contextlib.suppress(Exception):
+            # ⛔ A LOG LINE IS NOT A HEALTH FIELD (#14587 review P3-1): name the
+            # graph in the registry `/health` folds, so the arm that used to be
+            # logged-only is a COUNTED gap when — as in the raise case — the
+            # module that owns that registry did import. Suppressed because the
+            # OTHER way in here is that it did not, and the docstring states that
+            # residual rather than pretending this call can fix it.
+            from tortoise.record_writer import note_uncut_graph
+
+            note_uncut_graph(org_id, graph_id, reason="provision_failed")
 
 
 async def _graph_quota_gate(org: dict) -> None:

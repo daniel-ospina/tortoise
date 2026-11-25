@@ -3406,8 +3406,6 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     ``n x`` it; the live breaker is not consulted, and the reason is stated on
     that constant.
     """
-    from . import record_allocator as ra
-
     try:
         dsn = record_dsn()
     except RecordWriteError as exc:
@@ -3422,6 +3420,33 @@ def provision_graph_record(*, org_id: str, graph_id: str,
         return {"provisioned": False, "reason": "malformed_dsn"}
     if dsn is None:
         return {"provisioned": False, "reason": "unarmed"}
+
+    # ⛔ THE IMPORT IS INSIDE A GUARDED ARM (#14587 review P3-1). It sat BEFORE
+    # this function's first `try` until the review, which made an unimportable
+    # `record_allocator` the ONE exception that escaped a hook whose contract is
+    # "never raises": it landed in the door wrappers, which can only LOG, and
+    # `/health` therefore stayed `ok: true` over a graph whose cursor row was
+    # never provisioned. Here it is the same failure class as every other arm —
+    # counted in the registry, reported on `/health`, healed by the same
+    # per-graph remedy. ⛔ AFTER the `unarmed` return on purpose: an unarmed
+    # deployment has no record, so nothing is uncut, counted or logged (property
+    # 1 above), and an unimportable seam is then not a fact about anything.
+    try:
+        from . import record_allocator as ra
+    except Exception as exc:
+        note_uncut_graph(org_id, graph_id, reason="provision_failed")
+        _logger.warning(
+            "the graph's record cursor could NOT be provisioned for %s/%s: "
+            "the record seam (`tortoise.record_allocator`) is not importable "
+            "(%s: %s) — the graph was created and every record it writes is "
+            "refused until it is seeded. Remedy, PER GRAPH: "
+            "`record_allocator_cli.py seed --org-id %s --graph-id %s "
+            "--enumerated-floor 0`, then `arm --org-id %s --graph-id %s "
+            "--acknowledge-cutover`. `/health` reports this under "
+            "`record.armed_but_uncut`",
+            org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
+            org_id, graph_id, org_id, graph_id)
+        return {"provisioned": False, "reason": "provision_failed"}
 
     connection: Any | None = None
     try:

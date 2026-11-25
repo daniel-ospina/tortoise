@@ -1355,6 +1355,102 @@ def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
         f"it never will: {lines}")
 
 
+def test_an_unimportable_allocator_seam_names_the_graph_and_never_escapes(
+        caplog, monkeypatch):
+    """⛔ #14587 review P3-1 — the ONE arm that escaped the never-raise contract.
+
+    `from . import record_allocator as ra` sat BEFORE the hook's first `try`, so an
+    unimportable allocator raised out of a function whose docstring promises "it
+    never raises" AND whose whole compensation is a health field. It landed in the
+    door wrappers, which can only LOG — so `/health` kept `ok: true` over a graph
+    whose cursor row was never provisioned: the PR's headline failure, with the
+    remedy moved off the surface the docstring advertises.
+
+    RED before the fix: the call below raises `ModuleNotFoundError` instead of
+    returning, so there is no result to assert and nothing in the registry.
+
+    Two levers, and BOTH are needed to make the import fail for real: the
+    `sys.modules` entry is what the import machinery refuses, and the package
+    ATTRIBUTE has to go too or `from . import record_allocator` resolves it
+    without consulting `sys.modules` at all (measured: with the `sys.modules` entry
+    alone the hook returns `unarmed` and never touches the seam).
+    """
+    import sys
+
+    import tortoise
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setitem(sys.modules, "tortoise.record_allocator", None)
+    monkeypatch.delattr(tortoise, "record_allocator", raising=False)
+
+    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
+        result = rw.provision_graph_record(org_id="org-14582",
+                                          graph_id="graph-14582")
+
+    assert result == {"provisioned": False, "reason": "provision_failed"}, (
+        "an unimportable seam must be a NAMED provisioning outcome, not an "
+        f"escaping exception: {result!r}")
+    assert rw.armed_but_uncut_reasons() == {"provision_failed": 1}, (
+        "the graph is uncut and `/health` folds `armed_but_uncut`; a failure it "
+        "does not count is the silent gap this hook exists to close")
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert any("seed --org-id org-14582 --graph-id graph-14582 "
+               "--enumerated-floor 0" in line for line in lines), lines
+    assert any("not importable" in line for line in lines), lines
+
+    # ⛔ AND THE GUARD SITS AFTER THE `unarmed` RETURN ON PURPOSE (property 1): with
+    # no record DSN there is no record, so an unimportable seam is not a fact about
+    # anything and must not be counted. Mutant: hoist the import guard above the
+    # `unarmed` return → this counts a graph on an unarmed deployment (the
+    # permanent false red F3 forbids).
+    rw.reset_uncut_graphs()
+    monkeypatch.delenv(rw.RECORD_DSN_ENV)
+    assert rw.provision_graph_record(org_id="org-14582", graph_id="graph-14582") \
+        == {"provisioned": False, "reason": "unarmed"}
+    assert rw.armed_but_uncut_reasons() == {}, (
+        "an unarmed deployment has no record, so nothing is uncut — an "
+        "unimportable seam must not be counted there")
+
+
+@pytest.mark.parametrize(("module", "wrapper"), (
+    ("tortoise.hosted_api", "_provision_graph_record"),
+    ("tortoise.supabase_control", "_provision_default_graph_record"),
+))
+def test_a_wrapper_that_logs_an_escaping_hook_also_counts_the_graph(
+        module, wrapper, monkeypatch):
+    """⛔ #14587 review P3-1 — "logged at ERROR" is not a health field.
+
+    Both door wrappers caught the hook's escaping exception with a bare
+    `_logger.error`, so the graph a log line NAMED was absent from the registry
+    `/health` folds — `ok: true` over a known gap, on the one arm the wrapper's
+    own docstring claimed was covered.
+
+    The hook now guards its own seam import, so what reaches a wrapper is either
+    the residual (the hook's module itself did not import, where the registry it
+    would report into is gone too — stated on both docstrings, not pretended
+    away) or a hook that RAISED despite its never-raise contract. In that second
+    case the module DID import, so a log-only body leaves the surface green over a
+    bug — which is what this pins. Mutant: delete either wrapper's
+    `note_uncut_graph` call → the registry stays empty and this reds.
+    """
+    import importlib
+
+    from tortoise import record_writer
+
+    door = getattr(importlib.import_module(module), wrapper)
+
+    def boom(**_kw):
+        raise RuntimeError("the hook raised despite its never-raise contract")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(record_writer, "provision_graph_record", boom)
+        door(org_id="org-14582", graph_id="graph-14582")
+
+    assert rw.armed_but_uncut_reasons() == {"provision_failed": 1}, (
+        f"`{module}.{wrapper}` logged the failure and left `/health` green — the "
+        "graph is uncut and the registry that would say so was importable there")
+
+
 # ── the live legs: a real record database ──────────────────────────────────
 
 pytestmark_live = pytest.mark.skipif(
