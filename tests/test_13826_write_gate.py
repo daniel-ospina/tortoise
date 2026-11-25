@@ -69,9 +69,16 @@ def sdk(tmp_path):
 
 def _gate(monkeypatch, required: bool) -> None:
     """Force the ONE predicate. `_derived_mirror_required` imports it per call, so this
-    reaches every writer — folds, sdk doors and the restore alike."""
+    reaches every writer — folds, sdk doors and the restore alike.
+
+    ⛔ ``**_kw`` for the same reason as :func:`_gate_map` (`#14560`): the DR restore asks
+    with ``require_substantive=True``, and a positional-only stub would raise into the
+    caller's fail-closed `except` — turning every "stop" into "keep" and greening these
+    arms over a fold that never actually stopped. The keyword is ignored deliberately: the
+    triviality rule is pinned separately.
+    """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: required, raising=False)
+                        lambda entity_type, **_kw: required, raising=False)
 
 
 def _gate_map(monkeypatch, keep: set[str]) -> None:
@@ -83,7 +90,14 @@ def _gate_map(monkeypatch, keep: set[str]) -> None:
     labels SHARE — measured, all three were green under `_gate` alone.
     """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: entity_type in keep, raising=False)
+                        lambda entity_type, **_kw: entity_type in keep, raising=False)
+    # ⛔ ``**_kw`` IS NOT TIDINESS (#14560): the DR restore asks with
+    # ``require_substantive=True`` so a TRIVIAL verdict cannot license a drop, and a
+    # one-positional-arg stub would raise into the caller's fail-closed `except` and turn
+    # every "stop" answer into "keep" — the per-label AND below would then be green over
+    # a door that never opened. The keyword is IGNORED here on purpose: what these arms
+    # measure is the per-label conjunction, and the triviality rule has its own pin
+    # (`tests/test_14560_operator_vectors.py::test_a_TRIVIAL_verdict_cannot_license_the_restore_drop`).
 
 
 def _prop(g, match: str, prop: str):
@@ -441,6 +455,16 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     # index (so nothing READS the property) and `#13971` gated the writers on the same
     # measured predicate, so `#5004`'s "a Point vector is RECORD TRUTH" is now the reason
     # the RECORD holds it — never a reason to re-write the mirror after a strip.
+    # ⛔ THE WHOLE `:Point` BLOCK RUNS WITH THE HOLD LIFTED (`#14560` review, P2). `:Point`'s
+    # drop is HELD (`hosted_backup._RESTORE_DROP_HELD`, `#13971`'s per-ID ask is outstanding) on
+    # BOTH doors now, so with the real set NO `:Point` write can pop at all — and the two
+    # one-half arms below would then pass under a mutant that drops EITHER conjunct (or the
+    # whole gate block), which is exactly what they exist to catch. Lifting the hold for the
+    # block restores their discrimination; the hold itself is re-asserted at the end, on the
+    # REAL set, so it is graded rather than assumed.
+    import tortoise.hosted_backup as _hb
+    _hold = _hb._RESTORE_DROP_HELD
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     g.query("CREATE (p:Point {id: 'pt-13826', content: 'a claim'})")
     _gate_map(monkeypatch, {"point"})
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
@@ -461,9 +485,21 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     _gate_map(monkeypatch, set())
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is None, (
-        "a `:Point` write kept the graph vector with BOTH halves answering stop")
+        "a `:Point` write kept the graph vector with BOTH halves answering stop and the "
+        "hold LIFTED — the conjunction is not being asked")
     assert _prop(g, "(n:Point {id:'pt-13826'})", "content") == "a claim", (
         "the ROW write did not land on the stop arm")
+    # ⛔ AND THE HOLD, ON THE REAL SET (`#14560` review, P1). This door journals NO embedding
+    # record (`#4094`), so a pop here does not "let the record hold it": the caller's vector
+    # reaches NEITHER store and the call still returns success. The same both-stop answer
+    # therefore KEEPS the vector until `#13971` can answer about the row being written.
+    g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", _hold)
+    sdk.update_knowledge("pt-13826", embedding=list(VEC))
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
+        "the hold is not in force on the SDK door: a caller-supplied `:Point` vector was "
+        "dropped from the props, and this door journals no embedding record — the write "
+        "landed in neither store")
 
 
 def test_update_entity_journals_the_gated_state(sdk, monkeypatch):
@@ -766,7 +802,9 @@ def test_restore_graph_asks_the_gate(proj, monkeypatch):
         "the restore dropped a vector it was told to keep — a restored graph left short")
     assert "retired_vectors" not in result
 
-    proj.g.query("MATCH (n) DETACH DELETE n")
+    # `_query` is the guarded handle's own delegate (`#14548`'s ratchet counts a NEW
+    # untyped `.query(` receiver as growth); `query()`/`ro_query()` both route here.
+    proj.g._query("MATCH (n) DETACH DELETE n")
     _gate(monkeypatch, False)
     result = restore_graph(proj.g, dump)
     assert _prop(proj.g, "(n:Event {eventId:'ev-13826-restore'})",
@@ -946,6 +984,13 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     both = _dump({"dump_id": 1, "labels": ["Object", "Point"],
                   "props": {"id": "pt-13826-co", "content": "x",
                             "embedding": list(VEC)}})
+    # ⛔ THE HOLD IS LIFTED *HERE ONLY*, so the two-counter conjunction stays GRADED
+    # (`#14560` review F5). `:Point`'s restore drop is HELD (`hosted_backup._RESTORE_DROP_HELD`,
+    # `#13971`'s per-ID ask is outstanding), so with the real set every arm below would keep
+    # the vector for the WRONG reason and the two `keep=` arms would stop discriminating at
+    # all. The hold itself is asserted at the end of this arm, on the real set.
+    import tortoise.hosted_backup as _hb
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     _gate_map(monkeypatch, keep={"point"})
     result = restore_graph(proj.g, both)
     assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
@@ -970,6 +1015,34 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
         "both `:Point` halves said stop and the restore kept the graph vector")
     assert result["retired_vectors"] == 1, result
     assert result["retired_vector_labels"] == ["Object", "Point"], result
+
+    # ⛔ THE HOLD ON THE REAL SET is its OWN test (`test_the_Point_restore_drop_is_HELD`):
+    # grading it here needs `monkeypatch.undo()` and a fourth graph wipe, and a test that
+    # reaches for a raw `proj.g.query` to set up its state is an untyped receiver the
+    # `sdk_privatise` RATCHET charges — a required leg (`surface-guard`) reds and there is
+    # no pin to re-cut. A fresh graph per test is the cheaper setup AND the cleaner arm.
+
+
+def test_the_Point_restore_drop_is_HELD(proj, monkeypatch):
+    """`:Point`'s restored vector is KEPT even when BOTH counters answer stop (`#14560` F5).
+
+    `#13971`'s per-ID ask is outstanding, so `_RESTORE_DROP_HELD` holds this label: an
+    aggregate `record_vectors >= graph_vectors` is not evidence about the individual row a
+    restore would delete, and `#5004` (a dropped restored vector cannot be re-encoded) makes
+    a wrong drop unrecoverable. This arm REDS the moment the hold is lifted — it is the
+    counterweight to the conjunction arms above, which lift the hold only to grade
+    themselves, and it runs on the REAL set with nothing lifted.
+    """
+    dump = _dump({"dump_id": 1, "labels": ["Object", "Point"],
+                  "props": {"id": "pt-13826-held", "content": "x",
+                            "embedding": list(VEC)}})
+    _gate_map(monkeypatch, keep={""})
+    result = restore_graph(proj.g, dump)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-held'})", "embedding") is not None, (
+        "the `:Point` restore drop is HELD until `#13971`'s per-ID ask lands — an aggregate "
+        "`record_vectors >= graph_vectors` is not evidence about the row being deleted, and "
+        "`#5004` forbids re-encoding what is dropped")
+    assert "retired_vectors" not in result, result
 
 
 def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):
@@ -1048,7 +1121,13 @@ def test_an_unreadable_predicate_keeps_the_graph_copy(proj, monkeypatch):
     green (173 passed), which is why the arm needs an assertion of its own.
     """
 
-    def _unreadable(entity_type: str) -> bool:
+    def _unreadable(entity_type: str, **_kw) -> bool:
+        # `**_kw` is load-bearing, not tidiness: the door calls
+        # `mirror_required(entity_type, require_substantive=...)` unconditionally, so a
+        # single-arity stub raises `TypeError` about the keyword and reaches the
+        # `except` arm for a REASON the docstring does not state. Accepting the kwarg
+        # keeps the arm graded by the `RuntimeError` it is named for (#14560 review,
+        # advisory 3).
         raise RuntimeError("the record's arming predicate could not be read")
 
     monkeypatch.setattr(record_vector, "mirror_required", _unreadable, raising=False)

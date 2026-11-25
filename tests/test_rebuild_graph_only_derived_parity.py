@@ -402,7 +402,7 @@ def test_the_pass_1b_snapshot_restore_is_NEVER_gated_by_the_label_verdict(
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     events, sdk = sup
     pid = "pt-graph-only-vector"
     _seed(sdk, pid, "SEED")
@@ -443,7 +443,7 @@ def test_the_pass_1b_restore_ASKS_the_gate_about_an_id_the_record_ANSWERS(
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     # The record ANSWERS this id — the per-id read is the `#14552` half, and it is stubbed
     # here because a unit test has no record database. The read itself is exercised by
     # `tests/test_record_read_point_vector_keys.py`.
@@ -485,7 +485,7 @@ def test_the_pass_1b_restore_keeps_the_vector_of_an_id_the_record_CANNOT_answer(
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     events, sdk = sup
     pid = "pt-record-silent"
     _seed(sdk, pid, "SEED")
@@ -524,7 +524,7 @@ def test_the_pass_1b_restore_of_a_WITHHELD_vector_does_not_emit_an_EMPTY_STATEME
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     events, sdk = sup
     pid = "pt-withheld-nothing-else"
     _seed(sdk, pid, "SEED")

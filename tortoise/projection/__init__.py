@@ -20553,6 +20553,21 @@ class FalkorProjection(
 
         A third caller that needs seconds (a health or restore sweep) still has to be given
         this argument deliberately — nothing here infers it.
+
+        ⛔ THE COUNT IS KIND-AWARE FOR THE ENTITY TYPES THAT ARE NOT THEIR OWN LABEL
+        (`#14560`). `operator` ⊂ `:Point` (and `document`/`source` both ⊂ `:Source`), so a
+        whole-label aggregate measures a DIFFERENT population from the one the record's
+        numerator counts: `record_vector._record_vector_count` has applied the kind
+        predicate since `#13630`, and this side did not, which made
+        ``record_vectors >= graph_vectors`` unreachable for `operator` by arithmetic —
+        17,899 operator rows can never be >= every vector-bearing `:Point`. The predicate
+        now comes from `record_vector.graph_kind_filter`, the ONE declaration and the
+        Cypher twin of the SQL the numerator uses, so the two halves compare like with
+        like. ⛔ IT IS NOT A PERMISSION AND NOT A WEAKENING: the population compared is
+        the one the gate was always meant to compare (the slice the request serves), the
+        declaration is a module constant (never a caller's string spliced into a
+        statement), and `point` — the label whose denominator IS the whole label — is
+        untouched, so the strip's own counterweight is unchanged.
         """
         from ..security import ENTITY_TYPE_LABELS, entity_label
 
@@ -20569,8 +20584,18 @@ class FalkorProjection(
             return None
         try:
             label = entity_label(entity_type)
+            # Local import: `record_vector` imports this package's writers' siblings, so a
+            # module-level import here would close a cycle. The lookup is the ONE
+            # declaration (`#14560`) — a second spelling of the operator identity is what
+            # `#9553` records silently filing no row for a whole arm.
+            from ..record_vector import graph_kind_filter
+
+            kind = graph_kind_filter(entity_type)
+            where = "WHERE n.embedding IS NOT NULL"
+            if kind:
+                where += f" AND {kind}"
             rows = self.g.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                f"MATCH (n:{label}) {where} "
                 "RETURN count(n)", timeout=timeout_ms).result_set
         except Exception:  # noqa: BLE001, RUF100 — unmeasurable, never zero
             logging.getLogger(__name__).debug(
