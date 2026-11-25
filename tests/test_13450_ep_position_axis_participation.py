@@ -716,3 +716,54 @@ class TestThePresencePinCannotBeSatisfiedByAComment:
         assert _terminal_vocabulary_refs(source), (
             "the `live.`-qualified spelling must be seen too — it is the other "
             "way a module reaches the vocabulary")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6. The RETIRED spelling is not re-quoted in shipped prose either
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The two-column selection this PR RETIRES — the exact text ``ep.py`` carried
+#: before it read ``live.ending_axes``.
+_RETIRED_PREDICATE_SPELLING = "TERMINAL_EXCLUDED_STATUSES or bool(outdated)"
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _retired_spelling_sites() -> list[str]:
+    """Every shipped module that still re-quotes the retired predicate."""
+    return sorted(
+        f"{path.relative_to(_REPO_ROOT)}:{lineno}"
+        for path in sorted((_REPO_ROOT / "tortoise").rglob("*.py"))
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1)
+        if _RETIRED_PREDICATE_SPELLING in line
+    )
+
+
+def test_no_production_module_quotes_the_retired_predicate():
+    """`sdk.py`'s `#10828` note still spelled the retired filter at PR #14600's
+    head (P3, verified at source). A citation of a predicate the tree no longer
+    contains is a SECOND source of truth: it drifts silently, and this one had —
+    `ep.py` reads `live.ending_axes`, so the note described code that is gone,
+    and the PR's own AST pin (`test_ep_imports_the_shared_answer_and_spells_no_filter`)
+    already forbids that spelling from returning to `ep.py` itself.
+
+    Scanned on TEXT, deliberately — the drift is PROSE, which no `ast` walk
+    sees; the AST pin next door covers the code path, this covers the citations
+    the code path leaves behind.
+
+    Scoped to shipped source (`tortoise/`), not the whole tree: the spelling
+    survives LEGITIMATELY as history — this module's own docstring quotes it as
+    the base defect, and `tests/test_11825_event_terminal_status_refused.py`
+    quotes it for the same reason — so a repo-wide ban would red on evidence
+    rather than on drift.
+
+    Non-vacuity: measured on the pre-fix head, where this scanned exactly one
+    site, `tortoise/sdk.py:28299`; the only edit that greens it is the edit that
+    replaces that citation with the declaration's own name.
+    """
+    offenders = _retired_spelling_sites()
+    assert offenders == [], (
+        "a shipped module re-quotes the predicate #13450 retired — cite "
+        "`live.ending_axes` (the ONE declaration) instead of a spelling that "
+        f"drifts with the code: {offenders}")

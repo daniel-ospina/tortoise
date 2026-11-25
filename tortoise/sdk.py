@@ -28295,8 +28295,10 @@ class TortoiseSDK:
             # as the status. Liveness is NOT the status alone: ``invalidate_point``
             # sets ``outdated = true`` and deliberately leaves ``status`` alone
             # (``live.py`` says so in as many words), and ``ep.py``'s selection
-            # already strips a flag-dead input (``status in
-            # TERMINAL_EXCLUDED_STATUSES or bool(outdated)``). A gate that read
+            # already strips a flag-dead input through ``live.ending_axes`` — the
+            # ONE declaration of the rule, named here rather than re-spelled
+            # (#13450: a quoted predicate is a second source of truth that drifts
+            # with the code, as this line's own citation had). A gate that read
             # only the status admitted an operator over a flag-dead endpoint, so
             # the operator flipped ``live``, EP then dropped the input, the
             # factor degenerated, and the operator was left permanently live
