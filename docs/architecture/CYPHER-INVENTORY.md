@@ -441,21 +441,18 @@ to assume) — a Postgres statement named by a module constant, exactly the shap
 the new call is not a statement site, so the migration metric §0 is about does not move. §1's door
 predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
 **1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
-⚠️ **The verb figures also moved (2,399→2,401 whole-text, 2,388 line-based, UNCHANGED) and that is
-NOT this cut's:** `git diff origin/main HEAD -- tortoise/ | grep -icE '^\+.*\b(MATCH|MERGE)'` reads
-**2** — both hits are the English word "matches" in comments (`# matches no row`), not a
-`MATCH`/`MERGE` clause, so this branch still adds no such line — those two are `main`'s own advance
-landing without a re-cut, re-measured here because §1 states them. The end-of-line scan moved with them (**184**→**185**,
-the non-cross-line remainder **171**→**172**) while the 13 cross-line matches, the one-file gap and the
-**−54** did not. ⛔ **The verb figures in this paragraph were measured at an earlier head of this
-branch and are ONE LOW against this tree — §1 above is authoritative at this head** (bare
+⚠️ **Any movement in the verb figures is NOT this cut's:**
+`git diff origin/main HEAD -- tortoise/ | grep -icE '^\+.*\b(MATCH|MERGE)'` reads **2** — both hits are
+the English word "matches" in comments (`# matches no row`), not a `MATCH`/`MERGE` clause — so this
+branch adds no such line, and a verb total that did move is `main`'s own advance landing without a
+re-cut. ⛔ **This paragraph does NOT restate those totals.** They were cut at an earlier head of this
+branch and read one low against the current tree, and re-deriving them here is the hand-arithmetic
+that produced that: they are the unpinned-prose class a recorded decision (#13098) declined to pin,
+with the drift tracked as tortoise#14616. **§1 above is authoritative at this head** (bare
 case-sensitive **2,117**, `-i` without the exclusion **2,478**, over the 313 files **2,114** /
-**2,388**, exclusion dropped **2,116** / **2,391**). They are stated here rather than re-cut because
-§1's numbers are the unpinned-prose class a recorded decision (#13098) declined to pin, and the drift
-they accumulate is tracked as tortoise#14616; re-deriving them by hand in a second place is how they
-went wrong the first time. The **graded** figures in this paragraph — the two pins above — are the
-re-derived ones, and they agree with `cypher_inventory.py --check`'s **25 pinned counts match**. The
-gap is **87** and its enumeration is unchanged except `tortoise-capture.test.ts` **27**→**32**. Appendix
+**2,388**, exclusion dropped **2,116** / **2,391**). The **graded** figures in this paragraph — the
+two pins above — ARE re-derived, and they agree with `cypher_inventory.py --check`'s **25 pinned
+counts match**. Appendix
 A is regenerated with `--markdown` at the merged tree: **338 rows re-derived**, every one of them a
 `file:line` (this branch edits `tortoise/hosted_api.py` and `tortoise/record_writer.py` above sites
 both files carry; no row added, none removed — the table still lists **1327**).
