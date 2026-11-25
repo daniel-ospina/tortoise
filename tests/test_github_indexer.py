@@ -3225,12 +3225,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
     # that was about to be committed. `entities.py` used to keep this branch's values
-    # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
-    # status latch, so the whole block moved together and is re-derived here again
-    # (`+59` against `origin/main`'s numbers — `git diff --numstat origin/main...HEAD --
-    # tortoise/projection/entities.py` -> `61  2` — resolved line by line, never applied as an
-    # offset; the pin TABLE's own keys were only `+30` off, because the last re-derivation of
-    # this block was two commits stale when this PR re-measured it); `sdk.py` moves for both sides each
+    # across both of those merges; it no longer does — `main` grew the module ABOVE every
+    # row of this block, so the whole block moved together and is re-derived here again. It is
+    # MEASURED, never carried: `git diff origin/main...HEAD -- tortoise/projection/entities.py`
+    # is EMPTY (this branch does not touch the file), so the eleven distinct start keys (13
+    # rows) moved by exactly `main`'s own growth above the block since the table's last cut —
+    # `+43` on EVERY one (`5261→5304`, `6124→6167`, `6206→6249`, `6364→6407`, `6388→6431`,
+    # `6389→6432`, `6396→6439`, `6417→6460`, `6449→6492`, `6458→6501`, `6469→6512`), each
+    # address resolved line by line against the tree that carries it, never applied as an
+    # offset; `sdk.py` moves for both sides each
     # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a
@@ -3337,7 +3340,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `b2d1e9086a92` and at `bbe54363ad65` is what attributes the move, and the `+53` / `+117`
     # pair is the CONSISTENCY CHECK on that measurement, never its input.
     # ⛔ THIS IS A MAIN-RED INHERITED, NOT ONE THIS CHANGE CAUSED — stated so that nobody hunts
-    # for a branch commit to blame: `git diff HEAD -- tortoise/sdk.py` is EMPTY, and all four
+    # for a branch commit to blame: `git diff origin/main...HEAD -- tortoise/sdk.py` is EMPTY
+    # (the 3-dot form is the one that proves it — a bare `git diff HEAD` compares the WORKING
+    # TREE to HEAD and reads empty on any clean checkout, whatever the branch committed), and all four
     # addresses were identical at the pre-fold branch head `7ce74ac20fc0` and at `origin/main`
     # `af40c97ca312`. `main` then grew this module above all four twice — `#14596` (+29 above all
     # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
