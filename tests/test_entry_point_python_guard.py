@@ -1731,7 +1731,7 @@ REFUSAL_WHY: dict[str, str] = {
         "the set 0-5 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
         "ADVISORY/USAGE), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
         "— it is the fail-closed neighbour, and closing a row is not reaching a "
-        "verdict. Adding a sixth code would change a documented public "
+        "verdict. Extending that set would change a documented public "
         "contract to satisfy a lint, which is the wrong trade"
     ),
     "tools/build_site_icons.py": (
