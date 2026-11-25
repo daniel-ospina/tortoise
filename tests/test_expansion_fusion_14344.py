@@ -277,21 +277,54 @@ _ONE_RANK_BOUND = re.compile(r"(<=|\u2264)\s*61")
 #: The phrases a carrier uses to INTRODUCE the win condition. A clause carrying
 #: one of them must carry the true pair form, because that is the clause a reader
 #: takes the condition from — the two sites in ``expansion_merge`` and the one site
-#: in each of the other two carriers, measured, not assumed.
+#: in each of the other three carriers, measured, not assumed. ``beats a
+#: single-list`` is deliberately a PREFIX: the carriers spell the single-list side
+#: "candidate at 0-based rank r" (the README and both docstrings) and "rank-`r`
+#: term" (``docs/00_index.md``), so a trigger set matching only one spelling would
+#: silently drop the other site from the grade (measured at ``36f61041``).
 _WIN_ARITHMETIC = (
-    "beats a single-list candidate",
+    "beats a single-list",
     "only while",
     "can pass an incumbent",
 )
-#: A clause may QUOTE the refuted form only if it also says, in that clause, that
-#: the form is the refuted one. Deliberately narrow and explicit: the linter
-#: pattern this copies (a `noqa` suppression carrying its rule code / `nosec` /
-#: `//nolint`) puts the suppression ON the offending line and NAMES the rule rather
-#: than blanket-silencing a file — Ruff's own ``unused-noqa`` (RUF100) exists
-#: because a suppression that stops matching is itself a defect.
+#: A carrier may QUOTE the refuted form only if it says, BESIDE THE QUOTE, that the
+#: form is the refuted one. Deliberately narrow and explicit: the linter pattern
+#: this copies (a `noqa` suppression carrying its rule code / `nosec` / `//nolint`)
+#: puts the suppression ON the offending line and NAMES the rule rather than
+#: blanket-silencing a file — Ruff's own ``unused-noqa`` (RUF100) exists because a
+#: suppression that stops matching is itself a defect.
+#:
+#: ⛔ ``⛔`` IS NOT IN THIS SET, and that is a measured correction (#14597 review
+#: P2-1): it is this repo's generic "careful" glyph, used on clauses that OPEN a
+#: hard warning — including the clause in ``docs/00_index.md`` that opens with ⛔ and
+#: STATES THE TRUE FORM. Having it in the set meant a refuted form spliced into that
+#: very sentence was excused by the sentence's own opening glyph (reproduced: the
+#: row stayed green). The set now names only a RETRACTION.
 _CORRECTION = re.compile(
-    r"\u26d4|\bfalse\b|\brefuted\b|\bwrong\b|\bdisagrees\b|\bcorrected\b"
+    r"\bfalse\b|\brefuted\b|\bwrong\b|\bdisagrees\b|\bcorrected\b"
     r"|\buntil now\b|\bno longer\b")
+#: How close the correction marker must sit to the refuted quote it excuses, on
+#: either side and WITHIN THE SAME CLAUSE (#14597 review P2-1).
+#:
+#: ⛔ MEASURED, and the number is the whole point. A CLAUSE-wide exemption was the
+#: defect: ``expansion_merge``'s "What changes is the BOUND: pass-1 evidence can no
+#: longer be displaced …" clause carries the word "no longer" **279 characters**
+#: from its pair form, in a sense that has nothing to do with a retraction, and that
+#: word laundered a refuted form spliced in at the sentence's own pair site —
+#: reproduced at ``36f61041``: **0 violations, the row stayed green** while the first
+#: site's identical splice reddened it. The three shipped corrected quotes sit at
+#: **24, 31 and 67** characters from their nearest marker, so 200 keeps ~3x headroom
+#: over the widest real one while excluding a word 279 away.
+#:
+#: The window is ALSO bounded by the clause (the slice below never crosses a
+#: ``_CLAUSE_BOUNDARY``), because the ⛔ that opens the NEXT clause sits 41
+#: characters past the FIRST pair form: a bare distance window would let the
+#: following clause's marker excuse a splice here. And the number is not trusted on
+#: its own — `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check`
+#: mutates EVERY site in EVERY carrier and reds if any splice goes ungraded, so a
+#: prose edit that moved a launderer inside the window would red that row instead of
+#: silently re-opening the hole.
+_CORRECTION_WINDOW = 200
 #: Clause boundaries as the carriers actually punctuate them. The lookahead is
 #: what keeps ``i.e.`` and ``e.g.`` from splitting a clause in half: a real
 #: boundary here is followed by a capital, an open paren, a bold marker, a
@@ -299,10 +332,45 @@ _CORRECTION = re.compile(
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[.;])\s+(?=[A-Z(\u26d4*`])")
 
 
+def _index_row() -> str:
+    """The ``#14344`` row of ``docs/00_index.md`` — the FOURTH published site of the
+    merge rule's condition, and the one the pre-fix ``_carriers()`` left ungraded
+    while its docstring said "every" (#14597 review, P2-1). It restates the rule,
+    quotes the refuted form, and repeats the "cannot re-publish it at the other
+    site" claim about the pin itself.
+
+    ⛔ EXTRACTED BY ITS OWN KEY, and the extraction ASSERTS it matched exactly one
+    row: a re-keyed or deleted row reds HERE rather than leaving the carrier to
+    grade an empty string — an empty text splits into no clauses, so every check in
+    the row below would pass vacuously.
+    """
+    root = Path(__file__).resolve().parent.parent
+    rows = [line for line in (root / "docs" / "00_index.md").read_text().splitlines()
+            if line.startswith("| **`#14344`")]
+    assert len(rows) == 1, (
+        "docs/00_index.md holds "
+        f"{len(rows)} rows keyed `#14344` — this carrier is extracted by that key, "
+        "so it must match exactly one")
+    return " ".join(rows[0].split())
+
+
 def _carriers() -> dict:
-    """Every carrier that publishes the merge rule's condition, keyed by the
-    site a reader finds it at. The README and the SDK docstring are read from
-    disk/source, never imported, so this stays a ``core``-surface property."""
+    """Every PROSE carrier that publishes the merge rule's condition, keyed by the
+    site a reader meets it at: the module docstring, the one SDK docstring, the
+    evidence README, and the ``docs/00_index.md`` row. Each is read from
+    source/disk — never imported — so this stays a ``core``-surface property.
+
+    ⛔ "EVERY" IS THE CLAIM THAT BROKE (#14597 re-review, P2-1): the docstring said
+    it while the dict held three sites, and the fourth (``docs/00_index.md``, which
+    publishes the condition AND repeated the "cannot re-publish it at the other
+    site" claim) was ungraded — nothing would have noticed if it stopped being
+    correct. It is graded now, so the sentence and the dict agree.
+
+    Named EXCLUSIONS, stated rather than silent: ``tests/``' own comments (e.g.
+    ``tests/test_entity_key_expansion.py:781`` repeats the formula) are the guard's
+    own record, not a site a reader meets the rule at; and the PR body cannot be a
+    carrier because it is not in the tree, so no test can read it.
+    """
     root = Path(__file__).resolve().parent.parent
     return {
         "tortoise/expansion_merge.fuse_expansion_pass": " ".join(
@@ -311,13 +379,32 @@ def _carriers() -> dict:
         "docs/evidence/14344-expansion-fusion/README.md": " ".join(
             (root / "docs" / "evidence" / "14344-expansion-fusion"
              / "README.md").read_text().split()),
+        "docs/00_index.md (#14344 row)": _index_row(),
     }
 
 
+def _uncorrected_refuted(clause: str) -> list[int]:
+    """Offsets of every refuted-form quote in this clause that has NO correction
+    marker within ``_CORRECTION_WINDOW`` characters of it.
+
+    Per OCCURRENCE, never per clause: the exemption is the prose analogue of
+    ``noqa``-on-the-offending-line, so it has to be attached to the quote it
+    excuses. Grading the clause as a whole is what let a word describing something
+    else (``expansion_merge``'s "can no longer be displaced") excuse a splice 279
+    characters away (#14597 review, P2-1).
+    """
+    out = []
+    for match in _REFUTED_FORM.finditer(clause):
+        lo = max(0, match.start() - _CORRECTION_WINDOW)
+        hi = min(len(clause), match.end() + _CORRECTION_WINDOW)
+        if not _CORRECTION.search(clause[lo:hi]):
+            out.append(match.start())
+    return out
+
+
 def _pair_condition_violations(text: str) -> list[str]:
-    """Every CLAUSE that states the two-term advantage without the true pair
-    condition, and every clause that re-publishes the refuted closed form without
-    marking it as the refuted one.
+    """Every clause that states the two-term advantage without the true pair
+    condition, and every refuted-form quote that is NOT marked as the refuted one.
 
     ⛔ CLAUSE-SCOPED ON PURPOSE (#14597 review P2). The first cut asserted
     ``pair_condition.search(whole_carrier_text)``, and a carrier that states the
@@ -327,25 +414,38 @@ def _pair_condition_violations(text: str) -> list[str]:
     Grading per clause is what makes the pin about every SITE rather than about the
     carrier's existence.
 
-    The one exemption is co-located, and this function is also the anti-over-block
-    proof: all three carriers QUOTE the refuted form today, and each quote carries
-    its correction marker in the same clause, so a clean run exercises the
-    exemption instead of proving the string absent everywhere.
+    ⛔ AND CLAUSE-SCOPING WAS NOT ENOUGH (#14597 re-review, P2-1, measured at
+    ``36f61041``): the exemption was read off the whole clause, so the SECOND pair
+    site — inside a clause whose "can no longer be displaced" describes a BOUND, not
+    a retraction — was ungraded in BOTH directions (splice a refuted form there, or
+    delete the pair form there: **0 violations**). The exemption is therefore
+    per-OCCURRENCE and distance-bounded (``_uncorrected_refuted``); the
+    win-condition rule has no exemption at all, because a clause that introduces the
+    condition must carry it, and every carrier satisfies that today (measured: every
+    ``_WIN_ARITHMETIC`` clause carries the pair form).
+
+    This function is also the anti-over-block proof: three of the four carriers
+    QUOTE the refuted form today, each with its correction marker beside the quote,
+    so a clean run exercises the exemption instead of proving the string absent
+    everywhere.
 
     Stated residual, not a silent one: a NEW site that states the bound while
     using neither a ``_WIN_ARITHMETIC`` phrase nor the refuted form is not graded
     here (it re-words past the trigger set). Closing that fully would need a
-    parser for the prose, and the measured defect — the refuted form returning at
-    the headline — is what this closes.
+    parser for the prose, and the measured defects — the refuted form returning at
+    the headline, and returning at a second site inside a "no longer" clause — are
+    what this closes.
     """
     violations = []
     for clause in _CLAUSE_BOUNDARY.split(text):
-        corrective = bool(_CORRECTION.search(clause))
-        if _REFUTED_FORM.search(clause) and not corrective:
+        uncorrected = _uncorrected_refuted(clause)
+        if uncorrected:
             violations.append(
                 "re-publishes the refuted closed form `r < (h1 + h2 - 61) / 2` "
-                f"without saying it is the refuted one: {clause[:180]!r}")
-        if corrective or _PAIR_CONDITION.search(clause):
+                "without a correction marker beside the quote (within "
+                f"{_CORRECTION_WINDOW} chars): {clause[uncorrected[0]:][:180]!r}")
+            continue
+        if _PAIR_CONDITION.search(clause):
             continue
         if any(phrase in clause for phrase in _WIN_ARITHMETIC):
             violations.append(
@@ -393,9 +493,21 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     twice in one docstring meant one surviving occurrence satisfied the regex for
     the whole carrier, so the refuted form could be restored at the FIRST bullet —
     the sentence a reader hits first — with this row still green. The grade is
-    therefore ``_pair_condition_violations``, CLAUSE-scoped in both directions, and
-    `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check` is the
-    executed proof that the same restoration now reds.
+    therefore ``_pair_condition_violations``.
+
+    ⛔ AND CLAUSE-SCOPING WAS STILL NOT SITE-SCOPING — the defect MOVED instead of
+    going away, which the next round measured at ``36f61041`` (#14597 re-review,
+    P2-1): the second pair site sits in a clause whose "can no longer be displaced"
+    describes a BOUND, not a retraction, and the clause-wide exemption accepted that
+    word as a correction, so a splice there produced **0 violations** (and deleting
+    the pair form there, also 0). Two things close it: the exemption is now
+    distance-bounded per OCCURRENCE (``_uncorrected_refuted``), and the fourth
+    published site — the ``docs/00_index.md`` row, which this row's docstring had
+    been claiming was graded — is now actually a carrier. Both are executed rather
+    than asserted:
+    `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check` mutates every
+    occurrence in every carrier, and `test_the_index_row_is_graded_as_a_carrier_not_merely_claimed`
+    grades the row's own reachability.
     """
     carriers = _carriers()
     unbounded = "outranks either pass alone"
@@ -429,46 +541,118 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
 
 
 def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
-    """Non-vacuity for the row above, EXECUTED rather than remembered (#14597
-    re-review, P2).
+    """Non-vacuity for the row above, EXECUTED rather than remembered, over EVERY
+    site of EVERY carrier (#14597 re-review, P2, then P2-1).
 
-    The attack it reproduces is the one that was MEASURED at ``3c2d3464``: restore
-    the refuted closed form at the site a reader hits FIRST, leave the later
-    paragraph (which still states the true form) untouched, and the suite stayed
-    green because the pin was a whole-carrier presence check. The mutation below
-    does exactly that mechanically — it replaces the FIRST occurrence of the true
-    form and keeps the second — so it asserts the old pin would STILL be satisfied
-    (``_PAIR_CONDITION.search`` on the mutated carrier) and the new one is not.
+    Two attacks, both measured rather than imagined:
 
-    It also asserts the exemption is exercised rather than merely unused: the
-    carrier really does quote the refuted form today, and quoting it with its
-    correction marker is not a violation.
+    * at ``3c2d3464`` the pin was a whole-carrier presence check, so restoring the
+      refuted form at the site a reader hits FIRST left the later paragraph to
+      satisfy the regex and the suite stayed green;
+    * at ``36f61041`` it was clause-scoped, and the defect MOVED rather than went
+      away: the second pair site lives in a clause that also says "can no longer be
+      displaced" — a BOUND change, not a retraction — and that word excused a
+      splice there. Measured at that head: splice at the first site → 2 violations;
+      splice at the second → **0**. Delete the pair form at the second site → 0.
+
+    So this row now mutates every occurrence in every carrier, and separately pins
+    the MECHANISM of the second-site hole (the laundering word is still in that
+    clause, still outside ``_CORRECTION_WINDOW``) rather than only its symptom.
+
+    It also asserts the exemption is exercised rather than merely unused: three of
+    the carriers really do quote the refuted form today, each with its marker
+    beside the quote, and citing it that way is not a violation.
     """
+    refuted_form = "r < (h1 + h2 - 61) / 2"
+    for where, carrier in _carriers().items():
+        assert not _pair_condition_violations(carrier), where
+
+        # The exemption is LIVE: a quoted refuted form with its marker BESIDE it is
+        # not a violation, and that is exercised here rather than proved absent.
+        for clause in _CLAUSE_BOUNDARY.split(carrier):
+            if _REFUTED_FORM.search(clause):
+                assert _CORRECTION.search(clause), (
+                    f"{where}: a clause quotes the refuted form with NO correction "
+                    f"marker in it at all: {clause[:180]!r}")
+                assert not _uncorrected_refuted(clause), (
+                    f"{where}: a quoted refuted form has no marker within "
+                    f"{_CORRECTION_WINDOW} chars of it — that is a violation, not "
+                    f"an exemption: {clause[:180]!r}")
+
+        occurrences = list(_PAIR_CONDITION.finditer(carrier))
+        assert occurrences, f"{where} no longer states the true pair form"
+        for index, match in enumerate(occurrences, start=1):
+            mutated = (carrier[:match.start()] + refuted_form
+                       + carrier[match.end():])
+            violations = _pair_condition_violations(mutated)
+            assert violations, (
+                f"{where}: the refuted form restored at occurrence {index} of "
+                f"{len(occurrences)} went UNGRADED — a splice there leaves the pin "
+                "green, which is the defect this row exists for")
+            assert any("refuted closed form" in v for v in violations), (
+                f"{where}: occurrence {index} reddened for something other than "
+                f"the splice: {violations}")
+
+    # ⛔ THE SECOND-SITE MECHANISM, pinned so the window cannot silently widen: in
+    # ``expansion_merge`` the clause holding the SECOND pair form also holds "no
+    # longer" — a word that describes a BOUND, 279 chars from the quote — and the
+    # clause-wide exemption read it as a correction. Assert the hole's ingredients
+    # are still what they are: the word IS in that clause, and the splice at that
+    # site IS graded, which is only possible because the marker is outside the
+    # window. If the prose moves, this reds and the window must be re-measured —
+    # rather than the hole re-opening quietly.
     doc = _carriers()["tortoise/expansion_merge.fuse_expansion_pass"]
-    assert not _pair_condition_violations(doc)
+    second_clause = next(c for c in _CLAUSE_BOUNDARY.split(doc)
+                         if "can no longer be displaced" in c)
+    pair = _PAIR_CONDITION.search(second_clause)
+    assert pair, (
+        "the second pair site left the 'can no longer be displaced' clause — "
+        "re-measure _CORRECTION_WINDOW against wherever it is now, then update this "
+        "row deliberately")
+    distance = min(abs(m.start() - pair.start())
+                   for m in _CORRECTION.finditer(second_clause))
+    assert distance > _CORRECTION_WINDOW, (
+        f"the nearest correction marker in the second-site clause is {distance} "
+        f"chars from the quote, INSIDE _CORRECTION_WINDOW={_CORRECTION_WINDOW} — the "
+        "clause-wide laundering hole is back, because that word now excuses a "
+        "refuted form spliced in at the second site")
 
-    # The exemption is LIVE: this carrier quotes the refuted form, in a clause that
-    # names it as the refuted one, and that is not a violation.
-    quoted = [clause for clause in _CLAUSE_BOUNDARY.split(doc)
-              if _REFUTED_FORM.search(clause)]
-    assert quoted, (
-        "the carrier no longer quotes the refuted form — this row would then not "
-        "exercise the co-located-correction exemption at all")
-    assert all(_CORRECTION.search(clause) for clause in quoted), (
-        "a correction clause lost its correction marker: "
-        + " | ".join(c[:180] for c in quoted if not _CORRECTION.search(c)))
 
-    first = _PAIR_CONDITION.search(doc)
-    assert first, "the carrier no longer states the true pair form"
-    mutated = doc[:first.start()] + "r < (h1 + h2 - 61) / 2" + doc[first.end():]
-    assert _PAIR_CONDITION.search(mutated), (
-        "the mutation removed EVERY true occurrence — it would not reproduce the "
-        "headline-site attack, which leaves the later paragraph intact")
-    violations = _pair_condition_violations(mutated)
-    assert violations, (
-        "the refuted form restored at the carrier's FIRST site went ungraded — the "
-        "pin is a presence check again, which is the defect this row exists for")
-    assert any("refuted closed form" in v for v in violations), violations
+def test_the_index_row_is_graded_as_a_carrier_not_merely_claimed():
+    """``docs/00_index.md`` publishes the condition and repeated the pin's own
+    "cannot re-publish it at the other site" claim — and was NOT in ``_carriers()``
+    (#14597 re-review, P2-1). A document that claims its own coverage is exactly the
+    artifact that has to be read, or the claim is the only thing keeping it true.
+
+    Reachability in BOTH directions, on the row itself: the row carries the true
+    form and the ``<= 61`` half, the refuted form spliced at its pair site reds, and
+    removing its ``<= 61`` half leaves the sibling row's per-carrier bound assert
+    with nothing to match."""
+    row = _index_row()
+    assert _PAIR_CONDITION.search(row), (
+        "the index row no longer publishes the true pair condition — it is not a "
+        "carrier, so naming it in _carriers() would grade prose that is not there")
+    assert _ONE_RANK_BOUND.search(row), (
+        "the index row publishes the pair condition WITHOUT its symmetric `<= 61` "
+        "half — the round-18 defect in the other direction")
+    assert not _pair_condition_violations(row)
+
+    match = _PAIR_CONDITION.search(row)
+    spliced = row[:match.start()] + "r < (h1 + h2 - 61) / 2" + row[match.end():]
+    assert _pair_condition_violations(spliced), (
+        "the index row can re-publish the refuted form and go ungraded — it is not "
+        "really a carrier")
+
+    # The `<= 61` half is a separate assertion in the sibling row, so prove the cut
+    # below is a real mutation of THIS artifact and not a no-op string replace.
+    dropped = row.replace("`<= 61`-in-both", "the symmetric")
+    assert dropped != row, (
+        "the index row no longer spells its `<= 61` half as "
+        "``\u0060<= 61\u0060-in-both`` — update this mutation, or it would assert "
+        "nothing")
+    assert not _ONE_RANK_BOUND.search(dropped), (
+        "this mutation still matches the bound regex, so it does not reproduce the "
+        "missing-half defect")
 
 
 def test_the_published_pair_condition_is_the_fusions_arithmetic():
