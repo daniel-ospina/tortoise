@@ -1108,6 +1108,98 @@ def test_the_renderer_refuses_to_write_over_git_metadata(tmp_path, monkeypatch, 
         f"stderr:\n{err}")
 
 
+def test_the_renderer_refuses_a_linked_worktrees_dot_git_FILE(tmp_path, monkeypatch, capsys):
+    """…and the metadata path the `rev-parse` probe cannot see: a worktree's `.git` FILE.
+
+    ⛔ IN A LINKED WORKTREE `.git` IS A REGULAR FILE holding `gitdir: …`, AND IT IS NOT
+    INSIDE EITHER DIRECTORY `git rev-parse --git-dir --git-common-dir` REPORTS: from a
+    worktree those answer `<common>/worktrees/<name>` and `<common>`, while the link is
+    `<worktree>/.git`. So the probe-only guard above keeps the write for the one path a
+    lane in a worktree is most likely to type — measured at `037d0c68` before this arm
+    existed: `--render .git` printed `render: wrote 4 lines`, exited **0**, replaced the
+    file, and every later `git` call in that worktree answered **128**, i.e. the
+    worktree was detached from its repository and no `git` command restores it.
+
+    The worktree here is REAL (`git worktree add`) and the arm proves the link still
+    RESOLVES afterwards, so it cannot pass on a refusal that happened to leave a
+    half-written file behind.
+    """
+    main_repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    subprocess.run(
+        ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@e",
+         "commit", "-q", "--allow-empty", "-m", "seed"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(main_repo), "worktree", "add", "-q", str(wt)],
+                   check=True)
+    src = wt / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", wt)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", wt / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    link = wt / ".git"
+    assert link.is_file(), (
+        "the premise: in a linked worktree `.git` is a FILE, which is the shape a "
+        "probe over the reported git dirs cannot reach")
+    reported = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-dir", "--git-common-dir"],
+        capture_output=True, text=True, check=True)
+    assert all(
+        str(link.resolve()) != str((wt / line.strip()).resolve())
+        for line in reported.stdout.splitlines() if line.strip()
+    ), (
+        "the premise: the link is NOT one of the dirs the probe reports — if that ever "
+        "changes, the probe half covers this case and the component half is redundant")
+    before = link.read_bytes()
+    rc = census.main(["--render", ".git"])
+    assert rc == 2, f"`--render .git` in a linked worktree must exit 2, got {rc}"
+    assert link.read_bytes() == before, (
+        "the worktree's git LINK was overwritten — the worktree is now detached from "
+        "its repository and no `git` command restores it")
+    resolved = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-dir"],
+        capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        f"the worktree no longer resolves its git dir: {resolved.stderr}")
+    assert "GIT METADATA" in capsys.readouterr().err, (
+        "the refusal must name the class it hit, like its `.git/config` sibling")
+
+
+def test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree(tmp_path, monkeypatch):
+    """…and the half the `.git` COMPONENT cannot see: metadata living outside the tree.
+
+    ⛔ `git init --separate-git-dir=<abs>` puts the repository's metadata in a directory
+    whose name is not `.git` and which is NOT under the work tree, so the component half
+    of the guard keeps the write and the render lands in `<meta>/config` — the same
+    unrecoverable destruction, one layout over. This is the arm that makes the
+    `rev-parse` probe LOAD-BEARING rather than decorative: with it removed, this row is
+    the only one that reds (every other metadata destination carries a `.git`
+    component).
+    """
+    meta = tmp_path / "meta"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", f"--separate-git-dir={meta}", str(repo)],
+                   check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = meta / "config"
+    assert config.is_file(), (
+        "the premise: this layout's metadata lives OUTSIDE the work tree")
+    assert ".git" not in config.parts, (
+        "the premise: and it carries no `.git` component, so only the probe can see it")
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, f"`--render <separate git dir>/config` must exit 2, got {rc}"
+    assert config.read_bytes() == before, (
+        "the separate git dir's config was REWRITTEN — the probe half of the guard "
+        "is what refuses this layout")
+
+
 def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
     """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
 
@@ -3138,6 +3230,18 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # `.git/config` is untracked by construction, so the probe above passed it
         # and `--render` exited 0 having overwritten git metadata it cannot restore.
         "test_the_renderer_refuses_to_write_over_git_metadata",
+        # ⛔ AND THE HALF THAT PROBE CANNOT SEE (#14625 review, P2): in a LINKED WORKTREE
+        # `.git` is a regular FILE outside both dirs `rev-parse` reports, so the
+        # probe-only guard kept the write — measured at `037d0c68`, `--render .git`
+        # exited 0, replaced the link, and every later `git` call in that worktree
+        # answered 128. Deleting the `.git`-component half reds only this arm; deleting
+        # the probe half reds only the `.git/config` sibling above.
+        "test_the_renderer_refuses_a_linked_worktrees_dot_git_FILE",
+        # ⛔ AND THE PROBE HALF'S OWN ARM (#14625 review, P2): a `--separate-git-dir`
+        # checkout's metadata carries no `.git` component and sits OUTSIDE the work tree,
+        # so the component half cannot see it — with the probe removed, this is the only
+        # row that reds, which is what keeps that half from being inert.
+        "test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3218,8 +3322,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 27, (
-        f"expected EXACTLY 27 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 29, (
+        f"expected EXACTLY 29 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3229,7 +3333,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 26` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 29` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -3241,8 +3345,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 86, (
-        f"expected EXACTLY 86 test functions in this module; got "
+    assert len(test_functions) == 88, (
+        f"expected EXACTLY 88 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
