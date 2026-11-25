@@ -2960,7 +2960,28 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # second walk this change moved inside the guard) and a payload written through
         # `emit()`. Reverting either left the suite green (#13098 round 5, P2).
         "test_the_json_verb_enumerates_rg_totals_once_and_emits_through_the_writer",
+        # ⛔ THE UNGATED HALF OF THE TABLE-SHAPE PAIR (#14625 review, P2). Its gated
+        # twin below is counted by `len(decorated) == 9`; this one carries the arm the
+        # REQUIRED `docs` check actually grades (`CYPHER-INVENTORY.src.md` is the
+        # tracked file) and was the ONLY one of this change's 25 new arms neither pin
+        # named — measured: deleting its `def` block left the whole file green at
+        # `99 passed, 15 skipped`.
+        "test_the_source_tables_are_not_broken_across_physical_lines",
     }
+    # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
+    # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
+    # PRUNED from the literal, which leaves the arm that name protected silently
+    # deletable — the exact class this pin exists for (measured: removing one member
+    # left the file green at `100 passed, 15 skipped`). The other direction, a new
+    # ungated invariant arm nobody names, is the same hole from the other side, and
+    # `len(decorated) == 9` cannot see it either because these arms are ungated on
+    # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
+    # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
+    assert len(split_arms) == 24, (
+        f"expected EXACTLY 24 named split arms; got {len(split_arms)} — either a "
+        "member was PRUNED from the literal (leaving the arm it named deletable "
+        "with nothing red) or a new ungated invariant arm was added without being "
+        f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
     assert not missing, (
         f"the #13098 split's own invariant arms are GONE: {missing} — they are "
