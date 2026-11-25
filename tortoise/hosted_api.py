@@ -15752,9 +15752,16 @@ def _layer_payload(entry: dict, layer: str) -> dict:
         # ⛔ `layer` is REQUIRED and has no branch fallback, deliberately: a
         # route always knows which layer it serves, and an optional kwarg would
         # let a future caller that forgot it silently re-open the Source door to
-        # `objectKind`. (The `is_source` test above keeps its branch fallback —
-        # that one only ever FAILS CLOSED, on a legacy/mock row with no label
-        # set, where the branch label is all there is.)
+        # `objectKind`. ⛔ The `is_source` test above DOES keep a branch
+        # fallback, and it is NOT fail-closed — stated plainly because an earlier
+        # cut of this very comment claimed it was. On a row that arrives with
+        # `labels` missing and `label == "Object"` for a node that is really a
+        # hybrid, that fallback answers False and `filter_source_props` is never
+        # called: the denied `content` is published (measured). It is unreachable
+        # in production only because `_resolve_entity` ALWAYS emits `labels`
+        # (`projection/__init__.py`), which is a property of the callee, not of
+        # this fallback — so it stays for legacy/mock rows and must never be read
+        # as a safety guarantee.
         from tortoise.entity_reads import LAYER_KIND_PROP
 
         _kind_prop = LAYER_KIND_PROP.get(layer)
@@ -54950,7 +54957,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
