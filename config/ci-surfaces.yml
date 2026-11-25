@@ -95,6 +95,33 @@ version: 1
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them. ⛔ Every other row in this map at this head is `main`'s, NOT this PR's.
+# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
+# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
+# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
+# `#14597`'s `tests/test_expansion_fusion_14344.py`, `#14415`'s two batch rows, `#14548`'s residue
+# RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py`, `#14565`'s reaper-schedule row,
+# `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`) and `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` (all `core`; every one of them at the flat 2.0 s
+# weight EXCEPT `#14548`'s residue RATCHET, which is `tests/test_sdk_privatise_sweep.py` at
+# **28.0 s** — a `core` file whose weight is not flat, so do not read this list as "all 2.0 s")
+# — plus `#14607`'s two new `core` rows (`tests/test_mcp_selfcheck.py`,
+# `tests/test_recall_neighborhood.py`), the verb
+# packs the pool into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s
+# (c, d, h), so `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
+# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 826.9 = 2.0317), so the two agree by construction rather than
+# by a hand re-read.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
+# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
+# is measurable and small: `fast_pool()` holds 1337 files at this head against 1335 on `main`, and
+# the TWO entries this branch adds are `#14607`'s `tests/test_mcp_selfcheck.py` and
+# `tests/test_recall_neighborhood.py` — re-derived by running the verb on BOTH manifests
+# (`origin/main`'s and this tree's), not carried from either parent's paragraph, and `main` carries
+# nothing this tree lacks. ⛔ Every row named above is `main`'s at this head, NOT this branch's:
+# counting one as this branch's would make the list disagree with the paragraph's own
+# 1337 − 1335 = 2. The name lists are what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
+# about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -3004,6 +3031,8 @@ surfaces:
   # Without BOTH rows the pin is asleep on one of the two diffs that can revert
   # it. Same reasoning as `test_13665_sentry_init_off_loop.py` above.
   - test_14592_read_parity.py
+  - test_mcp_selfcheck.py
+  - test_recall_neighborhood.py
   # #14552: the store's per-id vector answer, beside the write-gate and retirement suites it
   # completes (test_13826_write_gate.py, test_13629_entity_vector_retire.py). Registered `core`
   # because its subject — `tortoise/record_read.py::point_vector_keys` — is reached from the
