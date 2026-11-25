@@ -674,6 +674,55 @@ def test_source_by_id_resolves_a_url_keyed_source(tmp_path):
         assert client.get("/v1/sources/https%3A%2F%2Fnope.test%2Fx").status_code == 404
 
 
+def test_source_by_id_resolves_a_hybrid_whose_id_differs_from_its_url(tmp_path):
+    """#14593 review P2: the by-id layer gate graded the resolution BRANCH.
+
+    ``_read_labelled_entity`` skipped an entry whose ``label`` — the BRANCH the
+    union matched — was not the route's layer. A hybrid
+    ``(:Object:Source {id:X, url:U})`` with ``X != U`` resolves ONCE, through
+    ``Object`` (``_resolve_entity`` dedupes by identity value), so
+    ``GET /v1/sources/{id:X}`` answered **404** for the very node
+    ``GET /v1/sources/{url:U}`` answered **200**. Measured at `081de792`:
+
+        GET /v1/sources/{url}  200  text WITHHELD
+        GET /v1/sources/{id}   404  {"detail":"Source not found"}
+
+    The match is now membership in the node's label SET, so both addresses answer
+    the same node — and the payload stays graded, which is the half that must not
+    be traded away for reachability.
+    """
+    hybrid_id = "hybrid-sources-by-id-14593"
+    url = "https://example.test/hybrid-sources-by-id-14593"
+    secret = "HYBRID SOURCE BODY THAT MUST STAY WITHHELD"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, name:'HYBRID', "
+                "text:$t, objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        # The {url} address resolved BEFORE the fix and must keep resolving…
+        by_url = client.get(f"/v1/sources/{quote(url, safe='')}")
+        assert by_url.status_code == 200, by_url.text
+        # …and the {id} address now answers the SAME node instead of a 404.
+        by_id = client.get(f"/v1/sources/{hybrid_id}")
+        assert by_id.status_code == 200, by_id.text
+        assert by_id.json().get("url") == url, by_id.text
+        # Reachability did not buy the payload back: the `:Source` half is still
+        # withheld on EITHER address, because the grading is by label set.
+        assert "text" not in by_id.json(), by_id.text
+        assert secret not in by_id.text, by_id.text
+        assert secret not in by_url.text, by_url.text
+        # The SAME node reached through its OTHER layer still answers.
+        by_object = client.get(f"/v1/objects/{hybrid_id}")
+        assert by_object.status_code == 200, by_object.text
+        assert secret not in by_object.text, by_object.text
+
+
 def test_source_payload_is_filtered_on_the_route(tmp_path):
     """#3998: the graph indexes a document's raw text — it is not the raw store.
     A route that handed it back would be a NEW disclosure path, so this pins the

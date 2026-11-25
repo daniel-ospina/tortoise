@@ -15926,13 +15926,24 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     ``FalkorProjection._resolve_entity`` dedupes by identity VALUE, so when two
     labels share an id value only the first branch's entry survives. Latent
     rather than live (``entity_identity.resolve_or_mint`` mints opaque ids and
-    never derives one from a name), and stated because this filter depends on
-    the entry's label being present.
+    never derives one from a name).
+
+    ⛔ AND THE MATCH IS ON THE LABEL **SET**, never the resolution BRANCH (#14593
+    review P2, measured). ``_resolve_entity`` emits one entry per BRANCH, so a
+    hybrid ``(:Object:Source {id:X, url:U})`` with ``X != U`` came back as ONE
+    entry whose ``label`` is ``Object`` — and the previous
+    ``entry.get("label") != label`` test skipped it, so ``GET /v1/sources/{id:X}``
+    answered **404** for a node ``GET /v1/sources/{url:U}`` answered **200**. Same
+    node, same route, opposite answers, decided by which branch happened to
+    resolve first. The entry carries ``labels`` additively (``_resolve_entity``
+    returns ``labels(n)``), so membership is the honest test; a legacy/hand-built
+    entry carrying only ``label`` keeps exactly the previous behaviour.
     """
     _require_scope(org, "graphs:read", surface)
     _sdk, resolved = await _resolve_entity_off_loop(org, entity_id, surface=surface)
     for entry in resolved:
-        if entry.get("label") != label:
+        entry_labels = entry.get("labels") or [entry.get("label")]
+        if label not in entry_labels:
             continue
         return _layer_payload(entry)
     raise HTTPException(status_code=404, detail=f"{label} not found")
