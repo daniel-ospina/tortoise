@@ -3371,7 +3371,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # ⛔ THAT READING IS SUPERSEDED AT THIS HEAD, and it is marked rather than deleted because it
     # is the record of what was true at `main` `af40c97ca312`. After the `origin/main` merge the
     # three premises above are all FALSE here, measured: `git diff origin/main...HEAD --
-    # tortoise/sdk.py` is `25  0` (NOT empty — three hunks at `10783` +6, `29186` +11, `37063`
+    # tortoise/sdk.py` is `25  0` (NOT empty — three hunks at `10784` +6, `29187` +11, `37064`
     # +8), the four addresses are IDENTICAL to `origin/main` `071710aea1b8`'s (`23110`, `56446`,
     # `56448`, `56598`, `57113` — i.e. the block quoted exactly `main`'s CORRECT table, which the
     # merge resolved this file to) and therefore NOT identical at this head. So the reds this
@@ -3395,7 +3395,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
     # than being re-pointed at neighbouring code.
     # ⛔ RE-DERIVED ONCE MORE on the merge that carries #13450 (`ov-14600`): this branch's own
-    # `sdk.py` docstring inserts sit at `:10783` (+6), `:29186` (+11) and `:37063` (+8), so the
+    # `sdk.py` docstring inserts sit at `:10784` (+6), `:29187` (+11) and `:37064` (+8), so the
     # two regions the rows live in moved by DIFFERENT amounts — **+6** above `update_knowledge`
     # and **+25** below it. Measured, not carried: at `main` `4b2fba3e8aa0` all four rows resolve,
     # and at this head `git show HEAD:tortoise/sdk.py | grep -n` each row's own FIRST-line text

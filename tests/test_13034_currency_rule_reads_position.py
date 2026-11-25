@@ -670,7 +670,7 @@ _CENSUS_MODULES = (
     # teaching the detector `ast.In` produces ~10 pre-existing hits across
     # `sdk.py` and `derived_invalidation.py`, and several are currency answers that
     # read the word axis ALONE (`derived_invalidation.py:952`/`:999`,
-    # `sdk.py:27842`, `sdk.py:37176`, `sdk.py:37178`) — the SAME class #13450 fixed,
+    # `sdk.py:27843`, `sdk.py:37177`, `sdk.py:37179`) — the SAME class #13450 fixed,
     # whose widening is the ingest/direct-edge decision this PR states as a
     # residual rather than a tidy-up. Landing the detector without that decision
     # would either red four modules this PR does not own or exempt them by
