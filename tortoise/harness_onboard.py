@@ -33,6 +33,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -292,15 +293,25 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     (`mcpServers` → `name`), never by text search, so an identically-named key in
     an unrelated object can never be the thing that gets rewritten.
 
-    Returns the edited text, or "" when `name` cannot be located under
-    `mcpServers` (the caller then falls back to a full dump, and SAYS so).
+    ⛔ BOTH shapes are spliced, because the FIRST INSTALL is the common path: when
+    `name` is absent from an existing `mcpServers` object, the member is INSERTED
+    into it (comma + the same indentation the file already uses) rather than the
+    caller re-dumping the document — measured before this: a config holding another
+    server came back with its `\\u2014` escapes expanded and its objects re-flowed,
+    which is exactly the reformat this function exists to prevent. An EMPTY
+    `mcpServers` object is spliced too, without a leading comma.
+
+    Returns the edited text, or "" when `mcpServers` is not a JSON OBJECT in this
+    text (the caller then falls back to a full dump, and SAYS so).
     """
     servers = _member_span(text, "mcpServers")
     if servers is None:
         return ""
+    if servers[0] >= len(text) or text[servers[0]] != "{":
+        return ""
     span = _member_span(text, name, servers[0])
     if span is None:
-        return ""
+        return _insert_member(text, name, entry, servers[0], servers[1])
     start, end = span
     # Match the indentation of the value being replaced: everything after the
     # first line of the dumped entry shifts right by the original indent.
@@ -310,6 +321,47 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     dumped = json.dumps(entry, indent=2, ensure_ascii=False)
     body = dumped.replace("\n", "\n" + indent)
     return text[:start] + body + text[end:]
+
+
+def _insert_member(text: str, name: str, entry: dict,
+                   obj_start: int, obj_end: int) -> str:
+    """Add `name: entry` to the JSON object spanning `[obj_start, obj_end)`.
+
+    Every byte outside that object is returned unchanged, and the member's
+    indentation is taken from the file (the object's own line indent + two
+    spaces) rather than hard-coded, so a 4-space or tab-preferring config keeps
+    its own style. An object written INLINE (`{"other": …}`) gets an inline
+    member, because inserting a multi-line value there would reformat the line it
+    shares.
+    """
+    close = obj_end - 1                       # the object's own `}`
+    inner = text[obj_start + 1:close]
+    one_line = "\n" not in inner
+    dumped = json.dumps(entry, indent=2, ensure_ascii=False)
+    if one_line:
+        compact = json.dumps(entry, ensure_ascii=False)
+        member = f'"{name}": {compact}'
+        if not inner.strip():
+            return text[:obj_start + 1] + member + text[close:]
+        return text[:close].rstrip() + ", " + member + text[close:]
+    # ── multi-line object: find the line holding the closing brace, insert ABOVE it
+    line_start = text.rfind("\n", 0, close) + 1
+    if text[line_start:close].strip():
+        return ""                            # a shape we do not understand: fall back
+    obj_line_start = text.rfind("\n", 0, obj_start) + 1
+    base = text[obj_line_start:obj_start]
+    base = base[:len(base) - len(base.lstrip())]
+    # The file's OWN member indent wins when it already has a member (a 4-space or
+    # tab-preferring config must not receive a 2-space member); the object's line
+    # indent + two spaces is the fallback for an object that is empty.
+    own = re.search(r'\n([ \t]*)"', text[obj_start:close])
+    member_indent = own.group(1) if own else base + "  "
+    body = dumped.replace("\n", "\n" + member_indent)
+    line = f'{member_indent}"{name}": {body}'
+    if not inner.strip():
+        return text[:line_start] + line + "\n" + text[line_start:]
+    return (text[:line_start].rstrip("\n").rstrip() + ",\n" + line + "\n"
+            + text[line_start:])
 
 
 def _toml_table(entry: dict) -> str:
@@ -416,13 +468,15 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     if spliced:
         after = spliced
     else:
-        # No existing entry to splice (a fresh file): dump, and SAY that the
-        # whole file was written rather than implying a one-entry merge.
+        # No `mcpServers` OBJECT to splice into (the file has none, or it is not an
+        # object): dump, and SAY that the whole file was written rather than
+        # implying a one-entry merge. ⛔ A file that merely LACKS the entry is NOT
+        # this branch — `_splice_entry` inserts into an existing object.
         after = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
         if before:
             out.actions.append(
-                f"{path}: the `{mcp_selfcheck.SERVER_NAME}` entry could not be "
-                f"located in the file's text — the whole document was re-written")
+                f"{path}: the file has no `mcpServers` object to merge into — the "
+                f"whole document was re-written")
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose

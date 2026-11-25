@@ -305,6 +305,73 @@ def test_installer_preserves_the_rest_of_the_file_byte_for_byte(project):
     assert "tortoise.mcp_bridge" in after
 
 
+def test_a_FIRST_install_splices_into_an_existing_config_byte_for_byte(project):
+    """The COMMON path: another server exists, `tortoise` does not yet.
+
+    `_splice_entry` used to return "" whenever the entry was absent, so the first
+    install fell through to `json.dumps(whole document)` — measured: a config
+    holding another server came back with its `\\u2014` escape expanded and its
+    `unrelated` object re-flowed, which is precisely the reformat `write_config`'s
+    own docstring promises never to do. The upgrade path had a row; this one did
+    not, so the promise was pinned on the path that already worked.
+    """
+    original = (
+        '{\n'
+        '  "mcpServers": {\n'
+        '    "other": {"command": "npx", "purpose": "keep my \\u2014 escaping"}\n'
+        '  },\n'
+        '  "unrelated": {"deep": [1,2,3]}\n'
+        '}\n'
+    )
+    path = project / ".mcp.json"
+    path.write_text(original, encoding="utf-8")
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    after = path.read_text(encoding="utf-8")
+    assert '"other": {"command": "npx", "purpose": "keep my \\u2014 escaping"}' in after, (
+        "an unrelated entry was reformatted — a FIRST install must splice, not dump")
+    assert '"unrelated": {"deep": [1,2,3]}' in after, (
+        "an unrelated top-level member lost its bytes")
+    assert "tortoise.mcp_bridge" in after
+    parsed = json.loads(after)
+    assert parsed["mcpServers"]["other"]["purpose"] == "keep my \u2014 escaping"
+    assert parsed["unrelated"] == {"deep": [1, 2, 3]}
+
+
+def test_the_spliced_entry_keeps_the_FILES_own_indentation(project):
+    """The dumped entry is re-indented to the file, on BOTH paths.
+
+    Without this the spliced value is valid JSON at column 0 — which the round-trip
+    guard cannot see, because the parse is identical. Measured by a fresh reviewer:
+    deleting the indentation shift (`indent = ""`) left the whole suite green.
+    4-space here rather than the default 2, so a hard-coded width would also fail.
+    """
+    # upgrade path: the member being replaced already has the file's indent
+    path = project / "upgrade.mcp.json"
+    path.write_text('{\n    "mcpServers": {\n        "tortoise": {"type": "http"}\n    }\n}\n',
+                    encoding="utf-8")
+    harness_onboard._splice_entry(
+        path.read_text(encoding="utf-8"), "tortoise",
+        {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
+    after = harness_onboard._splice_entry(
+        path.read_text(encoding="utf-8"), "tortoise",
+        {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
+    assert '\n          "type": "stdio"' in after, (
+        f"the replacement lost the file's indentation (member 8 spaces, value 10):\n{after}")
+    assert '\n            "-m"' in after, (
+        "nested members must be the value's indent plus two, not column 0")
+
+    # insert path: the member is NEW, so the indent comes from the file's siblings
+    inserted = harness_onboard._splice_entry(
+        '{\n    "mcpServers": {\n        "other": {"a": 1}\n    }\n}\n',
+        "tortoise", {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
+    assert '\n        "tortoise": {' in inserted, (
+        f"the inserted member did not adopt the sibling's indent:\n{inserted}")
+    assert '\n          "type": "stdio"' in inserted, inserted
+
+
 def test_installer_refuses_an_unparseable_config(project):
     path = project / ".mcp.json"
     path.write_text("{ not json", encoding="utf-8")
