@@ -866,8 +866,12 @@ def check(doc: Path, result: dict) -> int:
         # could have printed any value for them while `--check` stayed green — the
         # same vacuity the `files_scanned` key above closed, left open for its
         # neighbours (`#13098` review P3). `ast_door_calls` is the reconciliation's
-        # headline (census + non-Cypher, §0's "= 1,557"), so it is pinned as the
-        # SUM rather than as a second independent count that could disagree.
+        # headline (§1's `= N AST door calls` line, which is the classified statements
+        # PLUS these non-Cypher calls), so it is pinned as the SUM rather than as a
+        # second independent count that could disagree. ⛔ The §1 line is named, not
+        # quoted: this comment used to type `§0's "= 1,557"`, a figure that appears in
+        # no section of the document at any base — a quoted number beside a pinned
+        # relation rots and misdirects exactly as fast as a stale one.
         "non_cypher_door_calls": result["non_cypher_door_calls"],
         "ast_door_calls": len(sites) + result["non_cypher_door_calls"],
         "partial": result["partial"],
