@@ -246,6 +246,10 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     #: they SHOULD be rejected. So the blanket rule is strictly worse than recursion.
     clock_attrs = {"now", "utcnow", "today", "gmtime", "localtime", "time",
                    "time_ns"}
+    #: …of which these are DUAL-PURPOSE: a clock read with NO positional argument,
+    #: a pure CONVERTER with one. `time.gmtime(<baked epoch>)` produces a constant
+    #: and is not derived; `time.gmtime()` is (#14646 cycle 3).
+    clock_dual_attrs = {"gmtime", "localtime", "time", "time_ns"}
 
     def walk_resolved(node, scope, seen=frozenset()):
         """Yield every node in `node`, following `scope` Names transitively.
@@ -263,32 +267,67 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         for child in ast.iter_child_nodes(node):
             yield from walk_resolved(child, scope, seen)
 
-    def _receiver_is_local(call, scope):
-        """True when the call's receiver is a name THIS MODULE defines.
+    def _defines_a_body(name, scope, seen=frozenset()):
+        """True when `name` resolves to a function/class/lambda THIS MODULE defines.
 
-        `datetime.now` and `time.gmtime` read the clock because their receiver is
-        a stdlib module. `_FrozenClock.now` does not: a stub whose body returns a
-        hardcoded `datetime(2026, …)` is a clock by NAME and a literal by value,
-        and it passes every rule that reads only the attribute. So a clock-named
-        call on a module-defined receiver is not counted here; the walk instead
-        descends INTO that receiver's body (it is in `scope`), where a real clock
-        read is still found — and a stub returning a literal has none.
+        That is the only kind of receiver worth descending into. `_t = time` is a
+        module ALIAS, not a definition: discounting it would red a correct fixture
+        that spells a clock read `_t.gmtime()`, which is why the test is on the
+        resolved BODY rather than on membership in `scope` (#14646 cycle 3).
         """
-        root = call.func.value
-        while isinstance(root, ast.Attribute):
-            root = root.value
-        if isinstance(root, ast.Name):
-            return root.id in scope
-        return False
+        node = scope.get(name)
+        while (isinstance(node, ast.Name) and node.id in scope
+               and node.id not in seen):
+            seen = seen | {node.id}
+            node = scope[node.id]
+        return isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
 
-    def reaches_a_clock(node, scope):
-        """True when `node` READS a clock."""
+    def reaches_a_clock(node, scope, seen=frozenset(), as_func=False):
+        """True when `node` READS a clock.
+
+        `as_func` marks the node as the CALLEE of a `Call`. That distinction is
+        load-bearing twice over: a bare `time.gmtime` there is not itself a read
+        (the arity rule belongs to the CALL, not the attribute), while a bare
+        `datetime.now` there still has to reach its receiver, which is how
+        `_now = datetime.now` — an ordinary spelling — stays accepted.
+        """
+        if isinstance(node, ast.Name):
+            if node.id in scope and node.id not in seen:
+                return reaches_a_clock(scope[node.id], scope, seen | {node.id})
+            return False
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in clock_attrs
+                # A dual-purpose attribute handed an instant is a CONVERTER; the
+                # arguments below are still walked, so `time.gmtime(time.time())`
+                # reads and `time.gmtime(<baked>)` does not.
+                and not (node.args and func.attr in clock_dual_attrs)
+                and not (
+                    isinstance(func.value, ast.Name)
+                    and _defines_a_body(func.value.id, scope))
+            ):
+                return True
+            return (
+                reaches_a_clock(func, scope, seen, as_func=True)
+                or any(reaches_a_clock(arg, scope, seen) for arg in node.args)
+                or any(reaches_a_clock(kw.value, scope, seen)
+                       for kw in node.keywords))
+        if isinstance(node, ast.Attribute):
+            if (
+                not as_func
+                and node.attr in clock_attrs
+                and not (
+                    isinstance(node.value, ast.Name)
+                    and _defines_a_body(node.value.id, scope))
+            ):
+                return True
+            return reaches_a_clock(node.value, scope, seen)
         return any(
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Attribute)
-            and child.func.attr in clock_attrs
-            and not _receiver_is_local(child, scope)
-            for child in walk_resolved(node, scope))
+            reaches_a_clock(child, scope, seen)
+            for child in ast.iter_child_nodes(node))
 
     def pins_a_calendar(node, scope):
         """True when a clock-derived value is then pinned to a fixed DATE.
