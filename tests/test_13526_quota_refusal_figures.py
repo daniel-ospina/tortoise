@@ -228,8 +228,13 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
 
     * behavioural — the reading is inside the gate's own freshness window,
       which is the condition under which the dimension is armed at all;
-    * structural — the value that REACHES the gate is clock-derived, so it
-      fails at the EDIT instead of a day later.
+    * structural — the value handed to the gate RESOLVES to an expression that
+      reads a clock, with no hardcoded ISO instant text and no `.replace(...)`
+      pinning a calendar component — so the shapes a lane actually writes are
+      rejected when the edit lands rather than a day later. Source reading is a
+      DIAGNOSTIC, not the guarantee: it has lost the arms race repeatedly, which
+      is why ``test_the_fixture_reading_follows_the_clock`` below decides the
+      property by measurement instead.
 
     ⛔ The structural arm asserts the VALUE THAT REACHES THE GATE, not the
     binding and not the quoting. Two weaker arms came before it, both measured
@@ -413,13 +418,23 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         component is not derived. `replace(microsecond=0)` stays accepted: the
         reading still moves with the clock.
 
-        ⛔ Residual, stated rather than papered over: this is a static guard on
-        the PLAUSIBLE shapes, not a proof. String surgery on a derived value
-        (slicing an ``isoformat()`` and splicing a date back in) is not detected
-        here. The behavioural arm below is the backstop — it rejects any reading
-        outside the freshness window, so such a shape reds within one window
-        instead of waiting for the calendar, and a future-dated instant is red
-        immediately.
+        ⛔ Residual, stated rather than papered over. This arm reads SOURCE, so
+        what it can establish is narrow: that a clock read is PRESENT in the
+        resolved value, that no ISO instant is written as TEXT, and that no
+        `.replace` pins a calendar component. It cannot establish that the value
+        FLOWS from the clock — `datetime.now(UTC).isoformat()[:10] +
+        "T02:00:00+00:00"` satisfies all three, and so does a helper that reads a
+        clock and discards it.
+
+        That is precisely why the sibling arm
+        ``test_the_fixture_reading_follows_the_clock`` exists: it shifts the clock
+        a known distance and requires the value the gate is handed to move by
+        exactly that much, which a composed or pinned value fails and a derived
+        one cannot. **The movement arm is the guarantee; this one is the cheaper
+        diagnostic that names the offending expression.** Two earlier revisions of
+        this paragraph claimed the guard "fails at the EDIT", that only "string
+        surgery" survived it, and that a future-dated instant was red immediately;
+        all three were measured false on the head they shipped at.
         """
         return any(
             isinstance(child, ast.Call)
