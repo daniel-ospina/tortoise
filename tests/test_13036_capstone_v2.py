@@ -676,10 +676,22 @@ def test_every_live_tool_is_accounted_for():
     assert not missing, (
         "live tool(s) with no V2 payload case and no recorded reason: "
         f"{sorted(missing)} — add a case, or record UNDRIVEN with the mechanism")
-    unknown = recorded - LIVE_TOOLS
+    # ⛔ RETIRED NAMES ARE ACCOUNTED FOR, not tolerated (#11609 lane P11). Nine doors
+    # retired FORWARD in that lane (`search`, `search_sessions`, `suggest_entry_points`,
+    # `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`,
+    # `check_structure`, `calibrate_summary`) and this file still DRIVES them, because the
+    # #3883 shim serves a retired name and its reply is exactly what a caller migrating off
+    # it receives — dropping those cases would delete the evidence that the shim answers.
+    # So they are subtracted BY NAME rather than allowed through: a name that is neither
+    # live nor on this list still reds, which is the property this gate is for.
+    unknown = recorded - LIVE_TOOLS - set(RETIRED_DRIVEN)
     assert not unknown, (
         "this file names tool(s) that are not live (retired or never existed): "
         f"{sorted(unknown)} — a case for a retired name belongs to row V3")
+    stale_retired = set(RETIRED_DRIVEN) - recorded
+    assert not stale_retired, (
+        f"RETIRED_DRIVEN names tool(s) this file never drives: {sorted(stale_retired)} — "
+        "the list must describe the cases that exist")
 
 
 def test_the_declared_coverage_matches_the_tools_this_file_ACTUALLY_CALLS():
@@ -803,6 +815,17 @@ def _driven_tool_names():
 #: accounting gate can assert coverage without importing pytest's collection —
 #: the alternative (trusting the tests to remember) is what lets a new tool slip
 #: past a row unnoticed.
+#: ⛔ The retired-forward doors (#11609 lane P11) stay in this list ON PURPOSE: the
+#: #3883 shim answers them, so driving them measures what a migrating caller actually
+#: receives. `RETIRED_DRIVEN` below is what keeps the coverage gate honest about which
+#: of these names are no longer advertised.
+RETIRED_DRIVEN = (
+    "tortoise_search", "tortoise_search_sessions", "tortoise_suggest_entry_points",
+    "tortoise_list_batches", "tortoise_list_namespaces", "tortoise_diary_read",
+    "tortoise_expand_relationships", "tortoise_check_structure",
+    "tortoise_calibrate_summary",
+)
+
 _DRIVEN_BY_TEST = (
     "tortoise_list_knowledge", "tortoise_search_knowledge", "tortoise_search",
     "tortoise_query", "tortoise_get_entity", "tortoise_create_entity",

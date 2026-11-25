@@ -12,6 +12,38 @@ aboutObjects: "#11609, TOOL_REGISTRY, PROTECTED, NO_CONTAINER_YET, FastAPIRouter
 # #11609 — the three structural blockers that hold twelve protected doors
 
 **Status:** PLAN + PIN. Nothing in this change retires a door or alters a wire shape.
+
+> ## ⛔ SUPERSEDED IN PART — #11609 lane P11 (2026-11-25)
+>
+> The nine envelope doors **have retired**, and they retired WITHOUT the approval gate
+> §2.1 describes — because the gate was written for a step that turned out not to be
+> necessary. Read §2.1's Decision as *one route that was considered*, not the route taken.
+>
+> §2.1 chose the union `list[dict] | dict` and named its cost precisely: it RE-WRAPS every
+> already-dict arm of six live tools (§1.3's heterogeneity is the reason), so it is a
+> customer-visible `structuredContent` change needing Daniel's approval. That cost is real
+> and it is unchanged — but it is the cost of the UNION, not of the envelope.
+>
+> This document's own §1.1 already records the other route: *"a container may also build
+> the same `ToolResult` by hand"*. `_row_section_envelope` is that route, already shipped
+> for `tortoise_graph_overview` (#10085), and §1.6 measures it as wire-equivalent to a
+> declared wrap annotation. Applied at a container boundary it wraps a **LIST** and returns
+> a **MAPPING** untouched — so the list arms ship the retired door's own bytes, every
+> existing dict arm keeps its shape, and no customer-visible re-wrap occurs. Lane P11
+> applied it to `search_knowledge`, `list_knowledge`, `check_confidence` and
+> `explore_connections` and retired all nine doors forward.
+>
+> What this changes below:
+> - §2.1's decision stands as a RECORD and is **not** reversed: the union remains available
+>   if a paged arm ever needs a declared `anyOf`. Nothing in the tree annotates a container.
+> - §2.3 (`query`) and §1.4 (`org_create`, `ingest`) are UNCHANGED and still hold: those
+>   three doors are the only ones left off the target, each with the reason recorded there.
+> - §4's S1/S2 are **DONE** by the mechanism above; S3 landed in P6; S4 and S5 remain.
+> - The `#8482` failure-channel finding in §1.6 stands and is why the failure half of the
+>   old reason was reported false before it was acted on. The success half is now pinned on
+>   the wire by
+>   `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`, so removing
+>   `_row_section_envelope` reds instead of silently un-enveloping a container.
 **Lane:** P4 (`feat/11609-p4-envelope-and-routes`).
 **Authority for the population:** `tests/test_11609_door_retirement.py` (`PROTECTED`, `NO_CONTAINER_YET`).
 
