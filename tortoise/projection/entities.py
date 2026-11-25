@@ -7931,9 +7931,14 @@ def filter_source_props(props: dict) -> tuple[dict, list[str]]:
 #: production shapes elsewhere in this tree), and the read side sees only the
 #: branch it resolved through — so a rule keyed on one label is only as strong as
 #: that label's position. Lives HERE, not in a route module, because the decision
-#: is shared by the REST by-id routes, the ``/belief`` provenance arm, and the
-#: SDK/MCP entity door (``TortoiseSDK._get_entity`` / ``tortoise_get_entity``);
-#: a second copy is a second rule.
+#: is shared by the REST by-id routes, the ``/belief`` provenance arm, the SDK
+#: entity accessor (``TortoiseSDK._get_entity``) and the MCP auto-detect arm
+#: (``mcp_server._get_auto_detect``); a second copy is a second rule.
+#: ⛔ NOT every door that can answer an entity: ``TortoiseSDK.get_entity`` on an
+#: ARMED ``prefer``/``record`` deployment takes ``_get_entity_served``, which
+#: returns the record row's map without calling this predicate —
+#: ``record_serve.ServedAnswer`` carries props but no label set to grade with. That
+#: arm is an open residual, so the list above names the doors that DO call it.
 PUBLISHABLE_PAYLOAD_LABELS: frozenset = frozenset(
     {"Point", "Object", "Subject", "Event"})
 

@@ -709,10 +709,14 @@ def test_the_MCP_entity_door_grades_the_label_SET_too(tmp_path):
     ``GET /v1/objects/{id}`` withheld it after this PR's by-id fix. MEASURED at
     the pre-fix head: ``keys: ['id', 'name', 'objectKind', 'text', 'url']``.
 
-    ⛔ Both doors now call ``projection.entities.label_set_publishable``, so they
-    cannot disagree again, and ``mcp_server.tortoise_get``'s auto-detect arm —
-    which applied NO filter at all, not even for a plain ``:Source`` — grades the
-    set as well. This arm asserts on the SDK door, which is what that tool runs.
+    ⛔ This arm grades ``sdk._get_entity`` — the accessor behind
+    ``tortoise_get_entity``. The tool's OTHER spelling, ``tortoise_get(id)`` with
+    no ``type``, does NOT run this function (it runs
+    ``mcp_server._get_auto_detect``, which gets its own arm in the test below), and
+    ``TortoiseSDK.get_entity`` on an ARMED ``prefer``/``record`` deployment takes
+    the record-served path, which grades no label set at all — a residual stated
+    in ``hosted_api._layer_payload``'s docstring, not closed here. "Every door"
+    would be the same over-claim this docstring exists to correct.
     """
     secret = "HYBRID BODY THAT MUST NOT REACH THE MCP ENTITY DOOR"
     hybrid_id = "hybrid-mcp-door-14593"
