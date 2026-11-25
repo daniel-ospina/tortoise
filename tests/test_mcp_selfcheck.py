@@ -1091,6 +1091,72 @@ def test_a_four_space_indented_example_is_not_ours_either():
         "a 4-space-indented example was deleted")
 
 
+def test_a_LEGAL_closer_indent_is_still_a_closed_fence():
+    """⛔ STRICT-BUT-WRONG: the nested-fence rule refused a CommonMark-Legal file.
+
+    The previous fix made a closer illegal once it out-indented its opener, which is
+    what stops a fence nested inside an outer one from closing the OUTER one early.
+    Applied alone it also refused the shape CommonMark explicitly allows — *"the
+    closing fence may be indented up to three spaces"* — and then the scan ended
+    OPEN, so BOTH writers hard-refused the file:
+
+        onboard   --  `an unclosed code fence opened on line 5` … `The two sentences
+                      were NOT written`
+        --uninstall --  `an unclosed code fence opened on line 21` … `REFUSING to
+                      remove`
+
+    on a file whose only fault was a legal `+2` closer, with a remedy that named the
+    wrong object (it told the reader to finish a partial marker pair). Fail-closed,
+    so no text was lost, but the reversibility promise broke for that file — which is
+    why the lenient reading is now a FALLBACK rather than the rule: it is used only
+    when the strict one produces an impossible diagnosis.
+
+    ⛔ The allowance is in COLUMNS, not characters. `len(line) - len(lstrip)` counts a
+    tab as ONE, so a tab-indented opener (1 char, 4 columns) against a 4-space closer
+    (4 chars, 4 columns) read as "deeper" and was refused too.
+    """
+    for pad in (0, 1, 2, 3):
+        text = "# House rules\n\n```md\nexample\n" + " " * pad + "```\n"
+        spans, unclosed = harness_onboard._fence_scan(text)
+        assert unclosed is None, (
+            f"a closer indented +{pad} beyond its opener is LEGAL (up to +3) and must "
+            f"close the fence; it was refused as unclosed on line {unclosed}")
+        assert spans, f"+{pad}: a closed fence produced no span"
+        assert harness_onboard._markers_well_formed(text) == (True, ""), (
+            f"+{pad}: a file with no markers must be well-formed, not refused: "
+            + repr(harness_onboard._markers_well_formed(text)))
+
+    # The tab arm: 1 character, 4 columns — the same visual indent as 4 spaces.
+    tabbed = "# House rules\n\n\t```md\nexample\n    ```\n"
+    _spans, unclosed = harness_onboard._fence_scan(tabbed)
+    assert unclosed is None, (
+        "a tab-indented opener (1 char = 4 columns) compared against a 4-space "
+        "closer (4 chars = 4 columns) is the SAME indent, not a deeper one; the "
+        "comparison must be in columns")
+
+    # ⛔ AND THE NESTED-EXAMPLE PROTECTION SURVIVES the fallback: a fence nested four
+    # columns deep still does NOT close the outer one, because the strict reading
+    # closes the file and the lenient one is therefore never consulted.
+    nested = ("# House rules\n\n```md\nWrite the block inside a list item:\n"
+              "    ```\n    " + harness_onboard.BEGIN_MARK +
+              "\n    never delete this example body\n    " +
+              harness_onboard.END_MARK + "\n    ```\n```\n")
+    assert "never delete this example body" in harness_onboard._strip_block(nested), (
+        "the lenient fallback must not be reached when the strict reading closes the "
+        "file — a +4 nested example is documentation, not the block")
+
+
+def test_an_unclosed_fence_is_still_refused_when_BOTH_readings_leave_it_open():
+    """The fallback must not become a way to accept a genuinely unclosed fence."""
+    for text in ("# House\n\n```md\nno closer at all\n",
+                 "# House\n\n```md\n    ```\nstill inside\n"):
+        _spans, unclosed = harness_onboard._fence_scan(text)
+        assert unclosed is not None, (
+            "neither reading closes this fence, so it MUST be refused: " + repr(text))
+        ok, why = harness_onboard._markers_well_formed(text)
+        assert ok is False and "unclosed code fence" in why, why
+
+
 def test_a_fenced_example_carrying_a_line_separator_cannot_shift_the_removal():
     """⛔ TWO LINE DECOMPOSITIONS, ONE INDEX — the user's own text paid for it.
 
@@ -1140,6 +1206,20 @@ def test_a_prose_mention_of_a_marker_is_not_the_block():
     assert harness_onboard._markers_well_formed(prose) == (True, "")
     stripped = harness_onboard._strip_block(prose)
     assert harness_onboard.BEGIN_MARK in stripped, "a prose mention was removed"
+    # ⛔ BOTH HALVES, because pinning only the BEGIN half left the END half revertible
+    # to a substring with the WHOLE SUITE GREEN. Measured on the previous revision:
+    # `elif not fenced and END_MARK in line:` — the fence gate kept, so only the prose
+    # half reverted — DELETED `and <END> at the end.` and every test still passed
+    # (`102 passed`), because this arm asserted the BEGIN prose line and `keep.` and
+    # nothing about the END prose line. The behaviour was already correct; only the
+    # assertion was missing, which is the shape of a guard that cannot fail.
+    assert "at the end." in stripped, (
+        "a prose END mention was removed: the END arm must be anchored to the marker "
+        "ALONE on its line, exactly like the BEGIN arm — " + repr(stripped))
+    assert stripped.count(harness_onboard.END_MARK) == 1, (
+        "the prose END mention must survive byte-identically: " + repr(stripped))
+    assert stripped.count(harness_onboard.BEGIN_MARK) == 1, (
+        "the prose BEGIN mention must survive byte-identically: " + repr(stripped))
     assert "keep." in stripped
 
     shared = ("# House\n\n" + harness_onboard.BEGIN_MARK +

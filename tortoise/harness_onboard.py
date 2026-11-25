@@ -501,6 +501,32 @@ def _git_tracks(path: Path) -> bool:
 
 # ── Instruction file (the two sentences), delimiter-marked + reversible ───
 
+#: How far a CLOSING fence may be indented beyond its opener, in COLUMNS.
+#: CommonMark: "the closing fence may be indented up to three spaces". Read by
+#: `_fence_scan`'s LENIENT pass only — see the two-pass note there for why the
+#: strict reading is tried first.
+CLOSER_ALLOWANCE_COLUMNS = 3
+
+
+def _indent_columns(line: str) -> int:
+    """The line's leading whitespace width in COLUMNS, not characters.
+
+    ⛔ NOT `len(line) - len(line.lstrip(" \t"))`. That counts a TAB as ONE, so a
+    tab-indented opener (1 character, 4 columns) compared against a 4-space closer
+    (4 characters, 4 columns) read as "deeper than its opener" and a legal
+    CommonMark closer was refused. The tab stop is 4, which is CommonMark's own.
+    """
+    width = 0
+    for char in line:
+        if char == " ":
+            width += 1
+        elif char == "\t":
+            width += 4 - (width % 4)
+        else:
+            break
+    return width
+
+
 def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     """Fenced spans, plus the 1-based line an UNCLOSED fence opened on (or None).
 
@@ -533,6 +559,45 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     fenced: the caller REFUSES by name, which costs a clear error instead of an
     unreversible file. The returned line number is what the refusal names.
     """
+    spans, open_line = _fence_scan_pass(text, allowance=0)
+    if open_line is None:
+        return spans, None
+    # ⛔ TWO PASSES, because the two harms are not symmetric and one rule cannot
+    # serve both. STRICT is tried first: a closer may not be indented beyond its
+    # opener, which is what keeps a fence nested inside an outer one from closing
+    # the OUTER one early — the shape where the markers SHOWN IN THE EXAMPLE read as
+    # the real block and `--uninstall` deletes the example's body (measured, exit 0,
+    # no refusal). STRICT is only given up when it produces an IMPOSSIBLE diagnosis.
+    #
+    # ⛔ AND STRICT ALONE WAS WRONG, in the other direction, on a legal file. A
+    # closing fence may be indented up to three columns beyond its opener
+    # (CommonMark), so `indent <= open_indent` refused every such closer, the scan
+    # ended open, and BOTH writers hard-refused a file they had handled correctly —
+    # measured: `onboard` and `--uninstall` each refused
+    # `an unclosed code fence opened on line N` on a file whose only fault was a
+    # legal `+2` closer, with a remedy that named the wrong object. Fail-closed, so
+    # no text was lost, but the reversibility promise ("`--uninstall` removes exactly
+    # the marked block") was broken for that file.
+    #
+    # The fallback is principled rather than a loosening: STRICT failing to close
+    # PROVES the file's closers are all deeper than its openers, and in that case the
+    # deeper one IS the closer by CommonMark. When BOTH readings leave a fence open
+    # the fence really is unclosed, and the caller still refuses by line number — the
+    # strict pass's line, because that is the reading the file was rejected under.
+    lenient_spans, lenient_open = _fence_scan_pass(text, allowance=CLOSER_ALLOWANCE_COLUMNS)
+    if lenient_open is None:
+        return lenient_spans, None
+    return spans, open_line
+
+
+def _fence_scan_pass(
+    text: str, *, allowance: int,
+) -> tuple[list[tuple[int, int]], int | None]:
+    """One scan of `text`; `allowance` is how far a closer may out-indent its opener.
+
+    Split out of `_fence_scan` only so the strict/lenient pair can share one loop —
+    the two differ in that single comparison and nothing else, so they cannot drift.
+    """
     spans: list[tuple[int, int]] = []
     open_char: str | None = None
     open_len = 0
@@ -541,8 +606,8 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     open_indent = 0
     offset = 0
     for number, line in enumerate(text.splitlines(keepends=True), start=1):
+        indent = _indent_columns(line)
         stripped = line.lstrip(" \t")
-        indent = len(line) - len(stripped)
         candidate = stripped[:1]
         run = 0
         while run < len(stripped) and stripped[run] == candidate:
@@ -552,16 +617,8 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
             if is_fence:
                 open_char, open_len, open_at, open_line = candidate, run, offset, number
                 open_indent = indent
-        # ⛔ A CLOSER MAY NOT BE INDENTED MORE THAN ITS OPENER. The relaxation that
-        # reads an indented fence as a fence (so a doc example in a list item is
-        # left alone) must NOT apply to the closer as well: then a fence nested
-        # INSIDE an outer one closes the OUTER one early, the markers shown in the
-        # example are read as the real block, and `--uninstall` deletes the
-        # example's body — measured, exit 0 with NO refusal, on a doc that fences
-        # the block inside a list item. Erring toward "this is documentation, leave
-        # it" is the only direction that cannot destroy text.
         elif (is_fence and candidate == open_char and run >= open_len
-              and indent <= open_indent):
+              and indent <= open_indent + allowance):
             spans.append((open_at, offset + len(line)))
             open_char = None
         offset += len(line)
