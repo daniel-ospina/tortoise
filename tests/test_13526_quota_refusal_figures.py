@@ -107,6 +107,48 @@ def _single_sample_meter(used: float):
     )
 
 
+def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
+    """The pin that makes this FILE's own class of red un-repeatable (#14646).
+
+    The three cases below assert what the refusal SAYS, so none of them can
+    notice that the reading they hand the gate has aged out — they are what
+    breaks when it does. That is exactly how this file went red on every PR
+    with no commit in between: ``measured_at`` was a literal, and 24 h after
+    the date baked into it the gate took its ``stale`` arm (cap UNARMED, write
+    SERVED, ``state: "open"``).
+
+    So the FIXTURE is pinned, on two arms, and the second is the one a
+    behavioural check cannot replace:
+
+    * behavioural — the reading is inside the gate's own freshness window,
+      which is the condition under which the dimension is armed at all;
+    * structural — the reading is DERIVED, not a literal. A literal written
+      TODAY is fresh for 24 h and then reds this file with no commit in
+      between; asserting the fixture's source carries no hardcoded ISO instant
+      fails at the edit instead of a day later.
+    """
+    import inspect
+    import re
+
+    from tortoise.allowance_gate import STALE_AFTER_SECONDS
+
+    source = inspect.getsource(_single_sample_meter)
+    assert re.search(r"measured_at\s*=\s*[\"']\d{4}-", source) is None, (
+        "the fixture pins an absolute instant again — the gate ages a reading by "
+        f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) and will SERVE instead of "
+        "arming this dimension 24 h later, reddening this file with no commit in "
+        "between. Derive it (`datetime.now(UTC).isoformat()`) or monkeypatch the "
+        "window (#14646)")
+
+    reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
+    age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
+    assert 0 <= age < STALE_AFTER_SECONDS, (
+        f"the fixture's reading is {age:.0f}s old — outside the gate's "
+        f"{STALE_AFTER_SECONDS}s freshness window, so the dimension goes UNARMED "
+        "(reason=stale, write served) and every case below asserts a refusal the "
+        "gate never composes")
+
+
 def _armed_gate(monkeypatch, used: float) -> None:
     """Make ``org_quota_state``'s gate call run the REAL gate over an armed cap.
 
