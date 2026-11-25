@@ -988,7 +988,8 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     # (`#14560` review F5). `:Point`'s restore drop is HELD (`hosted_backup._RESTORE_DROP_HELD`,
     # `#13971`'s per-ID ask is outstanding), so with the real set every arm below would keep
     # the vector for the WRONG reason and the two `keep=` arms would stop discriminating at
-    # all. The hold itself is asserted at the end of this arm, on the real set.
+    # all. The hold itself is asserted on the real set by
+    # `test_the_Point_restore_drop_is_HELD`.
     import tortoise.hosted_backup as _hb
     monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     _gate_map(monkeypatch, keep={"point"})
