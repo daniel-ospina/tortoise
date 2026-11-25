@@ -751,17 +751,22 @@ class TestDocsPageAndSkillConfig:
                     '<h4 id="chatgpt">ChatGPT</h4>')
 
     def test_quickstart_cloud_teaches_the_http_shape_indirectly(self):
-        """#4674: the cloud quickstart taught `streamable-http` plus a literal
-        `Bearer tt_...` key -- the exact anti-pattern this module forbids -- and
-        nothing pinned it, so it re-drifted (its own guard comment at the
-        `.mcp.json` http-type test only *mentions* the divergence).
+        """#4674 -> #14607: the quickstart must teach the shape the product SHIPS.
 
-        The prose deliberately NAMES the legacy value, because a first-time
-        reader needs to recognise it; so the assertions target the
-        copy-pasteable SHAPE. The per-harness checks PARSE the blocks, so a bare
-        string sitting in prose cannot satisfy them, and the Cursor block is
-        pinned because a single block labelled for Cursor while carrying the
-        Claude form is the same silent-drop defect one layer down.
+        Two drifts, one test. #4674 caught `streamable-http` plus a literal
+        `Bearer tt_...` key. #14607 catches the REST of that shape: an
+        `Authorization` header at all -- `type: http` plus a header IS the capture
+        the bridge exists to remove (an `${VAR}` in a config is read once, at
+        spawn, and unset it expands to an empty bearer). The quickstart was still
+        teaching that shape, and this test PINNED it, so the next lane to fix the
+        doc met a red test defending the defect.
+
+        The assertions target the copy-pasteable SHAPE (the blocks are PARSED, so a
+        bare string in prose cannot satisfy them), and they pin the BRIDGE fields
+        one by one -- `type`, `args`, `env`, and the ABSENCE of `headers` and
+        `${` -- because each one is a way the capture can come back. The Cursor
+        block is pinned separately: a single block labelled for Cursor while
+        carrying the Claude form is the same silent-drop defect one layer down.
         """
         text = self.QUICKSTART.read_text(encoding="utf-8")
         assert '"Bearer tt_' not in text, (
@@ -775,22 +780,42 @@ class TestDocsPageAndSkillConfig:
                     "streamable-http entry again -- Cursor CLI drops it silently"
                 )
         claude = self._quickstart_block("**Claude Code**")
-        assert claude["type"] == "http", (
-            "#4674: the quickstart's Claude Code block must use type=http"
-        )
-        assert claude["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}", (
-            "#4674: the quickstart's Claude Code header must be env-indirect"
-        )
+        assert claude.get("type") == "stdio", (
+            "#14607: the quickstart's Claude Code block must be the stdio bridge "
+            f"-- a `type: http` plus header entry is the capture; got {claude!r}")
+        assert claude.get("command") == "python3", (
+            f"#14607: the bridge entry names a bare interpreter; got "
+            f"{claude.get('command')!r}")
+        assert claude.get("args") == ["-m", "tortoise.mcp_bridge"], (
+            "#14607: the quickstart must run the bridge module -- got "
+            f"{claude.get('args')!r}")
+        assert (claude.get("env") or {}).get("TORTOISE_MCP_URL"), (
+            "#14607: the quickstart's entry must name its endpoint in "
+            f"`env.TORTOISE_MCP_URL` -- got {claude.get('env')!r}")
+        assert "headers" not in claude, (
+            "#14607: the quickstart must NOT teach an Authorization header -- the "
+            "bridge resolves the key per request, so a header there is a capture "
+            f"of the environment variable; got {claude.get('headers')!r}")
+        assert "${" not in json.dumps(claude), (
+            "#14607: the quickstart's entry must interpolate NOTHING -- an unset "
+            "variable expands to an empty bearer (the #10605 capture)")
         cursor = self._quickstart_block("**Cursor**")
         assert "type" not in cursor, (
             "#4674: the quickstart's Cursor block must omit `type` -- Cursor "
-            "infers the transport from url, and a `type` there is the shape "
-            "its CLI can silently drop"
+            "infers the transport, and a `type` there is the shape its CLI can "
+            "silently drop"
         )
-        assert cursor["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}", (
-            "#4674: the quickstart's Cursor block must use the tested "
-            "${env:...} expansion"
-        )
+        assert cursor.get("args") == ["-m", "tortoise.mcp_bridge"], (
+            "#14607: the Cursor block must be the SAME bridge as the Claude one "
+            f"-- got {cursor.get('args')!r}")
+        assert (cursor.get("env") or {}).get("TORTOISE_MCP_URL"), (
+            f"#14607: the Cursor block must name its endpoint; got {cursor!r}")
+        assert "headers" not in cursor, (
+            "#14607: the Cursor block must carry no Authorization header -- got "
+            f"{cursor.get('headers')!r}")
+        assert "${" not in json.dumps(cursor), (
+            "#14607: the Cursor block must interpolate NOTHING -- got "
+            f"{json.dumps(cursor)}")
 
     def _quickstart_json_blocks(self) -> list[dict]:
         """Every ```json config block in the quickstart, parsed."""
