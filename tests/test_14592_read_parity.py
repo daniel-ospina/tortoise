@@ -606,12 +606,26 @@ def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path
     `entity_reads.entity_relations` and `other.name` becomes the planted raw
     text below, on a route that never asked for a payload — while
     `/v1/sources/{id}` keeps denying it, so the two routes would disagree.
+
+    ⛔ BOTH BRANCHES ARE EXERCISED, and that is why the fixture is read from BOTH
+    ends. The two UNION arms are textually duplicated copies of one disclosure
+    rule, which is exactly where a fix drifts: reading only the carrier's
+    relations evaluates the `out` arm, and reverting the INBOUND arm alone would
+    have left this test GREEN (measured: with `coalesce(m.name, m.content,
+    m.url)` restored on the reverse branch only, the carrier read still passed).
+    So the Source is also planted as an INBOUND neighbour of a second root, and
+    both reads must agree that the payload is withheld.
     """
     url = "https://example.test/relations-source-14592"
     raw = "RAW DOCUMENT TEXT THAT MUST NOT LEAK"
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         carrier = client.post(
             "/v1/objects", json={"name": "CARRIER", "objectKind": "goal"}).json()
+        # The second root for the INBOUND read: the Source points AT it, so
+        # `GET /v1/entities/{inbound_root}/relations` evaluates the reverse UNION
+        # arm and returns the Source as the neighbour.
+        inbound_root = client.post(
+            "/v1/objects", json={"name": "INBOUND", "objectKind": "goal"}).json()
         sdk = _sdk(ha)
         try:
             sdk._create_point("statement", "extracted", extractedFrom=url)
@@ -626,6 +640,12 @@ def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path
             sdk._get_proj().g._query(
                 "MATCH (a {id:$a}), (s:Source {url:$u}) MERGE (a)-[:mentions]->(s)",
                 params={"a": carrier["id"], "u": url},
+                read_only=False)
+            # … and the SAME Source as an INBOUND neighbour of a second root, so
+            # the reverse UNION arm is reached with a `:Source` on the other end.
+            sdk._get_proj().g._query(
+                "MATCH (b {id:$b}), (s:Source {url:$u}) MERGE (s)-[:mentions]->(b)",
+                params={"b": inbound_root["id"], "u": url},
                 read_only=False)
         finally:
             sdk.close()
@@ -643,6 +663,17 @@ def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path
         assert sources, body
         assert sources[0]["name"] == url, sources
         assert raw not in repr(body), body
+
+        # … and the INBOUND arm must withhold it too: the same node, reached from
+        # the other end of the same edge, is the other UNION branch.
+        inbound = client.get(
+            f"/v1/entities/{inbound_root['id']}/relations").json()
+        in_others = [r["other"] for r in inbound["relations"]]
+        in_sources = [o for o in in_others if o["label"] == "Source"]
+        assert in_sources, inbound
+        assert [r["direction"] for r in inbound["relations"]] == ["in"], inbound
+        assert in_sources[0]["name"] == url, in_sources
+        assert raw not in repr(inbound), inbound
 
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
