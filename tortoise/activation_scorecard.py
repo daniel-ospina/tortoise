@@ -382,13 +382,29 @@ FUNNEL_QUERY = (
 # "CORRECTED" BACK. `docs/architecture/CYPHER-INVENTORY.md` is now a GENERATED,
 # untracked build artifact (`--render`'s output, #13098), and its Appendix A
 # carried **244** distinct targets of those the census counts — 150 above the pivot,
-# 93 below it and the pivot itself — of which **242** were cited NOWHERE ELSE (the
-# pivot is cited by these notes, and `hosted_api.py:19186` also by a research
-# brief). Those 242 are exactly what the population lost: 150 above the pivot and
-# 92 below, which is why the citing-file count fell by one and nothing else moved.
+# 93 below it and the pivot itself — of which **243** were cited NOWHERE ELSE (the
+# pivot is cited by these notes; nothing else in the appendix was cited in a second
+# place). Those 243 are exactly what the population lost: 150 above the pivot and
+# 93 below, which is why the citing-file count fell by one and nothing else moved.
 # So a reader who re-measures the old appendix gets 244/150/93 and a reader who
-# re-measures the tree gets 483/7/475: both are right, they count different trees,
+# re-measures the tree gets 484/7/476: both are right, they count different trees,
 # and neither licenses typing a figure here.
+# ⛔ THE FOUR DERIVED FIGURES IN THE PARAGRAPH ABOVE ARE DELIBERATELY NOT IN A
+# `_NOTES` ROW, and that is a LIMIT rather than an omission: they describe a tree
+# that no longer exists (the pre-split appendix), so `--check` — which recomputes
+# against the tree in front of it — has nothing to compare them with. They were
+# `242` / `92` / `483` / `475` until #14625's review re-measured them (P1): once
+# `main` landed `#14592`, the base tree read **727** distinct targets over **208**
+# citing files, the appendix's 244 split 150 above / 93 below / 1 at the pivot, and
+# the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
+# not 242, and the tree reads **484/7/476**, not 483/7/475. `hosted_api.py:19186`
+# was cited in the old sentence as a second shared target; it is NOT one of the
+# appendix's targets at all (`git grep -c 'hosted_api\.py:19186' <base> --
+# docs/architecture/CYPHER-INVENTORY.md` exits 1 — it is cited only by
+# `docs/research/2026-09-10-per-graph-backups-ux.md`), which is why the recount is
+# 243 and not 242. ⛔ Re-take these by MEASUREMENT at the base you are describing,
+# never by adjusting the numbers above: that arithmetic is what produced the stale
+# set in the first place.
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a

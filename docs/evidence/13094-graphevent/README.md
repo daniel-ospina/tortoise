@@ -383,7 +383,11 @@ count), not a
 change to what the code does. ⛔ A reader comparing these with a PRE-#13098 reading sees larger
 figures, and neither reading is a hand-count error: the census appendix used to be a TRACKED
 document, and its machine-written rows carried cite targets of their own — 244 distinct ones, of
-which 242 were cited nowhere else — so untracking it shrank this population by exactly those 242.
+which 243 were cited nowhere else — so untracking it shrank this population by exactly those 243.
+⛔ Re-measured at #14625's review: this sentence read `242` against the older base, where one more
+of the appendix's targets was also cited elsewhere. `hosted_api.py:19186` is NOT one of them —
+`git grep -c 'hosted_api\.py:19186' <base> -- docs/architecture/CYPHER-INVENTORY.md` exits 1 — so
+the only shared target is the pivot and 244 − 1 = 243.
 `tortoise/activation_scorecard.py`'s `--refresh` note carries the reconciliation.
 
 ---

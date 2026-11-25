@@ -398,6 +398,24 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
             f"`{' '.join(legal)}` must stay LEGAL — `--all-surface` is the modifier "
             f"that widens the census, not a second output verb; got {ok.returncode} "
             f"with stderr:\n{ok.stderr}")
+        # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). Asserting
+        # `rc == 0` alone cannot tell §1's WIDE census from the PRODUCT census — a
+        # regression that silently ignores `--all-surface` (exactly the
+        # scope-narrowing the sibling refusal arm exists to prevent) would stay
+        # green, and the two outputs differ by ~7,900 rows. Measured at this head:
+        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,238; the
+        # JSON form names its prefix set, which is the whole difference.
+        if "--json" in legal:
+            payload = json.loads(ok.stdout)
+            assert payload["prefixes"] == ["."], (
+                "`--json --all-surface` must report the ROOT prefix `.` (the wide "
+                f"census); got prefixes={payload['prefixes']!r} — `--all-surface` was "
+                "accepted and then ignored")
+        else:
+            assert len(ok.stdout.splitlines()) > 2000, (
+                "`--markdown --all-surface` must emit the WIDE table (thousands of "
+                f"rows at this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
+                "`--all-surface` was accepted and then ignored")
 
 
 def test_a_directory_destination_is_refused_AS_a_directory(tmp_path):
