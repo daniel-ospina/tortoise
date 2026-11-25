@@ -916,7 +916,10 @@ def test_relations_bounds_and_marks_a_long_neighbour_body(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         hub = client.post("/v1/points", json={
             "content": "the anchor", "kind": "statement"}).json()
-        long_body = "x" * 4000
+        # DISTINCTIVE, not one repeated character: with "x" * 4000 the value
+        # assertion below is satisfied by ANY 200 "x"s, so a mutant returning a
+        # different slice stayed green (measured).
+        long_body = "EDGE-OF-THE-BODY" + "y" * 4000
         far = client.post("/v1/points", json={
             "content": long_body, "kind": "statement"}).json()
         sdk = _sdk(ha)
@@ -982,6 +985,83 @@ def test_relations_never_puts_a_Sources_payload_in_the_name_field(tmp_path):
         other = r.json()["relations"][0]["other"]
         assert other["label"] == "Source", other
         assert other["name"] == url, other
+
+
+def test_relations_never_publishes_a_legacy_Documents_stored_body(tmp_path):
+    """The `ELSE` arm must not reach `content` — a legacy `:Document` lives there.
+
+    Review P2 (second round): the per-layer CASE closed the `:Source` arm but its
+    `ELSE` kept the old blanket ``coalesce(m.name, m.content, m.url)``, so a bare
+    ``(:Document {id})`` — pre-D10, or left behind by an interrupted
+    ``relabel_legacy_documents`` — still answered ``other.name`` with its stored
+    body. ``projection.entities`` names ``content`` as the retired document
+    payload and ``migrate_kinds`` records that ``_upsert_document`` genuinely
+    stored it, so this is the same disclosure class one label over — and the
+    route's own docstring claimed the rule was "everything else by its name".
+
+    ⛔ The fallback is now ``coalesce(m.name, m.url, m.id)``: a name if the node
+    has one, else its identity. Nothing legitimate is lost — `:Event` keeps its
+    narrative in `session_narrative`, never on the node.
+    """
+    secret = "PRE-D10 DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
+    legacy_id = "doc-legacy-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            # Below the door: no product writer produces this shape today, which is
+            # exactly why a restored pre-D10 dump is the realistic source. The EDGE
+            # is written here too — `_create_edge` resolves ids through the identity
+            # table, which does not know a bare `:Document`, so a fixture that went
+            # through it would fail on the fixture rather than on the route
+            # (measured: `{'created': False}`).
+            sdk._get_proj().g._query(
+                "CREATE (d:Document {id:$i}) SET d.content = $t "
+                "WITH d MATCH (a:Point {id:$a}) CREATE (a)-[:related]->(d)",
+                params={"i": legacy_id, "t": secret, "a": hub["id"]},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        assert secret not in r.text, "a legacy Document's body rode the response"
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Document", other
+        # It falls back to the node's own IDENTITY, so the row is still usable.
+        assert other["name"] == legacy_id, other
+
+
+def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
+    """The root's `entity.name` is capped and flagged like a neighbour's (P3).
+
+    The code said "the root's own name, on the same coalesce as a neighbour's"
+    while the neighbour side had gained a cap and a flag the root did not have —
+    so a client gating display on `nameTruncated` read the root's missing flag as
+    "bounded" and got an unbounded value (measured: 4000 characters). The two
+    sides now answer identically; the full body stays reachable at the entity's
+    own route.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        body_4000 = "y" * 4000
+        root = client.post("/v1/points", json={
+            "content": body_4000, "kind": "statement"}).json()
+        far = client.post("/v1/points", json={
+            "content": "a neighbour", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            assert sdk._create_edge("related", root["id"], far["id"])
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{root['id']}/relations")
+        assert r.status_code == 200, r.text
+        entity = r.json()["entity"]
+        assert len(entity["name"]) == 200, len(entity["name"])
+        assert entity["nameTruncated"] is True, entity
+        # The neighbour side answers with the SAME shape, which is the claim.
+        assert r.json()["relations"][0]["other"]["nameTruncated"] is False
 
 
 def test_relations_pages_and_offset_actually_advances(tmp_path):

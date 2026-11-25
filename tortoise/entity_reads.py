@@ -360,25 +360,61 @@ def layer_kind_values(proj: Any, label: str) -> frozenset[str]:
 
 
 #: The most characters of a neighbour's own text a relation row carries. The
-#: same bound ``search_engine.get_relationships`` applies to its ``related_content``
-#: — a relation list is per-EDGE, so an unbounded preview scales as
+#: same VALUE as the inline ``[:200]`` in ``search_engine.get_relationships``'
+#: ``related_content`` (there is no named constant there to share) — a relation
+#: list is per-EDGE, so an unbounded preview scales as
 #: ``limit × largest neighbour body`` (#14593 review P2, measured at 4000 chars
-#: through a Point). Deliberately NOT read from ``search_engine``: that constant
-#: is private to its own rendering, and coupling the two would mean a change there
+#: through a Point). Deliberately NOT imported from ``search_engine``: that slice
+#: is inline to its own rendering, and coupling the two would mean a change there
 #: silently re-caps a public REST field here.
 _ENDPOINT_NAME_MAX = 200
 
-#: Which property answers "the neighbour's own name" — PER LAYER, not one blanket
-#: ``coalesce``. ⛔ A ``:Source`` is answered by ``url`` ONLY: the blanket form fell
-#: through to ``content``, which is a Source's stored payload — the ``#3998``
-#: disclosure ``filter_source_props`` exists to stop, arriving through the name
-#: field on a route that never asked for it. A ``:Point`` has no ``name`` in any
-#: writer's vocabulary, so its own text is ``content``.
+#: Which property answers "the neighbour's own name" — PER LAYER, and the
+#: ``ELSE`` arm deliberately does NOT read ``content`` (#14593 review P2, second
+#: round). ``content`` is a Point's own text (handled explicitly) and, for anything
+#: else that carries it, a LEGACY DOCUMENT PAYLOAD: ``projection.entities`` names
+#: ``content`` in ``_DOC_RETIRED_KEYS`` as the pre-D10 document body, and
+#: ``migrate_kinds`` records that ``_upsert_document`` DID store the raw ``content``
+#: on its subpopulation — so a bare ``(:Document {id})`` left behind by an
+#: interrupted ``relabel_legacy_documents`` is exactly the shape the Source arm
+#: exists to stop, and with the blanket fallback still in place it was MEASURED to
+#: answer ``other.name`` with the full planted body. ``:Event`` loses nothing here:
+#: its narrative lives in ``session_narrative``, never on the node
+#: (``_EVENT_SERVER_MANAGED_PROPS``).
 _RELATION_ENDPOINT_NAME = (
     "CASE WHEN m:Source THEN m.url "
     "     WHEN m:Point THEN coalesce(m.content, m.name) "
-    "     ELSE coalesce(m.name, m.content, m.url) END"
+    "     ELSE coalesce(m.name, m.url, m.id) END"
 )
+
+
+def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
+    """The entity the caller ASKED for — same name answer, same bound, same flag.
+
+    ⛔ The coalesce and the cap are IDENTICAL to a neighbour's preview, on
+    purpose (#14593 review P3). An earlier revision answered the root in full and
+    left the sentence "the root's own name, on the same coalesce as a neighbour's"
+    in the code — true about the coalesce, false about the bound the neighbour
+    side had just gained, so a client gating display on ``nameTruncated`` would
+    read the root's missing flag as "bounded" while receiving an unbounded value.
+    Bounding both makes the sentence true and the wire shape uniform; the FULL
+    body of a Point is not lost by this, because the root is by definition
+    reachable at its own route (``/v1/points/{id}`` and siblings) — this route
+    answers "what is this entity connected to", not "give me its text".
+
+    ``:Source`` cannot reach ``content`` here: ``navigation._resolve_root``
+    filters a Source root before this point, which is why the ``#3998`` payload
+    rule for that layer is satisfied upstream of this helper.
+    """
+    raw = (root.get("name") or root.get("content")
+           or root.get("url") or root.get("eventId"))
+    name = None if raw is None else str(raw)
+    return {
+        "id": entity_id,
+        "label": root_label,
+        "name": None if name is None else name[:_ENDPOINT_NAME_MAX],
+        "nameTruncated": name is not None and len(name) > _ENDPOINT_NAME_MAX,
+    }
 
 
 def _endpoint_preview(row: Any) -> dict:
@@ -403,7 +439,7 @@ def _endpoint_preview(row: Any) -> dict:
     caller cannot detect is the "absence read as an answer" class this PR
     removes elsewhere.
 
-    ⛔ And the per-layer SELECTION is done in Cypher (``_relation_endpoint_name``
+    ⛔ And the per-layer SELECTION is done in Cypher (``_RELATION_ENDPOINT_NAME``
     above the two UNION branches), because a single blanket ``coalesce(m.name,
     m.content, m.url)`` reached ``content`` for a ``:Source`` too — the ``#3998``
     payload disclosure arriving through the name field, which
@@ -566,14 +602,7 @@ def entity_relations(
                            else list(declared.get(predicate, ()))),
         })
     return {
-        "entity": {
-            "id": entity_id,
-            "label": root_label,
-            # The root's own name, on the same coalesce as a neighbour's, so the
-            # two sides of a relation render the same way.
-            "name": (root.get("name") or root.get("content")
-                     or root.get("url") or root.get("eventId")),
-        },
+        "entity": _root_preview(entity_id, root_label, root),
         "relations": relations,
         "count": len(relations),
         "declarationsReadable": declared is not None,
