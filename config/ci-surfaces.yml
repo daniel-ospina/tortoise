@@ -76,6 +76,50 @@ version: 1
 # this branch's: each landed before this fold. The name lists are what the guard COMPARES against
 # the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
 # a graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
+# reader of the prose can see. On THIS tree — `origin/main` `939e37f664e5` folded in, which by then
+# already carried BOTH rows an earlier cut of this work had proposed: `#14596`'s
+# `tests/test_14560_operator_vectors.py` (`core`, flat 2.0 s `DEFAULT_FAST_WEIGHT`) and `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` (`core`, that same flat weight), so neither is THIS
+# PR's — the verb packs the pool into two bins: five shards at 826.2 s (a, g, i, j, k) and six at
+# 826.1 s (b, c, d, e, f, h), so `ceil(826.2/60 x 2)` = 28 m governs (a shard's job-level wall clock
+# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` on every one of the eleven shards, so the two agree by construction
+# rather than by a hand re-read.
+# ⛔ THE POOL DELTA IS ZERO, which is the fact this fold must not overstate: `fast_pool()` holds
+# 1333 files at this head and 1333 on `origin/main` (measured both ways, and the second measurement
+# is the one that matters — a delta asserted from one side is how the older "1333 here against 1332
+# on `main`" spelling outlived the landing that made it false). ⛔ No parent's FIGURE is carried
+# here: the fold re-packed every bin (the packer is greedy), so the per-fold readings that stood in
+# this block before the union splice — `#14565`'s, `#14574`'s, `#14559`'s, and the `826.0`/`825.9`
+# pair a rebase of this branch once spliced in beside this sentence — describe trees that no longer
+# exist, and they are deleted rather than re-pointed. The name lists are what the guard COMPARES
+# against the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so
+# they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
+# them.
+# reader of the prose can see. On THIS tree — `origin/main` `939e37f664e5` folded in, carrying
+# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row, `#14574`'s drift-reporter row
+# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s) and `#14560`'s
+# `tests/test_14560_operator_vectors.py` (`core`, same flat 2.0 s `DEFAULT_FAST_WEIGHT`) — plus
+# THIS PR's (`#14552`) OWN row in `fast_pool()` (`tests/test_record_read_point_vector_keys.py`,
+# `core`, at that same flat 2.0 s `DEFAULT_FAST_WEIGHT`), the verb packs the pool into two bins:
+# three shards at 826.4 s (a, j, k) and eight at 826.3 s (b, c, d, e, f, g, h, i), so
+# `ceil(826.4/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two
+# agree by construction rather than by a hand re-read.
+# ⛔ THAT CLAUSE IS THIS TREE'S ALONE, and the move is THIS PR's: `origin/main`
+# `51f444fd088` names no `test_record_read_point_vector_keys.py` registration at all
+# (`git show origin/main:config/ci-surfaces.yml | grep -c test_record_read_point_vector_keys` -> 0),
+# so this PR adds exactly ONE file to `fast_pool()` — which holds 1334 files at this head against
+# 1333 on `main` — and every other registration the clause counts is `main`'s at this head. ⛔ No
+# parent's FIGURE is carried here: the fold re-packed every bin (the packer is greedy), so the
+# per-fold readings that stood in this block before the union splice — `#14565`'s, `#14574`'s,
+# `#14559`'s — describe trees that no longer exist, and they are deleted rather than re-pointed.
+# ⛔ The
+# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two, `#14560`'s) are `main`'s at this
+# head, NOT
+# this PR's: each landed before this fold. The name lists are what the guard COMPARES against the
+# live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
+# graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -284,6 +328,13 @@ surfaces:
   # MEASURED, same selector, pre-fix. The `core` row is what covers the
   # `sentry.py`-only diff, and that is the only gap it closes.
   - test_13665_sentry_init_off_loop.py
+
+  # #14592 Phase A: the OTHER half of that suite's dual registration — it pins the
+  # five REST read routes whose handlers live in `tortoise/hosted_api.py`, and a
+  # hosted_api-only diff resolves `['api', 'onboarding']` (the EXACT `api` match
+  # REPLACES the `core` fallback), so the `core` row alone leaves these pins asleep
+  # on the one diff that can revert a route. Measured with the shipped selector.
+  - test_14592_read_parity.py
   # #13722: the capture provenance stamp chain's per-id record writes must run
   # OFF the event loop. Dual-registered for the reason the off-loop guards above
   # are: the handler that owns the chain is `tortoise/hosted_api.py`, an EXACT
@@ -2969,6 +3020,21 @@ surfaces:
   # projection rebuild and the capture path, i.e. a `tortoise/`-only diff selects it. Hermetic:
   # the read is exercised against a stub connection, no graph and no docker.
   - test_record_read_point_vector_keys.py
+
+  # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
+  # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
+  # DUAL-REGISTERED, and the two rows cover DIFFERENT diffs — measured with this
+  # selector, not assumed:
+  #   * `tortoise/entity_reads.py`  -> `['core']`
+  #   * `tortoise/event_store.py`   -> `['core']`
+  #   * `tortoise/pack_registry.py` -> `['core']`      (all three: THIS row)
+  #   * `tortoise/hosted_api.py`    -> `['api', 'onboarding']` — an EXACT `api`
+  #     SOURCE_PATTERNS match that REPLACES the `core` fallback, so the `api` row
+  #     below is the one that keeps these pins awake on a hosted_api-only diff,
+  #     which is the exact change class (a route's shape) this suite guards.
+  # Without BOTH rows the pin is asleep on one of the two diffs that can revert
+  # it. Same reasoning as `test_13665_sentry_init_off_loop.py` above.
+  - test_14592_read_parity.py
   # #14429 review P2: the spool-drain rehearsal's two load-bearing invariants (the
   # source spool is never written, and a non-loopback / production target is
   # refused) are enforced only inside `tools/spool_drain_rehearsal.py`'s own control
@@ -15998,6 +16064,7 @@ durations:
   # missing in turn) and the verdict step (every arm that must fail, plus the
   # rehearsal arms that must not). No docker, no DB, no graph, no model call.
   # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
+  test_14592_read_parity.py: 2.0  # new in #14592 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` and `api` registrations above are what put the file in `fast_pool()`. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority). What the weight covers: the suite drives the real ASGI app (middleware, auth dependency, SDK, graph) and it takes its graph from ``tests/_http_fixtures.patched_tortoise_sdk(db_path)`` — against a private temp EMBEDDED DB when no ambient URI is set, and against the ambient docker lane when one is (epic #1647's redirect; that fixture's docstring owns the conditional). It does NOT skip when no live URI is configured — it carries no skip marker at all — which is why the file is a normal pool member rather than a `uri_requiring` one.
   test_14559_reaper_schedule.py: 2.0
   test_14592_operating_model_evidence.py: 2.0  # new in #14592 phase D (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (committed JSON/text reads, four producer module imports, one `bash` invocation of `run.sh` against a throwaway interpreter symlink, one `stamp_provenance.py --check` subprocess — no DB, no graph, no network, no model call, no provider key): the identity selection rule over every input ORDER (the pre-fix ranking chose the wrong row in 18 of 24 permutations of the real 4-way tie), the REFUSAL of a near-miss instead of expanding it, the retired `startswith` preference reddening on a lookalike row, §5's 8 rows / 6 operators / duplicated mitigation, G5's 96-row claim door with its 62+34 bins, §3's 120 = 62 + 34 + 24, the stale sentences asserted ABSENT from the report, every artifact's truthful `produced_by_committed_producer: false` block, the refusal to stamp over a producer-written block, the read-only recipe running with NO credential while `run_ingest.py` demands one, and a non-zero exit for an empty relation read (with an AST pin on the wiring). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13220_record_label_embeddings.py: 1.8

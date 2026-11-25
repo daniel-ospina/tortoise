@@ -213,6 +213,18 @@ routes:
   - method: GET
     path: /v1/dream/health
     class: tenant
+  # #14592 Phase A — REST read parity for the ontology's other layers. GET
+  # `/v1/objects`, `/v1/subjects` and `/v1/sources` read back what the existing
+  # POST doors write; `relations` and `belief` expose the edges and the EP
+  # posterior that only the MCP door could reach. No MCP tool and no public SDK
+  # method is added — the delegation table is `tortoise/entity_reads.py`'s
+  # module docstring.
+  - method: GET
+    path: /v1/entities/{entity_id}/belief
+    class: tenant
+  - method: GET
+    path: /v1/entities/{entity_id}/relations
+    class: tenant
   - method: GET
     path: /v1/events
     class: tenant
@@ -384,8 +396,14 @@ routes:
   - method: GET
     path: /v1/issue-insight
     class: tenant
+  - method: GET
+    path: /v1/objects
+    class: tenant
   - method: POST
     path: /v1/objects
+    class: tenant
+  - method: GET
+    path: /v1/objects/{entity_id}
     class: tenant
   - method: GET
     path: /v1/onboarding/github/branches
@@ -498,8 +516,24 @@ routes:
   - method: POST
     path: /v1/signup/email
     class: tenant
+  - method: GET
+    path: /v1/sources
+    class: tenant
+  # `:path`, not a bare segment: a provenance Source is keyed by `url` and a URL
+  # contains `/`. With a bare `{entity_id}` the request 404s in ROUTING (the
+  # router matches the DECODED path, so `%2F` is `/` by then) and the caller
+  # cannot tell a routing miss from an absent document — measured on this tree.
+  - method: GET
+    path: /v1/sources/{entity_id:path}
+    class: tenant
+  - method: GET
+    path: /v1/subjects
+    class: tenant
   - method: POST
     path: /v1/subjects
+    class: tenant
+  - method: GET
+    path: /v1/subjects/{entity_id}
     class: tenant
   - method: GET
     path: /v1/team

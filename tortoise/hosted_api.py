@@ -15240,7 +15240,14 @@ async def list_points(
     body: dict = {"points": results, "count": len(results)}
     # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
     # that ignores the new field is unaffected; ``truncated`` is the instrument.
-    body.update(truncation_field(trunc_out))
+    #
+    # ``body |= …`` rather than ``body.update(…)`` on every envelope in this file,
+    # the pre-existing `/v1/points` one included: `update` is an ordinary-word
+    # receiver no typing can decide, so the privatisation ratchet counts each new
+    # one as growth and reds `surface-guard`. `|=` is the same merge on the same
+    # store with no such row, and mixed idiom inside one file is what makes the
+    # next author copy the counted form.
+    body |= truncation_field(trunc_out)
     return body
 
 
@@ -15638,6 +15645,753 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     if "pointKind" in props:
         props["kind"] = props.pop("pointKind")
     return props
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ── #14592 Phase A: read parity for the ontology's other three layers ────────
+#
+# The REST door could CREATE Points, Objects and Subjects and READ back only
+# Points; Sources had no route at all, and neither relations nor confidence had
+# one. Every read below already existed behind the MCP door, so each handler is
+# a transport adapter over a function that door already calls — the delegation
+# table is `tortoise/entity_reads.py`'s module docstring, and the PR body
+# restates it. NO MCP tool and NO public SDK method is added or renamed: the two
+# reads with no reusable function are free functions over a projection there.
+#
+# Shape borrows `/v1/points`': the same
+# `_require_scope(…, "graphs:read")`, the same off-loop construction
+# (`_data_sdk_offloaded`) and the same dedicated read lane (`_read_offload`),
+# the same `truncation` instrument for a capped page, and the same 404-on-absence
+# answer for a by-id read. It does NOT adopt the points route's `pointKind`→
+# `kind` renaming: `kind` is the REST name for a property the point doors never
+# accept as `pointKind`, whereas here the write door's own field name IS
+# `objectKind`/`subjectKind`, so a client writes and reads the same word and
+# `?kind=` filters the thing it names.
+#
+# ⛔ These reads do NOT consult `TORTOISE_RECORD_SERVE` — the record seam is
+# armed on the ANCHORED single-Point read only, and `GET /v1/points` (the LIST
+# route this parity mirrors) does not consult it either. See
+# `entity_reads`' module docstring for why a second, divergent arm of a seam with
+# six named fallback reasons would be worse than saying plainly which store is
+# read (there is one).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+async def _resolve_entity_off_loop(org: dict, entity_id: str, *, surface: str
+                                  ) -> tuple[object, list[dict]]:
+    """``(sdk, resolved)`` for one by-id entity read, off the loop.
+
+    ``FalkorProjection._resolve_entity`` with all three identity arms, which is
+    the exact resolution ``TortoiseSDK.get_entity`` (the ``tortoise_get_entity``
+    MCP door) performs — one resolution over the canonical label→key table, so a
+    url-keyed ``:Source`` is addressable here for the same reason it is there
+    (#5448) and there is no second table to drift.
+
+    The SDK is returned so the caller can apply the layer's own payload rule
+    without opening a second handle: the read lane and the construction lane are
+    both bounded, and paying them twice for one request is the shape #10602
+    removed from the point read.
+    """
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    resolved = await _read_offload(
+        lambda: sdk._get_proj()._resolve_entity(
+            entity_id, by_id=True, by_eventId=True, by_url=True),
+        op=f"{surface}.resolve")
+    return sdk, resolved
+
+
+def _layer_payload(entry: dict) -> dict:
+    """One resolved node's properties, under its layer's own disclosure rule.
+
+    A ``:Source`` goes through ``projection.entities.filter_source_props`` — the
+    ONE home of the #3998 rule (the graph indexes the raw; it is not the raw
+    store) that ``get_entity`` itself applies, so this route cannot re-open a
+    disclosure that door closed. Every other layer's properties are returned as
+    stored.
+    """
+    props = dict(entry.get("properties") or {})
+    if entry.get("label") == "Source":
+        from tortoise.projection.entities import filter_source_props
+
+        props, _denied = filter_source_props(props)
+    return props
+
+
+async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
+                                surface: str) -> dict:
+    """Read ONE entity, refusing an id that names a node of another layer.
+
+    ⛔ A 404 here is NOT "this id is unknown to the product" — a Point's id
+    passed to ``GET /v1/objects/{id}`` is a perfectly real entity that this
+    route's layer does not name. That is the honest answer for a LAYER-SCOPED
+    route (the caller asked this layer), and the same id stays reachable at the
+    route that owns its label, plus at ``/v1/entities/{id}/relations`` and
+    ``/v1/entities/{id}/belief``, which are deliberately layer-agnostic.
+
+    ⚠️ THE SCOPE GATE IS THE FIRST STATEMENT, here rather than in each of the
+    three callers. An earlier revision of this block put it in the LIST and
+    edge/belief handlers only, so ``GET /v1/{objects,subjects,sources}/{id}``
+    answered a key that lacked ``graphs:read`` — measured: the same key got 403
+    from ``GET /v1/objects`` and 200 from ``GET /v1/objects/{id}``, i.e. it could
+    not list Objects but could fetch any Object payload by id. That is the
+    "never post-filter: the check is the FIRST statement of a data handler"
+    contract ``_require_scope``'s own docstring states, and putting it in the
+    shared helper makes it impossible to add a fourth by-id route without it.
+
+    ⚠️ A CROSS-LABEL ID COLLISION is not reported as the requested layer:
+    ``FalkorProjection._resolve_entity`` dedupes by identity VALUE, so when two
+    labels share an id value only the first branch's entry survives. Latent
+    rather than live (``entity_identity.resolve_or_mint`` mints opaque ids and
+    never derives one from a name), and stated because this filter depends on
+    the entry's label being present.
+    """
+    _require_scope(org, "graphs:read", surface)
+    _sdk, resolved = await _resolve_entity_off_loop(org, entity_id, surface=surface)
+    for entry in resolved:
+        if entry.get("label") != label:
+            continue
+        return _layer_payload(entry)
+    raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
+def _paged(body_key: str, rows: list[dict], *, candidates: int,
+           offset: int, exact: bool) -> dict:
+    """The capped-page envelope `/v1/points` publishes, one layer over.
+
+    ``candidates`` is the candidate set the PRODUCER could see, before the
+    ``limit`` cut. Two callers fill it two ways, and the difference is disclosed
+    rather than smoothed: ``list_layer`` passes an EXACT ``count()`` under the
+    same WHERE (so ``exact=True`` is honest and a truncated page carries
+    ``total_available``), while ``list_sources`` passes the length of the
+    whole-population list it paged in Python (also exact, for the same reason —
+    it is the complete set). ⛔ ``exact`` is therefore REQUIRED and has no
+    default: a caller that ever fills ``candidates`` from a ``limit + 1`` probe
+    row must pass ``exact=False`` (the probe is a lower bound, never a total —
+    ``truncation.py``'s own rule), and a default would silently hand such a
+    caller the wrong claim. Both current callers pass ``exact=True`` because
+    their totals ARE exact; the parameter exists so the next one cannot inherit
+    that answer by omission.
+
+    ⛔ ``offset`` is load-bearing, not bookkeeping. These routes are
+    ``SKIP``/``LIMIT`` paged, so the honest question is *"do matches exist beyond
+    what this RESPONSE delivered?"* — ``offset + delivered < candidates``, which
+    is what ``mark_truncation`` computes once it is told the offset. Without it
+    the verdict was ``candidates > delivered``, which marked the TERMINAL page
+    (and a page past the end) ``truncated: true``: the exact inverse of #8447's
+    contract, since nothing remained, and a client paging ``while truncated``
+    never terminated. The dropped rows here ARE reachable by continuing the walk,
+    which is why the marker must say "more remain" and never "the page was cut"
+    on a terminal page — ``truncation.py``'s register records this pair as its
+    offset-paged exception.
+    """
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    delivered = len(rows)
+    sink: dict = {}
+    mark_truncation(sink, returned=delivered, candidates=candidates, exact=exact,
+                    offset=offset)
+    body: dict = {body_key: rows, "count": delivered}
+    body |= truncation_field(sink)
+    return body
+
+
+def _layer_kind_vocabulary(label: str) -> frozenset[str]:
+    """The kinds ``label`` DECLARES — the set a refused ``kind`` filter lists.
+
+    ⛔ Deliberately NOT ``known_kinds("subjectKind")``. ``domain_loader``'s
+    subject bucket is EMPTY BY DESIGN — ``_BUCKET_ATTRS["subjectKind"] is None``
+    and ``_CORE_KINDS_BY_BUCKET["subjectKind"] == frozenset()``, because the
+    manifest v3 schema has no ``subjectKinds`` list — so reading it here would
+    answer ``set()`` and 400 EVERY subject filter, the whole
+    ``/v1/subjects?kind=`` surface included. §5's vocabulary is
+    :func:`tortoise.kind_layers.subject_kind_names`, and that is also what
+    ``declared_layers`` asks (``declares_subject``); the two must not diverge.
+    """
+    from tortoise.kind_layers import KIND_PROP, subject_kind_names
+
+    if label == "Subject":
+        return subject_kind_names()
+    from tortoise.domain_loader import known_kinds
+
+    return frozenset(known_kinds(KIND_PROP[label.lower()]))
+
+
+def _names_this_layer(kind: str, vocabulary: frozenset[str]) -> bool:
+    """Does ``kind`` name a value ``this`` layer declares, under a legal spelling?
+
+    ⛔ NOT ``declared_layers(kind)``, and the reason is a measured fail-open: that
+    authority deliberately strips **any** namespace (``domain_loader.kind_is_known``
+    splits on ``:``), so ``?kind=zzz:goal`` was admitted as an Object kind —
+    ``declared_layers('zzz:goal') == ['object', 'point']`` — and the route answered
+    ``200 {"objects": [], "count": 0, "truncated": false}``, the exact answer this
+    refusal exists to remove. ``?kind=zzz:team`` was refused on the Subject route,
+    so the two layers graded the same input differently.
+
+    The spellings admitted here are the ones the write doors actually write:
+    the layer vocabulary's own bare names, and the repo's ``core:`` namespaced
+    form of those names. ⚠️ A pack-namespaced spelling that the graph does not
+    carry yet is REFUSED rather than assumed legal — fail-closed on purpose: the
+    alternative (strip the namespace) is the fail-open above, and a legal spelling
+    becomes admissible the moment ONE row carries it (the ``carried`` arm). The
+    residual is stated rather than hidden: ``?kind=<pack-ns>:<kind>`` on a graph
+    with no such row answers 400, and the refusal lists the bare spelling to use.
+    """
+    if kind in vocabulary:
+        return True
+    namespace, sep, bare = kind.partition(":")
+    if not sep:
+        # ⛔ The BARE form of a `core:`-declared kind, and it is not symmetric by
+        # accident: §5's subject vocabulary is namespaced (`core:team`,
+        # `core:role`, …), so `?kind=team` — the spelling `POST /v1/subjects`
+        # itself writes — would otherwise be refused while `core:team` is
+        # admitted. `kind_layers.declares_subject` states this rule for the
+        # binder; the read door has to apply it too, or the two disagree about a
+        # value the write door stores.
+        return f"core:{kind}" in vocabulary
+    return namespace == "core" and bare in vocabulary
+
+
+async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
+                                     *, surface: str) -> None:
+    """Refuse a ``kind`` filter that names nothing this layer can answer.
+
+    #14593 review P1. ``?kind=org`` (or ``Goal``, or any typo) used to reach
+    ``entity_reads.list_layer``, match nothing, and return
+    ``200 {"objects": [], "count": 0, "total_available": 0, "truncated": false}``
+    — a page POSITIVELY marked complete that is byte-identical to "this graph
+    names no Objects of that kind". That is the fail-open class this PR fixes one
+    file over (#8447's "a FULL page was byte-identical to a COMPLETE one"), and
+    the sibling read route already refuses the same input: ``list_points``
+    answers ``400 kind must be one of [...]`` via ``known_kinds()``.
+
+    Admission is the UNION of three authorities, and each is load-bearing:
+
+    * the LAYER'S OWN vocabulary (``_layer_kind_vocabulary``) under a legal
+      spelling — the bare name, or the repo's ``core:``-namespaced form of it
+      (``_names_this_layer``). ⛔ NOT ``kind_layers.declared_layers``: that
+      authority deliberately strips ANY namespace, so it admitted ``zzz:goal``
+      (measured: ``declared_layers('zzz:goal') == ['object', 'point']``) and the
+      route answered the empty-and-complete page this function removes — while
+      the Subject route refused ``zzz:team``. Exact spellings keep the point↔
+      object overlap the #7813 owner ruling permits (``goal``/``plan``/
+      ``strategy``/``target`` are in the Object vocabulary, measured) without
+      admitting a namespace nobody declares;
+    * the NIL kinds (``kind_layers.NIL_KINDS``) — ``other``/``core:other`` are
+      the fold's ON CREATE default on EVERY entity layer, so they are always
+      answerable. They are also in the ``allowed`` list below, and a refusal that
+      names a value it rejects is a false block (measured before this arm:
+      ``?kind=other`` answered 400 whose message listed ``'other'``);
+    * the kinds the graph CARRIES (``entity_reads.layer_kind_values``) — read
+      only when the vocabulary does not answer, because the write doors are open
+      on this property and a stored off-vocabulary kind must stay readable by
+      filter. This is also what makes a pack-namespaced spelling admissible: one
+      carried row is enough.
+
+    ⛔ The graph's own data WINS over the vocabulary, never the reverse: a kind
+    this layer actually holds is admitted even when nothing declares it. Refusing
+    it would be a false block on a row the caller can read — the direction that is
+    worse than the silence, and the reason a declared-vocabulary-only check was
+    rejected here (the PR's own suite writes ``objectKind="organisation"``, which
+    NO vocabulary declares).
+
+    A kind declared on this layer but absent from the graph is ADMITTED too — an
+    empty page for it is the honest answer ("you know nothing of that kind"), and
+    400ing it would invent a refusal the data does not support.
+    """
+    from tortoise import entity_reads
+    from tortoise.kind_layers import NIL_KINDS
+
+    vocabulary = _layer_kind_vocabulary(label)
+    # ⛔ The NIL kinds are admitted OUTSIDE the vocabulary: §5's subject vocabulary
+    # deliberately excludes `other` (`subject_kind_names`' own rule), so a
+    # vocabulary-only arm refused `core:other` on /v1/subjects while the refusal's
+    # `allowed` list named it — a false block on the fold's own ON CREATE default.
+    if kind in NIL_KINDS or _names_this_layer(kind, vocabulary):
+        return
+    carried = await _read_offload(
+        lambda: entity_reads.layer_kind_values(sdk._get_proj(), label),
+        op=f"{surface}.kind_vocabulary")
+    # ⛔ The CARRIED arm answers the same equivalence the filter applies, not one
+    # spelling of it: a graph holding `organisation` must admit
+    # `?kind=core:organisation` too (measured before this arm: 400, while the
+    # filter would have answered correctly for either spelling — an over-block,
+    # and the same asymmetry this admission removes one level up for declared
+    # kinds). An arbitrary namespace's equivalence set is itself, so
+    # `?kind=zzz:goal` still admits only the rows that really carry it.
+    if any(spelling in carried
+           for spelling in entity_reads.kind_equivalents(kind)):
+        return
+    allowed = sorted(vocabulary | carried | NIL_KINDS)
+    raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
+
+
+async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
+                            kind: str | None, limit: int, offset: int) -> dict:
+    """One handler body for every layer list, so the two cannot diverge."""
+    from tortoise import entity_reads
+    from tortoise.kind_fallbacks import named_kind
+
+    _require_scope(org, "graphs:read", surface)
+    # #9572: BLANK is not a kind — the same predicate the write doors use, so a
+    # ``?kind=%20`` filter cannot answer an empty page for a filter the caller
+    # never meant to apply.
+    kind = named_kind(kind)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    if kind is not None:
+        await _refuse_unknown_layer_kind(sdk, label, kind, surface=surface)
+    rows, total = await _read_offload(
+        lambda: entity_reads.list_layer(
+            sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),
+        op=surface)
+    return _paged(body_key, rows, candidates=total, offset=offset, exact=True)
+
+
+@app.get("/v1/objects")
+async def list_objects(
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list Objects in the org's graph (the STATE layer's persistent things).
+
+    The read this layer never had — ``POST /v1/objects`` existed and there was no
+    way to ask *what do you know about?* Optional ``kind`` filters on the
+    ``objectKind`` the write door accepts. Paged over a TOTAL order
+    (``name``, then the node's internal id), so walking ``offset`` visits every
+    row exactly once. ENDED rows (``deprecated`` and the rest of the terminal
+    vocabulary) are excluded from the listing and stay retrievable by id — the
+    LISTING half of ``GET /v1/points``' tombstone contract, read through the same
+    shared predicate. ⛔ The BY-ID half is deliberately NOT identical, and the
+    difference is stated rather than implied: ``GET /v1/points/{id}`` refuses a
+    ``retracted`` record by name (``#432``/``#689``), while this route answers it
+    with the stored properties — it delegates to ``sdk.get_entity``, which is
+    the documented behaviour of the MCP door it reuses, and a caller reading
+    `status` in the payload can see the row is ended. Measured both ways:
+    a retracted Object answers 200 here and 404 on ``/v1/points/{id}``.
+
+    Delegates to :func:`tortoise.entity_reads.list_layer`. See
+    ``/v1/objects/{id}`` for the single-node read.
+    """
+    return await _list_layer_route(org, "Object", "list_objects", "objects",
+                                   kind, limit, offset)
+
+
+@app.get("/v1/objects/{entity_id}")
+async def get_object(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get a single Object by id — the STATE layer's by-name read.
+
+    Delegates to ``FalkorProjection._resolve_entity`` (the resolution
+    ``TortoiseSDK.get_entity`` — the ``tortoise_get_entity`` MCP door — is built
+    on). A 404 means *this layer names no such id*: an id that belongs to
+    another layer is a real entity this route does not serve, and stays
+    reachable at its own layer's route.
+    """
+    return await _read_labelled_entity(org, entity_id, label="Object",
+                                       surface="get_object")
+
+
+@app.get("/v1/subjects")
+async def list_subjects(
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list Subjects in the org's graph — the actors/roles layer.
+
+    Mirrors ``GET /v1/objects`` exactly (same paging contract, same tombstone
+    rule, same truncation instrument); ``kind`` filters on ``subjectKind``, the
+    property ``POST /v1/subjects`` writes. Delegates to
+    :func:`tortoise.entity_reads.list_layer`.
+    """
+    return await _list_layer_route(org, "Subject", "list_subjects", "subjects",
+                                   kind, limit, offset)
+
+
+@app.get("/v1/subjects/{entity_id}")
+async def get_subject(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get a single Subject by id. See ``/v1/objects/{id}``."""
+    return await _read_labelled_entity(org, entity_id, label="Subject",
+                                       surface="get_subject")
+
+
+#: ``GET /v1/sources``' page bound. ``_list_sources`` returns the whole
+#: provenance-Source population (it is a bounded, per-graph set keyed by ONE
+#: aggregating query), so this route pages it in Python rather than issuing a
+#: second query — a second query would be a second implementation of "what is a
+#: provenance Source" (the ``documentKind IS NULL`` partition, D10) and the two
+#: would drift. Same ceiling as ``/v1/points``.
+_SOURCES_MAX_LIMIT = 1000
+
+
+@app.get("/v1/sources")
+async def list_sources(
+    limit: int = Query(50, ge=1, le=_SOURCES_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: list provenance Sources with their point counts.
+
+    There was no ``/v1/sources`` route at all, so "where did this come from?"
+    was unanswerable through the app door. Delegates to
+    ``TortoiseSDK.list_knowledge(kind='source')`` — the SAME arm the
+    ``tortoise_list_knowledge`` MCP tool serves — so the two doors cannot
+    disagree about what a provenance Source is.
+
+    ⚠️ A row's address is its ``url`` (``{url, sourceKind, points}``): a
+    provenance Source is keyed by ``url`` in the graph, and ``GET
+    /v1/sources/{id}`` resolves it by that value. Ordering is the callee's own
+    (most-connected first), and a truncated page carries ``total_available``.
+    """
+    _require_scope(org, "graphs:read", "list_sources")
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    rows = await _read_offload(
+        lambda: sdk.list_knowledge(kind="source"), op="list_sources")
+    rows = list(rows or [])
+    page = rows[offset:offset + limit]
+    return _paged("sources", page, candidates=len(rows), offset=offset, exact=True)
+
+
+@app.get("/v1/sources/{entity_id:path}")
+async def get_source(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: get one Source by id OR by url.
+
+    ``entity_id`` may be a Source's ``id`` or its ``url`` — the graph keys a
+    provenance Source by ``url`` and the resolution covers both arms (#4649), so
+    a client can walk straight from a ``/v1/sources`` row (which carries the
+    url) to the document.
+
+    ⛔ THE PATH CONVERTER IS ``:path``, and it is load-bearing rather than
+    cosmetic: a URL contains ``/``, so a bare ``{entity_id}`` segment cannot
+    match one at all (the router sees the decoded path, so ``%2F`` is ``/`` by
+    the time it matches) and the request 404s in ROUTING with Starlette's own
+    "Not Found" — an absence reported by the router rather than by this handler,
+    which is the shape a caller cannot diagnose (measured on this tree before the
+    converter was added). A caller still percent-encodes the url as a matter of
+    HTTP hygiene; the converter is what makes the DECODED value reachable.
+
+    ⛔ The payload is filtered through ``filter_source_props``: the graph indexes
+    a document's raw text, it is not the raw store (#3998), and this route must
+    not become the one that hands it back.
+    """
+    return await _read_labelled_entity(org, entity_id, label="Source",
+                                       surface="get_source")
+
+
+@app.get("/v1/entities/{entity_id}/relations")
+async def get_entity_relations(
+    entity_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#14592: every DIRECTED edge touching one entity, of ANY predicate.
+
+    Each row is ``{direction, predicate, mechanism, other, idx, declaredBy}``:
+    which way the edge runs (``out``/``in``), the verb, the stored edge type
+    (``IMPL``/``NAND`` for an operator's typed edge, the predicate itself for a
+    structural edge), the other endpoint as ``{id, label, name}``, the
+    operator-position axis where one exists, and **which packs declare the
+    predicate**.
+
+    ⛔ ``declaredBy`` is THREE-VALUED, and the third value is the point:
+    ``["dev"]`` = declared by those packs; ``[]`` = declared by no installed
+    pack (a core/structural predicate — legal); and ``declarationsReadable:
+    false`` at the top level = the registry could not be asked, in which case
+    ``declaredBy`` is ``null`` rather than a list. An unreadable registry
+    rendered as ``[]`` would be a positive claim that nothing declares a
+    vocabulary we could not see.
+
+    Layer-agnostic on purpose for an ID: pass an Object, a Subject, a Point or a
+    Source id. ⚠️ A URL is NOT accepted here (a single path segment cannot carry
+    one) — a url-keyed Source's document read is ``/v1/sources/{url}``; stated
+    because the alternative, a ``:path`` converter here, would greedily swallow
+    the trailing ``/relations``.
+    Delegates to
+    :func:`tortoise.entity_reads.entity_relations` — see its docstring for why
+    the two nearest existing reads (``navigation.entityProfile``, which follows
+    every edge but drops direction, and ``sdk._expand_relationships``, which
+    keeps direction but only for the epistemic predicates) cannot answer this,
+    and for the shared identity table it resolves the anchor through.
+    """
+    from tortoise import entity_reads
+
+    _require_scope(org, "graphs:read", "get_entity_relations")
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    body, candidates = await _read_offload(
+        lambda: entity_reads.entity_relations(
+            sdk._get_proj(), entity_id, limit=limit, offset=offset),
+        op="get_entity_relations")
+    if not body.get("entity"):
+        raise HTTPException(status_code=404, detail="Entity not found")
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ⛔ `exact=False`: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total needs a second COUNT over every edge of the node, and publishing the
+    # probe's own ``limit + 1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (``truncation.py``). A truncated page therefore
+    # takes the contract's third state — incomplete, total unknown — and a
+    # complete one is positively marked complete rather than left un-marked.
+    sink: dict = {}
+    mark_truncation(sink, returned=body.get("count", 0),
+                    candidates=candidates, exact=False)
+    body |= truncation_field(sink)
+    return body
+
+
+@app.get("/v1/entities/{entity_id}/belief")
+async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
+    """#14592: one entity's current EP belief, when it last moved, and why.
+
+    Returns the current posterior (``mean``/``variance``/``alpha``/``beta`` — the
+    EP α/β), the newest ``ConfidenceChanged`` event that committed a value for
+    THIS node (so *when* it last moved is answered from the store's own record
+    rather than inferred), and the evidence chain behind the claim.
+
+    ⚠️ **THIS GET CAN WRITE — but only for a node that HAS a persisted belief.**
+    ``TortoiseSDK.check_confidence(claim_id=…)`` reaches ``get_confidence``,
+    whose lazy-consistency pass dreams a DIRTY root; that is why the
+    ``tortoise_check_confidence`` MCP tool is tiered ``maintenance`` and not
+    ``read``. A ``graphs:read`` scope is deliberately sufficient (the same
+    posture that door states), and ``GET /v1/packs`` (#9583) is the existing
+    precedent for a REST GET that can write.
+
+    ⛔ The qualification is not a hedge — it is the behaviour. The gate below
+    asks the NODE first and returns ``current: null`` without calling EP at all
+    when there is no belief to report, so the write arm is reachable only for a
+    node carrying a stored posterior/prior/baseline. An earlier revision stated
+    the capability unconditionally, which over-claimed a write on the request
+    shape this route most commonly serves.
+
+    ⛔ **A NODE WITH NO PERSISTED BELIEF ANSWERS ``current: null``, not a
+    Beta(1,1).** EP's ``_read_node`` coalesces absent params to ``(1.0, 1.0)``,
+    so an Object, a Subject, or a Point EP has never consumed would otherwise
+    come back as ``{"mean": 0.5, "alpha": 1.0, "beta": 1.0, "effective_n":
+    2.0}`` — a plausible-looking posterior for a node that carries no evidence,
+    which is precisely the substituted-number class this route's neighbour
+    paragraph forbids. An earlier revision of this handler DID return that value
+    (measured: an Object and a Subject both answered 200 with Beta(1,1)).
+
+    ⛔ **``ep_state`` IS PUBLISHED BESIDE ``current``, and the two KINDS of
+    belief are never merged into one.** ``search_engine.ep_state`` (#11702) is
+    the repo's ONE three-valued answer — ``measured`` | ``baseline`` |
+    ``absent`` — and it is called here rather than re-deciding presence from a
+    key tuple: a node a write merely STAMPED with a declared prior
+    (``set_point_baseline``) would otherwise answer ``current`` with
+    ``{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n: 2.0}``, byte-identical to
+    the fabricated payload the paragraph above removes, with nothing to tell a
+    reader that no evidence was consumed. #11702's rule is that a measured 0.5
+    and an absent-or-declared 0.5 must never be the same answer again, and
+    #3415's rule is that a prior-only baseline's variance is the WIDTH OF THE
+    DECLARED PRIOR, not a measured contention — so ``ep_state: "baseline"``
+    says which reading ``current`` carries. ``/v1/search`` publishes the same
+    word for the same reason (``ranking.py``).
+
+    ⛔ An UNCALIBRATED **CLAIM OR GRAPH** REFUSES the confidence read
+    (``CalibrationError``, fail-closed since #344) — answered here as **409**
+    with the SDK's own sentence, because a precondition that is not the request
+    failed, and the remedy is to calibrate *that scope*: ``get_confidence``
+    narrows its calibration scope to ``claim_id`` (measured: a CALIBRATED graph
+    holding one mirror-only Point raises `1 uncalibrated evidence points` for
+    that id), so the failure is not always the graph's. The remedy below names
+    both scopes rather than promising the graph-level one. It is deliberately
+    not a 200 with a substituted number: a topology-only figure reported as EP
+    would be the silent-uncalibrated-EP class #7478 targets.
+
+    ⛔ ``lastBeliefWrite`` is what a ``ConfidenceChanged`` event COMMITS (the
+    values EP wrote), not a before→after delta — one event does not carry the
+    prior. The delta, and a decision-level ``PreferenceFlipped`` event, are
+    Phase C and are NOT claimed here.
+
+    ⛔ ``entity_id`` is a single path segment, so a URL cannot be passed here: a
+    **url-keyed** ``:Source`` (which carries no ``id``) has its document read at
+    ``/v1/sources/{url}`` but is not addressable on THIS route. Stated because
+    the alternative — a ``:path`` converter — would greedily swallow nothing
+    here (there is no suffix) but would silently differ from its sibling
+    ``/relations``, which has one.
+    """
+    from tortoise import event_store
+    from tortoise.exceptions import CalibrationError
+
+    _require_scope(org, "graphs:read", "get_entity_belief")
+    sdk, resolved = await _resolve_entity_off_loop(
+        org, entity_id, surface="get_entity_belief")
+    if not any(entry.get("label") for entry in resolved):
+        raise HTTPException(status_code=404, detail="Entity not found")
+    label = resolved[0].get("label")
+    entity = resolved[0].get("properties") or {}
+    # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE first, and only then ask EP.
+    # EP's `_read_node` coalesces ABSENT params to Beta(1,1), so an Object, a
+    # Subject, or a Point EP never consumed comes back as a perfectly-shaped
+    # posterior over no evidence. Measured before this gate: an Object and a
+    # Subject both answered 200 with `{mean: 0.5, alpha: 1.0, beta: 1.0,
+    # effective_n: 2.0}`, which published as `current` is the substituted-number
+    # class #7478 targets, one level below the graph-level 409.
+    #
+    # The ORDER matters twice, so it is not a style choice: asking EP for a node
+    # with no belief would run `get_confidence`'s lazy-consistency pass — a WRITE
+    # — to produce a number this handler then discards, and any other exception
+    # out of that call would win over the honest `current: null`. Asking the node
+    # first means a no-belief request performs no EP work at all.
+    #
+    # ⛔ WHICH STATE, asked of the ONE home that decides it (#11702). A
+    # hand-rolled key tuple used to answer this, and it was wrong in the way
+    # that matters: `ep_alpha`/`ep_beta`/`baseline_set` are exactly what a
+    # DECLARED PRIOR stamps, so a prior with no evidence consumed passed the
+    # gate and published as a measurement. `ep_state` answers the same question
+    # with the three names every other belief surface uses, and with #11702's
+    # totality rules (a non-numeric operand is `absent`, a half pair is
+    # `absent`, the `confidence` mirror leads) rather than a second vocabulary
+    # that could drift from `ranking.py`/`why.py`.
+    #
+    # ⛔ AND THE #2490 TERMINAL FOLD, through `ep_state_resolve` — the ONE place
+    # that fold happens, which every other state-reporting surface applies
+    # (`why.py`, `search_engine.annotate_ep_batch`, the rankers). Without it a
+    # claim a terminalising write stamped with the DECAYED `confidence=0.5,
+    # posterior_alpha=1.0, posterior_beta=1.0` (`live.VACUITY_BELIEF`) answered
+    # `ep_state: "measured"` — publishing `{mean: 0.5, alpha: 1.0, beta: 1.0,
+    # effective_n: 2.0}`, byte-identical to the fabricated payload the absent arm
+    # of this handler removes, under the one word that says an EP pass measured
+    # it. Measured on a retracted Point before this fold: the stored row read
+    # `('retracted', 0.5, 1.0, 1.0, True)` and the route said `measured`. The
+    # terminal predicate is `live.is_terminal_status` — the same call
+    # `ep_state_resolve`'s other callers make — so the vocabulary cannot diverge.
+    from .live import is_terminal_status
+    from .search_engine import EP_STATE_ABSENT, ep_state, ep_state_resolve
+
+    belief_state = ep_state_resolve(
+        ep_state(
+            confidence=entity.get("confidence"),
+            posterior_alpha=entity.get("posterior_alpha"),
+            ep_alpha=entity.get("ep_alpha"),
+            posterior_beta=entity.get("posterior_beta"),
+            ep_beta=entity.get("ep_beta"),
+            baseline_set=entity.get("baseline_set") is True,
+        ),
+        measured=not is_terminal_status(
+            entity.get("status"), bool(entity.get("outdated")),
+            # ⛔ the POSITION axis too (#13034): `_resolve_entity` hands back
+            # `properties(n)`, so `isClosed`/`pipelineSlot` are already in hand,
+            # and `is_terminal_status`'s docstring says a caller that fetched
+            # them must pass them. Without this an Object closed on that axis
+            # with a stored posterior still answered `ep_state: "measured"` —
+            # measured: isClosed=true / pipelineSlot='terminal' both did.
+            is_closed=entity.get("isClosed"),
+            stage_slot=entity.get("pipelineSlot")),
+    )
+    has_belief = belief_state != EP_STATE_ABSENT
+    view = None
+    if has_belief:
+        try:
+            view = await _read_offload(
+                lambda: sdk.check_confidence(claim_id=entity_id),
+                op="get_entity_belief.confidence")
+        except CalibrationError as e:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "EP_UNCALIBRATED",
+                    "message": str(e),
+                    "remedy": ("calibrate the scope the error names — the CLAIM "
+                               "(a claim with no prior is uncalibrated even on a "
+                               "calibrated graph) or the GRAPH; "
+                               "`dream`/`compute_confidence` on a calibrated "
+                               "graph"),
+                }) from e
+    # ⛔ `sdk._get_proj()` IS A GRAPH SEAM and must be evaluated INSIDE the
+    # offloaded callable, never on the loop (#10602/#3718). It is the COLD
+    # projection open — connect + version probe (`hosted_api.py`'s
+    # `_GRAPH_SEAM_CALLEES` names it) — so calling it before the `await` put
+    # synchronous FalkorDB I/O back on the single event loop this route family
+    # exists to keep free. Measured: it reds the REQUIRED
+    # `tests/test_read_routes_loop_responsiveness.py::test_graph_io_is_offloaded`
+    # (`async body/bodies [('get_entity_belief', [n])] run synchronous
+    # FalkorDB I/O … on the event loop`).
+    #
+    # The seam sits in a NESTED function handed to the boundary as a callable
+    # REFERENCE, which is the shape that pin recognises: a name bound from an
+    # expression that CONTAINS `_get_proj` is treated as a graph handle
+    # (`_graph_bound_names`), so the inline-lambda spelling makes every later
+    # `last.get(...)` read as an inline graph call. Both spellings run the open
+    # in the worker; this one also states which statement does the graph work.
+    def _latest_belief_write():
+        return event_store.latest_for_node(
+            sdk._get_proj(), "ConfidenceChanged", entity_id)
+
+    last = await _read_offload(
+        _latest_belief_write, op="get_entity_belief.last")
+    # Provenance is a :Point read (`TortoiseSDK._provenance` calls `_get_point`),
+    # so it is asked only for a Point — asking it of an Object would return the
+    # callee's own "Point … not found" error INSIDE a successful response, which
+    # is a worse answer than saying the evidence chain is not recorded there.
+    provenance: dict | None = None
+    if label == "Point":
+        provenance = await _read_offload(
+            lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
+    return {
+        "entity": {
+            "id": entity_id,
+            "label": label,
+            "name": (entity.get("name") or entity.get("content")
+                     or entity.get("url") or entity.get("eventId")),
+        },
+        # ⛔ `measured` | `baseline` | `absent` (#11702) — the word that makes
+        # `current` readable: `measured` is evidence-derived, `absent` comes with
+        # `current: null`, and `baseline` covers TWO readings — EITHER a DECLARED
+        # PRIOR (a `set_point_baseline` stamp whose variance is the prior's own
+        # width, #3415) OR, via `ep_state_resolve`'s #2490 terminal fold, a
+        # TERMINAL claim's DECAYED posterior (`live.VACUITY_BELIEF` — e.g.
+        # `alpha=beta=1.0`, whose mean 0.5 is a vacuity, NOT a prior). So
+        # `baseline` alone does not mean "declared": read the entity's
+        # `status`/`outdated` (and `isClosed`/`pipelineSlot`) — the same three
+        # axes the fold above passes — before treating `current` as a prior.
+        "ep_state": belief_state,
+        # `null` + a named reason, never a fabricated Beta(1,1): a node with no
+        # persisted belief has no posterior, and the neutral mean is not one.
+        "current": view if has_belief else None,
+        "currentUnavailable": (None if has_belief else {
+            "error_code": "NO_PERSISTED_BELIEF",
+            "message": (
+                "this entity carries no persisted EP belief — no posterior, "
+                "prior or baseline — so there is no posterior to report. The "
+                "neutral Beta(1,1) EP would coalesce to is NOT returned here, "
+                "because it is a fallback rather than a measurement."),
+            "entityLabel": label,
+            # `:Event` has no lifecycle and is never an EP participant; saying
+            # which labels CAN carry a belief keeps the answer diagnosable.
+            "beliefCarriedBy": ["Point", "Subject", "Object"],
+        }),
+        "lastBeliefWrite": (
+            None if last is None else {
+                "at": last.get("ts"),
+                "seq": last.get("seq"),
+                "committed": {
+                    "confidence": (last.get("payload") or {}).get("confidence"),
+                    "posteriorAlpha": (last.get("payload") or {}).get(
+                        "posterior_alpha"),
+                    "posteriorBeta": (last.get("payload") or {}).get(
+                        "posterior_beta"),
+                },
+            }),
+        # ⛔ The WINDOW is published, not hidden: `latest_for_node` retains the
+        # newest N events of this type, so a null `lastBeliefWrite` means "not in
+        # that window", never "this node never changed". The window bounds the
+        # RESULT; it does not bound the store's work (there is no `type` index —
+        # see `event_store.LATEST_FOR_NODE_SCAN`), so this is not an O(N) claim.
+        "lastBeliefWriteScan": {
+            "eventType": "ConfidenceChanged",
+            "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
+            "bounds": "retained rows, not the store's scan",
+        },
+        "evidence": {
+            # `null` for a non-Point entity: the chain is recorded on Points
+            # (#1423's "who decided this?"), and saying so is not the same as
+            # saying there is no evidence.
+            "provenance": provenance,
+            "provenanceRecordedFor": "Point",
+        },
+    }
 
 
 @app.post("/v1/dream")

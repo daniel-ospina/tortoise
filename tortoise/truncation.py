@@ -87,8 +87,17 @@ whether the dropped rows are REACHABLE: the offset/cursor paths
 cursor walks) already report ``total``/``hasMore`` and hand the caller the next
 page, so they are never marked here. The criterion is REACHABILITY, and it is
 applied per surface rather than stated once: the marker is written where a row
-dropped at the cap is unreachable by any subsequent call. Every site that meets
-it today is named below by ``<module>::<function>``, and
+dropped at the cap is unreachable by any subsequent call.
+
+The hosted ``_paged`` routes are the recorded exception, and they are an
+exception in FORM only (``hosted_api.py::_paged``, below): they are
+``SKIP``/``LIMIT`` paged, so their marker answers the same reachability question
+— *"does the population extend beyond what THIS RESPONSE delivered?"* — as
+``offset + delivered < total``, never ``total > page length``. Marking the
+terminal page truncated is the inverse of this module's defect: a caller paging
+``while truncated`` would never terminate, and "more remain" would be
+indistinguishable from "this was the last page". Every site that meets the
+criterion is named below by ``<module>::<function>``, and
 ``tests/test_8447_truncation_marker.py::TestTheMarkerSiteRegisterIsComplete``
 derives that list from the tree so this register cannot re-stale — it has
 already shipped wrong twice, both times as a claim about how MANY sites there
@@ -106,6 +115,22 @@ are rather than naming them:
   ``incomplete`` so a 0-row outage is never served as a complete empty (the arm
   landed on ``main`` after this register was written; a new site joins this list
   however it arrives).
+- ``tortoise/hosted_api.py::_paged`` — hosted ``GET /v1/objects`` and
+  ``GET /v1/subjects`` (both via ``_list_layer_route``) and hosted
+  ``GET /v1/sources`` (via ``list_sources``), i.e. all THREE ``_paged`` callers.
+  ⚠️ Its verdict is OFFSET-AWARE and is the recorded exception described above:
+  the marker is asked about ``offset + delivered``, so a page with matches
+  behind it is ``truncated: true`` (plus ``total_available``) and the TERMINAL
+  page — and a page past the end — is ``false``. Computed from
+  ``candidates > delivered`` alone, the terminal page and an offset past the end
+  both reported ``truncated: true``. ``candidates`` is EXACT for all three, but
+  it is not one shape: an exact ``count()`` under the same WHERE for the two
+  layer lists, and the WHOLE-POPULATION list length (``candidates=len(rows)``
+  over ``list_sources``' already-complete answer) for ``/v1/sources``.
+- ``tortoise/hosted_api.py::get_entity_relations`` — hosted
+  ``GET /v1/entities/{id}/relations``: a ``limit + 1`` PROBE row taken AFTER the
+  ``SKIP``/``LIMIT`` window, so it proves *there are more edges than this page
+  delivers* and never publishes the probe as a total (``exact=False``).
 
 Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
 a list-shaped surface needs a return-shape decision first
@@ -172,7 +197,8 @@ EXACT_KEY = "_exact"
 
 def mark_truncation(sink: dict | None, *, returned: int,
                     candidates: int, exact: bool = False,
-                    incomplete: bool = False) -> None:
+                    incomplete: bool = False,
+                    offset: int = 0) -> None:
     """Record whether a read DROPPED rows at its cap, on the caller's sink.
 
     ``candidates``  the candidate set the producer could SEE, after every
@@ -196,6 +222,15 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     unreachable: the same defect with an extra step. Such a
                     read takes the third state (unknown total), never
                     ``complete``.
+    ``offset``      rows the caller SKIPPED before this response in an
+                    offset-paged read (default ``0`` = unpaged). The verdict is
+                    ``offset + returned < candidates``, i.e. the same
+                    reachability question asked about the population BEYOND what
+                    this response delivered. It exists because a ``SKIP``-paged
+                    route that ignored it marked its TERMINAL page — and a page
+                    past the end — ``truncated``, the inverse of the defect this
+                    module exists to prevent, and a caller paging
+                    ``while truncated`` then never terminates.
 
     Writes ``truncated`` on EVERY call (so a complete read is positively
     marked complete, not merely un-marked), ``total_available`` only when
@@ -208,7 +243,7 @@ def mark_truncation(sink: dict | None, *, returned: int,
     """
     if sink is None:
         return
-    truncated = (candidates > returned) or incomplete
+    truncated = ((offset + returned) < candidates) or incomplete
     sink[TRUNCATED_FIELD] = truncated
     # The exactness PROOF, recorded so a consumer relays it rather than
     # re-deriving it (see EXACT_KEY). A private key: ``truncation_field``
