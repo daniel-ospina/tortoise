@@ -830,21 +830,24 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
         try:
             raw = _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at
         except AssertionError as exc:
-            #: ⛔ The fixture's OWN freshness assert runs inside the shifted clock, so
-            #: when this arm cannot see a clock the reading does not move and THAT
-            #: assert fires first — with "written as an offset from now … never as a
-            #: literal date", which is false for a correctly written fixture that
-            #: merely reaches the clock somewhere this patch cannot reach (another
-            #: module, an import-time constant, a name bound inside the fixture). The
-            #: disclosure below never printed, because the exception left `handed()`
-            #: before the `moved` assertion. A fail-closed red is defensible; a
-            #: fail-closed red that asserts a falsehood is not, so the real cause is
-            #: named here rather than leaving the fixture's message to mislead.
+            #: ⛔ TWO different failures reach here, and they must not be relabelled
+            #: into each other — that is the whole point of this arm's messages:
+            #: * at offset ZERO (`base = handed(timedelta())`) no shift is in play, the
+            #:   real clock is read, and the fixture's own "reading is Ns old" is
+            #:   ACCURATE. Relabelling that as "cannot SHIFT" made a 2-day-stale
+            #:   fixture — the #9127 bomb this file exists to catch — read as
+            #:   "all CORRECT code" (measured: 172800 s reported as "looks 6h stale");
+            #: * at a NON-ZERO offset the shift IS in play, so a clock this patch
+            #:   cannot reach shows up here as a fixture that "did not move".
+            #: So the discriminator is the offset, and a genuine freshness failure is
+            #: re-raised untouched.
+            if offset == timedelta():
+                raise
             raise AssertionError(
                 "this arm cannot SHIFT the clock the fixture reads, so it cannot "
                 "judge it — and the fixture's own freshness check fired first, "
-                "because a reading that does not move under a +6h shift looks 6h "
-                f"stale. Underlying report: {exc}\n"
+                "because a reading that does not move under a "
+                f"{offset} shift looks {offset} stale. Underlying report: {exc}\n"
                 "⛔ The three shapes this arm cannot shift, all CORRECT code: a clock "
                 "reached through a helper in ANOTHER module "
                 "(`from tortoise.ids import now_iso`), a constant computed at IMPORT "
