@@ -382,9 +382,14 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # that retires a pass-through door reds this line and re-pins it in the same wave —
     # 19 -> 16 -> 13 -> 12 -> 10 -> 11 above IS that procedure — which is the same FALSE-RED
     # direction `checked > 0` accepts deliberately a few lines up.
-    assert checked >= 11, (
+    # 11 -> 4 in #11609 lane P11: SEVEN of the nine retired envelope doors were
+    # pass-through wrappers (`search`, `search_sessions`, `suggest_entry_points`,
+    # `list_batches`, `diary_read`, `expand_relationships`, `calibrate_summary`), and
+    # re-pinning this floor in the same wave is the procedure its own text prescribes.
+    # The measured population is 4 and the count is the scan's own output, not a target.
+    assert checked >= 4, (
         f"only {checked} pass-through wrappers were found ({reshaped} read as "
-        "reshaping) against a floor of 11, the population measured at this head. "
+        "reshaping) against a floor of 4, the population measured at this head. "
         "The count cannot tell its two causes apart: a CORRECT retirement of a "
         "pass-through door, or the classifier going blind (a pass-through rewritten "
         "in an idiom `_passthrough_of` does not know is counted as reshaping). "
