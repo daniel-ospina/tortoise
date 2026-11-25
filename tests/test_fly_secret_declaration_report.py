@@ -1152,7 +1152,9 @@ def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     ⛔ THIS ROW IS A DIAGNOSIS, NOT THE ONLY NET — an earlier revision of this
     docstring claimed "no behavioural row can see WHERE in the step the guards sit",
     and a review measured that FALSE: the behavioural rows run the SHIPPED step, so
-    lifting the CLEAN arm's dry-run guard from `:399` to just after `done < "$mine"`
+    lifting the CLEAN arm's dry-run guard (its `if [ "${FILE_ISSUES:-true}" != "true" ]`
+    block in `.github/workflows/fly-secret-declaration-drift.yml`, the CLEAN arm's copy —
+    the DRIFT arm carries an identical one) to just after `done < "$mine"`
     gives 2 failed — this row and `test_a_dispatched_dry_run_resolves_nothing`, which
     reds because the sweep mutated on a run the UI calls dry. The net is that NARROW,
     and its breadth was measured rather than assumed: a CLEAN-arm REORDER can only reach
