@@ -117,7 +117,8 @@ are rather than naming them:
   however it arrives).
 - ``tortoise/hosted_api.py::_paged`` — hosted ``GET /v1/objects`` and
   ``GET /v1/subjects`` (both via ``_list_layer_route``) and hosted
-  ``GET /v1/sources`` (via ``list_sources``), i.e. all THREE ``_paged`` callers.
+  ``GET /v1/sources`` (via ``list_sources``), i.e. all THREE ``_paged``
+  ROUTES, through its TWO callers.
   ⚠️ Its verdict is OFFSET-AWARE and is the recorded exception described above:
   the marker is asked about ``offset + delivered``, so a page with matches
   behind it is ``truncated: true`` (plus ``total_available``) and the TERMINAL
