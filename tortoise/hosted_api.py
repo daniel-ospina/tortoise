@@ -221,11 +221,10 @@ from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 # hardcoded copy would drift in the one direction that matters — a renamed token
 # would route a NON-DURABLE journal into the durable branch and downgrade the
 # "stored NOWHERE" ERROR to a WARNING.
-from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
 #: ⛔ ONE HOME FOR THE UNCUT-GRAPH REMEDY (#14610 review F1). Every operator-facing
 #: line this module publishes names the same command the seam builds, so a future
 #: edit cannot leave `hosted_api` telling an operator to run half of it.
-from tortoise.record_writer import uncut_graph_remedy
+from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL, uncut_graph_remedy
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -54127,7 +54126,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
