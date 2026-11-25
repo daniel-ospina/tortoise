@@ -676,6 +676,49 @@ def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path
         assert raw not in repr(inbound), inbound
 
 
+def test_belief_never_republishes_a_source_neighbours_denied_payload(tmp_path):
+    """#3998 / D30 + #5196: the BELIEF route carried the same leak one route over.
+
+    `get_entity_belief` builds `entity.name` from `_resolve_entity`'s RAW
+    `properties(n)` — it does NOT route through `_layer_payload`, which is where
+    the by-id routes get `filter_source_props` — so a label-agnostic coalesce
+    republished a payload `:Source`'s denied `content` as `entity.name`.
+
+    ⛔ MUTANT: restore `entity.get("name") or entity.get("content") or …` in
+    `hosted_api.get_entity_belief`'s payload and this test reds while
+    `/v1/sources/{id}` keeps withholding the same field — measured in both
+    directions, not reasoned about.
+    """
+    url = "https://example.test/belief-source-14592"
+    raw = "RAW DOCUMENT TEXT THAT MUST NOT LEAK"
+    src_id = "src-belief-14592"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            sdk._create_point("statement", "extracted", extractedFrom=url)
+            # Below the write door: the door refuses to produce a payload Source,
+            # and the `id` is what makes it addressable on the by-id-ish routes
+            # (`_CANONICAL_ENTITY_ID_PROPS` declares `("Source", "id")`).
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) "
+                "SET s.content = $t, s.id = $i REMOVE s.name",
+                params={"u": url, "t": raw, "i": src_id},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
+        assert "content" not in denied, denied
+        assert raw not in repr(denied), denied
+
+        body = client.get(f"/v1/entities/{src_id}/belief")
+        assert body.status_code == 200, body.text
+        payload = body.json()
+        assert payload["entity"]["label"] == "Source", payload
+        assert payload["entity"]["name"] == url, payload
+        assert raw not in repr(payload), payload
+
+
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         a = client.post("/v1/objects", json={"name": "ALPHA", "objectKind": "goal"}).json()

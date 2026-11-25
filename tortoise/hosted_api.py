@@ -16356,8 +16356,18 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         "entity": {
             "id": entity_id,
             "label": label,
-            "name": (entity.get("name") or entity.get("content")
-                     or entity.get("url") or entity.get("eventId")),
+            # ⛔ THE SAME LABEL-AWARE RULE AS THE RELATIONS PREVIEW, for the same
+            # reason: `entity` here is `_resolve_entity`'s RAW `properties(n)`,
+            # which — unlike `_read_labelled_entity`, that routes through
+            # `_layer_payload` — is filtered by nobody. `content` is a DENIED
+            # `:Source` property (#3998 / D30, #5196), so a label-agnostic
+            # coalesce republished a legacy payload Source's raw text under the
+            # one route that also answers `/v1/sources/{id}`'s own node: measured,
+            # the by-id route withheld it while this route served it.
+            "name": ((entity.get("name") or entity.get("url")
+                      or entity.get("eventId")) if label == "Source" else
+                     (entity.get("name") or entity.get("content")
+                      or entity.get("url") or entity.get("eventId"))),
         },
         # ⛔ `measured` | `baseline` | `absent` (#11702) — the word that makes
         # `current` readable: `measured` is evidence-derived, `absent` comes with
@@ -54652,7 +54662,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (724 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
