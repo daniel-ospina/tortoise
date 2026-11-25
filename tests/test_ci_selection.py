@@ -9245,7 +9245,7 @@ _ROW_CLAIM_AFTER_FILE_RE = re.compile(
 #: "a claim graded by nothing rots" class this block exists to warn about, reproduced inside the
 #: arm cut to catch it.
 _ROW_CLAIM_BEFORE_LIST_RE = re.compile(
-    r"\brows?\b[\s*_]{0,4}\((?P<names>[^)]*)\)", re.IGNORECASE)
+    r"\brows?\b[\s*_]{0,4}\((?P<names>(?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
 #: The COLON shape — `rows: `A`, `B`` — which is a second spelling of the same claim and was graded
 #: by nothing. It has no closing paren to bound the capture, so this pattern takes only a
 #: comma-separated RUN of test paths; anything else after the colon ends the run.
@@ -10195,6 +10195,122 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     with pytest.raises(AssertionError, match="ODD number of double quotes"):
         _carry_row_claims('a stray " then `tests/test_carry_planted_first.py` carry an explicit '
                           '`2.0` `durations` row')
+
+
+def test_the_row_claim_list_pattern_reads_an_inner_parenthetical():
+    """`row (`A` (core), `B`)` — an inner paren must not truncate the list (#14612 review, P3).
+
+    `_ROW_CLAIM_BEFORE_LIST_RE` captured `[^)]*`, so the FIRST `)` ended the capture. MEASURED on
+    the pre-fix pattern, on the sentence below: `['test_inner_note.py']` — the second name, the one
+    a fold is free to leave behind, was read by nothing. The pattern's own comment claims it
+    captures the WHOLE parenthesised list for exactly that reason, so the reach and the claim
+    disagreed. One level of balanced inner parens is admitted now; a second level is not claimed.
+    """
+    sentence = ("two `core` rows (`tests/test_inner_note.py` (core), "
+                "`tests/test_second_name.py`)")
+    assert _row_claims(sentence) == ["test_inner_note.py", "test_second_name.py"], (
+        "a `row (…)` list whose first item carries its own parenthetical lost every name after "
+        "the inner `)` — the first-name-only class `_ROW_CLAIM_BEFORE_LIST_RE` was widened to "
+        f"close, one level down: {_row_claims(sentence)!r}")
+
+
+#: A claim that the row enumeration is EXHAUSTIVE — a frame that is FALSE one `--refresh-durations`
+#: sweep after a named file is measured, because that sweep ADDS a row rather than editing the
+#: sentence. Matched on masked text (`_unquoted_block`), so a QUOTED record of a retired wording is
+#: not read as a live claim. The block carries no live one today: its enumeration is stated POSITIVE
+#: only, and the arm below is what keeps a `merge=union` fold from splicing the old frame back in.
+_COMPLETENESS_CLAIM_RE = re.compile(
+    r"enumeration\s+is\s+complete|is\s+a\s+completeness\s+claim"
+    r"|those\s+are\s+the\s+named\s+files", re.IGNORECASE)
+#: The row enumeration's OPENING, and the `⛔` that closes it: the arm below asserts a property of
+#: this list, so it is BOUNDED rather than read out of the whole block — an unbounded read would
+#: grade prose it does not own.
+_ROW_ENUMERATION_OPEN_RE = re.compile(r"A ROW is an entry in")
+
+
+def _row_enumeration(header: str) -> str:
+    """The row-vs-registration enumeration, bounded from its opening to the next `⛔` marker."""
+    unquoted = _unquoted_block(header)
+    opening = _ROW_ENUMERATION_OPEN_RE.search(unquoted)
+    assert opening is not None, (
+        "the block no longer opens its row enumeration with `A ROW is an entry in` — re-point this "
+        "arm at the sentence the block uses rather than letting it grade nothing")
+    end = unquoted.find("⛔", opening.end())
+    assert end != -1, (
+        "the row enumeration has no `⛔` marker after its opening, so it runs to the end of the "
+        "block and this arm would grade every sentence after it — restore the bound")
+    return unquoted[opening.start():end]
+
+
+def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
+    """The row list is graded ONE-DIRECTIONALLY, and it must not regain a completeness frame.
+
+    The block carried "THAT ENUMERATION IS COMPLETE … those are the named files that carry a
+    `durations` entry" (`issuecomment-7172196903`). Nothing graded that and nothing CAN: a
+    `--refresh-durations` sweep ADDS a row the first time it measures a `fast_pool()` member, so
+    the claim is false one sweep after any named file is measured, with no arm able to see it —
+    the same sweep-falsifiable class as the absence claim this branch dropped in `e5310e39bf`.
+
+    MEASURED on the pre-fix block (`14a9bdb124d7`):
+
+        drop three of the four shorthand enumeration entries   -> every arm GREEN
+        delete `durations['test_expansion_fusion_14344.py']`   -> every arm GREEN
+            (the enumeration claimed that row, but `#14597`'s entry was a bare `#14597`'s,` with
+            no path beside it, so `_row_claims` never returned the file)
+
+    Two properties are asserted, and both hold of the POSITIVE-only text the block carries now: no
+    live completeness frame, and every path the list names returned by `_row_claims` with a row
+    behind it. `#14560`'s, `#14565`'s and `#14552`'s entries are deliberately NOT required to spell
+    their paths here — the paragraph above names each of them with its path AND the word `row`, so
+    they are graded there, and a shorthand is only a defect when NO matcher can reach its file.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    rows = set(cs.load_manifest()["durations"])
+    # 1. No LIVE completeness frame anywhere in the block.
+    live_claim = _COMPLETENESS_CLAIM_RE.search(_unquoted_block(header))
+    assert live_claim is None, (
+        "the `fast_shards` block frames its row enumeration as COMPLETE "
+        f"({live_claim.group(0)!r}) — the list is graded one-directionally and cannot be graded "
+        "for completeness: `--refresh-durations` ADDS a row whenever a sweep measures a "
+        "`fast_pool()` member, so the frame is false one sweep later and no arm can see it. "
+        "State the list POSITIVE only (these named files carry a row) and drop the completeness "
+        "clause")
+    # …and the retired wording IS matched by that pattern, so assertion 1 is not decoration: this is
+    # the block's own pre-fix sentence.
+    retired = (
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s, `#14560`'s, "
+        "`tests/test_retired_row.py` row. ⛔ THAT ENUMERATION IS COMPLETE, and it is a completeness "
+        "claim about the files this paragraph names BY PATH, not a count of anything: those are "
+        "the named files that carry a `durations` entry. ⛔ It does NOT claim")
+    assert _COMPLETENESS_CLAIM_RE.findall(retired), (
+        "the completeness-frame pattern no longer reads the sentence it was cut for, so assertion "
+        "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
+        "retired wording")
+    # …and a QUOTED record of a retired frame is NOT a live claim: a guard that reds on its own
+    # retraction would force the block's history out of the file.
+    quoted_record = (
+        "A ROW is an entry in `durations` — `tests/test_quoted_record.py` row. ⛔ it once said "
+        '"THAT ENUMERATION IS COMPLETE" · and does not now. ⛔ next sentence')
+    assert _COMPLETENESS_CLAIM_RE.search(_row_enumeration(quoted_record)) is None, (
+        "a QUOTED record of a retired completeness frame is being read as a live claim — the "
+        "quoted-span mask has regressed, and the repair this message would push is to delete the "
+        "block's record of why the frame is gone")
+    # 2. Every path the enumeration names IS graded against the map — the half that makes the
+    # surviving positive-only statement true, and the reach hole `#14597`'s row fell through.
+    enumeration = _row_enumeration(header)
+    named = {m.group(1) for m in re.finditer(r"`tests/([\w/.-]+\.py)`", enumeration)}
+    assert named, (
+        "the row enumeration names no file by path, so this arm grades nothing — re-point "
+        "`_row_enumeration` at the list the block actually writes")
+    ungraded = sorted(named - set(_row_claims(header)))
+    assert not ungraded, (
+        f"the row enumeration names {ungraded}, which `_row_claims` does not return as a row — a "
+        "row claim no matcher reaches is graded by nothing. Put the word `row` beside the path so "
+        "`test_the_fast_shards_header_block_calls_a_row_only_what_has_one` checks it")
+    rowless = sorted(named - rows)
+    assert not rowless, (
+        f"the row enumeration calls {rowless} a `durations` row, but the map carries none: the "
+        "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
