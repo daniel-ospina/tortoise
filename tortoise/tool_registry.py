@@ -314,7 +314,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "still scans the whole tagged population before slicing, so a very large tag "
                     "can still be slow. "
                     "include_retracted=True surfaces tombstones. For "
-                    "semantic relevance use tortoise_search; for a single known ID use "
+                    "semantic relevance use tortoise_search_knowledge; for a single known ID use "
                     "tortoise_get_point.",
         risk="read",
         http_policy=True,

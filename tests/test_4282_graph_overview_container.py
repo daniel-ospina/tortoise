@@ -58,12 +58,27 @@ RETIRED_INTO_CONTAINER = {
     "tortoise_dream_health",
 }
 
-#: Absorbed, but its DOOR stays live this batch: `check_structure` is the one member
-#: with a WRAP envelope (`-> list[dict]`), so it carries the #8482 failure repair that a
-#: `-> Any` container cannot. The section and the door answer the same rows; retiring the
-#: door before the container has a declared envelope would move the repair off the
-#: advertised path. Pinned as a fact so the next lane cannot "tidy" it away silently.
-SECTION_ONLY_MEMBERS = {"tortoise_check_structure": "structure_check"}
+#: EMPTY since #11609 lane P11 — the reason the one member was here is GONE, and that is
+#: the point rather than an omission.
+#:
+#: `tortoise_check_structure` stayed live while it did because it is the one member with a
+#: WRAP envelope (`-> list[dict]`), so it carried the #8482 failure repair that a `-> Any`
+#: container could not. #11609 P11 moved that repair onto the CONTAINER BOUNDARY
+#: (`_row_section_envelope` in `mcp_server.py`, which ships `{"result": [...]}` for a list
+#: arm and leaves a mapping untouched), which is exactly the condition this set existed to
+#: wait for — so the door retires FORWARD into `graph_overview(section="structure_check")`
+#: and the set is empty. ⛔ Re-adding a row here re-opens "the container has no envelope",
+#: which is no longer true; the repair is pinned per arm by
+#: `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope` and by
+#: `tests/test_11609_structural_blockers.py::test_the_retired_door_still_declares_the_array_envelope`.
+SECTION_ONLY_MEMBERS: dict[str, str] = {}
+
+#: The member the set used to hold, kept so the transition itself is asserted rather than
+#: described: it must be RETIRED (not deleted), its pointer must name the section, and the
+#: container must now carry the envelope the door used to own.
+RETIRED_ONCE_THE_CONTAINER_CARRIED_THE_ENVELOPE = {
+    "tortoise_check_structure": "structure_check",
+}
 
 #: Pointers that predate this batch and had to be RE-POINTED, because they named the
 #: now-retired `tortoise_overview` and a two-hop pointer resolves nowhere.
@@ -154,31 +169,74 @@ class TestDeclaration:
 
 
 class TestSectionOnlyMembers:
-    """A member absorbed as a SECTION while its door stays LIVE must stay live.
+    """The set is EMPTY, and the member that left it left for the right reason.
 
-    `tortoise_check_structure` is the one such member: it carries the #8482 wrap-envelope
-    repair (its output is `-> list[dict]`, so it has a declared envelope; the container
-    returns `Any` and has none). If a later batch retires it, that repair moves off the
-    advertised path — silently, because the shim keeps answering. These two tests are what
-    make that failure loud; without them `SECTION_ONLY_MEMBERS` was prose that read like
-    coverage.
+    `tortoise_check_structure` was the one member absorbed as a SECTION whose door stayed
+    LIVE: it carries the #8482 wrap-envelope repair (`-> list[dict]`) and the container
+    returned `Any`, so retiring the door first would have moved the repair off the
+    advertised path — silently, because the shim keeps answering.
+
+    #11609 lane P11 satisfied that condition instead of bypassing it: every container now
+    runs its result through `_row_section_envelope`, so the container builds the same
+    `{"result": [...]}` envelope by hand and the door retires FORWARD. These tests assert
+    the transition in both directions — the door is retired with a one-hop pointer, and the
+    repair now lives at the container boundary, on the wire — so a later "tidy" that
+    re-adds the door, or drops the boundary wrap, is loud.
     """
 
-    @pytest.mark.parametrize("door,section", sorted(SECTION_ONLY_MEMBERS.items()))
-    def test_the_door_is_still_advertised(self, door, section):
-        live = {t.name for t in TOOL_REGISTRY}
-        assert door in live, (
-            f"{door} is absorbed as section {section!r} but must stay LIVE until the "
-            f"container has a declared output envelope (see the container's docstring)")
-        assert door not in RETIRED_USE_INSTEAD, f"{door} must not be a retirement pointer"
+    def test_the_set_is_empty_now_that_the_container_carries_the_envelope(self):
+        assert SECTION_ONLY_MEMBERS == {}, (
+            "SECTION_ONLY_MEMBERS is non-empty: a door has been put back in the "
+            "stay-live pen after #11609 P11 gave the containers the boundary envelope. "
+            "If a NEW section-only member exists, say why in the comment — otherwise "
+            "the row is re-opening a gap that no longer exists")
 
-    @pytest.mark.parametrize("door,section", sorted(SECTION_ONLY_MEMBERS.items()))
+    @pytest.mark.parametrize(
+        "door,section",
+        sorted(RETIRED_ONCE_THE_CONTAINER_CARRIED_THE_ENVELOPE.items()))
+    def test_the_former_member_retired_forward_not_deleted(self, door, section):
+        live = {t.name for t in TOOL_REGISTRY}
+        assert door not in live, (
+            f"{door} is still advertised — #11609 P11 retired it forward once the "
+            "container carried the envelope at the boundary")
+        assert door not in {t.name for t in TOOL_REGISTRY}
+        assert RETIRED_USE_INSTEAD[door] == (
+            f'{CONTAINER}(section="{section}")'), (
+            f"{door} is pointed at {RETIRED_USE_INSTEAD[door]!r}, which is not the "
+            "one-hop section pointer a migrating caller needs")
+
+    @pytest.mark.parametrize(
+        "door,section",
+        sorted(RETIRED_ONCE_THE_CONTAINER_CARRIED_THE_ENVELOPE.items()))
     def test_the_section_still_reaches_it(self, door, section, monkeypatch):
         called = []
         monkeypatch.setattr(ms, f"tortoise_{door.removeprefix('tortoise_')}",
                             lambda *a, **k: called.append((a, k)) or {"ok": True})
         ms.tortoise_graph_overview(section=section)
         assert called, f"section {section!r} no longer dispatches to {door}"
+
+    @pytest.mark.parametrize(
+        "door,section",
+        sorted(RETIRED_ONCE_THE_CONTAINER_CARRIED_THE_ENVELOPE.items()))
+    def test_the_envelope_repair_now_lives_at_the_container_boundary(
+            self, door, section, monkeypatch):
+        """The property the door was kept alive for, measured on the container.
+
+        This is the assertion that makes the retirement safe: the retired door's own
+        envelope was `{"result": [...]}`, and the container must now ship exactly that
+        for a LIST section arm — not a bare text block (`#10085` measured
+        `{"text": "[...]"}` with no `structuredContent`).
+        """
+        monkeypatch.setattr(
+            ms, f"tortoise_{door.removeprefix('tortoise_')}",
+            lambda *a, **k: [{"id": "p1"}])
+        out = ms.tortoise_graph_overview(section=section)
+        assert getattr(out, "structured_content", None) == {"result": [{"id": "p1"}]}, (
+            f"section {section!r} no longer ships the envelope the retired door {door} "
+            f"carried on the wire: {out!r}")
+        assert (getattr(out, "meta", None) or {}).get("fastmcp") == {"wrap_result": True}, (
+            "the boundary wrap must advertise itself the same way FastMCP's wrap "
+            "annotation does, or a client that unwraps on `meta` sees a different shape")
 
 
 class TestArgumentForwarding:

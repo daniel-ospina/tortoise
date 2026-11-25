@@ -201,15 +201,31 @@ def test_expand_mcp_tool(sdk, monkeypatch):
 
 
 def test_expand_tool_registered(sdk):
-    from tortoise.tool_registry import TOOL_REGISTRY
-    names = {t.name for t in TOOL_REGISTRY}
-    assert "tortoise_expand_relationships" in names
-    entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_expand_relationships")
+    """#11609 lane P11 retired the door FORWARD; the absorbed operation stays registered.
+
+    The door's own name is no longer advertised — it is SERVED through the #3883 warning
+    shim, whose pointer names the container. So the assertion follows the door rather than
+    pinning it live: the retired row must exist with an empty `sdk_method` (the handler
+    binds none) and must point at the container that carries the promoted
+    `related_status`/`related_content` fields this file measures.
+    """
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    live = {t.name for t in TOOL_REGISTRY}
+    assert "tortoise_explore_connections" in live, (
+        "the container that absorbed `expand_relationships` left the advertised surface")
+    retired = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+    assert "tortoise_expand_relationships" not in live, (
+        "#11609 P11 retired this door; a live row would re-open the door beside its "
+        "container, which is the duplicate surface the wave removed")
+    entry = retired["tortoise_expand_relationships"]
     assert entry.sdk_method == "", (
         "#11609: the SDK method retired into explore_connections(id, "
         "include_content=True); the door is served by its MCP handler, which "
         "binds no SDK method")
     assert entry.group == "memory"
+    assert entry.retired_use_instead.startswith("tortoise_explore_connections"), (
+        f"the door points at {entry.retired_use_instead!r}, not the container that "
+        "carries the promoted fields this file pins")
 
 
 # ── E6 (#1538) Task 4 — window fields + marker golden shapes ─────────────

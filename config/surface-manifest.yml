@@ -1555,7 +1555,7 @@ rows:
     the answer but gives you no hasMore/total. On the `tag=` arm that walk is NOT lossless yet — its accessor has
     no total order (#5346/#11062) — so treat a walked tag as approximate, not as the complete set. The `tag=` read
     itself still scans the whole tagged population before slicing, so a very large tag can still be slow. include_retracted=True
-    surfaces tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.'
+    surfaces tombstones. For semantic relevance use tortoise_search_knowledge; for a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK._paginated_query (resolves)
   lifecycle: active
   used_by: agents, tooling, docs

@@ -315,9 +315,21 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   That is why the floor below is still exactly 32 while the population floor
     #   moved to 34 — carrying 35 - 3 = 32 over unchanged would have left the right
     #   number behind the wrong mechanism.
-    assert len(advertising) >= 32, (
+    #
+    #   ⛔ #11609 lane P11 (the nine envelope doors) moves BOTH terms by departing only:
+    #   `search`, `search_sessions`, `suggest_entry_points`, `list_batches`,
+    #   `list_namespaces`, `diary_read`, `check_structure` and `calibrate_summary` were
+    #   `http_policy=True` and all eight retired into containers ALREADY in this view (no
+    #   container row arrives), so the population moves 34 - 8 = **26** (measured here).
+    #   `expand_relationships` was the ninth door and is `http_policy=False`, so it left
+    #   this population untouched — it moved the UNFILTERED census instead, which is why
+    #   the two numbers must be derived separately. The exclusion term stays at 2 (the
+    #   two excluded names still in the view are `graph_set_recording` and
+    #   `manage_sources`; `list_graphs` left in P7), so the advertising floor moves
+    #   34 - 8 - 2 = **24**.
+    assert len(advertising) >= 24, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 32 (34 HTTP-filtered live tools minus the 2 excluded names in that "
+        "at least 24 (26 HTTP-filtered live tools minus the 2 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -345,7 +357,11 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     # untouched while still moving that census). A floor, for the same reason as the one
     # above: an equality would move with a collapsed
     # registry and pass over it.
-    assert len(http_population) >= 34, (
+    # #11609 lane P11 retires eight `http_policy=True` doors and registers NOTHING, so
+    # 34 - 8 = **26**, measured the same way at this head (see the advertising derivation
+    # above; the ninth door, `expand_relationships`, is `http_policy=False` and is not in
+    # this population at all).
+    assert len(http_population) >= 26, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]

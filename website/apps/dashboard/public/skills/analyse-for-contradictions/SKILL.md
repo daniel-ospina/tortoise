@@ -51,7 +51,7 @@ deliberate act through `how-to-use-tortoise`.
      high-confidence state on that subject, object-centric, with superseded /
      deprecated / retracted claims excluded and *contested* claims flagged with
      their counter-evidence attached. This is the primary matcher.
-   - `tortoise_search(query=<claim>)` — semantic matcher, for when the graph
+   - `tortoise_search_knowledge(query=<claim>)` — semantic matcher, for when the graph
      words the same idea differently. Annotates EP confidence but does not
      filter, so low-confidence neighbours stay visible.
    - `tortoise_query(kind="decision")` — the committed decisions, when the claim

@@ -159,10 +159,9 @@ Contradictions found: <n> (see analyse-for-contradictions)
 - **G3 — control.** Every cycle after the first is driven by the previous
   cycle's `mode="gaps"` output. Re-researching something that was not a gap is
   how the loop degenerates into ordinary research.
-- **G4 — structure.** `tortoise_check_structure()` (or
-  `tortoise_overview(section="structure_check")`) before presenting: no orphan
-  operators, no dangling refs. A loop that runs on a structurally broken graph
-  ranks garbage.
+- **G4 — structure.** `tortoise_graph_overview(section="structure_check")`
+  before presenting: no orphan operators, no dangling refs. A loop that runs
+  on a structurally broken graph ranks garbage.
 
 ## Error handling
 
