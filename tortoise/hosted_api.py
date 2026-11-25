@@ -15822,7 +15822,7 @@ def _names_this_layer(kind: str, vocabulary: frozenset[str]) -> bool:
     ⛔ NOT ``declared_layers(kind)``, and the reason is a measured fail-open: that
     authority deliberately strips **any** namespace (``domain_loader.kind_is_known``
     splits on ``:``), so ``?kind=zzz:goal`` was admitted as an Object kind —
-    ``declared_layers('zzz:goal') == ['object', 'point']`` — and the route answered
+    ``declared_layers('zzz:goal') == frozenset({'object', 'point'})`` — and the route answered
     ``200 {"objects": [], "count": 0, "truncated": false}``, the exact answer this
     refusal exists to remove. ``?kind=zzz:team`` was refused on the Subject route,
     so the two layers graded the same input differently.
@@ -15870,7 +15870,7 @@ async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
       spelling — the bare name, or the repo's ``core:``-namespaced form of it
       (``_names_this_layer``). ⛔ NOT ``kind_layers.declared_layers``: that
       authority deliberately strips ANY namespace, so it admitted ``zzz:goal``
-      (measured: ``declared_layers('zzz:goal') == ['object', 'point']``) and the
+      (measured: ``declared_layers('zzz:goal') == frozenset({'object', 'point'})``) and the
       route answered the empty-and-complete page this function removes — while
       the Subject route refused ``zzz:team``. Exact spellings keep the point↔
       object overlap the #7813 owner ruling permits (``goal``/``plan``/

@@ -2990,8 +2990,9 @@ surfaces:
   #   * `tortoise/pack_registry.py` -> `['core']`      (all three: THIS row)
   #   * `tortoise/hosted_api.py`    -> `['api', 'onboarding']` — an EXACT `api`
   #     SOURCE_PATTERNS match that REPLACES the `core` fallback, so the `api` row
-  #     below is the one that keeps these pins awake on a hosted_api-only diff,
-  #     which is the exact change class (a route's shape) this suite guards.
+  #     ABOVE (this comment sits in the `core:` list) is the one that keeps these
+  #     pins awake on a hosted_api-only diff, which is the exact change class (a
+  #     route's shape) this suite guards.
   # Without BOTH rows the pin is asleep on one of the two diffs that can revert
   # it. Same reasoning as `test_13665_sentry_init_off_loop.py` above.
   - test_14592_read_parity.py
