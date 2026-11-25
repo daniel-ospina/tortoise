@@ -438,16 +438,11 @@ to assume) — a Postgres statement named by a module constant, exactly the shap
 `non_cypher_door_calls` 267→**268** and `ast_door_calls` 1594→**1595** (= 1327 + 268);
 `sites` **1327**, `files` **102**, `files_scanned` **314**, `unresolved` **105**, `candidates` **589**,
 `partial` **321**, `plain` **875** (read **589** / write **286**) and every other shape are unchanged —
-the new call is not a statement site, so the migration metric §0 is about does not move. ⛔ **RE-CUT AT
-THIS MERGE with `origin/main` `29bb16b5b6` — `files_scanned` reads `314` and NO OTHER PIN MOVED, because
-the two contributions are SEPARABLE and are stated apart rather than summed:** `main` took that operand
-from **313** to **314** with `#14344`'s `tortoise/expansion_merge.py` (product surface that issues no
-door call and no `MATCH`/`MERGE`, so it moves the scanned population and nothing else), and this branch
-adds NO scanned file of its own (`git diff --name-status c3dca699..HEAD -- tortoise/` has no `A` row),
-so the shipped population is `main`'s **314**, not a sum. Measured on the merged tree with the index
-RESOLVED, never by arithmetic on the markers: the tool's own `--json` reads `files_scanned` **314**,
-`sites` **1327**, `non_cypher_door_calls` **268**, `ast_door_calls` **1595**, `partial` **321**, and
-`--check` prints **25 pinned counts match**. §1's door
+the new call is not a statement site, so the migration metric §0 is about does not move. ⛔
+`files_scanned` reads **314** here only because this merge carries `main`'s `#14344` file (313→**314**);
+this branch adds NO scanned module (`git diff --name-status c3dca699..HEAD -- tortoise/` has no `A`
+row), so that move is `main`'s and is narrated at the `#14344` paragraph below, not re-narrated here.
+§1's door
 predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
 **1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
 ⚠️ **Any movement in the verb figures is NOT this cut's:**
