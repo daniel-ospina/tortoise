@@ -62,6 +62,65 @@ def _rows(reply):
     return []
 
 
+def pick_point(rows, marker):
+    """The `statement` Point the marker names — never a raw turn, never a near-miss.
+
+    Ranked, so the answer does not depend on the search's order: a statement
+    whose content STARTS WITH the marker wins over one that merely contains it,
+    and a `statement` always wins over a raw turn (a turn's `Decision:` prefix is
+    the transcript's, not the extractor's).
+    """
+    best: dict | None = None
+    best_rank = -1
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "").lower().strip()
+        if marker not in content:
+            continue
+        kind = str(row.get("pointKind") or row.get("point_kind") or "").lower()
+        rank = (2 if content.startswith(marker) else 0) + (1 if kind == "statement" else 0)
+        if rank > best_rank:
+            best, best_rank = row, rank
+    return best
+
+
+async def _pick(client, out, key, query, marker):
+    """Search by content and pick the Point; `None` is recorded, never guessed.
+
+    `limit=8`, not 5: the committed run's decision probe did not surface the
+    decision inside its first five hits, so its expand arm recorded
+    `decision_point_id: null` and never ran — a failed read that the artifact
+    presented as a graph fact.
+    """
+    r = await _call(client, "tortoise_search", {"query": query, "limit": 8})
+    out[f"{key}_search"] = r
+    point = pick_point(_rows(r.get("reply")), marker)
+    pid = (point or {}).get("id") or (point or {}).get("point_id")
+    out[f"{key}_point_id"] = pid
+    print(f"\n=== {key} point: {pid} — {str((point or {}).get('content'))[:90]}")
+    return pid
+
+
+def relation_rows(reply, keys=("result", "relationships", "nodes")):
+    """Rows from an expansion reply, in the three shapes the server uses."""
+    if isinstance(reply, str):
+        try:
+            return relation_rows(json.loads(reply), keys)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(reply, dict):
+        for k in keys:
+            if isinstance(reply.get(k), list):
+                return reply[k]
+        return []
+    if isinstance(reply, list):
+        if len(reply) == 1 and isinstance(reply[0], str):
+            return relation_rows(reply[0], keys)
+        return [row for row in reply if isinstance(row, dict)]
+    return []
+
+
 async def run() -> int:
     from fastmcp import Client
     from fastmcp.client.transports import PythonStdioTransport
@@ -118,25 +177,20 @@ async def run() -> int:
 
         # ── 4. the contradiction: is doc-05 wired against doc-01? ───────
         # Search both sides, then expand the doc-01 decision point's edges.
-        r = await _call(client, "tortoise_search",
-                        {"query": "we choose ColdPath Logistics as our delivery partner",
-                         "limit": 5})
-        out["decision_search"] = r
-        dec = next((x for x in _rows(r.get("reply"))
-                    if "choose ColdPath" in str(x.get("content", ""))), None)
-        dec_id = (dec or {}).get("id")
-        out["decision_point_id"] = dec_id
-        print(f"\n=== decision point: {dec_id} — {str((dec or {}).get('content'))[:90]}")
+        # Every id is DISCOVERED by content and a failed pick is recorded, so a
+        # missing id can no longer be written down as a successful read.
+        dec_id = await _pick(client, out, "decision",
+                             "we choose ColdPath Logistics as our delivery partner",
+                             "choose coldpath")
 
-        r2 = await _call(client, "tortoise_search",
-                         {"query": "we revert to NordicFreight and stop using ColdPath",
-                          "limit": 5})
-        out["reversal_search"] = r2
-        rev = next((x for x in _rows(r2.get("reply"))
-                    if "revert" in str(x.get("content", "")).lower()), None)
-        rev_id = (rev or {}).get("id")
-        out["reversal_point_id"] = rev_id
-        print(f"=== reversal point: {rev_id} — {str((rev or {}).get('content'))[:90]}")
+        rev_id = await _pick(client, out, "reversal",
+                             "we revert to NordicFreight and stop using ColdPath",
+                             "we revert to nordicfreight")
+
+        out["relation_read_findings"] = []
+        if not dec_id:
+            out["relation_read_findings"].append(
+                "no decision point was selected — expand/explore never ran")
 
         if dec_id:
             out["expand_decision"] = await _call(
@@ -150,6 +204,12 @@ async def run() -> int:
             print("\n=== explore_connections(decision, 2 hops) ===")
             print(json.dumps(out["explore_decision"].get("reply"),
                              indent=1, default=str)[:4000])
+            if not relation_rows(out["expand_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({dec_id}) returned no relations")
+            if not relation_rows(out["explore_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"explore_connections({dec_id}) returned no connected nodes")
 
         if rev_id:
             out["expand_reversal"] = await _call(
@@ -157,6 +217,12 @@ async def run() -> int:
             print("\n=== expand_relationships(reversal) ===")
             print(json.dumps(out["expand_reversal"].get("reply"),
                              indent=1, default=str)[:3000])
+            if not relation_rows(out["expand_reversal"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({rev_id}) returned no relations")
+
+        for issue in out["relation_read_findings"]:
+            print(f"!! RELATION READ INCOMPLETE: {issue}")
 
         # ── 5. provenance: can the product trace a claim to its source? ──
         out["provenance"] = await _call(
