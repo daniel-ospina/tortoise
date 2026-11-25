@@ -51,6 +51,11 @@ from tortoise.search_engine import rrf_fusion
 # only ever absorbs summation noise.
 _TIE_EPS = 1e-15
 
+#: What the damping recorder records when the caller passed NO ``k`` at all — a
+#: distinct object, not ``None``, so "the engine's own default applies" cannot be
+#: confused with a forwarded value.
+_NOT_PASSED = object()
+
 
 # ── The concatenation this replaced, kept ONLY as the counterfactual the
 #    assertions below are written against. Never call it from product code. ──
@@ -196,11 +201,19 @@ def test_the_damping_constant_is_the_engines_not_a_literal_retyped_here(monkeypa
     drift the module was created to end.
 
     ⛔ DISCRIMINATING IN BOTH DIRECTIONS, EXECUTED: the unoverridden call must
-    reach ``rrf_fusion`` with ONE argument (the pre-fix default handed it two —
-    ``([first, second], 60)``), and an explicit ``k=`` override must still be
-    honoured so a test that moves the damping is not silently ignored. The
-    boundary the prose publishes is derived from the same default
-    (``_ONE_RANK_BOUNDARY``), so a move in the engine reds the prose pin too.
+    reach ``rrf_fusion`` with NO damping constant (the pre-fix default handed it
+    ``60``), and an explicit ``k=`` override must still be honoured — **by VALUE**,
+    so a test that moves the damping is not silently ignored. The boundary the
+    prose publishes is derived from the same default (``_ONE_RANK_BOUNDARY``), so a
+    move in the engine reds the prose pin too.
+
+    ⛔ AND THE RECORD IS THE VALUE, NOT THE ARITY (#14619 re-review, Finding 2).
+    The first cut recorded ``len(args)``, which measured "was there a second
+    positional argument" — so a caller's ``k=`` silently DISCARDED (the engine
+    always receiving 60) passed GREEN, the exact failure this docstring names, and
+    a semantically-correct keyword forward (``rrf_fusion([first, second], k=k)``)
+    was a FALSE RED. Both are closed by recording what the engine receives, and the
+    recorder's three channel shapes are asserted here rather than trusted.
     """
     default = inspect.signature(fuse_expansion_pass).parameters["k"].default
     assert default is None, (
@@ -210,23 +223,45 @@ def test_the_damping_constant_is_the_engines_not_a_literal_retyped_here(monkeypa
 
     pass1 = [("a", 0.9), ("b", 0.8)]
     expanded = [("c", 0.7), ("a", 0.6)]
-    calls: list[int] = []
+    seen: list[object] = []
 
     def _spy(ranked_lists, *args, **_kwargs):
-        calls.append(len(args))
+        # The damping the ENGINE receives — from either channel, and ``_NOT_PASSED``
+        # when neither carries one. NOT ``len(args)``: that was a positional-arity
+        # probe, blind to a dropped override and hostile to a keyword forward.
+        seen.append(args[0] if args else _kwargs.get("k", _NOT_PASSED))
         return {pid: 1.0 for pid, _score in list(pass1) + list(expanded)}
 
     monkeypatch.setattr(expansion_merge, "rrf_fusion", _spy)
-    _ids(fuse_expansion_pass(pass1, expanded))
-    assert calls and all(arity == 0 for arity in calls), (
-        "an unoverridden call passed the damping constant to rrf_fusion "
-        f"(positional args seen: {calls}) — the module's own literal is back")
+    # The recorder itself, in the three shapes the module can call it: no constant,
+    # a positional forward, a keyword forward. The last two are asserted because the
+    # arity record got exactly one of them wrong in each direction.
+    seen.clear()
+    expansion_merge.rrf_fusion([pass1, expanded])
+    assert seen == [_NOT_PASSED], (
+        f"the recorder must read an ABSENT constant as absent, got {seen}")
+    seen.clear()
+    expansion_merge.rrf_fusion([pass1, expanded], 7)
+    assert seen == [7], f"the recorder must read a positional constant, got {seen}"
+    seen.clear()
+    expansion_merge.rrf_fusion([pass1, expanded], k=7)
+    assert seen == [7], (
+        "the recorder must read a KEYWORD constant — a correct `k=k` forward must "
+        f"not be a false red, got {seen}")
 
-    calls.clear()
+    seen.clear()
+    _ids(fuse_expansion_pass(pass1, expanded))
+    assert seen == [_NOT_PASSED], (
+        "an unoverridden call gave rrf_fusion a damping constant "
+        f"(values seen: {seen}) — the module's own literal is back, so the "
+        "engine's default no longer applies by construction")
+
+    seen.clear()
     _ids(fuse_expansion_pass(pass1, expanded, k=7))
-    assert calls == [1], (
-        "an explicit k= override was not passed through to rrf_fusion "
-        f"(positional args seen: {calls})")
+    assert seen == [7], (
+        "an explicit k= override did not REACH rrf_fusion as 7 "
+        f"(values seen: {seen}) — a caller that moves the damping is silently "
+        "ignored, which is the failure this row's docstring names")
 
 
 def test_no_new_expansion_order_when_the_expansion_adds_nothing():
@@ -354,19 +389,47 @@ _WIN_ARITHMETIC = (
     "can pass an incumbent",
 )
 #: A clause may QUOTE the refuted form only if it also says, in that clause, that
-#: the form is the refuted one. Deliberately narrow and explicit: the linter
-#: pattern this copies (a `noqa` suppression carrying its rule code / `nosec` /
-#: `//nolint`) puts the suppression ON the offending line and NAMES the rule rather
-#: than blanket-silencing a file — Ruff's own ``unused-noqa`` (RUF100) exists
-#: because a suppression that stops matching is itself a defect.
+#: the form is the refuted one, AND the quoted form is what it names. Deliberately
+#: narrow and explicit: the linter pattern this copies (a `noqa` suppression
+#: carrying its rule code / `nosec` / `//nolint`) puts the suppression ON the
+#: offending line and NAMES the rule rather than blanket-silencing a file — Ruff's
+#: own ``unused-noqa`` (RUF100) exists because a suppression that stops matching is
+#: itself a defect, and ``blanket-noqa`` (PGH004) exists because a bare noqa hides
+#: the neighbouring violations too.
+#:
+#: ⛔ A MARKER IS HALF AN EXEMPTION. The other half is the QUOTING, below: the same
+#: word list exempted a whole CLAUSE, so ordinary prose containing "no longer"
+#: silenced the live bound it sat next to (#14619 re-review, Finding 1).
 _CORRECTION = re.compile(
     r"\u26d4|\bfalse\b|\brefuted\b|\bwrong\b|\bdisagrees\b|\bcorrected\b"
     r"|\buntil now\b|\bno longer\b")
+#: A SUPERSEDED value is NAMED, not stated: it sits inside quote marks, the way a
+#: changelog quotes the value it replaced (`` ``<= 62`` ``, `` `<= 62` ``, `"<= 62"`).
+#: ⛔ THE QUOTING IS WHAT MAKES THE EXEMPTION PER-VALUE (agent remediation of
+#: #14619 re-review Finding 1). The exemption used to be per-CLAUSE on
+#: ``_CORRECTION`` alone, so ``expansion_merge``'s authoritative BOUND paragraph —
+#: "pass-1 evidence can no longer be displaced ... the <= 61-in-both reading" — was
+#: exempted by the words "no longer" alone, and a FALSE number there stayed GREEN
+#: (measured at ``2693c8be05e0``: ``<= 999`` in place of ``<= 61`` in that clause,
+#: 18 passed). Quoting is the same discipline the `noqa`/`nosec` convention and the
+#: snapshot testers use: a value a test or a correction NAMES is delimited, a value
+#: stated as live prose is not.
+_QUOTED_BOUND = re.compile(
+    r"(?:``|`|\"|\u201c)\s*(?:<=|\u2264)\s*\d+\s*(?:``|`|\"|\u201d)")
+_QUOTED_REFUTED = re.compile(
+    r"(?:``|`|\"|\u201c)\s*r\s*<\s*\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)"
+    r"\s*/\s*2\s*(?:``|`|\"|\u201d)")
 #: Clause boundaries as the carriers actually punctuate them. The lookahead is
 #: what keeps ``i.e.`` and ``e.g.`` from splitting a clause in half: a real
 #: boundary here is followed by a capital, an open paren, a bold marker, a
 #: backtick span or a ⛔.
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[.;])\s+(?=[A-Z(\u26d4*`])")
+
+
+def _quoted_at(spans: list[tuple[int, int]], match: re.Match) -> bool:
+    """Whether ``match`` sits INSIDE one of the quoted spans."""
+    return any(start <= match.start() and match.end() <= end
+               for start, end in spans)
 
 
 def _carriers() -> dict:
@@ -397,10 +460,14 @@ def _pair_condition_violations(text: str) -> list[str]:
     Grading per clause is what makes the pin about every SITE rather than about the
     carrier's existence.
 
-    The one exemption is co-located, and this function is also the anti-over-block
-    proof: all three carriers QUOTE the refuted form today, and each quote carries
-    its correction marker in the same clause, so a clean run exercises the
-    exemption instead of proving the string absent everywhere.
+    The one exemption is co-located — and, since #14619's re-review (Finding 1),
+    it is also QUOTED: a clause may carry the refuted form only inside quote marks
+    while marking itself a correction. A word-list marker alone exempted ordinary
+    prose that merely said "no longer", which is what let a live bound go ungraded
+    in the sibling grader. This function is also the anti-over-block proof: all
+    carriers that QUOTE the refuted form today do so with their correction marker
+    in the same clause, so a clean run exercises the exemption instead of proving
+    the string absent everywhere.
 
     Stated residual, not a silent one: a NEW site that states the bound while
     using neither a ``_WIN_ARITHMETIC`` phrase nor the refuted form is not graded
@@ -410,12 +477,16 @@ def _pair_condition_violations(text: str) -> list[str]:
     """
     violations = []
     for clause in _CLAUSE_BOUNDARY.split(text):
-        corrective = bool(_CORRECTION.search(clause))
-        if _REFUTED_FORM.search(clause) and not corrective:
+        quoted = [(m.start(), m.end()) for m in _QUOTED_REFUTED.finditer(clause)]
+        # A correction RECORD of the refuted form: marked as such in this clause AND
+        # delimited as a quotation. Anything else that states it is publishing it.
+        correction_record = bool(_CORRECTION.search(clause)) and bool(quoted)
+        if any(not (correction_record and _quoted_at(quoted, match))
+               for match in _REFUTED_FORM.finditer(clause)):
             violations.append(
                 "re-publishes the refuted closed form `r < (h1 + h2 - 61) / 2` "
-                f"without saying it is the refuted one: {clause[:180]!r}")
-        if corrective or _PAIR_CONDITION.search(clause):
+                f"without naming it, in quotes, as the refuted one: {clause[:180]!r}")
+        if _PAIR_CONDITION.search(clause) or correction_record:
             continue
         if any(phrase in clause for phrase in _WIN_ARITHMETIC):
             violations.append(
@@ -441,25 +512,40 @@ def _one_rank_bound_violations(text: str) -> list[str]:
     ``test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check`` is the
     executed proof that the same mutants now red.
 
-    The exemption is the co-located one the pair grader already uses: a clause
-    that marks itself as a CORRECTION may quote a wrong number, because "we
-    published ``\u2264 62`` until now, which was false" is an accurate correction
-    and grading it would block an honest record. Stated residual, not a silent
-    one: a live bound smuggled into a clause that also calls itself a correction
-    is not graded here.
+    The exemption is now PER VALUE and requires the value to be QUOTED. The
+    earlier version exempted a whole CLAUSE on a word list, so ``\bno longer\b`` —
+    the ordinary phrasing of "the bound changed" — exempted the authoritative BOUND
+    paragraph that publishes ``the <= 61-in-both reading``, and a FALSE number there
+    stayed GREEN (MEASURED at ``2693c8be05e0``: ``<= 999`` in place of ``<= 61`` in
+    that clause, 18 passed). That was the residual the previous docstring disclosed
+    as "a live bound smuggled into a clause that also calls itself a correction";
+    the disclosure was accurate and the residual was wider than it read, because
+    NOTHING had to call itself a correction — ordinary prose sufficed.
+
+    "We published ``\u2264 62`` until now, which was false" is still an accurate
+    correction and must not be blocked, so the exemption survives — but only for a
+    number the clause QUOTES as the superseded one. That quoting is what separates
+    NAMING a past value from STATING the live one.
+    `test_the_superseded_bound_exemption_is_per_value_and_quoted` executes BOTH
+    directions: the live ``no longer`` site reds when its number is falsified, and a
+    quoted superseded number stays green.
     """
     violations = []
     for clause in _CLAUSE_BOUNDARY.split(text):
-        if _CORRECTION.search(clause):
-            continue
-        for number in _RANK_BOUND_NUMBER.findall(clause):
-            if int(number) != _ONE_RANK_BOUNDARY:
-                violations.append(
-                    f"states a 1-based rank boundary of `<= {number}` where the "
-                    f"engine's boundary is `<= {_ONE_RANK_BOUNDARY}` — the SYMMETRIC "
-                    f"case wins while the shared id sits at 1-based rank <= "
-                    f"{_ONE_RANK_BOUNDARY} in BOTH lists, TIES at "
-                    f"{_ONE_RANK_BOUNDARY + 1} and loses past it: {clause[:180]!r}")
+        corrective = bool(_CORRECTION.search(clause))
+        quoted = [(m.start(), m.end()) for m in _QUOTED_BOUND.finditer(clause)]
+        for match in _RANK_BOUND_NUMBER.finditer(clause):
+            number = int(match.group(1))
+            if number == _ONE_RANK_BOUNDARY:
+                continue
+            if corrective and _quoted_at(quoted, match):
+                continue  # a NAMED, quoted past value in a clause that marks it
+            violations.append(
+                f"states a 1-based rank boundary of `<= {number}` where the "
+                f"engine's boundary is `<= {_ONE_RANK_BOUNDARY}` — the SYMMETRIC "
+                f"case wins while the shared id sits at 1-based rank <= "
+                f"{_ONE_RANK_BOUNDARY} in BOTH lists, TIES at "
+                f"{_ONE_RANK_BOUNDARY + 1} and loses past it: {clause[:180]!r}")
     return violations
 
 
@@ -514,6 +600,16 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     (``_one_rank_bound_violations``), and
     `test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check` executes
     the mutants that were measured green.
+
+    ⛔ AND THAT FIX LEFT A HOLE OF ITS OWN (#14619 re-review, Finding 1, P2): the
+    per-clause grader exempted any clause matching ``_CORRECTION`` — a word list
+    including ``\bno longer\b`` — so the AUTHORITATIVE BOUND paragraph, which opens
+    "pass-1 evidence can no longer be displaced", was exempted while publishing
+    ``the <= 61-in-both reading``. Falsifying that number stayed GREEN (measured).
+    The exemption is now per VALUE and requires the number to be QUOTED as the
+    superseded one;
+    `test_the_superseded_bound_exemption_is_per_value_and_quoted` executes both
+    the red and the honest-correction-green arms.
     """
     carriers = _carriers()
     unbounded = "outranks either pass alone"
@@ -637,6 +733,79 @@ def test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check():
             f"a false bound ({replacement}) at {where}'s FIRST site went "
             "ungraded — the `<= 61` half is a whole-carrier presence check "
             "again, which is the defect this row exists for")
+
+
+def test_the_superseded_bound_exemption_is_per_value_and_quoted():
+    """Non-vacuity for the EXEMPTION itself, EXECUTED in both directions
+    (#14619 re-review, Finding 1).
+
+    ``_one_rank_bound_violations`` exempts a clause that names a wrong number,
+    because "we published ``<= 62`` until now, which was false" is an accurate
+    correction and blocking it would forbid an honest record. The earlier cut
+    granted that exemption to a whole CLAUSE on a word list, so the AUTHORITATIVE
+    BOUND paragraph — "pass-1 evidence can no longer be displaced ... in the
+    symmetric case ``h1 == h2 == h`` the <= 61-in-both reading" — was exempted by
+    the ordinary words "no longer" alone. MEASURED at ``2693c8be05e0``: publishing
+    ``<= 999`` in place of ``<= 61`` in that clause left the row GREEN (18 passed).
+
+    Both halves are asserted here, because a fix that closed the hole by DELETING
+    the exemption would block the honest correction record instead:
+
+      * the live ``no longer`` clause reds when its number is falsified;
+      * a quoted superseded number, in a clause that marks it superseded, stays
+        green;
+      * the SAME sentence with the number written as live prose reds — the only
+        difference between the two being the quoting, which is the mechanism the
+        exemption now turns on.
+    """
+    doc = _carriers()["tortoise/expansion_merge.fuse_expansion_pass"]
+    assert not _one_rank_bound_violations(doc)
+
+    # (1) The clause the word-list exemption silenced. It is located by its own
+    #     correction word rather than by position, so a re-ordering of the prose
+    #     cannot make this row test a different sentence.
+    exposed = [clause for clause in _CLAUSE_BOUNDARY.split(doc)
+               if "no longer" in clause and _RANK_BOUND_NUMBER.search(clause)]
+    assert exposed, (
+        "the carrier no longer contains a correction-worded clause that STATES a "
+        "rank bound — this row would then not reproduce the exemption defect")
+    clause = exposed[0]
+    mutated_clause = _RANK_BOUND_NUMBER.sub(
+        "<= " + str(_ONE_RANK_BOUNDARY + 1), clause, count=1)
+    assert mutated_clause != clause, "the mutation changed nothing"
+    mutated = doc.replace(clause, mutated_clause, 1)
+    violations = _one_rank_bound_violations(mutated)
+    assert violations, (
+        "a FALSE bound inside the correction-worded clause went ungraded — the "
+        "exemption is still per-clause on a word list, so ordinary prose that says "
+        "`no longer` silences the live statement beside it: "
+        f"{mutated_clause[:180]!r}")
+    assert any("no longer" in v or "boundary" in v for v in violations), violations
+
+    # (2) The exemption must SURVIVE, or the fix over-blocks an honest correction.
+    superseded = ("We published `<= 62` until now, which was false: "
+                  "`2/122 == 1/61` is a TIE, not a win.")
+    assert not _one_rank_bound_violations(superseded), (
+        "a QUOTED, explicitly superseded number is not a statement of the live "
+        "bound — grading it forbids an honest correction record")
+
+    # (3) The quoting IS the exemption: the same sentence, number unquoted, is
+    #     publishing it. Without this arm, (2) could be satisfied by a grader that
+    #     exempts any clause carrying a correction word — the defect itself.
+    unquoted = superseded.replace("`<= 62`", "<= 62")
+    assert _one_rank_bound_violations(unquoted), (
+        "the superseded number written as live prose went ungraded — the exemption "
+        "is keyed to a correction word rather than to the quoted value")
+
+    # (4) The pair grader's exemption, same mechanism: a QUOTED refuted form in a
+    #     correction clause is a record, the same form stated bare is publishing.
+    quoted_form = ("We published `r < (h1 + h2 - 61) / 2` until now, which was "
+                   "false in both directions.")
+    assert not _pair_condition_violations(quoted_form)
+    assert _pair_condition_violations(
+        quoted_form.replace("`r < (h1 + h2 - 61) / 2`", "r < (h1 + h2 - 61) / 2")), (
+        "the refuted form stated without quotes went ungraded — the pair grader's "
+        "exemption is still a bare correction-word check")
 
 
 def test_the_published_pair_condition_is_the_fusions_arithmetic():
