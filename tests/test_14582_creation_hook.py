@@ -17,8 +17,12 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
 * every CONTROL-PLANE door calls it — pinned from the AST, on the DOOR'S OWN BODY
   rather than on a helper's, because the call is one line and its absence is
   invisible at runtime until a graph is uncut: `hosted_api._provision_graph`
-  (both HTTP create endpoints route through it) and
-  `supabase_control.ensure_default_graph_row`'s THREE id-yielding arms;
+  (both HTTP create endpoints route through it),
+  `supabase_control.ensure_default_graph_row`'s THREE id-yielding arms, and the
+  two `kind='default'` MINT arms in `supabase_control.set_graph_name` and
+  `set_graph_recording` — the last two are the finding carried from #14610's
+  independent review, and neither is reachable from the provisioning RPC, so
+  the census could not have seen them by name only;
 * the doors that CANNOT be hooked are pinned as NOT hooked, on purpose, because
   both are findings rather than omissions (`sdk._graph_create`: the Supabase arm
   persists nothing — F1 — and the registry arm creates a graph `public.graphs`
@@ -73,6 +77,15 @@ _DOORS = (
     ("tortoise/hosted_api.py", "_provision_graph", "_provision_graph_record"),
     ("tortoise/supabase_control.py", "ensure_default_graph_row",
      "_provision_default_graph_record"),
+    # ⛔ THE TWO MINT-ON-DEMAND DOORS (#14624 — the finding carried from
+    # #14610's independent review). Both create a `kind='default'` row with a
+    # POST of their own; neither is reachable from `ensure_default_graph_row`,
+    # so pinning the provisioning door could not see them. A graph whose first
+    # write is a RENAME or a recording toggle was born uncut and nothing red.
+    ("tortoise/supabase_control.py", "set_graph_name",
+     "_provision_default_graph_record"),
+    ("tortoise/supabase_control.py", "set_graph_recording",
+     "_provision_default_graph_record"),
 )
 
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
@@ -86,6 +99,14 @@ _DOOR_HOOK_CALLS = {
     ("tortoise/hosted_api.py", "_provision_graph"): 1,
     ("tortoise/supabase_control.py",
      "ensure_default_graph_row"): 3,
+    # ONE each: only the arm that MINTS. The PATCH arms of both functions write
+    # to a row that already existed, which is `backfill`/`sweep`'s population and
+    # deliberately outside the hook's scope (§A8.3.13's scope note). A count of 1
+    # is the pin that a tidy-up cannot "simplify" the call away, and that a later
+    # edit which moves it to function entry (where it would fire for custom rows
+    # too) reds here rather than only in production.
+    ("tortoise/supabase_control.py", "set_graph_name"): 1,
+    ("tortoise/supabase_control.py", "set_graph_recording"): 1,
 }
 
 #: The helpers those doors call must themselves reach the writer's hook.
@@ -274,6 +295,120 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "so each create logs a warning and the deployment reads "
         "`record.armed_but_uncut` forever. If this door is to be hooked, the "
         "graph-row mint has to land first")
+
+
+class _MintOnlyControlPlane:
+    """The control plane reduced to the reads a `kind='default'` MINT makes.
+
+    `graphs` reads return `self.existing` (the fake does not evaluate the
+    filters — the rows it is given are already the ones the real filters would
+    return), and every POST is recorded so the hook's argument can be compared
+    with the row that was ACTUALLY created. A hook called with the org id, or
+    with a resolved-but-not-minted id, is the same defect one step over.
+    """
+
+    def __init__(self, existing=None, org_graph_name="org_ns"):
+        self.existing = list(existing or [])
+        self.org_graph_name = org_graph_name
+        self.posted: list[dict] = []
+        self.patched: list[dict] = []
+
+    def query(self, table, select=None, filters=None, method=None,
+              json_body=None):
+        if table == "graphs" and method == "POST":
+            self.posted.append(dict(json_body or {}))
+            return None
+        if table == "graphs" and method == "PATCH":
+            self.patched.append(dict(json_body or {}))
+            return None
+        if table == "graphs":
+            return [{key: r.get(key) for key in (select or r)}
+                    for r in self.existing]
+        if table == "organizations":
+            return [{"graph_name": self.org_graph_name}]
+        raise AssertionError(f"unexpected control-plane read: {table}")
+
+
+def _hook_recorder():
+    """A fresh `(calls, recorder)` pair per door — the recorder closes over the
+    list it returns, not over the loop variable (ruff B023: a lambda defined
+    inside `for` binds the variable, so every iteration would share one)."""
+    calls: list[tuple[str, str]] = []
+
+    def record(org_id, graph_id):
+        calls.append((org_id, graph_id))
+
+    return calls, record
+
+
+def test_the_two_mint_on_demand_doors_arm_the_graph_they_create(monkeypatch):
+    """⛔ A RENAME OR A RECORDING TOGGLE ON A PRISTINE ORG CREATES THE DEFAULT
+    ROW — and neither hook was wired (#14624; the finding carried from #14610's
+    independent review, verified at the pre-fix head).
+
+    `set_graph_name` and `set_graph_recording` each POST a `kind='default'`
+    `public.graphs` row when the org has none yet. The only
+    `_provision_default_graph_record` call sites were the three inside
+    `ensure_default_graph_row`, which neither function reaches, so the row they
+    minted was born UNCUT: `write_live_record` is fail-soft by contract, so every
+    record for it was refused `cursor_not_active` while the write reported
+    success and `/health` read green — the loss only appearing at a rebuild.
+
+    ⛔ THE HOOK MUST FIRE ON THE **MINT** AND NOWHERE ELSE. The PATCH arms below
+    write to a row that already existed, and a graph whose default row exists
+    while its cursor row is missing is `backfill`/`sweep`'s population,
+    deliberately outside the hook's scope
+    (`docs/plans/2026-11-15-issue-12894-storage-shape.md` §A8.3.13's scope
+    note). Grading both halves is what makes this a proof of the SHAPE of the
+    fix: a call moved to function entry would fire on custom rows and on every
+    rename, and this row reds on the second half.
+    """
+    from tortoise import supabase_control
+
+    for door, value, column in (
+            (supabase_control.set_graph_name, "renamed", "name"),
+            (supabase_control.set_graph_recording, True, "recording"),
+    ):
+        calls, record = _hook_recorder()
+        monkeypatch.setattr(
+            supabase_control, "_provision_default_graph_record", record,
+            raising=True)
+
+        # ── the MINT arm: no row yet, so this call creates one ────────────
+        cp = _MintOnlyControlPlane()
+        assert door(cp, "org-14582", "default", value) is True, (
+            f"{door.__name__} refused a rename/toggle it used to accept")
+        assert len(cp.posted) == 1, (
+            f"{door.__name__} no longer mints a default row on a pristine org — "
+            f"this row would then grade a hook that has nothing to arm: {cp.posted}")
+        (minted,) = cp.posted
+        assert minted["kind"] == "default" and minted["status"] == "active", (
+            f"{door.__name__} minted an unexpected row: {minted}")
+        assert minted.get(column) == value, (
+            f"{door.__name__} must still write {column} on the row it creates")
+        assert calls == [("org-14582", minted["id"])], (
+            f"{door.__name__} minted {minted['id']} and did NOT arm it: "
+            f"the hook calls were {calls}. A default row born uncut refuses "
+            "every record it writes, silently — the hook must be called with "
+            "the id of the row the POST created")
+
+        # ── the PATCH arm: the row already exists, so nothing is minted ───
+        calls.clear()
+        existing = _MintOnlyControlPlane(existing=[{
+            "id": "g_existing", "kind": "default", "status": "active",
+            "namespace": "org_ns", "name": "old", "recording": None,
+        }])
+        assert door(existing, "org-14582", "default", value) is True
+        assert existing.posted == [], (
+            f"{door.__name__} minted a second row beside an active default: "
+            f"{existing.posted}")
+        assert len(existing.patched) == 1, (
+            f"{door.__name__} must PATCH the existing row: {existing.patched}")
+        assert calls == [], (
+            f"{door.__name__} called the creation hook for a ROW IT DID NOT "
+            f"CREATE ({calls}) — a pre-existing default row without a cursor row "
+            "is `backfill`/`sweep`'s population (§A8.3.13's scope note), and "
+            "arming it from a rename is the quiet widening that note rules out")
 
 
 def test_the_hooks_own_door_list_matches_the_doors_that_call_it():

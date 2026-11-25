@@ -4325,6 +4325,14 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     re-runs this hook over a row it did not mint. `provision_graph_record` is
     idempotent (`active` ⇒ no-op), so the repeat costs one scoped read.
 
+    ⛔ AND TWO MORE DOORS MINT THIS SAME ROW ON DEMAND, so they call this hook
+    too: :func:`set_graph_name` and :func:`set_graph_recording` create a
+    `kind='default'` row when the org has none (a rename or a recording toggle is
+    a plausible FIRST write), and neither is reachable from
+    :func:`ensure_default_graph_row`. Their PATCH arms do NOT call it — a row
+    that already exists is `backfill`/`sweep`'s population (see the scope note
+    below).
+
     ⛔ AND IT IS **NOT** A SELF-HEAL FOR A PRE-EXISTING GRAPH (#14624 review
     ISSUE 2; an earlier revision of this docstring claimed it was, and that
     sentence is the one a maintainer reads when deciding whether the
@@ -4963,6 +4971,21 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
             )
             return True
         raise
+    # ⛔ THE MINT IS A CREATION DOOR, SO IT CALLS THE HOOK (#14624 review — the
+    # finding carried from #14610). Reaching here means the POST above CREATED a
+    # `kind='default'` graphs row; without this call that row is born UNCUT —
+    # `write_live_record` is fail-soft by contract, so every record the graph
+    # writes is refused `cursor_not_active` while nothing reds, and the loss only
+    # surfaces at a rebuild. A rename is a plausible FIRST write for an org (the
+    # default row is created on demand here), so this is a real door, not a
+    # corner.
+    #
+    # ⛔ ONLY THE MINTING ARM. The two PATCH arms above write to a row that
+    # already existed; a graph whose default row exists and lacks a cursor row is
+    # `backfill`/`sweep`'s population, deliberately OUTSIDE the hook's scope
+    # (`docs/plans/2026-11-15-issue-12894-storage-shape.md` §A8.3.13's scope
+    # note), and `_provision_default_graph_record` states the same split.
+    _provision_default_graph_record(org_id, gid)
     return True
 
 
@@ -5056,6 +5079,17 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
             )
             return True
         raise
+    # ⛔ THE MINT IS A CREATION DOOR, SO IT CALLS THE HOOK (#14624 review — the
+    # finding carried from #14610). Same defect as `set_graph_name`'s mint arm,
+    # same consequence: the `kind='default'` row this POST just created is born
+    # UNCUT, so `write_live_record` (fail-soft) refuses every record for it while
+    # reporting success and `/health` stays green until a rebuild finds nothing.
+    # A `set_graph_recording` on a pristine org is a ONE-CLICK first write, which
+    # is why this path, not just the provisioning RPC, needed the hook.
+    #
+    # ⛔ ONLY THE MINTING ARM — the PATCH arms above write to a pre-existing row,
+    # which is `backfill`/`sweep`'s population (§A8.3.13's scope note).
+    _provision_default_graph_record(org_id, gid)
     return True
 
 
