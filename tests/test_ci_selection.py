@@ -9169,9 +9169,12 @@ _HISTORICAL_LETTERS_RE = re.compile(
 #: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
 #: A test file the block calls a `durations` ROW. The map's own vocabulary separates a ROW (an
-#: entry in `durations`) from a surface REGISTRATION (a `core`/`api` entry, which only puts the
-#: file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT` apply), so calling a registration a row is
-#: a false claim about the map.
+#: entry in `durations`) from a surface REGISTRATION, and calling a registration a row is a false
+#: claim about the map. ⛔ A registration is an entry on ANY `surfaces` key — `fast_pool()` folds
+#: every one of them — and it is NECESSARY but NOT SUFFICIENT for pool membership: the same call
+#: then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand`, so a file can be
+#: registered on three surfaces and still be outside the pool. `core` is the common case, `eval` a
+#: real one (the block's own `#14544` sentence is carried by an `eval` registration alone).
 #: ⛔ The row is NOT the map's only place a weight is recorded, and this arm must not claim it is:
 #: `durations_floors` can additionally PIN a declared value (`{value: N, pinned: true}`, e.g.
 #: `test_lane_stash.py`), so a pinned file's weight appears in both blocks. The distinction graded
@@ -9191,6 +9194,17 @@ _DERIVATION_LOOKAHEAD = 60
 #: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
 #: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
 #: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
+#: ⛔ FOUR shapes are read, and the arm's remit is stated rather than implied: `<file>` row,
+#: `row (`A`, `B`)`, `rows:` then a comma-separated run, and the ENUMERATED
+#: `#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` (below). MEASURED at
+#: this head: 8 of the 9 files the block calls rows are graded, and deleting any of those 8 rows
+#: reds the arm.
+#: ⛔ THE ONE STATED RESIDUAL is `tests/test_sdk_privatise_sweep.py` (the
+#: `#14548` residue RATCHET): the block names its ROW only by PRONOUN — “plus the RATCHET's” in the
+#: ROW definition, with the file itself written four lines earlier as
+#: "`tests/test_sdk_privatise_sweep.py` at **28.0 s**", which carries no `row` token at all.
+#: A pronoun has no local evidence to anchor on, so it is DECLARED here rather than manufactured:
+#: deleting that file's `durations` row leaves this arm GREEN. The other eight red.
 #: ⛔ CASE-INSENSITIVE ON PURPOSE (#14612 review round 3, P3). This block states its own vocabulary
 #: in CAPS — "A REGISTRATION IS NOT A ROW", "A ROW is an entry in `durations`" — so a matcher bound
 #: to lowercase `row` is bound to a spelling the block does not itself use. MEASURED: re-spelling
@@ -9215,6 +9229,19 @@ _ROW_CLAIM_BEFORE_COLON_RE = re.compile(
     r"\brows?\b[\s*_]{0,4}:\s*(?P<names>`?tests/[\w/.-]+\.py`?"
     r"(?:\s*,\s*`?tests/[\w/.-]+\.py`?)*)", re.IGNORECASE)
 _ROW_CLAIM_PATH_IN_LIST_RE = re.compile(r"`?tests/(?P<file>[\w/.-]+\.py)`?")
+#: The ENUMERATED shape: several files named in a run (`#1's `A`, #2's `B` and #3's `C`) that all
+#: then "carry an explicit `2.0` `durations` row". The files are not adjacent to the word — three
+#: names sit between the first of them and it — so neither shape above reads them, and the arm
+#: graded 4 of the 9 row-carrying files the block names. MEASURED on this block: deleting the
+#: `durations` row for `tests/test_sdk_privatise_sweep.py` or `tests/test_14371_offline_embed_json.py`
+#: left `_row_claims` unchanged and the arm GREEN, over a row the block asserts and the map no
+#: longer carries. The pattern is anchored on the PHRASE, never on a character window, so it cannot
+#: claim a path from a neighbouring sentence.
+_ROW_CLAIM_ENUMERATED_RE = re.compile(
+    r"(?P<names>#[^\s`]+'s\s+`tests/[\w/.-]+\.py`"
+    r"(?:\s*,?\s*(?:and\s+)?#[^\s`]+'s\s+`tests/[\w/.-]+\.py`)*)"
+    r"\s+carry\s+an\s+explicit\s+`[^`]+`\s+`durations`\s+rows?\b",
+    re.IGNORECASE)
 
 
 def _row_claims(header: str) -> list[str]:
@@ -9254,6 +9281,9 @@ def _row_claims(header: str) -> list[str]:
         found |= {m.group("file")
                   for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
     for claim in _ROW_CLAIM_BEFORE_COLON_RE.finditer(unquoted):
+        found |= {m.group("file")
+                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+    for claim in _ROW_CLAIM_ENUMERATED_RE.finditer(unquoted):
         found |= {m.group("file")
                   for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
     return sorted(found)
@@ -9888,9 +9918,11 @@ fast_shards: 11
 def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     """#14612: a file the block calls a `durations` ROW must actually have one.
 
-    The block's vocabulary is load-bearing: a ROW records a weight (and `durations_floors` can
-    additionally PIN one), while a surface REGISTRATION merely puts the file in `fast_pool()` and
-    lets `DEFAULT_FAST_WEIGHT` apply. Measured
+    The block's vocabulary is load-bearing: a ROW is an entry in `durations`, while a surface
+    REGISTRATION is the map's word for a `surfaces` entry and does not establish a row at all. A
+    registration is NECESSARY but NOT SUFFICIENT for `fast_pool()` membership — that call subtracts
+    `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and `core` is its common case,
+    not its definition. Measured
     2026-11-25: `tests/test_fly_secret_declaration_report.py` is `core`-registered on `main` and
     carries NO `durations` row, so this PR's review had the clause read "drift-reporter
     registration". The `4cdd732ab7ab` fold kept `main`'s copy of the paragraph, where it reads
@@ -9911,9 +9943,10 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     missing = [name for name in claimed if name not in rows]
     assert not missing, (
         f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
-        "no row for it. A REGISTRATION (a surface entry on any `surfaces` key — every one of them "
-        "feeds `fast_pool()`) only puts the file in "
-        "`fast_pool()`; its weight then comes from `DEFAULT_FAST_WEIGHT`, which is not a row. "
+        "no row for it. A REGISTRATION is the map's word for a `surfaces` entry — necessary but "
+        "NOT sufficient for `fast_pool()` membership, since that call subtracts `slow_files`, "
+        "`ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and it is not a row: with no row the "
+        "weight comes from `DEFAULT_FAST_WEIGHT`. "
         "Say `registration`, or add the row.")
     # …and BOTH reversion shapes are read while `registration` is deliberately not, and while a
     # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
@@ -9931,21 +9964,27 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\", and `#6`'s two `core` rows "
         "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`), `#7`'s "
         "drift-reporter **ROW** (`tests/test_row_claim_upper.py`) — the CAPS spelling this block "
-        "itself uses — and `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`")
+        "itself uses — `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`, and #9's "
+        "`tests/test_row_claim_enum_a.py`, #10's `tests/test_row_claim_enum_b.py` and #11's "
+        "`tests/test_row_claim_enum_c.py` carry an explicit `2.0` `durations` row")
     assert _row_claims(fixture) == [
         "eval/retrieval/test_row_claim_subdir.py",
         "test_row_claim_after.py",
         "test_row_claim_before.py",
         "test_row_claim_colon.py",
+        "test_row_claim_enum_a.py",
+        "test_row_claim_enum_b.py",
+        "test_row_claim_enum_c.py",
         "test_row_claim_list_first.py",
         "test_row_claim_list_second.py",
         "test_row_claim_upper.py",
     ], (
         "the row-claim matcher no longer reads every reversion shape (a file then `row`, "
-        "`row (` then the files, and `rows:` then the files), or it misses a SUBDIRECTORY row, or "
-        "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
-        "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
-        "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
+        "`row (` then the files, `rows:` then the files, and the ENUMERATED '#1's `A`, #2's `B` "
+        "and #3's `C` … carry an explicit `N` `durations` row'), or it misses a SUBDIRECTORY row, "
+        "or it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go "
+        "ungraded, or it is bound to lowercase while this block spells the concept in CAPS, or "
+        "it reads a `registration` as a row, or it grades a QUOTED dead claim as a live one: "
         f"{_row_claims(fixture)!r}")
     # ⛔ …and an ODD number of quotes is REFUSED, never read as "no row claim" (#14612 review
     # round 3, P2). MEASURED before this guard: a stray `"` before a reverted
