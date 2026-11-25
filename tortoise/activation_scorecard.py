@@ -360,8 +360,8 @@ FUNNEL_QUERY = (
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **157** distinct cite
-# targets have a line number LARGER than 28608 (29542 … 99999) and those are the
-# ones that shift; **568** have a number smaller than it (26 … 28602) and cannot
+# targets have a line number LARGER than 28608 (29548 … 99999) and those are the
+# ones that shift; **568** have a number smaller than it (26 … 28605) and cannot
 # move. (726 distinct targets in all — the remainder is 28608 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every

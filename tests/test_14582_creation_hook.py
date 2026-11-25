@@ -749,6 +749,85 @@ def test_a_graph_TRANSITIONS_between_the_two_populations(monkeypatch):
         rw.reset_uncut_graphs()
 
 
+class _OwnsPositionConn:
+    """The smallest thing `record_owns_position` accepts as a connection."""
+
+    def __init__(self):
+        self.committed = 0
+        self.closed = 0
+
+    def commit(self):
+        self.committed += 1
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_WRITE_PATH_feeds_and_retracts_the_registry(monkeypatch):
+    """⛔ THE OBSERVER ITSELF, NOT JUST THE REGISTRY API (#14624 review F2).
+
+    Every other row in this file calls `note_uncut_graph` / `clear_uncut_graph`
+    DIRECTLY, so the observation block inside :func:`record_owns_position` — the
+    one the whole field exists for, and the only per-write read of the cursor row
+    on an armed deployment — was entered by NO test: deleting `if usable:` and
+    its `else:` branch together reddened nothing. It is driven here the way
+    `tests/test_14002_record_only_journal.py` drives the same function: a
+    connection and a cursor row are INJECTED, so the question is the DECISION and
+    no database is needed.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _OwnsPositionConn()
+    state: dict[str, object] = {"row": None}
+
+    def read_cursor(_conn, *, org_id, graph_id):
+        return state["row"]
+
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+    monkeypatch.setattr(ra, "read_cursor", read_cursor)
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
+    monkeypatch.setenv(rw.RECORD_ORG_ENV, "org-14582")
+    monkeypatch.setenv(rw.RECORD_GRAPH_ENV, "graph-write-path")
+    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    rw.reset_uncut_graphs()
+    try:
+        tenant = ("org-14582", "graph-write-path")
+
+        # 1. no row: the WRITE PATH is what records the gap.
+        state["row"] = None
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert block["armed_but_uncut"] == 1, (
+            f"the write path observed an uncut graph and the registry did not "
+            f"hear it: {block}")
+        assert rw.armed_but_uncut_reasons() == {"no_cursor_row": 1}
+
+        # 2. `active`: the SAME read is the repair.
+        state["row"] = (5, "active")
+        assert rw.record_owns_position(tenant=tenant) is True
+        assert rw.armed_but_uncut()["armed_but_uncut"] == 0, (
+            "the observation that repairs the gap must RETRACT the entry")
+
+        # 3. `halted`: the write path must move it to the OTHER population — not
+        #    leave the repaired entry standing, and not report it as a gap.
+        state["row"] = (5, "halted")
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (0, 1), (
+            f"a halt observed on the write path must MOVE the graph between the "
+            f"populations, not add a second filing: {block}")
+
+        # 4. `seeded`: an incomplete cutover again, and not still a halt.
+        state["row"] = (5, "seeded")
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0), block
+        assert rw.armed_but_uncut_reasons() == {"mode_seeded": 1}
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
         monkeypatch):
     """⛔ #14587 review P1 — THE OVERFLOW COUNTER WAS A LATCH IN THE `ok` FOLD.

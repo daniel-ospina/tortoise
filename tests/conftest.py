@@ -668,6 +668,37 @@ def _isolate_process_env():
             os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _isolate_record_health_registry():
+    """⛔ PROCESS-MEMORY HEALTH STATE MUST NOT CROSS TESTS (#14624 review F2).
+
+    `tortoise.record_writer`'s two `/health` populations (`_UNCUT_GRAPHS`,
+    `_UNCUT_HALTED`) and their overflow counters are MODULE GLOBALS fed from the
+    WRITE PATH, so a live leg that writes a real point on a graph with no cursor
+    row legitimately leaves an entry for the rest of the process. The next
+    module's health rows then read `record.ok: false` over a registry they never
+    touched.
+
+    MEASURED: `tests/test_14002_record_only_journal.py` followed by
+    `tests/test_9548_record_arming_health.py` in ONE invocation reds SIX of that
+    module's rows — including `test_a_usable_value_is_still_accepted` — while
+    either file alone is green. The red names the wrong file, which is the
+    order-dependent class `_isolate_process_env` above exists for, one layer
+    down: env was not the leak, the module global was. Reset BEFORE each test so
+    the registry is clean at the start of every assertion, and a test that wants
+    entries seeds them itself.
+    """
+    try:
+        from tortoise import record_writer
+    except Exception:  # a missing optional import must not red a suite
+        yield
+        return
+    reset = getattr(record_writer, "reset_uncut_graphs", None)
+    if reset is not None:
+        reset()
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _no_ambient_dotenv():
     """#12407: a developer's repo-root `.env` is invisible to the suite.
