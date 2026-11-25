@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
 # parents: keeping two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `939e37f664` merged in, carrying
+# reader of the prose can see. On THIS tree — `origin/main` `837bba743d` merged in, carrying
 # `#14548`'s residue RATCHET, `#14559`'s reaper-schedule row, `#14574`'s drift-reporter row,
 # `#14560`'s operator-vector row and `#14552`'s `tests/test_record_read_point_vector_keys.py` row
 # (those five are `main`'s at this head, NOT this lane's) — plus THIS lane's own row
@@ -68,7 +68,7 @@ version: 1
 # wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: measured with the verb on each tree's own map, `main`
-# `939e37f664` alone packs five shards at 826.2 s and six at 826.1 s —
+# `837bba743d` alone packs five shards at 826.2 s and six at 826.1 s —
 # quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
 # the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
 # small: `fast_pool()` holds 1334 files at this head against 1333 on `main`, and the ONE addition is
@@ -79,29 +79,6 @@ version: 1
 # move to a row that did not cause it. The name lists above are what the guard COMPARES against the
 # live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
 # graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
-# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
-# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `939e37f664e5` folded in, which by then
-# already carried BOTH rows an earlier cut of this work had proposed: `#14596`'s
-# `tests/test_14560_operator_vectors.py` (`core`, flat 2.0 s `DEFAULT_FAST_WEIGHT`) and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (`core`, that same flat weight), so neither is THIS
-# PR's — the verb packs the pool into two bins: five shards at 826.2 s (a, g, i, j, k) and six at
-# 826.1 s (b, c, d, e, f, h), so `ceil(826.2/60 x 2)` = 28 m governs (a shard's job-level wall clock
-# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read.
-# ⛔ THE POOL DELTA IS ZERO, which is the fact this fold must not overstate: `fast_pool()` holds
-# 1333 files at this head and 1333 on `origin/main` (measured both ways, and the second measurement
-# is the one that matters — a delta asserted from one side is how the older "1333 here against 1332
-# on `main`" spelling outlived the landing that made it false). ⛔ No parent's FIGURE is carried
-# here: the fold re-packed every bin (the packer is greedy), so the per-fold readings that stood in
-# this block before the union splice — `#14565`'s, `#14574`'s, `#14559`'s, and the `826.0`/`825.9`
-# pair a rebase of this branch once spliced in beside this sentence — describe trees that no longer
-# exist, and they are deleted rather than re-pointed. The name lists are what the guard COMPARES
-# against the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so
-# they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
-# them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
