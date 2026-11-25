@@ -133,5 +133,27 @@
     "reply": [
       "[{\"url\":\"session:doc-02\",\"sourceKind\":\"agentSession\",\"points\":13},{\"url\":\"session:doc-01\",\"sourceKind\":\"agentSession\",\"points\":13},{\"url\":\"session:doc-05\",\"sourceKind\":\"agentSession\",\"points\":12},{\"url\":\"session:doc-04\",\"sourceKind\":\"agentSession\",\"points\":11},{\"url\":\"session:doc-03\",\"sourceKind\":\"agentSession\",\"points\":8}]"
     ]
+  },
+  "provenance": {
+    "artifact": "census3.json",
+    "producer": "run_census3.py",
+    "producer_path": "docs/evidence/14592-operating-model-validation/run_census3.py",
+    "artifact_status": "pre-producer",
+    "produced_by_committed_producer": false,
+    "provenance_key_shape": "absent",
+    "renamed_receipt_key": null,
+    "missing_producer_keys": [
+      "graph",
+      "provenance",
+      "ok",
+      "resolved"
+    ],
+    "hardcoded_point_ids": [
+      "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+      "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078"
+    ],
+    "regenerate_with": "TORTOISE_VENV=<checkout>/.venv TORTOISE_DB_URI=<uri to xv14592_operating_model> ./run.sh run_census3.py",
+    "note": "Carried from the 2026-11-25 run, made before this producer was committed, so it is NOT this script's output. It cannot be regenerated: xv14592_operating_model lived in a lane container that was torn down (REPORT.md \u00a79). The deviations above are measured by stamp_provenance.py, not asserted.",
+    "stamp_probe": "stamp_provenance.py"
   }
 }

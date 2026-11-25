@@ -9,12 +9,16 @@ without a producer: the report's stated repro path named only
 file, and the committed artifact carried a HARDCODED point id
 (`pt_f0a2b965…`) that no committed code derived.
 
-Two changes make it reproducible:
+Three changes make it reproducible:
 
   * every point id is DISCOVERED by a `tortoise_search` call here, by content —
     never pasted in — so the same script works on a re-run whose ids differ;
   * the artifact self-describes: a `provenance` block names this file and its
-    sha256, so a reader can tell which code produced the numbers.
+    sha256, so a reader can tell which code produced the numbers;
+  * the run carries a VERDICT: `ok` in the artifact and a non-zero exit when a
+    target could not be resolved or expanded, so a run whose headline evidence
+    is missing cannot be committed as a successful one. An unresolved target is
+    recorded and the script FAILS — it never guesses.
 
 Run it in the SAME sitting as `run_ingest.py` (the graph is this bundle's own
 `xv14592_operating_model`; a torn-down lane container cannot be re-read):
@@ -38,14 +42,22 @@ OUT = HERE / "out"
 WT = Path(__file__).resolve().parents[3]
 GRAPH = "xv14592_operating_model"
 
-#: (artifact key, search query, marker the content must carry, expansion args
-#: builder). The marker is what identifies the point — never its id.
+#: (artifact key, the claim sentence). The sentence is BOTH the search query
+#: and the identity the selected row must match — never an id, and never a
+#: substring that a nearby sentence could also satisfy.
 DECISION = ("expand_doc01_decision",
-            "we choose ColdPath Logistics as our delivery partner",
-            "choose coldpath")
+            "We choose ColdPath Logistics as our delivery partner")
 CLAIM = ("expand_cert_claim",
-         "ColdPath Logistics holds a validated cold-chain certificate",
-         "validated cold-chain certificate")
+         "ColdPath Logistics holds a validated cold-chain certificate")
+
+#: Keys the producer writes unconditionally. `stamp_provenance.py` reads this
+#: to tell a producer-written artifact from a hand-carried one.
+WRITTEN_KEYS = ("graph", "provenance", "ok", "resolved", "sources")
+
+
+def _norm(text: object) -> str:
+    """Whitespace- and case-normalised content, for identity comparison."""
+    return " ".join(str(text or "").lower().split())
 
 
 async def _call(client, tool, args):
@@ -82,28 +94,28 @@ def _rows(reply, keys=("result", "results", "relationships", "nodes", "items")):
     return []
 
 
-def pick_point(rows, marker):
-    """The `statement` Point the marker names — never a raw turn, never a near-miss.
+def pick_point(rows, claim):
+    """The Point whose content IS the claim — by identity, never by search order.
 
-    Ranked, so the answer does not depend on the search's order: a statement
-    whose content STARTS WITH the marker wins over one that merely contains it
-    (doc-05's "Two of ColdPath's vehicles could not show a validated cold-chain
-    certificate…" also `contains` the certificate marker), and a `statement`
-    always wins over a raw turn.
+    Returns ``None`` (a refusal) rather than a near-miss. The previous revision
+    ranked a `startswith` preference ahead of `contains`, and measured across
+    every row this corpus produced that term was **False for all of them** —
+    both extracted forms are sentences that *contain* their marker, so the `+2`
+    never fired and the tie was broken by whichever row the search happened to
+    list first. That is how doc-05's refutation ("Two of ColdPath's vehicles
+    could not show a validated cold-chain certificate…") could be expanded as
+    if it were the doc-01 claim.
+
+    Identity is the discriminating signal the corpus actually provides, so it is
+    the only one used: a row is the claim when its normalised content EQUALS the
+    claim sentence. A producer that cannot find its own target must say so, not
+    pick the most similar sentence it can see.
     """
-    best: dict | None = None
-    best_rank = -1
+    target = _norm(claim)
     for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        content = str(row.get("content") or "").lower().strip()
-        if marker not in content:
-            continue
-        kind = str(row.get("pointKind") or row.get("point_kind") or "").lower()
-        rank = (2 if content.startswith(marker) else 0) + (1 if kind == "statement" else 0)
-        if rank > best_rank:
-            best, best_rank = row, rank
-    return best
+        if isinstance(row, dict) and _norm(row.get("content")) == target:
+            return row
+    return None
 
 
 def _provenance() -> dict:
@@ -114,6 +126,23 @@ def _provenance() -> dict:
         "graph": GRAPH,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
+
+
+def verdict(out: dict) -> int:
+    """0 only when every target resolved AND every expansion returned rows.
+
+    This is the exit code and the `ok` field the artifact carries: a run that
+    expanded nothing is a FAILED read, not a quiet success. The previous
+    revision logged `!! <key> NOT RESOLVED`, skipped the expansion, wrote the
+    artifact and returned 0, so the headline evidence could be missing from a
+    run that exited green.
+    """
+    for key, _claim in (DECISION, CLAIM):
+        if not out.get("resolved", {}).get(key):
+            return 1
+        if not _rows((out.get(key) or {}).get("reply")):
+            return 1
+    return 0
 
 
 async def run() -> int:
@@ -130,15 +159,16 @@ async def run() -> int:
     out: dict = {"graph": GRAPH, "provenance": _provenance(), "resolved": {}}
     async with Client(transport, timeout=300) as client:
         ids: dict = {}
-        for key, query, marker in (DECISION, CLAIM):
-            r = await _call(client, "tortoise_search", {"query": query, "limit": 8})
+        for key, claim in (DECISION, CLAIM):
+            r = await _call(client, "tortoise_search", {"query": claim, "limit": 8})
             out[f"{key}_search"] = r
-            point = pick_point(_rows(r.get("reply")), marker)
+            point = pick_point(_rows(r.get("reply")), claim)
             pid = (point or {}).get("id") or (point or {}).get("point_id")
             out["resolved"][key] = pid
             print(f"\n=== resolved {key}: {pid} — {str((point or {}).get('content'))[:90]}")
             if not pid:
-                print(f"!! {key} NOT RESOLVED — its expansion cannot run")
+                print(f"!! {key} NOT RESOLVED — no row's content IS the claim "
+                      f"{claim!r}; its expansion must not run on a near-miss")
                 continue
             ids[key] = pid
             out[key] = await _call(
@@ -160,9 +190,13 @@ async def run() -> int:
         print("\n=== list_knowledge kind=source ===")
         print(json.dumps(out["sources"], indent=1, default=str)[:2000])
 
+    code = verdict(out)
+    out["ok"] = code == 0
     (OUT / "census3.json").write_text(json.dumps(out, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'census3.json'}")
-    return 0
+    if code:
+        print("!! census3 NOT OK: a target did not resolve or an expansion read no rows")
+    return code
 
 
 if __name__ == "__main__":

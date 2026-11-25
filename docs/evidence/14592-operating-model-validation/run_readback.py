@@ -20,9 +20,11 @@ bug, not the product's — they are NOT recorded as findings.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -34,15 +36,24 @@ GRAPH = "xv14592_operating_model"
 
 #: One probe per element of the operating model the owner asked about. `expect`
 #: names the corpus fact a correct graph must be able to answer with.
-#: The corpus decision this probe must land on. A raw episodic turn also carries the
-#: word "Decision" (`[assistant] Decision: we revert to NordicFreight…`), so a
-#: substring scan over the hits is NOT a selection rule. In the committed run it
-#: settled on `doc-05_t5` — an episodic turn id — and `expand`/`explore` then
-#: answered `[]` for a graph that holds 8 IMPL rows on the real decision point.
-#: `pick_decision_point` is the rule and `decision_probe_findings` is the guard:
-#: the guard's verdict is recorded in the artifact, so an empty relation read can
-#: never again be committed as a successful one.
-DECISION_MARKER = "choose coldpath"
+#: The corpus decision this probe must land on — the extracted SENTENCE, not a
+#: substring. A raw episodic turn also carries the word "Decision"
+#: (`[assistant] Decision: we revert to NordicFreight…`), so neither a substring
+#: scan nor a `startswith` preference is a selection rule: both were measured
+#: `False` on every row this corpus produced, which left the choice to whatever
+#: the search listed first. In the committed run it settled on `doc-05_t5` — an
+#: episodic turn id — and `expand`/`explore` then answered `[]` for a graph that
+#: holds 8 IMPL rows on the real decision point. `pick_decision_point` matches
+#: this sentence by identity and `decision_probe_findings` is the guard.
+DECISION_CLAIM = "We choose ColdPath Logistics as our delivery partner"
+
+#: Keys this producer writes unconditionally. `stamp_provenance.py` reads this to
+#: tell a producer-written artifact from a hand-carried one.
+WRITTEN_KEYS = (
+    "graph_name", "db_uri", "provenance", "ok", "tool_surface", "layers",
+    "search", "entities", "decision_point", "expand", "explore",
+    "decision_probe_findings", "confidence", "recall",
+)
 
 PROBES = [
     ("decision", "Which delivery partner did we choose, and why did we choose them?",
@@ -90,29 +101,27 @@ def reply_rows(reply, keys=("result", "results", "relationships", "nodes", "item
     return []
 
 
-def pick_decision_point(rows):
-    """The EXTRACTED decision statement from a search reply.
+def _norm(text: object) -> str:
+    """Whitespace- and case-normalised content, for identity comparison."""
+    return " ".join(str(text or "").lower().split())
 
-    Ranked, so the answer does not depend on the search's order: a statement
-    whose content STARTS WITH the marker wins over one that merely contains it,
-    and a `statement` always wins over a raw turn — the marker in a turn is the
-    transcript's own `Decision:` prefix, not the extracted decision
-    (`doc-05_t5`, the id the previous revision settled on).
+
+def pick_decision_point(rows, claim: str = DECISION_CLAIM):
+    """The EXTRACTED decision statement — by identity, never by search order.
+
+    Returns ``None`` (a refusal) rather than a near-miss. The previous revision
+    ranked a `startswith` preference ahead of `contains`; measured across every
+    row this corpus produced, that term was **False for all of them** (the
+    extracted statement *contains* the marker, it does not begin with it), so
+    the tie fell through to the search's own order — the defect that selected
+    `doc-05_t5`. Identity against the known claim sentence is the discriminator
+    the corpus provides, and it is the only one used here.
     """
-    best: dict | None = None
-    best_rank = -1
+    target = _norm(claim)
     for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        content = str(row.get("content") or "").lower().strip()
-        if DECISION_MARKER not in content:
-            continue
-        kind = str(row.get("pointKind") or row.get("point_kind") or "").lower()
-        rank = (2 if content.startswith(DECISION_MARKER) else 0) + (
-            1 if kind == "statement" else 0)
-        if rank > best_rank:
-            best, best_rank = row, rank
-    return best
+        if isinstance(row, dict) and _norm(row.get("content")) == target:
+            return row
+    return None
 
 
 def decision_probe_findings(decision_point, expand, explore, surfaced_by_probe=None):
@@ -137,6 +146,28 @@ def decision_probe_findings(decision_point, expand, explore, surfaced_by_probe=N
         issues.append(
             f"explore_connections({decision_point or ''}) returned no connected nodes")
     return issues
+
+
+def _provenance() -> dict:
+    body = Path(__file__).read_bytes()
+    return {
+        "probe_path": str(Path(__file__).resolve().relative_to(WT)),
+        "probe_sha256": hashlib.sha256(body).hexdigest(),
+        "graph": GRAPH,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+def verdict(report: dict) -> int:
+    """0 only when the guard found nothing wrong with the relation read.
+
+    This is the exit code `run()` returns and the `ok` field the artifact
+    carries. The previous revision PRINTED the findings and returned 0
+    unconditionally, so an empty relation read was recorded as a successful one
+    — making the failure *visible* in the artifact, which is real value, but not
+    *impossible*, which is what the commit message claimed.
+    """
+    return 1 if report.get("decision_probe_findings") else 0
 
 
 async def _call(client, tool, args):
@@ -169,14 +200,15 @@ async def run() -> int:
         "tortoise/mcp_server.py", python_cmd=sys.executable, env=env, cwd=str(WT))
 
     report: dict = {"graph_name": GRAPH,
-                    "db_uri": env["TORTOISE_DB_URI"].split("@")[-1]}
+                    "db_uri": env["TORTOISE_DB_URI"].split("@")[-1],
+                    "provenance": _provenance()}
 
     async with Client(transport, timeout=300) as client:
         tools = {t.name: t for t in await client.list_tools()}
         (OUT / "tool-surface.json").write_text(json.dumps(
             {n: {"description": (t.description or "")[:400],
                  "required": (t.inputSchema or {}).get("required", []),
-                 "params": list(((t.inputSchema or {}).get("properties") or {}))}
+                 "params": list((t.inputSchema or {}).get("properties") or {})}
              for n, t in sorted(tools.items())}, indent=2) + "\n")
         report["tool_surface"] = {"count": len(tools), "names": sorted(tools)}
         print(f"=== MCP tool surface: {len(tools)} tools ===")
@@ -277,10 +309,16 @@ async def run() -> int:
             print(f"\n=== recall:state [{label}] ===")
             print(json.dumps(r.get("reply", r), indent=1, default=str)[:3000])
 
+    findings = report["decision_probe_findings"]
+    code = verdict(report)
+    report["ok"] = code == 0
     (OUT / "readback.json").write_text(
         json.dumps(report, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'readback.json'}")
-    return 0
+    if code:
+        print(f"!! readback NOT OK: {len(findings)} decision-probe finding(s) — "
+              "the relation read failed, so this is not a successful run")
+    return code
 
 
 if __name__ == "__main__":

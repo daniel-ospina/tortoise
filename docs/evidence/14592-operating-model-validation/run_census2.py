@@ -48,6 +48,10 @@ CALLS = [
     ("structure", "tortoise_check_structure", {}),
 ]
 
+#: Keys this producer writes unconditionally. `stamp_provenance.py` reads this to
+#: tell a producer-written artifact from a hand-carried one.
+WRITTEN_KEYS = ("graph", "provenance", "ok", "claims", "conf_one", "structure")
+
 
 async def _call(client, tool, args):
     try:

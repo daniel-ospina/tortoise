@@ -4282,6 +4282,22 @@
     }
   },
   "provenance": {
+    "artifact": "census.json",
+    "producer": "run_census.py",
+    "producer_path": "docs/evidence/14592-operating-model-validation/run_census.py",
+    "artifact_status": "pre-producer",
+    "produced_by_committed_producer": false,
+    "provenance_key_shape": "call-receipt",
+    "renamed_receipt_key": "provenance -> confidence_provenance_read",
+    "missing_producer_keys": [],
+    "hardcoded_point_ids": [
+      "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f"
+    ],
+    "regenerate_with": "TORTOISE_VENV=<checkout>/.venv TORTOISE_DB_URI=<uri to xv14592_operating_model> ./run.sh run_census.py",
+    "note": "Carried from the 2026-11-25 run, made before this producer was committed, so it is NOT this script's output. It cannot be regenerated: xv14592_operating_model lived in a lane container that was torn down (REPORT.md \u00a79). The deviations above are measured by stamp_provenance.py, not asserted.",
+    "stamp_probe": "stamp_provenance.py"
+  },
+  "confidence_provenance_read": {
     "tool": "tortoise_check_confidence",
     "args": {
       "topic": "cold chain constraint",

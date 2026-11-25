@@ -2213,5 +2213,23 @@
     "reply": {
       "result": []
     }
+  },
+  "provenance": {
+    "artifact": "census2.json",
+    "producer": "run_census2.py",
+    "producer_path": "docs/evidence/14592-operating-model-validation/run_census2.py",
+    "artifact_status": "pre-producer",
+    "produced_by_committed_producer": false,
+    "provenance_key_shape": "absent",
+    "renamed_receipt_key": null,
+    "missing_producer_keys": [
+      "graph",
+      "provenance",
+      "ok"
+    ],
+    "hardcoded_point_ids": [],
+    "regenerate_with": "TORTOISE_VENV=<checkout>/.venv TORTOISE_DB_URI=<uri to xv14592_operating_model> ./run.sh run_census2.py",
+    "note": "Carried from the 2026-11-25 run, made before this producer was committed, so it is NOT this script's output. It cannot be regenerated: xv14592_operating_model lived in a lane container that was torn down (REPORT.md \u00a79). The deviations above are measured by stamp_provenance.py, not asserted.",
+    "stamp_probe": "stamp_provenance.py"
   }
 }

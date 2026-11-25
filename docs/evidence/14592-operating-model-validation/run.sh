@@ -23,9 +23,16 @@
 #                     'docker://:@127.0.0.1:16467/tortoise_test_matrix' — this
 #                     worktree's own container, never the shared 6379 instance,
 #                     never live-v5)
-#   DEEPSEEK_API_KEY  the extraction LLM credential
+#   DEEPSEEK_API_KEY  the extraction LLM credential — required ONLY by
+#                     `run_ingest.py` (and by any phase you force with
+#                     TORTOISE_REQUIRE_LLM_KEY=1). The read-only phases
+#                     (`run_readback.py`, `run_census.py`, `run_census2.py`,
+#                     `run_census3.py`) make no model call, so demanding a key
+#                     for them aborted the report's own read-only recipe
+#                     before Python started. Never read from a credential file.
 # Optional:
 #   TORTOISE_VENV     interpreter root (default: <worktree>/.venv)
+#   TORTOISE_REQUIRE_LLM_KEY=1  force the key requirement for any phase
 set -euo pipefail
 
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"   # worktree root
@@ -39,7 +46,15 @@ fi
 
 export PYTHONPATH="$WT"
 export TORTOISE_DB_URI="${TORTOISE_DB_URI:?set TORTOISE_DB_URI (see header)}"
-export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY — this script reads no credential store}"
+
+# The extraction credential belongs to the phase that makes the LLM call, not to
+# the driver. Requiring it unconditionally made every read-only step of the
+# report's recipe abort on `set -u` with no Python ever run.
+if [ "$(basename "${1:-}")" = "run_ingest.py" ] || [ "${TORTOISE_REQUIRE_LLM_KEY:-0}" = "1" ]; then
+  export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY — this script reads no credential store}"
+elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+  export DEEPSEEK_API_KEY
+fi
 
 cd "$WT"
 exec "$PY" "$@"

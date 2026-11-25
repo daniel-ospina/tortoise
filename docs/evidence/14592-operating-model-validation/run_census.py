@@ -18,15 +18,31 @@ builds Cypher, or touches the record store.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 WT = Path(__file__).resolve().parents[3]
 GRAPH = "xv14592_operating_model"
+
+#: Keys the producer writes unconditionally. `stamp_provenance.py` reads this to
+#: tell a producer-written artifact from a hand-carried one.
+WRITTEN_KEYS = ("graph", "provenance", "decision_search", "reversal_search")
+
+
+def _provenance() -> dict:
+    body = Path(__file__).read_bytes()
+    return {
+        "probe_path": str(Path(__file__).resolve().relative_to(WT)),
+        "probe_sha256": hashlib.sha256(body).hexdigest(),
+        "graph": GRAPH,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
 
 
 async def _call(client, tool, args):
@@ -73,7 +89,7 @@ async def run() -> int:
     transport = PythonStdioTransport(
         "tortoise/mcp_server.py", python_cmd=sys.executable, env=env, cwd=str(WT))
 
-    out: dict = {"graph": GRAPH}
+    out: dict = {"graph": GRAPH, "provenance": _provenance()}
     async with Client(transport, timeout=300) as client:
         # ── 1. every Object / Subject / Event, full-scan ────────────────
         for typ in ("object", "subject", "event", "source"):
@@ -90,7 +106,7 @@ async def run() -> int:
         r = await _call(client, "tortoise_query",
                         {"kind": "operator", "limit": 200})
         out["query_operators"] = r
-        print(f"\n=== tortoise_query kind=operator ===")
+        print("\n=== tortoise_query kind=operator ===")
         print(json.dumps(r, indent=1, default=str)[:1500])
 
         # ── 3. per-object EP + degree, via recall (graph beliefs) ───────
@@ -159,16 +175,27 @@ async def run() -> int:
                              indent=1, default=str)[:3000])
 
         # ── 5. provenance: can the product trace a claim to its source? ──
-        out["provenance"] = await _call(
+        # ⛔ NOT the `provenance` artifact key. This is a CALL RECEIPT for a
+        # `check_confidence(include_provenance=True)` read, and naming it
+        # `provenance` made `census.json` look like it self-described its
+        # producing code when it did not — there was no provenance block in the
+        # artifact at all. The receipt keeps its own name; the block lives under
+        # `provenance` above, written by `_provenance()`.
+        out["confidence_provenance_read"] = await _call(
             client, "tortoise_check_confidence",
             {"topic": "cold chain constraint", "include_provenance": True, "limit": 5})
         print("\n=== check_confidence(include_provenance) ===")
-        print(json.dumps(out["provenance"].get("reply"),
+        print(json.dumps(out["confidence_provenance_read"].get("reply"),
                          indent=1, default=str)[:3000])
 
+    code = 0 if out.get("decision_point_id") else 1
+    out["ok"] = code == 0
     (OUT / "census.json").write_text(json.dumps(out, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'census.json'}")
-    return 0
+    if code:
+        print("!! census NOT OK: the decision search surfaced no row whose content "
+              "IS the decision, so no relation read was attempted")
+    return code
 
 
 if __name__ == "__main__":
