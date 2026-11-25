@@ -1054,6 +1054,13 @@ def test_every_gh_subcommand_is_recognised():
     intended, not a flake. The entry is added and the tuple now carries 34 names, so
     `gh event listen` is a recognised invocation rather than a silent CLEAN read. Widen
     when a later `gh` adds one; never narrow.
+
+    ⛔ AND THE ENTRY STAYS EVEN ON A BOX WHOSE `gh` DOES NOT PUBLISH IT. This box's
+    `gh 2.102.0` prints no `event`, so pruning the tuple to "only what this box prints"
+    reads as tidy and re-opens the hole: the assertion is one-directional
+    (`published - listed`), so a SUPERSET costs nothing while a MISSING name is an
+    invocation that scans CLEAN. The red that established this was the required
+    `test-carve-out (b)` shard, run `45702028189`, head `071864b2`.
     """
     live = subprocess.run(["gh", "--help"], capture_output=True, text=True)
     if live.returncode != 0:
