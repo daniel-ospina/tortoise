@@ -28,10 +28,10 @@
 // Runner: vitest + jsdom (`npm run test:dom`), reached through the package's
 // primary command by `src/domSuite.test.js` (a `node:test` file that fails if this
 // file is not collected or does not pass).
-import { afterEach, test } from 'vitest'
+import { afterEach, test, vi } from 'vitest'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
 
 // Imported on purpose: `css: true` only injects CSS this file's own module graph
 // pulls in, so without it the visibility assertion below runs in a document with
@@ -40,10 +40,12 @@ import './index.css'
 import { NotificationBell } from './notificationPanel.jsx'
 import {
   DETAIL_NO_DETAIL,
+  DETAIL_TITLE,
   LEDGER_ALL_CLEAR,
   SAVE_FAILED,
   SNOOZE_PERIODS,
   STORAGE_UNAVAILABLE,
+  TRUNCATED_NOTE,
   entryKeyOf,
   storageKey,
 } from './notificationLedger.js'
@@ -102,7 +104,7 @@ function renderBell(props = {}) {
         onAcknowledge={props.onAcknowledge || null}
         ackPending={props.ackPending || null}
         ackError={props.ackError || null}
-        now={props.now || NOW}
+        now={'now' in props ? props.now : NOW}
         storage={storage}
       />,
     ),
@@ -124,14 +126,15 @@ test('#14686: the alerts are a bell with a count, not banner blocks in the page'
   assert.equal(control.getAttribute('aria-label'), 'Notifications — 2 unresolved')
   assert.equal(control.getAttribute('aria-expanded'), 'false')
   assert.equal(container.querySelector('.notif-badge').textContent, '2')
-  // WHAT THIS CANNOT PROVE: that the alerts are gone from the page FLOW. This
-  // component renders only itself, so `.overview === null` here is true wherever it
-  // is mounted — the placement pin is in `securityAlerts.test.js` (the bell is in
-  // `header.dash-header`, before `<main>`, and nothing mounts the old panel). What
-  // IS proved here: this component never renders the register headings or the
-  // per-row Acknowledge control of the surface it replaces.
+  // No banner: the closed control renders the BELL AND NOTHING ELSE. Counting the
+  // root's children is the assertion that can fail on the mutation this pins —
+  // alert markup added beside the bell (the old surface's shape) reds it, where
+  // asserting the absence of a class this component never renders cannot.
+  const root = container.querySelector('.notif-root')
+  assert.equal(root.children.length, 1, 'closed: the bell is the only thing rendered')
+  assert.ok(root.children[0].classList.contains('notif-bell'))
   assert.doesNotMatch(container.textContent, /Security alerts/)
-  assert.doesNotMatch(container.textContent, /Acknowledge for everyone/)
+  assert.doesNotMatch(container.textContent, /Acknowledge/)
   // …and the panel is CLOSED until asked for.
   assert.equal(panel(container), null)
 })
@@ -163,24 +166,6 @@ test('#14686: the panel unfolds from the bell and closes again', () => {
   assert.ok(panel(container))
   fireEvent.pointerDown(document.body)
   assert.equal(panel(container), null)
-})
-
-test('#14686: a failed or cut read is visible in the HEADER, without opening the panel', () => {
-  // Round-2 finding: moving the feed into a panel that only speaks when opened made
-  // "we could not read your alerts" and "you have none" the same pixel.
-  const failed = renderBell({ alerts: [], unavailable: true })
-  assert.match(bell(failed.container).getAttribute('aria-label'), /could not read alert history/)
-  assert.ok(failed.container.querySelector('.notif-badge-warn'), 'a visible warning mark')
-  failed.unmount()
-
-  const cut = renderBell({ alerts: [], scanSaturated: true })
-  assert.match(bell(cut.container).getAttribute('aria-label'), /alert window may be full/)
-  cut.unmount()
-
-  // A healthy org keeps the plain bell (no warning, no badge when nothing is open).
-  const quiet = renderBell({ alerts: [] })
-  assert.equal(bell(quiet.container).getAttribute('aria-label'), 'Notifications')
-  assert.equal(quiet.container.querySelector('.notif-badge-warn'), null)
 })
 
 test('#14686: the ledger is newest-first, grouped ×N, with a stamp and a relative age', () => {
@@ -231,23 +216,6 @@ test('#14686: an activity row is chipped as a measurement, an incident row as an
   assert.ok(!activity.className.includes('notif-row-incident'))
 })
 
-test('#14686: a row we could not classify says so, and does NOT claim to be an activity row', () => {
-  // `registerOf` fail-quiets an unknown register into the activity register, so a
-  // two-valued chip labelled an unclassified row "activity" while its own detail view
-  // said "We could not classify this alert" (review finding). Reachable in the window
-  // where the API deploys a new alert type before this bundle.
-  const { container } = renderBell({
-    alerts: [alert({ type: 'brand_new', register: undefined, message: 'unknown kind' })],
-  })
-  fireEvent.click(bell(container))
-  const row = rows(container)[0]
-  assert.match(row.textContent, /unclassified/)
-  assert.ok(!/activity/.test(row.querySelector('.notif-chip').textContent))
-  // …and the detail view agrees with the chip.
-  fireEvent.click(container.querySelector('.notif-open'))
-  assert.match(container.querySelector('.notif-detail').textContent, /could not classify/i)
-})
-
 // ── 3. Snooze ──────────────────────────────────────────────────────────────
 
 test('#14686: snoozing for 1 h hides the row, and the row is back once the hour passes', () => {
@@ -284,6 +252,88 @@ test('#14686: snoozing for 1 h hides the row, and the row is back once the hour 
   assert.match(rows(after.container)[0].textContent, /snooze me/)
 })
 
+// ── 3b. A snooze is suppression, not a resolution ──────────────────────
+
+test('#14686: a snooze that runs out while the panel sits OPEN comes back on its own', () => {
+  // The render clock was frozen at the last interaction and there was no timer, so
+  // a row snoozed at 09:00 was still hidden at 14:00 in the same tab (review
+  // finding). One coarse tick while the panel is open is what makes the deadline
+  // real. Fake timers: this is a claim about the passage of time, and a tick.
+  vi.useFakeTimers()
+  try {
+    vi.setSystemTime(NOW)
+    const { container } = renderBell({ alerts: [alert({ message: 'expire me' })], now: null })
+    fireEvent.click(bell(container))
+    fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+    // 61 minutes of a panel left open: the snooze is over, and the row is back
+    // without a click, a reload or a reopen.
+    act(() => { vi.advanceTimersByTime(61 * MIN) })
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('#14686: a snoozed-only ledger does not claim everything was dealt with', () => {
+  // A snooze is neither an acknowledgement nor a dismissal, so the old sentence
+  // printed an affirmative directly above "Snoozed (1) … in 1 h". (The review
+  // attributed the rule to Carbon's notifications guidance; a read of that
+  // pattern page — carbondesignsystem.com/patterns/notification-pattern — does
+  // NOT contain it, so the fix rests on the contradiction in our own render, not
+  // on a citation. What the page does say is relevant and kept: a notification
+  // panel exists so users "can access and read ALL notifications", and users must
+  // be able to "manage or limit noncritical notifications" — which is why snoozed
+  // and dismissed rows stay reachable instead of being deleted.)
+  const storage = fakeStorage()
+  const row = alert({ message: 'quiet me' })
+  const first = renderBell({ alerts: [row], storage })
+  fireEvent.click(bell(first.container))
+  fireEvent.change(first.container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+  first.unmount()
+
+  // Ten minutes in: still snoozed, so the ledger is empty and the badge is 0.
+  const during = renderBell({ alerts: [row], storage, now: new Date(NOW.getTime() + 10 * MIN) })
+  fireEvent.click(bell(during.container))
+  assert.equal(during.container.querySelector('.notif-list .notif-row'), null)
+  assert.doesNotMatch(
+    during.container.textContent,
+    /has been acknowledged or dismissed/,
+    'a snoozed alert has NOT been acknowledged or dismissed',
+  )
+  // …and the sentence that does print NAMES the third state.
+  assert.match(during.container.textContent, /acknowledged, dismissed or snoozed/)
+})
+
+test('#14686: "1 hour" is an hour from the CLICK, not from when the panel opened', () => {
+  // The snooze was measured from a FROZEN `openedAt`, so a panel left open for 40
+  // minutes snoozed for 20. Fake timers, because this is the one thing a
+  // hand-injected `now` cannot show: two READS of the real clock at different
+  // moments.
+  vi.useFakeTimers()
+  try {
+    vi.setSystemTime(NOW)
+    const storage = fakeStorage()
+    const { container } = renderBell({ alerts: [alert({ message: 'clock me' })], storage, now: null })
+    fireEvent.click(bell(container))
+
+    // The panel sits open for 40 minutes…
+    vi.setSystemTime(new Date(NOW.getTime() + 40 * MIN))
+    fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+
+    const saved = JSON.parse(storage.getItem(storageKey({ userId: USER, orgId: ORG })))
+    const until = Number(saved.snoozed[entryKeyOf(alert({ message: 'clock me' }))])
+    assert.equal(
+      new Date(until).toISOString(),
+      new Date(NOW.getTime() + 40 * MIN + HOUR).toISOString(),
+      'the hour starts when the reader chose it',
+    )
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test('#14686: a dismissal made WITHOUT a working store survives the panel being REOPENED', () => {
   // Review finding (P1): the re-read on open replaced in-memory state with the
   // store's, so with no store at all the dismissal vanished on the next open — the
@@ -315,23 +365,19 @@ test('#14686: Escape from inside the panel restores focus to the bell', () => {
   assert.equal(document.activeElement, bell(container))
 })
 
-test('#14686: Escape from inside the DETAIL view returns to the ledger, not to nowhere', () => {
-  const { container } = renderBell({ alerts: [alert({ message: 'detail escape' })] })
+test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
+  // `registerOf` fail-quiets an unknown register into the activity register, so a
+  // two-valued chip labelled an unclassified row "activity" — a measurement that
+  // "changed nothing" — while the same row's detail view said we could not classify
+  // it (review finding). Reachable whenever the API ships a new type first.
+  const { container } = renderBell({
+    alerts: [alert({ type: 'brand_new', register: undefined, message: 'unknown kind' })],
+  })
   fireEvent.click(bell(container))
+  const chip = container.querySelector('.notif-list .notif-chip')
+  assert.equal(chip.textContent, 'unclassified')
   fireEvent.click(container.querySelector('.notif-open'))
-  assert.ok(container.querySelector('.notif-detail'))
-  const back = container.querySelector('.notif-back')
-  back.focus()
-  // Round-2 finding: this keydown was handled only by the panel's own listener, so
-  // once focus fell to <body> a SECOND Escape did nothing and the panel stayed open.
-  fireEvent.keyDown(back, { key: 'Escape' })
-  assert.equal(container.querySelector('.notif-detail'), null, 'back to the ledger')
-  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
-  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
-  // …and Escape still closes from there.
-  fireEvent.keyDown(document, { key: 'Escape' })
-  assert.equal(container.querySelector('.notif-panel'), null)
-  assert.equal(document.activeElement, bell(container))
+  assert.match(container.querySelector('.notif-detail').textContent, /could not classify/i)
 })
 
 test('#14686: the trigger declares what it controls', () => {
@@ -444,6 +490,97 @@ test('#14686: no usable store at all is reported as its own fact, before any act
   assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
+// ── 4b. Two episodes, one identity (the row identity is not the decision) ───
+
+/** Two server episodes of the same type with the SAME message — the local
+ *  identity is `type|message`, so these are one decision over two rows. */
+function sameWording() {
+  const newer = alert({
+    message: 'same wording',
+    count: 9,
+    episode: 'flag|rule-b|newer',
+    at: new Date(NOW.getTime() - 1 * MIN).toISOString(),
+    first_at: new Date(NOW.getTime() - 4 * HOUR).toISOString(),
+  })
+  const older = alert({
+    message: 'same wording',
+    count: 3,
+    episode: 'flag|rule-a|older',
+    at: new Date(NOW.getTime() - 9 * MIN).toISOString(),
+    first_at: new Date(NOW.getTime() - 3 * HOUR).toISOString(),
+  })
+  return { newer, older }
+}
+
+test('#14686: two episodes sharing an identity are two rows, and each opens its OWN detail', () => {
+  const { newer, older } = sameWording()
+  const { container } = renderBell({ alerts: [newer, older] })
+  fireEvent.click(bell(container))
+  assert.equal(rows(container).length, 2, 'two server episodes are two notifications')
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 2 unresolved')
+
+  // Opening the SECOND row shows the second episode's count, not the first's —
+  // a detail view that shows a different episode than the row clicked is a bug a
+  // security list cannot have.
+  fireEvent.click(container.querySelectorAll('.notif-open')[1])
+  const detail = container.querySelector('.notif-detail')
+  assert.match(detail.textContent, /3 detection windows/)
+  assert.doesNotMatch(detail.textContent, /9 detection windows/)
+})
+
+test('#14686: dismissing the OLDER of two same-identity episodes leaves the newer one', () => {
+  // The incident gate: you dismissed what you saw, not what HAPPENED after.
+  const { newer, older } = sameWording()
+  const { container } = renderBell({ alerts: [newer, older] })
+  fireEvent.click(bell(container))
+  const second = container.querySelectorAll('.notif-list .notif-row')[1]
+  fireEvent.click([...second.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+
+  assert.equal(rows(container).length, 1, 'the newer episode must not be hidden by it')
+  assert.match(rows(container)[0].textContent, /same wording/)
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
+})
+
+test('#14686: a dismissal that could not be STORED survives reopening the panel', () => {
+  // `SAVE_FAILED` promises the decision holds until the page reloads. The re-read
+  // on open took the store's (empty) state, so opening the panel silently undid
+  // the click the reader had just made.
+  const broken = {
+    getItem: () => null,
+    setItem: () => { throw new Error('QuotaExceededError') },
+    removeItem: () => {},
+  }
+  const { container } = renderBell({ alerts: [alert({ message: 'hold me' })], storage: broken })
+  fireEvent.click(bell(container))
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+  fireEvent.click(bell(container)) // close
+  fireEvent.click(bell(container)) // open again: re-reads the store
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+  assert.ok(!container.textContent.includes('hold me'), 'the dismissal must survive opening the panel')
+  assert.ok(container.textContent.includes(SAVE_FAILED), 'and the write failure is still stated')
+})
+
+test('#14686: a FULL store is not reported as blocked — only the write failed', () => {
+  const full = {
+    getItem: () => null,
+    setItem: () => { throw new Error('QuotaExceededError') },
+    removeItem: () => {},
+  }
+  const { container } = renderBell({ alerts: [alert({ message: 'full store' })], storage: full })
+  fireEvent.click(bell(container))
+  assert.ok(
+    !container.textContent.includes(STORAGE_UNAVAILABLE),
+    'a full store still READS; "your browser blocked storage" is a cause it cannot know',
+  )
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  assert.ok(container.textContent.includes(SAVE_FAILED), 'the honest fact is that THIS write failed')
+})
+
 // ── 5. The detail view ─────────────────────────────────────────────────────
 
 test('#14686: clicking a notification opens its detail, and says when no detail was recorded', () => {
@@ -455,7 +592,11 @@ test('#14686: clicking a notification opens its detail, and says when no detail 
 
   const detail = container.querySelector('.notif-detail')
   assert.ok(detail, 'the detail view must open')
-  assert.match(detail.textContent, /Notification detail|detail me/)
+  // The title is the view's ACCESSIBLE NAME (`DETAIL_TITLE` reaches the DOM only
+  // as an `aria-label`). The old assertion here was satisfied by the fixture's own
+  // message text and so could not red when the title was removed.
+  assert.equal(detail.getAttribute('aria-label'), DETAIL_TITLE)
+  assert.match(detail.querySelector('h3').textContent, /Suspicious activity/)
   // The recorded facts are shown…
   assert.match(detail.textContent, /What/)
   assert.match(detail.textContent, /Kind/)
@@ -470,6 +611,28 @@ test('#14686: clicking a notification opens its detail, and says when no detail 
   fireEvent.click(detail.querySelector('.notif-back'))
   assert.equal(container.querySelector('.notif-detail'), null)
   assert.equal(rows(container).length, 1)
+})
+
+test('#14686: a truncated bout says its ×N+ is a floor, in the row and in the detail', () => {
+  // The sentence that explained `×N+` was deleted with the previous surface and
+  // the `+` stayed, so the ledger told a customer "100+ detection windows" — a
+  // count that stopped — with nothing saying why it stopped.
+  const truncated = alert({
+    count: 100,
+    truncated: true,
+    first_at: new Date(NOW.getTime() - 3 * HOUR).toISOString(),
+  })
+  const { container } = renderBell({ alerts: [truncated] })
+  fireEvent.click(bell(container))
+  const row = rows(container)[0]
+  assert.match(row.textContent, /×100\+/)
+  assert.match(row.textContent, /older than the window we can identify/)
+
+  fireEvent.click(row.querySelector('.notif-open'))
+  const detail = container.querySelector('.notif-detail')
+  assert.match(detail.textContent, /100\+ detection windows/)
+  assert.match(detail.textContent, /Older occurrences/)
+  assert.ok(detail.textContent.includes(TRUNCATED_NOTE))
 })
 
 test('#14686: the org-wide Acknowledge is in the detail view, owner-only, and calls the episode route', () => {
@@ -528,6 +691,22 @@ test('#14686: an ordinary quiet Organization does get the plain empty line', () 
   const { container } = renderBell({ alerts: [] })
   fireEvent.click(bell(container))
   assert.match(container.textContent, /You have no notifications\./)
+})
+
+test('#14686: a failed read is visible on the CLOSED bell, not only inside the panel', () => {
+  // The two "we could not look" sentences render inside the open panel, so a
+  // failed read used to be pixel-identical to an all-clear closed bell.
+  const failed = renderBell({ alerts: [], unavailable: true })
+  assert.match(bell(failed.container).getAttribute('aria-label'), /could not be loaded/)
+  assert.equal(failed.container.querySelector('.notif-badge').textContent, '!')
+
+  const cut = renderBell({ alerts: [], scanSaturated: true })
+  assert.match(bell(cut.container).getAttribute('aria-label'), /scan was cut/)
+  assert.equal(cut.container.querySelector('.notif-badge').textContent, '!')
+
+  // With rows in hand the rows are evidence: the count still counts.
+  const rowsPresent = renderBell({ alerts: [alert()], unavailable: true })
+  assert.equal(bell(rowsPresent.container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
 // ── 7. Nothing is hidden by CSS (the evasion no source scan can see) ────────

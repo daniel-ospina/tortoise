@@ -52,6 +52,23 @@
 // not repeat that mistake, so its key is the episode's client-visible IDENTITY
 // and not the moving server key — see `entryKeyOf`. A notification is hidden when
 // EITHER layer says it was dealt with.
+//
+// ⛔ TWO KEYS, and they answer different questions — do not collapse them:
+//
+//   * `rowKeyOf` — WHICH ROW this is: the server's `episode`. Stable across
+//     renders, distinct for two episodes that share a client-visible identity.
+//     It is what React keys on and what the detail view resolves, because a
+//     row that opens a DIFFERENT episode than the one clicked is a bug a
+//     security list cannot have.
+//   * `entryKeyOf` — WHICH DECISION covers it: the client-visible identity
+//     (`type|message`), which must NOT move when the server re-keys a bout.
+//
+// The two are not interchangeable. Using the decision key as the render key made
+// two distinct episodes the same React child (one silently dropped); using the
+// render key as the decision key would resurrect a dismissal every time the
+// scan window slid. The incident gate in `isDismissed` is what keeps the second
+// key honest — it mirrors the server's own rule (see the INCIDENT GATE in
+// `tortoise/abuse.py::_episode_acknowledged`).
 import {
   OLD_AFTER_DAYS,
   REGISTER_ACTIVITY,
@@ -110,6 +127,31 @@ export function periodMs(id) {
 
 export const STORAGE_PREFIX = 'tortoise.notifications.v1'
 
+/** The key the availability probe reads. Never written: see `probeStorage`. */
+const PROBE_KEY = '__tortoise_notif_probe__'
+
+/**
+ * The usable store, or null where there is none.
+ *
+ * Judged by a READ, deliberately. An earlier version probed by WRITING, so a
+ * store that is merely FULL (quota exceeded — the ordinary end state of a long
+ * session) threw on the probe and was reported as "your browser blocked local
+ * notification storage": a false cause, and a permanent-looking one, printed
+ * over a store that reads perfectly well and where the real fact (`this write
+ * failed`) has its own sentence. A privacy mode that blocks storage throws on
+ * the READ too, which is the only thing this probe is for; a store that reads
+ * but refuses a write is reported per write, by `writeState`.
+ */
+export function probeStorage(candidate) {
+  if (!candidate) return null
+  try {
+    candidate.getItem(PROBE_KEY)
+    return candidate
+  } catch {
+    return null
+  }
+}
+
 /** The storage key for one (user, Organization) pair. */
 export function storageKey({ userId, orgId } = {}) {
   // Deliberately never throws or returns an empty segment: an absent user or org
@@ -117,9 +159,6 @@ export function storageKey({ userId, orgId } = {}) {
   // silently not persisting — is the "dismissal that evaporates" bug itself.
   return `${STORAGE_PREFIX}:${userId || 'anonymous'}:${orgId || 'no-org'}`
 }
-
-/** How many dismissed WINDOWS a single identity keeps. See `dismiss`. */
-const MAX_DISMISS_WINDOWS = 12
 
 /** A complete, empty store. */
 export function emptyState() {
@@ -183,22 +222,14 @@ export function readState(storage, key, now = new Date()) {
   const dismissedEntries = Object.entries(
     isPlainObject(parsed.dismissed) ? parsed.dismissed : {},
   )
-  // Newest-first cap on the number of KEYED identities: the identities we keep are
-  // the ones dismissed most recently, which are the ones an in-feed episode can
-  // still match. Each entry keeps its own window list (see `dismiss`), and a
-  // numeric entry — the shape this store allowed before it carried windows — is
-  // normalised to a zero-width window instead of being dropped.
+  // Newest-first cap: the entries we keep are the most recent dismissals, which
+  // are the ones an in-window episode can still match.
   dismissedEntries
-    .map(([episode, value]) => {
-      const windows = normalizeWindows(value)
-      const newest = windows.reduce((max, w) => Math.max(max, w.at), 0)
-      return { episode, windows, newest }
-    })
-    .filter((entry) => entry.windows.length > 0)
-    .sort((a, b) => b.newest - a.newest)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
     .slice(0, MAX_DISMISSED)
-    .forEach(({ episode, windows }) => {
-      dismissed[episode] = windows
+    .forEach(([episode, at]) => {
+      const atMs = Number(at)
+      dismissed[episode] = Number.isFinite(atMs) ? atMs : 0
     })
   return { state: { v: 1, snoozed, dismissed }, persisted: true }
 }
@@ -239,40 +270,24 @@ export function unsnooze(state, episode) {
 
 /** Dismiss one notification locally.
  *
- * ⛔ THE DISMISSAL IS SCOPED TO THE EPISODE'S WINDOW, not to its identity alone.
- * The local key is `type|message` (see `entryKeyOf`) and for the highest-severity
- * class — `flag` — the message is a CONSTANT that deliberately omits the rule,
- * which is the server's real subject. Identity-only dismissal therefore meant one
- * click silently silenced every future bout of that class, forever, with the badge
- * reading 0: an alert made invisible AND uncountable on a security surface (review
- * P1, round 2). That is the same failure round 1 removed from the ack axis.
+ *  The stored value is a WATERMARK, not just a timestamp: the row's own `at`
+ *  when it carries one, so the comparison in `isDismissed` is server-time
+ *  against server-time and a skewed browser clock cannot hide an incident. A
+ *  row without an `at` falls back to the local clock — there is nothing on the
+ *  server side to compare it with either.
  *
- * So the store keeps the WINDOW the reader dismissed — `[first_at, at]` off the
- * row they clicked — and a later row is hidden only when its own window OVERLAPS
- * it. That is exactly how `_episode_acknowledged` survives the server's sliding
- * `first_at`: a bout that keeps growing still overlaps the window that was
- * dismissed (so it stays quiet), while a genuinely new bout a week later does not
- * (so it is shown). A naive `at <= dismissedAt` test would fail both ways — it
- * would resurrect a growing bout on its next window AND hide a new bout.
- *
- * `windows` is the row's `[first, at]` in ms, or null when the row carries no
- * usable timestamp; null falls back to identity matching, because a dismissal the
- * reader made must not be discarded by a missing field.
+ *  Consequence, stated because it is a behaviour: dismissing the OLDER of two
+ *  episodes that share an identity covers the older history but leaves the
+ *  NEWER one in the ledger. That is the gate working — you dismissed what you
+ *  saw, not what happened afterwards.
  */
-export function dismiss(state, episode, windows = null, now = new Date()) {
+export function dismiss(state, episode, now = new Date(), alert = null) {
   const base = state || emptyState()
   if (!episode) return base
-  const window = normalizeWindow(windows) || windowOfAlert(windows) || zeroWindow(now)
-  const existing = normalizeWindows((base.dismissed || {})[episode])
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
   return {
     ...base,
-    dismissed: {
-      ...base.dismissed,
-      // Bounded per key: a reader who dismisses the same identity repeatedly should
-      // not grow the blob without limit, and the number of windows that can still
-      // match an in-feed row is small.
-      [episode]: [...existing, window].slice(-MAX_DISMISS_WINDOWS),
-    },
+    dismissed: { ...base.dismissed, [episode]: atMsOf(alert) || nowMs },
   }
 }
 
@@ -295,71 +310,42 @@ export function snoozedUntil(state, episode, now = new Date()) {
   return until > nowMs ? until : 0
 }
 
-/** True when `alert` falls inside a window this key was dismissed for.
+/** The server timestamp of a row (ms), or 0 when it carries none. */
+function atMsOf(alert) {
+  const raw = alert && alert.at
+  if (!raw) return 0
+  const ms = new Date(raw).getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
+
+/**
+ * True when the episode is locally dismissed.
  *
- * Two dismissals of the same identity are independent windows, so a row is hidden
- * if it overlaps ANY of them. An unparseable window falls back to identity match
- * (see `dismiss`).
+ * ⛔ THE INCIDENT GATE, client side. `dismiss` records the row's own `at` as the
+ * watermark, and an INCIDENT that happened AFTER it is NOT covered — the same
+ * rule the server applies in `_episode_acknowledged` (`tortoise/abuse.py`):
+ *
+ *   "For an INCIDENT each row is a new FACT — a suspension, a re-suspension
+ *    after an appeal, a second new-country sign-in — and folding it into the
+ *    dismissed episode hides it. … The dismissal covers what the operator saw;
+ *    anything that HAPPENS afterwards re-opens the episode."
+ *
+ * Without this bound the local layer was the direction that gate explicitly
+ * rejects: one dismissal of `flag|Suspicious activity flagged on this
+ * Organization` (a message with no rule token, so EVERY flag rule shares it)
+ * hid a suspension that happened a week later.
+ *
+ * An ACTIVITY (measurement) row keeps no bound, and that asymmetry is the
+ * server's: a velocity row re-reported every five minutes is the SAME ongoing
+ * measurement, so one dismissal covering all of it is the point. It is bounded
+ * in practice by the store's dismissal cap.
  */
 export function isDismissed(state, episode, alert = null) {
-  if (!state || !state.dismissed || !(episode in state.dismissed)) return false
-  const windows = normalizeWindows(state.dismissed[episode])
-  if (windows.length === 0) return false
-  const target = alert ? windowOfAlert(alert) : null
-  if (!target) return true // no usable window on the row: identity match
-  return windows.some((w) => overlaps(w, target))
-}
-
-/** `[first_at, at]` in ms for an alert row, or null when it carries neither. */
-export function windowOfAlert(alert) {
-  if (!alert) return null
-  const at = tsOf(alert.at)
-  const first = tsOf(alert.first_at)
-  if (at === null && first === null) return null
-  const end = at === null ? first : at
-  const start = first === null ? end : Math.min(first, end)
-  return { first: start, at: end }
-}
-
-function tsOf(value) {
-  if (value === undefined || value === null || value === '') return null
-  const ms = value instanceof Date ? value.getTime() : Date.parse(value)
-  return Number.isFinite(ms) ? ms : null
-}
-
-function normalizeWindow(value) {
-  if (!value || typeof value !== 'object') return null
-  const first = Number(value.first)
-  const at = Number(value.at)
-  if (!Number.isFinite(first) || !Number.isFinite(at)) return null
-  return { first: Math.min(first, at), at: Math.max(first, at) }
-}
-
-/** Stored windows, tolerating the numeric shape this store allowed before it
- *  carried windows (a bare dismissal timestamp), and junk. */
-function normalizeWindows(value) {
-  if (value === undefined || value === null) return []
-  const raw = Array.isArray(value) ? value : [value]
-  const out = []
-  for (const item of raw) {
-    const window = normalizeWindow(item)
-    if (window) out.push(window)
-    else {
-      const ms = Number(item)
-      if (Number.isFinite(ms) && ms > 0) out.push({ first: ms, at: ms })
-    }
-  }
-  return out
-}
-
-function zeroWindow(now) {
-  const ms = now instanceof Date ? now.getTime() : Date.parse(now)
-  const at = Number.isFinite(ms) ? ms : Date.now()
-  return { first: at, at }
-}
-
-function overlaps(a, b) {
-  return a.first <= b.at && b.first <= a.at
+  if (!(state && state.dismissed && episode in state.dismissed)) return false
+  if (!alert || registerOf(alert) !== REGISTER_ALERT) return true
+  const dismissedThrough = Number(state.dismissed[episode]) || 0
+  const happenedAt = atMsOf(alert)
+  return !(happenedAt && happenedAt > dismissedThrough)
 }
 
 /** The server's opaque episode key — the key the ack route takes. */
@@ -380,19 +366,34 @@ export function episodeOf(alert) {
  * already solved it with window overlap.
  *
  * So the local key is the episode's IDENTITY as far as the client can see it:
- * the type plus the server-authored message. The message is the one field that
- * carries the subject for every type — `auth_ip` embeds the country, the rate
- * detectors embed the scope/id (`_read_velocity_message`), and the flag types
- * embed nothing because their subject is the rule, which the customer-facing
- * feed deliberately does not ship.
+ * the type plus the server-authored message.
  *
- * ⚠️ THAT COLLISION IS WHY A DISMISSAL IS WINDOW-SCOPED AND A SNOOZE IS NOT. Two
- * separate `flag` bouts share this key, so a dismissal keyed on the identity alone
- * would silence the class forever (review P1). `dismiss` therefore stores the
- * window the reader dismissed and hides only overlapping rows, while `snooze`
- * stays identity-wide because it is bounded by the period the reader chose — the
- * blast radius is the hour, day or week they asked for, and it is visible in the
- * "Snoozed (N)" list the whole time. Neither is silent, and both are reversible.
+ * ⚠️ THE MESSAGE DOES NOT CARRY THE SUBJECT FOR EVERY TYPE, and an earlier
+ * version of this docstring wrongly said it did. What the feed actually ships:
+ *
+ *   * `auth_ip` — the country IS in the message ("Access from a new location:
+ *     ES"), so two sign-in locations are two local identities;
+ *   * the rate detectors — the message names the DIMENSION (one key vs the
+ *     whole Organization) and deliberately names NO identifier:
+ *     `_read_velocity_message` in `tortoise/abuse.py` records that the earlier
+ *     wording printed `api_keys.id`, an internal hex value the customer cannot
+ *     match to any row, and that the sentence was removed for exactly that
+ *     reason. So two different keys crossing the same threshold in the same
+ *     scope are ONE local identity;
+ *   * the incident types — `flag` / `review_needed`, whose subject server-side
+ *     is the RULE (`_alert_subject`), and the customer-facing message is a
+ *     constant with no rule token. Every flag rule is therefore one local
+ *     identity.
+ *
+ * Consequence, stated rather than hidden: two SEPARATE bouts of the same type
+ * (over different rules, in the flag case) share one local identity, so
+ * dismissing one covers the other. Two things keep that from being the "new
+ * incident silently suppressed" bug: `isDismissed`'s INCIDENT GATE re-opens an
+ * incident that happened after the dismissal, and every dismissal is reversible
+ * — the ledger keeps a Dismissed group (with Restore) so nothing is destroyed.
+ *
+ * ⛔ This key is the DECISION identity only. Rows and the detail lookup are
+ * identified by `rowKeyOf`; see the module header.
  */
 export function entryKeyOf(alert) {
   if (!alert) return ''
@@ -402,6 +403,29 @@ export function entryKeyOf(alert) {
   // A row with neither: identify it by whatever else it carries rather than
   // returning one shared key that would let one dismissal hide every such row.
   return ['row', alert.at || '', alert.first_at || '', alert.label || ''].join('|')
+}
+
+/**
+ * WHICH ROW this is — the identity of a single entry, for React keys and for
+ * resolving the detail view against the row the reader actually clicked.
+ *
+ * The server's `episode` when there is one: it is stable across renders and
+ * distinct for two episodes that share a client-visible identity, which is the
+ * whole reason this is not `entryKeyOf`. A row with no `episode` (an API deploy
+ * older than #10156, a synthetic row) is identified by its own facts, so it
+ * still opens — and two such rows do not share one key unless they are
+ * genuinely indistinguishable.
+ */
+export function rowKeyOf(alert) {
+  const episode = episodeOf(alert)
+  if (episode) return `episode:${episode}`
+  return [
+    'row',
+    entryKeyOf(alert),
+    (alert && alert.first_at) || '',
+    (alert && alert.at) || '',
+    (alert && alert.label) || '',
+  ].join('|')
 }
 
 /** Remote age in words, for a snooze deadline: "in 42 min", "in 6 h", "in 6 days". */
@@ -419,6 +443,13 @@ export function untilLabel(untilMs, now = new Date()) {
 
 // ── The ledger ─────────────────────────────────────────────────────────────
 
+/** The explanation of the `×N+` floor: the same words the deleted panel carried
+ *  (`securityAlertsPanel.jsx`, "it explains the `×N+` floor above it") — a count
+ *  that stopped without saying why reads as the total. Declared here rather than
+ *  in the copy block at the bottom because a pure derivation (`detailOf`) reads
+ *  it; the render imports it too, so there is still one spelling. */
+export const TRUNCATED_NOTE = 'older than the window we can identify'
+
 /** One ledger row: the facts the menu renders, derived ONCE.
  *
  *  `count` is the ×N episode label the feed already computed server-side, and
@@ -427,23 +458,25 @@ export function untilLabel(untilMs, now = new Date()) {
  */
 export function entryOf(alert, now = new Date()) {
   const key = entryKeyOf(alert)
+  const rowKey = rowKeyOf(alert)
   const at = alert && alert.at ? new Date(alert.at) : null
   return {
+    // `key` is the persisted DECISION identity; `rowKey` is this row's own
+    // identity. Both travel: the render keys on `rowKey` and the store writes
+    // on `key` (see the module header).
     key,
+    rowKey,
     alert,
     label: (alert && (alert.label || alert.type)) || 'Alert',
     message: (alert && alert.message) || '',
     register: registerOf(alert),
     isIncident: registerOf(alert) === REGISTER_ALERT,
-    //: The register the SERVER stamped, if it stamped one. `registerOf` fail-quiets
-    //: an unrecognised row into the activity register, so `isIncident` alone cannot
-    //: tell "a detector measured a rate" from "we do not know what this is" — and a
-    //: two-valued chip derived from it labels an unknown row "activity", which
-    //: contradicts what the same row's detail view says (review finding).
-    registerKnown: Boolean(alert)
-      && (alert.register === REGISTER_ALERT || alert.register === REGISTER_ACTIVITY),
     countLabel: episodeCountLabel(alert),
     rangeLabel: episodeRangeLabel(alert),
+    // The `×N+` floor is a COUNT THAT STOPPED, and the row must say why — see
+    // `TRUNCATED_NOTE`. Carried explicitly because the field is otherwise only
+    // read inside `episodeCountLabel`'s `+` and would never reach a render.
+    truncated: Boolean(alert && alert.truncated),
     atMs: at && !Number.isNaN(at.getTime()) ? at.getTime() : 0,
     stamp: at && !Number.isNaN(at.getTime()) ? at.toLocaleString() : '',
     ageLabel: ageLabel(alert && alert.at, now),
@@ -481,39 +514,32 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   const snoozed = []
   const acked = []
   const dismissed = []
-  // ONE ROW PER IDENTITY. The local key is `type|message` (see `entryKeyOf`), and
-  // the feed can return two episodes that share it — two separate bouts of the
-  // same flag type, weeks apart. They are one dismissal decision, so they must be
-  // one ROW: two rows with the same key are two React children with the same key
-  // (`key={entry.key}`), which React resolves by dropping one, and a list that
-  // silently loses a notification on a security surface is the defect class this
-  // whole change is about.
+  // ONE ROW PER **ROW** — keyed on `rowKey` (the server's `episode`), never on
+  // the decision identity. Two episodes that share `type|message` are two facts
+  // and stay two rows.
   //
-  // ⛔ AND THE COLLAPSE MUST NOT HIDE AN UNACKNOWLEDGED ROW. "Newest wins" alone
-  // was a P1: the server's identity for a `flag` is `type + rule` while the
-  // customer message is a constant that deliberately omits the rule
+  // ⛔ THIS REPLACES THE IDENTITY COLLAPSE, and the reason is the failure the
+  // collapse could not survive: the server's identity for a `flag` is type + RULE
+  // while the customer message is a constant that deliberately omits the rule
   // (`_alert_subject` vs `_alert_dict`), so two genuinely different episodes
-  // collide here. Collapsing to the newest meant that once TODAY's bout was
-  // acknowledged, an OLDER unacknowledged one was neither listed nor counted —
-  // an alert made invisible and uncountable on the security surface. So an
-  // unacknowledged row always outranks an acknowledged one, and the newest wins
-  // only within the same ack-state. The identity is then unresolved iff any of its
-  // rows is, which is what "one episode, one decision" has to mean.
-  const byKey = new Map()
+  // collide on the client key. Collapsing to one row per identity meant that once
+  // today's bout was acknowledged, an OLDER unacknowledged one was neither listed
+  // nor counted — an alert made invisible and uncountable on the security surface
+  // — and "prefer the unacknowledged one" only moves which row disappears. With a
+  // per-row identity the question does not arise: each row is bucketed on its own
+  // `acked`/dismissed/snoozed state, so an identity is unresolved iff any of its
+  // rows is, and no row has to be deleted to keep the React keys unique.
+  //
+  // The dedupe that remains is for a feed that returns the SAME episode twice,
+  // which really is one row.
+  const byRowKey = new Map()
   for (const alert of alerts || []) {
     if (!alert) continue
     const entry = entryOf(alert, now)
-    const seen = byKey.get(entry.key)
-    if (!seen) {
-      byKey.set(entry.key, entry)
-      continue
-    }
-    const seenAcked = Boolean(seen.alert && seen.alert.acked)
-    const thisAcked = Boolean(alert.acked)
-    if (seenAcked && !thisAcked) byKey.set(entry.key, entry)
-    else if (seenAcked === thisAcked && entry.atMs > seen.atMs) byKey.set(entry.key, entry)
+    const seen = byRowKey.get(entry.rowKey)
+    if (!seen || entry.atMs > seen.atMs) byRowKey.set(entry.rowKey, entry)
   }
-  const unique = [...byKey.values()].sort(newestFirst)
+  const unique = [...byRowKey.values()].sort(newestFirst)
   for (const entry of unique) {
     const alert = entry.alert
     if (alert && alert.acked) {
@@ -547,9 +573,6 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
 //: The detail view's `Kind` line, one sentence per register. `KIND_UNCLASSIFIED`
 //: exists because `registerOf` fail-quiets an unrecognised row: asserting that an
 //: unclassified event "changed nothing" is a claim about a row we cannot read.
-export const REGISTER_CHIP_INCIDENT = 'alert'
-export const REGISTER_CHIP_ACTIVITY = 'activity'
-export const REGISTER_CHIP_UNKNOWN = 'unclassified'
 export const KIND_INCIDENT = 'Something happened on this Organization.'
 export const KIND_ACTIVITY =
   'A rate measurement from an abuse detector. It changed nothing.'
@@ -599,6 +622,10 @@ export function detailOf(alert, now = new Date()) {
         ? `${entry.countLabel.replace('×', '')} detection windows${entry.rangeLabel ? ` · ${entry.rangeLabel}` : ''}`
         : 'one detection',
     },
+    // A `×N+` is a FLOOR, and the detail view is where the reader can read what
+    // that means. The deleted surface explained it in the row and the
+    // explanation went with the file; it is stated in BOTH places now.
+    ...(entry.truncated ? [{ label: 'Older occurrences', value: `not visible — ${TRUNCATED_NOTE}` }] : []),
   ]
   // Only fields a customer can act on are surfaced. `details`, if it ever
   // arrives, also carries our internal vocabulary (`scope`, `id`, `rule`), which
@@ -615,6 +642,8 @@ export function detailOf(alert, now = new Date()) {
     : []
   // An EMPTY payload carries nothing, so it must not be reported as carrying
   // machine detail the dashboard hides (review finding: `{}` said exactly that).
+  // USABLE values, not keys: counting keys said a payload whose only value was an
+  // empty string carried machine detail the dashboard hides (review finding).
   const hasPayload = Boolean(extra) && Object.values(extra).some(
     (v) => v !== undefined && v !== null && v !== '',
   )
@@ -674,9 +703,9 @@ export const DETAIL_UNDISPLAYABLE =
 //: for episode identity) and simply does not ship it here. What is true is that the
 //: dashboard's alert feed does not carry the per-event records.
 export const DETAIL_NO_DETAIL_LEAD =
-  'This notification carries only the description above. The per-event records '
-  + 'behind it (which key, which source, the measured rate) are not shipped to '
-  + 'the dashboard — ask support@premiselabs.co if you need them.'
+  'The alert feed carries the description above; it does not include the '
+  + 'per-event records (which key, which source, the measured rate). Ask '
+  + 'support@premiselabs.co if you need them.'
 export const STORAGE_UNAVAILABLE =
   'Your browser blocked local notification storage, so snooze and dismiss '
   + 'cannot be remembered here. Server-side dismissals still apply on reload.'
