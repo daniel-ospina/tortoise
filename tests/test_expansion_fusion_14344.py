@@ -268,9 +268,38 @@ def test_both_halves_describe_the_fusion_never_the_removed_concatenation():
 
 # ── The pair-condition PROSE pin, as a grader rather than as a one-off search, so
 #    its non-vacuity is an assertion instead of a lab note (#14597 review P2). ──
-_PAIR_CONDITION = re.compile(
+#: The EXPRESSION alone — the right-hand side of the published condition, with no
+#: relation attached. Kept SEPARATE from ``_PAIR_CONDITION`` on purpose: the
+#: relation is graded PER OCCURRENCE (``_pair_condition_violations``), which is
+#: only possible over a pattern that still matches a site whose relation was
+#: flipped — a regex carrying ``r >`` simply stops matching it and reports nothing.
+_PAIR_EXPRESSION = re.compile(
     r"\(\s*61\s*\+\s*h1\s*\)\s*\(\s*61\s*\+\s*h2\s*\)\s*/\s*"
     r"\(\s*122\s*\+\s*h1\s*\+\s*h2\s*\)\s*[-\u2212]\s*61")
+#: The published condition INCLUDING its relation: group 1 is the relation
+#: (``r >``), group 2 the expression.
+#:
+#: ⛔ THE RELATION IS PART OF THE FORM (#14597 re-review, P2-2). The refuted closed
+#: form this pin exists for differed from the true one IN ITS DIRECTION, and the
+#: pre-fix regex graded only the right-hand EXPRESSION — so a carrier could publish
+#: ``r < (61+h1)(61+h2)/(122+h1+h2) - 61``, the reciprocal of what ``rrf_fusion``
+#: does, and every row stayed green. Measured at ``26276a06aaeb``: flipping the
+#: relation at ALL FIVE sites left ``_pair_condition_violations`` empty. Requiring
+#: the relation here restores the shape row's claim; grading it per occurrence
+#: below is what makes the claim survive a site whose relation was flipped.
+_PAIR_CONDITION = re.compile(r"(r\s*>\s*)(" + _PAIR_EXPRESSION.pattern + r")")
+#: How the TRUE relation is introduced: ``r >`` immediately before the expression.
+#: Only the STRICT ``>`` is correct — at equality the two-term id TIES a lone
+#: rank-1 (``2/122 == 1/61``) and loses below, so ``>=`` over-claims in the same
+#: direction the refuted form under-claimed, and a missing relation states none of
+#: it. Matched against a bounded prefix, which is the stated residual below.
+_PAIR_RELATION_TRUE = re.compile(r"r\s*>\s*$")
+#: How far back from an occurrence the true relation is looked for. The five sites
+#: measured at ``26276a06aaeb`` spell it as ``r >`` IMMEDIATELY before the
+#: expression (the widest gap is the backtick that closes ``r``), so 40 leaves room
+#: for a re-worded connective without letting an earlier ``r >`` in the same clause
+#: excuse a later flipped site.
+_PAIR_RELATION_LOOKBEHIND = 40
 _REFUTED_FORM = re.compile(
     r"r\s*<\s*\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)\s*/\s*2")
 _ONE_RANK_BOUND = re.compile(r"(<=|\u2264)\s*61")
@@ -355,10 +384,17 @@ def _index_row() -> str:
 
 
 def _carriers() -> dict:
-    """Every PROSE carrier that publishes the merge rule's condition, keyed by the
-    site a reader meets it at: the module docstring, the one SDK docstring, the
-    evidence README, and the ``docs/00_index.md`` row. Each is read from
-    source/disk — never imported — so this stays a ``core``-surface property.
+    """
+    Every PROSE carrier that publishes the merge rule's condition, keyed by the
+    site a reader meets it at: the ``fuse_expansion_pass`` docstring, the one SDK
+    docstring, the evidence README, and the ``docs/00_index.md`` row. Each is read
+    from source/disk — never imported — so this stays a ``core``-surface property.
+
+    ⛔ ``fuse_expansion_pass`` is a FUNCTION docstring, not the module's (#14597
+    re-review, P3-NOTE): this docstring said "the module docstring" while the code
+    reads ``expansion_merge.fuse_expansion_pass.__doc__``, and the module docstring
+    carries no condition at all — so the sentence described prose the dict does not
+    grade. Wording only; the extraction was right.
 
     ⛔ "EVERY" IS THE CLAIM THAT BROKE (#14597 re-review, P2-1): the docstring said
     it while the dict held three sites, and the fourth (``docs/00_index.md``, which
@@ -429,15 +465,43 @@ def _pair_condition_violations(text: str) -> list[str]:
     so a clean run exercises the exemption instead of proving the string absent
     everywhere.
 
+    ⛔ AND PRESENCE OF THE EXPRESSION WAS NOT PRESENCE OF THE CLAIM (#14597
+    re-review, P2-2, measured at ``26276a06aaeb``): every occurrence is now also
+    graded for its RELATION, because a carrier could publish
+    ``r < (61+h1)(61+h2)/(122+h1+h2) - 61`` — the reciprocal, i.e. the refuted
+    form's error in the other direction — at all five sites with **0 violations**.
+
     Stated residual, not a silent one: a NEW site that states the bound while
-    using neither a ``_WIN_ARITHMETIC`` phrase nor the refuted form is not graded
-    here (it re-words past the trigger set). Closing that fully would need a
-    parser for the prose, and the measured defects — the refuted form returning at
-    the headline, and returning at a second site inside a "no longer" clause — are
-    what this closes.
+    using neither a ``_WIN_ARITHMETIC`` phrase, the pair expression, nor the
+    refuted form is not graded here (it re-words past the trigger set). Closing
+    that fully would need a parser for the prose, and the measured defects — the
+    refuted form returning at the headline, returning at a second site inside a
+    "no longer" clause, and the TRUE expression published with the WRONG relation
+    — are what this closes.
     """
     violations = []
     for clause in _CLAUSE_BOUNDARY.split(text):
+        # ⛔ THE DIRECTION FIRST, per occurrence (#14597 re-review, P2-2). This is
+        # the last dimension of the same sentence, and the load-bearing one: the
+        # refuted form was wrong BECAUSE of its relation. Graded here rather than
+        # only inside `_PAIR_CONDITION` because a clause-level presence check cannot
+        # see a site whose relation was flipped — the pattern no longer matches, so
+        # the clause would simply fall through to the win-phrase rule and a site
+        # without one would go ungraded.
+        reversed_pair = [
+            match for match in _PAIR_EXPRESSION.finditer(clause)
+            if not _PAIR_RELATION_TRUE.search(
+                clause[max(0, match.start() - _PAIR_RELATION_LOOKBEHIND)
+                       :match.start()])]
+        if reversed_pair:
+            start = reversed_pair[0].start()
+            violations.append(
+                "publishes the pair expression with a relation other than the true "
+                "`r >` — the two-term id BEATS a worse-ranked single-list candidate, "
+                "TIES it at equality and LOSES below, so `r <` is the reciprocal of "
+                "what `rrf_fusion` does: "
+                f"{clause[max(0, start - _PAIR_RELATION_LOOKBEHIND):][:180]!r}")
+            continue
         uncorrected = _uncorrected_refuted(clause)
         if uncorrected:
             violations.append(
@@ -508,6 +572,16 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check` mutates every
     occurrence in every carrier, and `test_the_index_row_is_graded_as_a_carrier_not_merely_claimed`
     grades the row's own reachability.
+
+    ⛔ AND PRESENCE OF THE EXPRESSION WAS NOT PRESENCE OF THE CLAIM (#14597
+    re-review, P2-2, measured at ``26276a06aaeb``): ``_PAIR_CONDITION`` matched only
+    the right-hand expression, so the relation — the ONE token that carries the
+    claim's meaning, and the one the refuted form got wrong — was inside no regex
+    and inside no assertion. Flipping ``r >`` → ``r <`` at all five sites left
+    ``_pair_condition_violations`` at **0 violations** and all fifteen rows green.
+    The relation is now part of ``_PAIR_CONDITION`` AND graded per occurrence in
+    ``_pair_condition_violations``, so this row's "the FORM is true" is the form
+    INCLUDING its direction.
     """
     carriers = _carriers()
     unbounded = "outranks either pass alone"
@@ -542,9 +616,9 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
 
 def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
     """Non-vacuity for the row above, EXECUTED rather than remembered, over EVERY
-    site of EVERY carrier (#14597 re-review, P2, then P2-1).
+    site of EVERY carrier (#14597 re-review, P2, then P2-1, then P2-2).
 
-    Two attacks, both measured rather than imagined:
+    Three attacks, all measured rather than imagined:
 
     * at ``3c2d3464`` the pin was a whole-carrier presence check, so restoring the
       refuted form at the site a reader hits FIRST left the later paragraph to
@@ -554,10 +628,16 @@ def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
       displaced" — a BOUND change, not a retraction — and that word excused a
       splice there. Measured at that head: splice at the first site → 2 violations;
       splice at the second → **0**. Delete the pair form at the second site → 0.
+    * at ``26276a06aaeb`` the pin graded the EXPRESSION and never the RELATION, so
+      flipping ``r >`` → ``r <`` at every one of the five sites left
+      ``_pair_condition_violations`` empty — the reciprocal of the engine published
+      with all fifteen rows green. The relation is graded per occurrence now, and
+      this row mutates it at every site.
 
-    So this row now mutates every occurrence in every carrier, and separately pins
-    the MECHANISM of the second-site hole (the laundering word is still in that
-    clause, still outside ``_CORRECTION_WINDOW``) rather than only its symptom.
+    So this row now mutates every occurrence in every carrier — splice, and flip —
+    and separately pins the MECHANISM of the second-site hole (the laundering word
+    is still in that clause, still outside ``_CORRECTION_WINDOW``) rather than only
+    its symptom.
 
     It also asserts the exemption is exercised rather than merely unused: three of
     the carriers really do quote the refuted form today, each with its marker
@@ -592,6 +672,28 @@ def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
             assert any("refuted closed form" in v for v in violations), (
                 f"{where}: occurrence {index} reddened for something other than "
                 f"the splice: {violations}")
+
+            # ⛔ AND THE DIRECTION, at the SAME site (#14597 re-review, P2-2). The
+            # pin graded the expression and never the relation, so a carrier could
+            # publish the RECIPROCAL of `rrf_fusion`'s arithmetic here and stay
+            # green — the same defect class as the refuted form, which was wrong
+            # precisely in its direction. Group 1 is the relation, group 2 the
+            # expression, so the flip changes ONE character's meaning and nothing
+            # else about the site.
+            flipped = (carrier[:match.start()] + "r < " + match.group(2)
+                       + carrier[match.end():])
+            assert flipped != carrier, (
+                f"{where}: the relation flip at occurrence {index} was a no-op — "
+                "the pattern no longer carries the relation as its own group")
+            reversed_violations = _pair_condition_violations(flipped)
+            assert reversed_violations, (
+                f"{where}: the relation flipped to `r <` at occurrence {index} of "
+                f"{len(occurrences)} went UNGRADED — the carrier then publishes the "
+                "reciprocal of the engine's condition and the pin cannot see it")
+            assert any("relation other than the true" in v
+                       for v in reversed_violations), (
+                f"{where}: occurrence {index} reddened for something other than "
+                f"the flipped relation: {reversed_violations}")
 
     # ⛔ THE SECOND-SITE MECHANISM, pinned so the window cannot silently widen: in
     # ``expansion_merge`` the clause holding the SECOND pair form also holds "no
