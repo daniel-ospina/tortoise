@@ -661,6 +661,56 @@ def test_relations_pages_and_offset_actually_advances(tmp_path):
         assert whole["count"] == 4 and whole["truncated"] is False, whole
 
 
+def test_relations_marks_a_truncated_probe_and_never_publishes_it_as_a_total(tmp_path):
+    """A page cut from a `limit + 1` probe is `truncated: true`, with NO total.
+
+    ⛔ NOTHING ELSE IN THIS SUITE GRADES THIS ARM, and that is why it exists: every
+    `total_available` assertion here belongs to the objects/sources routes, and every
+    `truncated` assertion touching a relations reply is the COMPLETE arm (the test
+    above asks for `limit=10` over four spokes). So BOTH arguments of the marker were
+    ungraded, and each mutant left the suite green while changing the response:
+
+      * `mark_truncation(..., exact=False)` -> `exact=True` publishes the PROBE
+        (`limit + 1`) as `total_available` — a lower bound wearing a total's clothes,
+        the defect the route's own comment forbids;
+      * deleting the call means `truncation_field` raises on a sink carrying no marker,
+        so a truncated relations page stops answering at all instead of saying
+        `truncated: true` — the fail-open direction (a client paging `while truncated`
+        loses edges silently) this module exists to close.
+
+    The probe reads `limit + 1` rows, so `limit=1` over a 2-edge hub is the smallest
+    population that is provably truncated.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/objects", json={
+            "name": "HUB", "objectKind": "goal"}).json()
+        spokes = [client.post("/v1/objects", json={
+            "name": f"P{i}", "objectKind": "goal"}).json() for i in range(2)]
+        sdk = _sdk(ha)
+        try:
+            for sp in spokes:
+                assert sdk._create_edge("related", hub["id"], sp["id"])
+        finally:
+            sdk.close()
+
+        page = client.get(f"/v1/entities/{hub['id']}/relations", params={"limit": 1})
+        assert page.status_code == 200, page.text
+        body = page.json()
+        assert body["count"] == 1, body
+        # The probe proved THERE ARE MORE…
+        assert body["truncated"] is True, body
+        # …and proved nothing about HOW MANY, so no total rides it.
+        assert "total_available" not in body, body
+
+        # POSITIVE CONTROL in the same test, so the `True` above cannot come from a
+        # marker hard-wired to one value: the page that holds everything is marked
+        # COMPLETE, and still publishes no total (it does not need one).
+        whole = client.get(f"/v1/entities/{hub['id']}/relations",
+                           params={"limit": 10}).json()
+        assert whole["count"] == 2 and whole["truncated"] is False, whole
+        assert "total_available" not in whole, whole
+
+
 def test_relations_reports_a_self_loop_once(tmp_path):
     """A self-edge matches BOTH orientations, so the naive UNION returns the SAME
     edge twice and `count` double-counts it (measured: `['out', 'in']`, both with
