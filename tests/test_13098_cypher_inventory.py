@@ -362,8 +362,10 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
         raise subprocess.CalledProcessError(128, ["git", "ls-files"])
 
     monkeypatch.setattr(census, "rg_totals", boom_totals)
-    assert census.main(["--json"]) == 2, (
-        "`--json` re-enumerates for `rg_totals`; that second call must answer 2 as well")
+    for argv in (["--json"], []):
+        assert census.main(argv) == 2, (
+            f"`{' '.join(argv) or '(bare census)'}` re-enumerates for `rg_totals` "
+            f"(directly, or through `report()`); that second call must answer 2 too")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
@@ -381,6 +383,40 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     finally:
         doc.chmod(0o600)
     assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
+
+    # ⛔ AND NOT JUST AN `OSError`: `UnicodeDecodeError` is a ValueError, so it slipped
+    # past an `except OSError` in this very guard and exited 1 (measured on a latin-1
+    # byte). Same verb, same reserve of the DRIFT code.
+    latin1 = tmp_path / "latin1.md"
+    latin1.write_bytes("<!-- cypher-inventory:sites = 1327 -->\n".encode("utf-8") + b"\xff\xfe\n")
+    assert census.check(latin1, {"sites": []}) == 2, (
+        "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
+
+
+def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
+    """`--render` on a source it cannot read answers 2, never 1.
+
+    `--render` has no drift verdict, so an uncaught `PermissionError` (chmod 000) or
+    `IsADirectoryError` (a path that exists and is a directory) exits 1 — "the pins
+    drifted" — and §7 tells every lane to run this verb. The twin of
+    `check()`'s guard, graded here because the two are separate reads.
+    """
+    unreadable = tmp_path / "src.md"
+    unreadable.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        with pytest.raises(SystemExit) as refused:
+            census.render(unreadable, {"sites": []})
+        assert refused.value.code == 2, (
+            f"an unreadable SOURCE must refuse with 2 (could not run), got "
+            f"{refused.value.code!r}")
+    finally:
+        unreadable.chmod(0o600)
+
+    with pytest.raises(SystemExit) as refused_dir:
+        census.render(tmp_path, {"sites": []})   # exists, and is a directory
+    assert refused_dir.value.code == 2, (
+        f"a directory as the source must refuse with 2, got {refused_dir.value.code!r}")
 
 
 def test_the_renderer_refuses_to_write_over_the_source(capsys):
