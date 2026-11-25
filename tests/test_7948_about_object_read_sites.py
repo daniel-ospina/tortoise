@@ -3477,7 +3477,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: `_rows()` / `_doors()` / `_door_reaches()` rather than assumed. ⚠️ The worst-row
 #: ceiling is deliberately NOT moved with it: its note below says it is a BOUND, and the
 #: measured worst row is 3 against that ceiling of 4.
-_ACCEPTED_PAIRS_AT_THIS_HEAD = 27
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 28
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
 #: more of a larger set. It is the same relation over a larger population, not a
@@ -3696,10 +3696,14 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
     # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
+    # ⛔ #14682 then registered row 46 (`entity_reads.py::entity_relations`), whose ONE
+    # door is the REST route `GET /v1/entities/{entity_id}/relations` (21 -> 22): the
+    # route handler calls the reader directly, so it is one reference inside the
+    # default hop budget.
     # A table change moves this numeral with the table.
-    assert attributed >= 21, (
+    assert attributed >= 22, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 21 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 22 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
@@ -4101,7 +4105,7 @@ _13_8_ENUMERATION = (
     # marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
-    "Outside this eighteen, two are default-ON on the ingestion path",
+    "Outside this nineteen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.
@@ -5719,8 +5723,18 @@ def test_the_module_filter_admits_a_split_traversal():
     # carries in those files — `_export_graph_snapshot`,
     # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
     # is PRE-EXISTING, so P7 added none of them.
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (29, 43), (
-        "the empty-pattern derivation moved off 29 symbol keys / 43 site rows "
+    # ⛔ 29/43 -> 30/45 with `#14682` (from `#14593`, "read parity"):
+    # `tortoise/entity_reads.py` arrived carrying TWO untyped walks —
+    # `entity_relations`' outgoing `-[r]->` and its reverse `<-[r]-`, one site
+    # each — and `_resolve` inlines the `inner` statement into the
+    # `CALL { {inner} }` wrapper that executes it, so BOTH the `inner` statement
+    # and the `query` statement that spells the wrapper derive: the corpus gains
+    # exactly ONE symbol key and TWO rows. ⛔ The site DECLARES the read (§13
+    # row 46) rather than registering an exclusion, because it returns `type(r)`
+    # and the edge's `label`/`idx` — it asks what the referent says, which is the
+    # one thing an `EMPTY_PATTERN` entry asserts the walk cannot do.
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (30, 45), (
+        "the empty-pattern derivation moved off 30 symbol keys / 45 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "
