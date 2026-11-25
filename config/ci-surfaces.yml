@@ -59,27 +59,26 @@ version: 1
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` `1aef0b618b` folded in, carrying
 # `#14597`'s expansion fusion over the residue RATCHET
-# (`tests/test_expansion_fusion_14344.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`),
+# (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
 # `#14548`'s residue RATCHET, `#14552`'s `tests/test_record_read_point_vector_keys.py` row,
 # `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14565`'s
 # `tests/test_14559_reaper_schedule.py` row, `#14574`'s drift-reporter registration
 # (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
-# (`core` and `api` — ONE `fast_pool()` entry, two surfaces, the same flat 2.0 s), and `#14607`'s
+# (`core` and `api` — ONE `fast_pool()` entry, two surfaces), and `#14607`'s
 # registrations (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb
 # packs the pool into two bins: six shards at 827.1 s (a, b, g, i, j, k) and five at 827.0 s
 # (c, d, e, f, h), so `ceil(827.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
 # SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 827.1 = 2.0312), so the two agree by construction rather than by
 # a hand re-read.
-# ⛔ EVERY file named above is `main`'s at this head and every one is `core`; the weight is the
-# header's `DEFAULT_FAST_WEIGHT` for all of them EXCEPT `#14548`'s residue RATCHET
-# (`tests/test_sdk_privatise_sweep.py`), whose weight is a MEASURED `durations` row and not the
-# default — a `core` file whose weight is not flat, so do not read that list as "all default".
+# ⛔ EVERY file named above is `main`'s at this head and every one is `core`.
 # ⛔ NO PER-FILE WEIGHT IS QUOTED HERE, on purpose: a weight beside a file re-stales against the
-# run it came from, `--refresh-durations` rewrites it with no human decision, and a small move does
-# not even shift the graded emission — so no arm would see the sentence go false.
+# run it came from and `--refresh-durations` rewrites it with no human decision. The emission arm
+# below DOES red on a weight move — even 0.1 s regroups the bins — but its remedy is "re-run the
+# verb and paste its figures", which leaves a quoted weight in place and green; so the figure is
+# not written rather than graded by an arm that would not look for it.
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` — among the files named above, `#14597`'s
 # `tests/test_expansion_fusion_14344.py` row, `#14560`'s
@@ -146,9 +145,9 @@ version: 1
 # re-pointed.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
-# well, so `fast_pool()` still carries it (measured at this head, weight 90.0), and dropping the `core`
-# REGISTRATION cannot move a bin — the weight comes from the file's own `durations` row, not from
-# either registration.
+# well, so `fast_pool()` still carries it, and dropping the `core` REGISTRATION cannot move a bin —
+# the weight comes from `tests/test_dod_5090_probe.py` row in `durations`, not from either
+# registration.
 #
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
 # form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /
