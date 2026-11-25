@@ -1663,22 +1663,15 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
 
 
 #: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — the
-#: guards behind these rows landed in different changes, some in the very change
-#: that added the row. This file PINS each choice, and its newest row is
-#: `tools/fly_secret_declaration_report.py` (`#5128`) — and the verdict code it
-#: spares, or reuses on purpose. Only the table below is authoritative about which
-#: rows exist: counts and enumerations in this comment have gone stale before, so
-#: none is written here. `SystemExit(<message>)` exits 1 in
-#: CPython, and for several of these files 1 is already the tool's own verdict —
-#: for instance `gen_placement_table --check` prints `STALE` and returns 1,
-#: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
-#: map that could not be read, `cypher_inventory --check` returns it for DRIFT, and
-#: `cypher_diff_harness` for DIFFERS — which is why a guard here names a code the
-#: tool can tell apart from its verdicts: a spare one where the tool has one
-#: (`#4053`, `#13121`), and otherwise one reused on purpose because the refusal
-#: cannot be read as a finding — `cache_evict` takes 1, already its usage code
-#: (`CACHE_EVICTION_EXIT_USAGE`, verdicts 2/3/4), and `capstone_ledger` reuses
-#: `EXIT_INVALID`, its 0-5 set closed and spent (5 is `EXIT_USAGE`).
+#: verdict code it spares, or reuses on purpose. `REFUSAL_WHY` carries the reason
+#: for every row, and the table below is the sole authority on which rows exist:
+#: this comment deliberately states no count and no list of them, because every one
+#: written here has gone stale.
+#:
+#: `SystemExit(<message>)` exits 1 in CPython, and for several of these tools 1 is
+#: already a verdict of their own, so a guard taking the bare message shape can
+#: report an environment refusal as a finding the run never reached — which is why
+#: each code here was chosen deliberately rather than defaulted to (`#11342`).
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
 #: per-tool contract decision, not a property of the guard shape. Pinning it here
