@@ -103,6 +103,12 @@ _PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
+    # ⛔ EVERY `sdk.py` ROW BELOW MOVED +1 AT #14592, together and for ONE cause: that
+    # branch's `_get_entity` label-set hunk adds one line above these addresses, so the
+    # whole rotation is +1 and a per-row re-point would be nine chances to leave one
+    # behind. Re-derived by CONTENT at the #14592 head (not by adding 1 to the old
+    # number): each pinned fragment was grepped in `tortoise/sdk.py` and the pin was
+    # re-anchored on the line that carries it.
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3506`", _SE, 3506, "# #11682: the corpus join is PER FAMILY"),
     # ⛔ The two `:Document` addresses §5's #12915 move names had NO pin, and that is how BOTH shipped
@@ -111,20 +117,20 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    (_SUBSTRATE, 'tortoise/sdk.py:37982', _SDK, 37982, "``:Document`` node)."),
-    (_SUBSTRATE, '`:38024` in `_file_human_approval`', _SDK, 38024, "``:Document`` node)."),
+    (_SUBSTRATE, 'tortoise/sdk.py:37983', _SDK, 37983, "``:Document`` node)."),
+    (_SUBSTRATE, '`:38025` in `_file_human_approval`', _SDK, 38025, "``:Document`` node)."),
     # ⛔ Review cycle 2 (P1): these were RE-POINTED and left with no content pin, so a one-line
     # regression shipped green — MEASURED by mutating each destination by one line and watching the
     # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
-    (_INDEX, 'sdk.py:22202', _SDK, 22202, '"stats": _capture_stats_with_step_witness('),
-    (_SUBSTRATE, 'opening `:37962`', _SDK, 37962, "def record_decision(self, approver_id: str, artifact_id: str,"),
+    (_INDEX, 'sdk.py:22203', _SDK, 22203, '"stats": _capture_stats_with_step_witness('),
+    (_SUBSTRATE, 'opening `:37963`', _SDK, 37963, "def record_decision(self, approver_id: str, artifact_id: str,"),
     # ⛔ ADOPTED at the `origin/main` rebase (`#14416`'s fold): `main` added this row for the `:Source`
     # line BETWEEN the two `opening` defs, after a merge resurrected the `+21`-era siblings
     # (`(opening :37548` = a kwarg line) while the two graded headlines stayed right — green pins over
     # a wrong sentence (`#14038` review, cycle 2). It grades a SURVIVING document, so this cut keeps
     # it: only the `_AUDIT` rows go. Re-verified by content at the rebased head, not carried.
-    (_SUBSTRATE, '`:37981` is the `:Source` line', _SDK, 37981, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, 'opening `:38002`', _SDK, 38002, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
+    (_SUBSTRATE, '`:37982` is the `:Source` line', _SDK, 37982, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, 'opening `:38003`', _SDK, 38003, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -150,9 +156,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # tokens and still hold. They are the SAME `sdk.py` pair `00_index.md` and
     # `ENTITY-VERDICT-BANDS.md` each cite, plus the merge call below it; re-resolved at this head
     # before being restored, not assumed.
-    ("docs/00_index.md", '`sdk.py:28710` at this head', _SDK, 28710, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28710`), so any non-NULL', _SDK, 28710, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29074`', _SDK, 29074, "result = apply_entity_merge("),
+    ("docs/00_index.md", '`sdk.py:28711` at this head', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28711`), so any non-NULL', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29075`', _SDK, 29075, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the reader table cites
     # `hosted_backup.py:2732` for `_index_has_is_operator()`, and that document had NO pin at all,
     # so nothing would have reddened the next rotation of it. ⛔ RE-DERIVED BY CONTENT at the

@@ -21058,10 +21058,18 @@ class FalkorProjection(
         """Index-backed entity resolution mirroring the legacy
         `MATCH (n) WHERE n.id=$id OR n.eventId=$id OR n.url=$id` semantics.
 
-        Returns [{label, key, value, properties}, ...] — one entry per matching
-        node, deduped by node identity (a Source with id==url matches two
-        branches). Each branch is a labeled lookup on an indexed property, so
-        the planner uses Node By Index Scan instead of All Node Scan (#327).
+        Returns [{label, labels, key, value, properties}, ...] — one entry per
+        matching node, deduped by node identity (a Source with id==url matches
+        two branches). Each branch is a labeled lookup on an indexed property,
+        so the planner uses Node By Index Scan instead of All Node Scan (#327).
+
+        ⛔ `label` is the BRANCH that matched, and `labels` is the node's WHOLE
+        label SET (additive, #14593 review P1). The two differ for a hybrid such
+        as `(:Object:Source)`: the branch answers `Object` while the node also
+        carries `Source`, so a disclosure rule keyed on `label` alone is only as
+        strong as the branch that happened to match. Consumers that decide what
+        may be PUBLISHED must grade `labels`; `label` keeps its branch meaning so
+        no existing caller's shape moves.
 
         ``by_id`` also covers Events via their eventId branch: Event nodes
         always carry id == eventId (both set by _upsert_event; eventId-only
@@ -21093,19 +21101,28 @@ class FalkorProjection(
         union_q = " UNION ".join(
             f"MATCH (n:{label}) WHERE n.{prop} = $id "
             f"RETURN '{label}' AS label, '{prop}' AS key, n.{prop} AS value, "
-            f"properties(n) AS props LIMIT 1"
+            f"properties(n) AS props, labels(n) AS labels LIMIT 1"
             for label, prop in branches
         )
         rows = self.g.query(union_q, params={"id": id_val}).result_set
         seen: set[str] = set()
         out: list[dict] = []
-        for label, key, value, props in rows:
+        for row in rows:
+            # `row[:4]` rather than a 5-tuple unpack: a handle that answers the
+            # pre-#14593 column set (a fake/older graph, or a fixture standing in
+            # for this producer) must keep working, and the fallback below maps
+            # that case to the SINGLE branch label — the previous behaviour —
+            # instead of "no labels known" (which a deny-by-default consumer
+            # would read as a reason to filter everything).
+            label, key, value, props = row[:4]
+            node_labels = ([lbl for lbl in row[4] if lbl]
+                           if len(row) > 4 and row[4] else [label])
             ident = props.get("id") or props.get("eventId") or props.get("url")
             if ident in seen:
                 continue
             seen.add(ident)
-            out.append({"label": label, "key": key, "value": value,
-                        "properties": dict(props)})
+            out.append({"label": label, "labels": node_labels, "key": key,
+                        "value": value, "properties": dict(props)})
         # Defense-in-depth (issue #327 security review): consumers interpolate
         # label/key into Cypher patterns. Fail loudly here if this producer ever
         # returns anything other than the constant-tuple values — a future
