@@ -18,10 +18,14 @@ consumes. The measurement therefore reports, over seeded randomised pools:
   * ``new_admitted@k``      — how many ids ONLY the expansion found reach the
                               first ``k`` (does the lever still ADD?);
   * ``pass1_rank0_position`` — where pass 1's own rank-0 row lands in the
-                              merged leg. This is the displacement made visible:
-                              under the concatenation it is pushed to
-                              ``len(expanded)`` (everything the expansion
-                              returned sits above it); under the fusion it is
+                              merged leg. This is the displacement made visible.
+                              Under the concatenation the row goes to position
+                              ``len(expanded)`` when the expansion did NOT
+                              repeat it, and keeps whichever position the
+                              expansion gave its OWN copy when it did — so the
+                              old arm's mean sits BELOW ``len(expanded)`` in
+                              every shape (see the receipt's ``old`` column),
+                              never equal to it. Under the fusion the row is
                               bounded by how many candidates out-rank it.
 
 **Why this and not the capstone set.** `docs/evidence/12186-capstone/queries.json`

@@ -51,6 +51,11 @@ def fuse_expansion_pass(
     expansion that legitimately only ADDS candidates can push evidence the
     first pass already reached down by up to ``len(expanded)`` positions, and
     once the fused page is cut at ``limit`` that evidence leaves the answer.
+    The same grep also finds ``sdk._tortoise_fts_query``'s R4 structural-hop
+    merge, which concatenates in the MIRROR direction — the leg's own rows stay
+    first and the expansion is appended BELOW them, so it can bury the
+    expansion's rows but cannot displace the leg's, which is the defect this
+    module closes.
     The mechanism that closes it is the product's own: ``rrf_fusion``, whose
     formula gives a document credit for its rank in EACH list — ``w / (k + rank
     + 1)`` over a 0-BASED rank, ``k=60`` for equal-weighted legs — so
