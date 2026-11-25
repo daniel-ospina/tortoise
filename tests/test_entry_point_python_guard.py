@@ -1670,10 +1670,13 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
 #: each choice, and its newest row is `tools/fly_secret_declaration_report.py`
 #: (`#5128`) — and the
 #: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
-#: CPython, so for two of these files an old interpreter was reported as the
-#: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
-#: 1, and `test_design_map_check` documents 1 as "violations" while reserving 2
-#: for the map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
+#: CPython, and for several of these files 1 is already the tool's own verdict —
+#: for instance `gen_placement_table --check` prints `STALE` and returns 1,
+#: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
+#: map that could not be read, `cypher_inventory --check` returns it for DRIFT, and
+#: `cypher_diff_harness` for DIFFERS — which is why each guard names a code its
+#: tool can spare (`#4053`, `#13121`) instead of accepting the bare message shape.
+#: `cache_evict` is the exception BECAUSE its 1 is
 #: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
