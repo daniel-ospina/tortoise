@@ -382,7 +382,7 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
             f"(directly, or through `report()`); that second call must answer 2 too")
 
 
-def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatch):
+def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatch, tmp_path):
     """A closed pipe or a full disk is 2 (could not run), never 1 (DRIFT) and never 120.
 
     ⛔ `--markdown` IS the appendix table — the verb a lane pipes (`| head`) or
@@ -458,6 +458,41 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
     assert ok.flushed, (
         "emit() must FLUSH — an unflushed payload fails at interpreter shutdown as 120 "
         "with no diagnostic, which is the regression the explicit flush() exists to stop")
+
+    # ⛔ AND THE TWO CALL SITES, not only the writer. Routing `check()`'s and
+    # `--render`'s success lines through `emit` is graded by NOTHING above — the arm
+    # calls `emit` directly — so reverting either call site to `print()` + `return 0`
+    # restored exit **120** with the whole suite green (measured: a bare
+    # `print("hello") >/dev/full` answers 120, because the buffered bytes re-raise at
+    # the interpreter's shutdown flush — which is also why the writer detaches fd 1).
+    # Drive the verbs themselves, on the cheap shapes: 8 zero-valued pins make
+    # `check()` reach its success line with no tree walk, and a stubbed census makes
+    # `--render` reach its write line the same way.
+    pins = "".join(
+        f"<!-- cypher-inventory:{key} = 0 -->\n"
+        for key in ("sites", "files", "files_scanned", "unresolved", "candidates",
+                    "non_cypher_door_calls", "ast_door_calls", "partial"))
+    src = tmp_path / "pins.src.md"
+    src.write_text(pins, encoding="utf-8")
+    empty = {"sites": [], "files_with_sites": 0, "files_scanned": 0,
+             "non_cypher_door_calls": 0, "partial": 0}
+    monkeypatch.setattr(
+        sys, "stdout", Failing(OSError(28, "No space left on device")))
+    assert census.check(src, empty) == 2, (
+        "`--check`'s success line must go through `emit`: a full disk on stdout is "
+        "2 (could not run), never 120 and never 1 (DRIFT)")
+    monkeypatch.setattr(
+        census, "census",
+        lambda *_a, **_k: {
+            "sites": [], "prefixes": ("tortoise",), "files_scanned": 0,
+            "files_with_sites": 0, "non_cypher_door_calls": 0, "partial": 0,
+            "unparsed_files": [], "excluded_test_modules": 0,
+            "ast_door_calls": 0,
+        },
+    )
+    assert census.main(["--render", str(tmp_path / "out.md")]) == 2, (
+        "`--render`'s `render: wrote …` line must go through `emit` for the same "
+        "reason: the document WAS written, but the tool still cannot report it")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
