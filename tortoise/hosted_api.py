@@ -15827,14 +15827,28 @@ def _names_this_layer(kind: str, vocabulary: frozenset[str]) -> bool:
     refusal exists to remove. ``?kind=zzz:team`` was refused on the Subject route,
     so the two layers graded the same input differently.
 
-    The spellings admitted here are the ones the write doors actually write:
-    the layer vocabulary's own bare names, and the repo's ``core:`` namespaced
-    form of those names. ⚠️ A pack-namespaced spelling that the graph does not
-    carry yet is REFUSED rather than assumed legal — fail-closed on purpose: the
-    alternative (strip the namespace) is the fail-open above, and a legal spelling
-    becomes admissible the moment ONE row carries it (the ``carried`` arm). The
-    residual is stated rather than hidden: ``?kind=<pack-ns>:<kind>`` on a graph
-    with no such row answers 400, and the refusal lists the bare spelling to use.
+    The spellings admitted here are the layer vocabulary's own bare names, the
+    repo's ``core:`` namespaced form of those names, and ANY spelling the graph
+    already carries (the ``carried`` arm). ⚠️ **The claim stops there, and the
+    gap is stated rather than implied** — an earlier revision of this paragraph
+    said the admitted spellings "are the ones the write doors actually write",
+    which is FALSE: the write doors on ``<layer>Kind`` are OPEN (their gate is a
+    NAMESPACE approval, ``_require_approved_kind`` #5475/#2714), so
+    ``POST /v1/subjects {"subjectKind": "person"}`` stores ``person`` — a bare
+    spelling in no layer vocabulary (``kind_layers.subject_kind_names()`` is
+    ``core:legalPerson``/``core:naturalPerson``/``core:organization``/
+    ``core:role``/``core:team``), which this function refuses until a row
+    carries it. MEASURED at this head: ``?kind=person`` answers 400 on a fresh
+    graph and 200 over the same URL once one ``person`` Subject exists.
+    ⛔ That residual is the deliberate direction, not an oversight: the
+    alternative — admit every bare spelling — is exactly the silent
+    empty-and-complete page this refusal exists to remove, because an open
+    vocabulary cannot tell ``person`` from ``persn``. A pack-namespaced spelling
+    the graph does not carry yet is REFUSED for the same reason (fail-closed on
+    purpose: stripping the namespace is the fail-open above), and a legal
+    spelling becomes admissible the moment ONE row carries it (the ``carried``
+    arm). The refusal names the spellings it will accept, so the remedy is in
+    the answer.
     """
     if kind in vocabulary:
         return True
@@ -16165,14 +16179,52 @@ async def get_entity_relations(
     return body
 
 
+def _graph_event_types() -> list[str]:
+    """The event types this build actually writes into the GRAPH event store.
+
+    One home for the question `_belief_changes_reach_the_graph_store` answers,
+    so the route's published reason and its own branch cannot disagree.
+    """
+    from tortoise.sdk import _GRAPH_EVENT_TYPES  # the emitter's own gate
+
+    return sorted(_GRAPH_EVENT_TYPES)
+
+
+def _belief_changes_reach_the_graph_store() -> bool:
+    """Can a ``ConfidenceChanged`` row exist in the GRAPH event store at all?
+
+    ⛔ This is a property of the EMITTER, not of this route, and it is read from
+    the emitter's own gate rather than assumed: `sdk._emit_event` writes a
+    `:GraphEvent` row only for a type in `_GRAPH_EVENT_TYPES`, and that frozenset
+    does not contain ``ConfidenceChanged`` (measured at this head: the single
+    product `append_event(` call site is `sdk.py::_emit_event`'s gated arm). So
+    `event_store.latest_for_node(..., "ConfidenceChanged", …)` has nothing to
+    find on a real graph, and `/belief` must say that instead of letting a null
+    `lastBeliefWrite` be read as "this belief never moved".
+
+    It stays a runtime question on purpose: the day `ConfidenceChanged` joins
+    that set, the query starts answering with no change here, and the
+    `lastBeliefWriteUnavailable` reason disappears by itself.
+    """
+    return "ConfidenceChanged" in _graph_event_types()
+
+
 @app.get("/v1/entities/{entity_id}/belief")
 async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """#14592: one entity's current EP belief, when it last moved, and why.
 
     Returns the current posterior (``mean``/``variance``/``alpha``/``beta`` — the
     EP α/β), the newest ``ConfidenceChanged`` event that committed a value for
-    THIS node (so *when* it last moved is answered from the store's own record
-    rather than inferred), and the evidence chain behind the claim.
+    THIS node, and the evidence chain behind the claim.
+
+    ⛔ ``lastBeliefWrite`` is answered from what the GRAPH event store HOLDS — it
+    is not inferred — and a ``null`` there is NOT "this belief never moved"
+    unless the store can hold such a row at all. Measured: this build's emitter
+    writes only the types in ``sdk._GRAPH_EVENT_TYPES``, which excludes
+    ``ConfidenceChanged``, so on a real graph the field is null while the change
+    is durable in the event JOURNAL. The route therefore publishes
+    ``lastBeliefWriteUnavailable`` with a named reason beside the null, rather
+    than letting an absence read as a measurement.
 
     ⚠️ **THIS GET CAN WRITE — but only for a node that HAS a persisted belief.**
     ``TortoiseSDK.check_confidence(claim_id=…)`` reaches ``get_confidence``,
@@ -16411,6 +16463,35 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
             "bounds": "retained rows, not the store's scan",
         },
+        # ⛔ A NULL `lastBeliefWrite` IS NOT "THIS BELIEF NEVER MOVED", and this
+        # field is how the route says so instead of leaving a client to infer it
+        # from an absent value. MEASURED (#14593 review P1): the GRAPH event
+        # store only ever receives the types in `sdk._GRAPH_EVENT_TYPES` — the
+        # ONE product `append_event` call site is `sdk.py::_emit_event`'s
+        # graph-store arm, gated on that membership — and `ConfidenceChanged` is
+        # NOT in it. So on a real graph `latest_for_node(..., "ConfidenceChanged",
+        # …)` cannot return a row: the scan above runs and finds nothing, and the
+        # route used to say only "null", which reads as "never moved" while the
+        # change is in fact durable in the event JOURNAL. Naming the reason is
+        # this route's own established shape for an unanswerable half (see
+        # `currentUnavailable` / `NO_PERSISTED_BELIEF` above), and it keeps the
+        # claim honest without widening a shared product surface: emitting a new
+        # type into the change feed every tenant reads is a decision with its own
+        # owner, not something a Phase-A read may do on its own.
+        "lastBeliefWriteUnavailable": (
+            None if last is not None or _belief_changes_reach_the_graph_store()
+            else {
+                "error_code": "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE",
+                "message": (
+                    "a null lastBeliefWrite does not mean this belief never "
+                    "moved. This build's GRAPH event store records only the "
+                    "types in `sdk._GRAPH_EVENT_TYPES`, and `ConfidenceChanged` "
+                    "is not one of them, so no row of that type exists to "
+                    "read — the belief change itself IS durable, in the event "
+                    "journal. Read it there (`tortoise_belief_timeline`) "
+                    "rather than concluding the belief is static."),
+                "recordedEventTypes": _graph_event_types(),
+            }),
         "evidence": {
             # `null` for a non-Point entity: the chain is recorded on Points
             # (#1423's "who decided this?"), and saying so is not the same as

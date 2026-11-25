@@ -910,6 +910,9 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # prior is `baseline`, never silently reported as a measurement.
         assert body["ep_state"] == "baseline", body
         assert body["lastBeliefWrite"]["seq"] == seq, body
+        # The named reason is for a null write ONLY: when the store DOES hold the
+        # row, there is nothing unavailable to explain.
+        assert body["lastBeliefWriteUnavailable"] is None, body
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
         }, body
@@ -920,6 +923,54 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
+
+
+def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path):
+    """#14593 review P1: a null ``lastBeliefWrite`` must not speak for the store.
+
+    MEASURED: the GRAPH event store only receives the types in
+    ``sdk._GRAPH_EVENT_TYPES`` (the one product ``append_event`` call site is
+    ``sdk._emit_event``'s gated arm), and ``ConfidenceChanged`` is not among
+    them — so ``latest_for_node(..., "ConfidenceChanged", …)`` cannot return a
+    row on a real graph, and the field was null while the docstring promised
+    "when it last moved… from the store's own record rather than inferred".
+    A client reading that null concludes the belief never moved, which is false:
+    the change is durable in the event JOURNAL. The route now publishes a named
+    reason beside the null — the same shape it already uses for
+    ``NO_PERSISTED_BELIEF`` — so absence reads as "this store cannot record it",
+    not as a measurement.
+
+    ⛔ This test is RED before the fix (the key does not exist, so the subscript
+    raises), and it asserts the emitter's OWN gate rather than a hardcoded
+    list — the day ``ConfidenceChanged`` joins that set, the reason must vanish
+    on its own, and the sibling test above already pins the populated case.
+    """
+    from tortoise.sdk import _GRAPH_EVENT_TYPES
+
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            pid = sdk._create_point("statement", "a measured claim")["id"]
+            sdk._set_point_baseline(pid, 8.0, 2.0)
+        finally:
+            sdk.close()
+        r = client.get(f"/v1/entities/{pid}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["lastBeliefWrite"] is None, body
+        if "ConfidenceChanged" in _GRAPH_EVENT_TYPES:  # pragma: no cover
+            # The emitter started recording it: the query is now answerable and
+            # there must be no reason to publish.
+            assert body["lastBeliefWriteUnavailable"] is None, body
+            return
+        reason = body["lastBeliefWriteUnavailable"]
+        assert reason["error_code"] == (
+            "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE"), body
+        # It NAMES what the store does record, so the answer is diagnosable, and
+        # it points at where the change really is instead of asserting absence.
+        assert "ConfidenceChanged" not in reason["recordedEventTypes"], body
+        assert reason["recordedEventTypes"], body
+        assert "journal" in reason["message"], body
 
 
 def _plant_malformed_event(sdk, seq: int) -> None:
