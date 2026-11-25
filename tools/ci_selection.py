@@ -1989,11 +1989,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # worth a third entry for a `.md`: the Cypher census's pins
              # (`tests/test_13098_cypher_inventory.py`, registered `core`) compare the tool's
              # own count against the numbers PINNED IN THAT DOCUMENT'S SOURCE, so a
-             # source-only edit is exactly how a count drifts. ⛔ THE ENTRY NAMES THE
-             # TRACKED SOURCE, NOT THE RENDERED DOCUMENT: `CYPHER-INVENTORY.md` is a gitignored
-             # build artifact (`--render`'s output), so a diff can never carry it and an entry
-             # naming it would select nothing, forever, silently — the failure class this very
-             # entry exists to close. Measured before these entries:
+             # source-only edit is exactly how a count drifts. ⛔ AND BOTH PATHS ARE
+             # ENTRIES: the TRACKED SOURCE for the ordinary edit, and the RENDERED
+             # DOCUMENT for the one diff that CAN carry it — the modify/delete conflict
+             # resolved by "keep our version", which re-stages the gitignored file
+             # (`#13098` review round 11, measured: with the document's entry removed,
+             # `select(["docs/architecture/CYPHER-INVENTORY.md"])` → `surfaces: []` and the
+             # suite ABSENT, so the arm that exists to catch exactly that re-add was
+             # unscheduled for it). The document entry is inert on every other diff,
+             # because `.gitignore` keeps the path out of them. ⛔ The earlier reading of
+             # this comment — "a diff can never carry it" — was falsified by that arm's
+             # own premise. Measured before these entries:
              # `select(["tools/cypher_inventory.py"])`, `select(["tools/cypher_diff_harness.py"])`
              # and `select(["docs/architecture/CYPHER-INVENTORY.src.md"])` each → `surfaces: []`
              # with the suite ABSENT — `tools/` is in `NON_PYTHON_PREFIXES`, so the path is
@@ -2003,6 +2009,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "tools/cypher_inventory.py",
              "tools/cypher_diff_harness.py",
              "docs/architecture/CYPHER-INVENTORY.src.md",
+             # The RENDERED document: inert on every normal diff (gitignored), selected only
+             # when a conflict resolution re-stages it — see the note above.
+             "docs/architecture/CYPHER-INVENTORY.md",
              # #13436 P7 (PR #13445) review P1: the write-path-cost instrument and its
              # evidence directory are subjects of `tests/test_measure_13436_write_costs.py`
              # (`core`-registered), and every one of its pins reads one of them — the

@@ -958,7 +958,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.all_surface:
         prefixes = (".",)
 
-    result = census(prefixes, drop_test_modules=not args.all_surface)
+    # ⛔ EVERY MODE THAT CANNOT ENUMERATE ANSWERS 2, NEVER 1. `surface_files()` runs
+    # `git ls-files … check=True`, so on a box without a `git` binary or without an
+    # index it raises (`FileNotFoundError`, `CalledProcessError` 128) — and an
+    # uncaught exception exits the interpreter with 1, the code this tool reserves
+    # for the DRIFT verdict. `--render` has no drift verdict at all, and `--check`
+    # would then say "the census drifted" about a box that could not answer, sending
+    # a lane to re-cut 25 pins that were correct. The probe wrapper below closes this
+    # class for `git ls-files --error-unmatch`; this one closes it for the census's
+    # own enumeration, which runs on EVERY path.
+    try:
+        result = census(prefixes, drop_test_modules=not args.all_surface)
+    except (OSError, subprocess.CalledProcessError) as err:
+        print(
+            f"census: could not enumerate {prefixes}: {err} — this is 'could not "
+            "run', not drift",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.check is not None:
         return check(ROOT / args.check, result)
