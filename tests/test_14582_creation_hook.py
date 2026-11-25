@@ -1081,6 +1081,68 @@ class _FakeControlPlane:
         raise AssertionError(f"unexpected control-plane read: {table}")
 
 
+# ── the backfill's ARGUMENT GATE (#14624 review 2) ─────────────────────────
+
+#: Every guard below is a REFUSAL in `main()`, and none of them was exercised
+#: anywhere before these rows (#14624 review 2). The `SystemExit` vs `return`
+#: distinction is the non-vacuity: `ap.error` RAISES (exit 2), while a guard that
+#: is not there lets the same argv continue to the DSN check, which only RETURNS
+#: `EXIT_USAGE` — same code, no exception. So a reverted guard fails these rows.
+
+
+def test_backfill_arm_requires_the_cutover_acknowledgement(monkeypatch) -> None:
+    """⛔ `backfill --arm` ARMS A WHOLE ORG, so it needs the SAME
+    `--acknowledge-cutover` that `arm` does (#14624 review 2a).
+
+    THIS IS THE SAFETY GUARD. Revert `wants_arm` to `args.command == "arm"` and
+    nothing in the tree reds while a population is armed with no operator having
+    read the four preconditions (`CUTOVER_ACK_TEXT` exists to make them read).
+    """
+    from tools import record_allocator_cli as cli
+
+    monkeypatch.delenv(cli._record_env_contract()[0], raising=False)
+    assert cli.main(["backfill", "--org-id", "o", "--arm"]) == cli.EXIT_REFUSED
+    # …and the ack is a GATE, not a blanket refusal: unset the DSN and the
+    # acknowledged form gets PAST the gate and fails on what it lacks.
+    assert cli.main(["backfill", "--org-id", "o", "--arm",
+                     "--acknowledge-cutover"]) == cli.EXIT_USAGE, (
+        "an acknowledged `backfill --arm` with no DSN should fail on the DSN, "
+        "not on the ack gate")
+
+
+def test_backfill_takes_no_graph_id_and_no_stated_floor() -> None:
+    """`backfill` walks the WHOLE org and reads EACH graph's own journal
+    enumeration (#14624 review 2b/2c).
+
+    A `--graph-id` would let a population verb act on one graph while reporting
+    a population run; a single stated `--floor`/`--journal` would seed every
+    graph of an org to one number — the defect `sweep` already refuses by name.
+    """
+    from tools import record_allocator_cli as cli
+
+    for argv in (["backfill", "--org-id", "o", "--graph-id", "g"],
+                 ["backfill", "--org-id", "o", "--enumerated-floor", "3"],
+                 ["backfill", "--org-id", "o", "--journal", "j.jsonl"]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == cli.EXIT_USAGE, argv
+
+
+def test_dry_run_and_arm_belong_to_backfill_only() -> None:
+    """A flag a writing verb SILENTLY IGNORED is a lie about the one thing it
+    promises (#14624 review 2d/2e): `--dry-run` on `seed` would write, and
+    `--arm` on `seed` would allocate nothing while reading as if it had."""
+    from tools import record_allocator_cli as cli
+
+    for argv in (["seed", "--org-id", "o", "--graph-id", "g",
+                  "--enumerated-floor", "0", "--dry-run"],
+                 ["seed", "--org-id", "o", "--graph-id", "g",
+                  "--enumerated-floor", "0", "--arm"]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == cli.EXIT_USAGE, argv
+
+
 # ── the backfill ───────────────────────────────────────────────────────────
 
 @pytestmark_live
@@ -1093,7 +1155,13 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
     args = _backfill_args(org)
 
     dry = cli._cmd_backfill(_conn(), _backfill_args(org, dry_run=True))
-    assert (dry["considered"], dry["seeded"], dry["refused"]) == (1, 1, 0), dry
+    # ⛔ A DRY RUN WROTE NOTHING, SO IT REPORTS NOTHING AS WRITTEN (#14624
+    # review 3). This row used to assert `dry["seeded"] == 1` while the same
+    # payload's per-graph `outcome` said `would_seed` — the summary and the detail
+    # contradicted each other in the field an operator reads BEFORE arming
+    # production. The projection is `would_seed`; `seeded`/`armed` stay 0.
+    assert (dry["considered"], dry["seeded"], dry["refused"]) == (1, 0, 0), dry
+    assert (dry["would_seed"], dry["would_arm"]) == (1, None), dry
     assert dry["graphs"][0]["outcome"] == "would_seed"
     assert _counter(record_schema, org, graph) is None, (
         "--dry-run wrote a row: the one thing it promises is that it does not")
@@ -1111,6 +1179,58 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
     assert (again["considered"], again["seeded"], again["refused"]) == (0, 0, 0), again
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "the backfill must be IDEMPOTENT: a second run may not move the counter")
+
+
+def test_a_dry_run_reports_would_counts_and_a_real_run_reports_the_writes(
+        monkeypatch):
+    """⛔ THE DRY-RUN SUMMARY MAY NOT CLAIM A WRITE (#14624 review 3).
+
+    `seeded`/`armed` are the fields an operator acts on, so a dry run that
+    filled them in said "N graphs are healed" about a run that wrote nothing
+    while the per-graph `outcome` in the SAME payload said `would_seed`.
+
+    No database: the reporting is what is under test, so the seed's decision is
+    monkeypatched out (its own legs are the live tests above, and re-deciding it
+    here with a hand-written predicate is the second implementation this module
+    exists to avoid). The connection is a recorder, so "wrote nothing" is
+    MEASURED — zero `commit()`s and one run-level `rollback()`.
+    """
+    from tortoise import record_allocator as ra
+    from tools import record_allocator_cli as cli
+
+    graphs = ["g-1", "g-2"]
+    answers = {
+        _sql_key(ra.UNCUT_GRAPHS_SQL): [(graph,) for graph in graphs],
+        _sql_key(ra.JOURNAL_MAX_SQL): [(3,)],
+        _sql_key(ra.JOURNAL_COUNT_SQL): [(3,)],
+    }
+    monkeypatch.setattr(ra, "scope_tenant", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ra, "seed",
+        lambda *a, **k: SimpleNamespace(seq=3, mode="seeded",
+                                       healed_tail=None, burned=0))
+    monkeypatch.setattr(ra, "arm", lambda *a, **k: 3)
+
+    dry_conn = _FakeRecordConn(answers)
+    dry = cli._cmd_backfill(dry_conn, _backfill_args("o", dry_run=True,
+                                                     arm_graphs=True))
+    assert dry["dry_run"] is True
+    assert (dry["considered"], dry["seeded"], dry["refused"]) == (2, 0, 0), dry
+    assert (dry["armed"], dry["would_seed"], dry["would_arm"]) == (0, 2, 2), dry
+    assert [e["outcome"] for e in dry["graphs"]] == ["would_seed"] * 2
+    assert [e.get("would_arm") for e in dry["graphs"]] == [True, True]
+    assert dry_conn.commits == 0, "--dry-run committed: it wrote something"
+    assert dry_conn.rollbacks == 1, (
+        "the run-level rollback is the dry run's own promise; without it the "
+        "per-graph savepoints were rolled back but the transaction was left open")
+
+    # ⛔ NON-VACUITY: the SAME payload shape reports the writes on a real run, so
+    # a `seeded` that were hard-coded to 0 would fail here.
+    real_conn = _FakeRecordConn(answers)
+    real = cli._cmd_backfill(real_conn, _backfill_args("o", arm_graphs=True))
+    assert (real["seeded"], real["armed"]) == (2, 2), real
+    assert (real["would_seed"], real["would_arm"]) == (None, None), real
+    assert real_conn.commits == 2, "one transaction per graph"
 
 
 @pytestmark_live
@@ -1227,11 +1347,66 @@ def _uncut_graph(conn, label: str, *, positions=()):
     return org, graph
 
 
-def _backfill_args(org: str, *, dry_run: bool = False):
+def _backfill_args(org: str, *, dry_run: bool = False,
+                   arm_graphs: bool = False) -> SimpleNamespace:
+    """`_cmd_backfill` takes the CONNECTION, so it never reads `args.dsn` — the
+    field is here only so the namespace has the shape `main()` builds. Keeping it
+    `None` also lets the REPORTING legs below run without a record database,
+    which is all they are about (the seed's own decision has live legs)."""
     return SimpleNamespace(org_id=org, command="backfill", graph_id=None,
-                           dsn=_app_dsn(), floor=None, journal=None,
-                           dry_run=dry_run, arm_graphs=False,
+                           dsn=None, floor=None, journal=None,
+                           dry_run=dry_run, arm_graphs=arm_graphs,
                            acknowledge_cutover=False, as_json=False)
+
+
+def _sql_key(sql: str) -> str:
+    """Whitespace-insensitive key, so a re-indented constant still matches."""
+    return " ".join(str(sql).split())
+
+
+class _FakeRecordConn:
+    """A RECORDER, not a second record: it answers the backfill's reads and
+    counts what the code asked it to do.
+
+    `fetchone`/`fetchall` are keyed by the SQL the code executed, so a verb that
+    read a different statement than this test set up gets an empty answer instead
+    of a silent pass.
+    """
+
+    def __init__(self, answers: dict[str, list]) -> None:
+        self._answers = {_sql_key(k): v for k, v in answers.items()}
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self):
+        return _FakeRecordCursor(self._answers)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class _FakeRecordCursor:
+    def __init__(self, answers: dict[str, list]) -> None:
+        self._answers = answers
+        self._rows: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def execute(self, sql, params=None) -> None:
+        self._rows = self._answers.get(_sql_key(sql), [])
+
+    def fetchall(self) -> list:
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
 
 
 def _conn():

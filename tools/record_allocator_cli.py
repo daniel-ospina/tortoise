@@ -29,7 +29,13 @@ WHAT THE VERBS ARE FOR, one line each:
   disagree is NOT silently seeded — and it is never a silent skip.
   ``--dry-run`` exercises the REAL decision path and rolls the whole run back,
   so the operator can see the population and the refusals before writing
-  anything.
+  anything. ⛔ IT REPORTS WHAT IT **WOULD** DO, NEVER WHAT IT DID: `seeded` and
+  `armed` stay ``0`` (nothing was written and nothing was armed) and the
+  projection is carried in `would_seed` / `would_arm` — the same words each
+  graph's own `outcome` uses — so the summary cannot contradict the detail.
+  This verb exists for an operator reading the numbers BEFORE arming a
+  production deployment; a dry run that reported `seeded: N` would be read as
+  "N graphs are healed" by the one reader it has.
 
 THE SEED'S ONE INPUT THAT CANNOT BE DERIVED. `enumerated_floor` is *how many
 records a replay of THIS graph's journal enumerates* — the caller's fact. Two
@@ -566,6 +572,10 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
 
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
+    #: The dry-run projection, counted separately from the writes. A dry run
+    #: performs neither a seed nor an arm, so `seeded`/`armed` cannot be the
+    #: field an operator reads to learn what the run WOULD do (#14624 review 3).
+    would_seed = would_arm = 0
     for graph_id in graphs:
         # ⛔ RE-SCOPE EVERY ITERATION, AND THIS IS NOT DEFENSIVE. `scope_tenant`
         # sets a TRANSACTION-LOCAL GUC and `set_config(..., true)` ends with the
@@ -635,8 +645,10 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
             entry["outcome"] = "would_seed"
+            would_seed += 1
             if arm_them:
                 entry["would_arm"] = True
+                would_arm += 1
         else:
             conn.commit()
             entry["outcome"] = "seeded"
@@ -645,9 +657,9 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
                       "burned": result.burned}
             if arm_them:
                 entry["armed"] = True
-        seeded += 1
-        if arm_them:
-            armed += 1
+            seeded += 1
+            if arm_them:
+                armed += 1
         entries.append(entry)
     if dry_run:
         # Nothing this run wrote survives. Every savepoint was rolled back; this
@@ -663,6 +675,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "seeded": seeded,
         "refused": refused,
         "armed": armed if arm_them else None,
+        # ⛔ A DRY RUN REPORTS WHAT IT WOULD DO, NEVER WHAT IT DID. `seeded` and
+        # `armed` above stay 0 on a dry run (nothing was written, nothing was
+        # armed); the projection lives here, so the summary and each graph's own
+        # `outcome` (`would_seed` / `would_arm`) cannot disagree (#14624 review
+        # 3). `None` on a real run, exactly as `armed` is `None` without --arm.
+        "would_seed": would_seed if dry_run else None,
+        "would_arm": (would_arm if arm_them else None) if dry_run else None,
         "refusals": [e for e in entries if e.get("outcome") == "refused"],
         "graphs": entries,
         "cannot_see": (
