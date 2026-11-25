@@ -15790,13 +15790,90 @@ def _paged(body_key: str, rows: list[dict], *, candidates: int,
     return body
 
 
+def _layer_kind_vocabulary(label: str) -> frozenset[str]:
+    """The kinds ``label`` DECLARES — the set a refused ``kind`` filter lists.
+
+    ⛔ Deliberately NOT ``known_kinds("subjectKind")``. ``domain_loader``'s
+    subject bucket is EMPTY BY DESIGN — ``_BUCKET_ATTRS["subjectKind"] is None``
+    and ``_CORE_KINDS_BY_BUCKET["subjectKind"] == frozenset()``, because the
+    manifest v3 schema has no ``subjectKinds`` list — so reading it here would
+    answer ``set()`` and 400 EVERY subject filter, the whole
+    ``/v1/subjects?kind=`` surface included. §5's vocabulary is
+    :func:`tortoise.kind_layers.subject_kind_names`, and that is also what
+    ``declared_layers`` asks (``declares_subject``); the two must not diverge.
+    """
+    from tortoise.kind_layers import KIND_PROP, subject_kind_names
+
+    if label == "Subject":
+        return subject_kind_names()
+    from tortoise.domain_loader import known_kinds
+
+    return frozenset(known_kinds(KIND_PROP[label.lower()]))
+
+
+async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
+                                     *, surface: str) -> None:
+    """Refuse a ``kind`` filter that names nothing this layer can answer.
+
+    #14593 review P1. ``?kind=org`` (or ``Goal``, or any typo) used to reach
+    ``entity_reads.list_layer``, match nothing, and return
+    ``200 {"objects": [], "count": 0, "total_available": 0, "truncated": false}``
+    — a page POSITIVELY marked complete that is byte-identical to "this graph
+    names no Objects of that kind". That is the fail-open class this PR fixes one
+    file over (#8447's "a FULL page was byte-identical to a COMPLETE one"), and
+    the sibling read route already refuses the same input: ``list_points``
+    answers ``400 kind must be one of [...]`` via ``known_kinds()``.
+
+    Admission is the UNION of two authorities, and the split is load-bearing:
+
+    * the DECLARED vocabulary (:func:`tortoise.kind_layers.declared_layers`) —
+      the repo's ONE kind↔layer authority, so the point↔object overlap the #7813
+      owner ruling permits (``goal``/``plan``/``strategy``/``target``) is
+      admitted on BOTH layers rather than refused on one;
+    * the kinds the graph CARRIES (``entity_reads.layer_kind_values``) — read
+      only when the declared vocabulary does not answer, because the write doors
+      are open on this property and a stored off-vocabulary kind must stay
+      readable by filter.
+
+    ⛔ The graph's own data WINS over the vocabulary, never the reverse: a kind
+    this layer actually holds is admitted even when nothing declares it. Refusing
+    it would be a false block on a row the caller can read — the direction that is
+    worse than the silence, and the reason a declared-vocabulary-only check was
+    rejected here (the PR's own suite writes ``objectKind="organisation"``, which
+    NO vocabulary declares).
+
+    A kind declared on this layer but absent from the graph is ADMITTED too — an
+    empty page for it is the honest answer ("you know nothing of that kind"), and
+    400ing it would invent a refusal the data does not support.
+    """
+    from tortoise import entity_reads
+    from tortoise.kind_layers import declared_layers
+
+    if label.lower() in declared_layers(kind):
+        return
+    carried = await _read_offload(
+        lambda: entity_reads.layer_kind_values(sdk._get_proj(), label),
+        op=f"{surface}.kind_vocabulary")
+    if kind in carried:
+        return
+    allowed = sorted(_layer_kind_vocabulary(label) | carried)
+    raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
+
+
 async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
                             kind: str | None, limit: int, offset: int) -> dict:
     """One handler body for every layer list, so the two cannot diverge."""
     from tortoise import entity_reads
+    from tortoise.kind_fallbacks import named_kind
 
     _require_scope(org, "graphs:read", surface)
+    # #9572: BLANK is not a kind — the same predicate the write doors use, so a
+    # ``?kind=%20`` filter cannot answer an empty page for a filter the caller
+    # never meant to apply.
+    kind = named_kind(kind)
     sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    if kind is not None:
+        await _refuse_unknown_layer_kind(sdk, label, kind, surface=surface)
     rows, total = await _read_offload(
         lambda: entity_reads.list_layer(
             sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),

@@ -200,6 +200,45 @@ def list_layer(
     return [dict(r[0]) for r in rows], total
 
 
+def layer_kind_values(proj: Any, label: str) -> frozenset[str]:
+    """The ``<layer>Kind`` spellings this graph actually CARRIES on ``label``.
+
+    The second half of the vocabulary a layer list route validates its ``kind``
+    filter against (``hosted_api._refuse_unknown_layer_kind``); the first half is
+    the DECLARED vocabulary (:func:`tortoise.kind_layers.declared_layers`).
+
+    ⛔ It is read from the GRAPH and not from a constant because the write doors
+    on this property are OPEN: ``POST /v1/objects`` persists an ``objectKind`` no
+    vocabulary declares (``commit_schema``'s #5202 note),
+    ``create_subject(subjectKind="Subject")`` is accepted and STORED, and a pack
+    names its own spellings (``venture:tranche``). A validator built ONLY from the
+    declared vocabulary would refuse a filter over a row that exists — a false
+    block on data the caller can otherwise page to and read by id, which is the
+    over-block direction and worse than the silence it would be replacing.
+
+    ⛔ NO terminal predicate and NO ``kind`` filter of its own: this answers
+    "which spellings does this layer hold", so a kind whose rows are ALL
+    tombstoned is still a real kind and its filtered page is honestly EMPTY.
+    Reusing the list read's own WHERE here would make a fully-ended kind
+    unanswerable by filter — reintroducing the same ambiguity one level down.
+
+    ``label`` is a constant from :data:`LAYER_KIND_PROP`, and the property name
+    comes from that map rather than from any caller, so nothing here is
+    caller-controlled query text. ``ro_query`` on the same contract as every
+    other call in this module.
+    """
+    label = _safe_label(label)
+    kind_prop = LAYER_KIND_PROP.get(label)
+    if kind_prop is None:
+        raise ValueError(
+            f"layer_kind_values has no declaration for label {label!r}")
+    rows = proj.g.ro_query(
+        f"MATCH (n:{label}) WHERE n.{kind_prop} IS NOT NULL "
+        f"RETURN DISTINCT n.{kind_prop}",
+    ).result_set
+    return frozenset(str(r[0]) for r in rows if r[0] is not None)
+
+
 def _endpoint_preview(row: Any) -> dict:
     """The OTHER endpoint of one edge, as identity + label + its own name.
 

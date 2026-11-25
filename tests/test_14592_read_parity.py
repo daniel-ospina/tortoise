@@ -323,6 +323,103 @@ def test_subjects_list_and_by_id_mirror_the_objects_route(tmp_path):
         assert client.get("/v1/subjects/nope").status_code == 404
 
 
+# ── the `kind` filter is GRADED: an unknown kind is refused, not answered ──
+
+def test_layer_lists_refuse_a_kind_no_vocabulary_declares(tmp_path):
+    """#14593 review P1: an unknown `kind` answered a page marked COMPLETE.
+
+    Pre-fix, `?kind=org` reached `entity_reads.list_layer`, matched nothing and
+    returned `200 {"objects": [], "count": 0, "total_available": 0,
+    "truncated": false}` — byte-identical to "this graph names no Objects of that
+    kind", and POSITIVELY marked complete by the offset-aware marker this PR
+    added. That is the fail-open class the PR fixes one file over (#8447), on a
+    brand-new read surface, and the sibling route already refuses the input
+    (`list_points` -> 400 via `known_kinds()`), so the two list surfaces must not
+    grade the same bad input differently.
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        client.post("/v1/subjects", json={"name": "Ops", "subjectKind": "team"})
+        for route in ("/v1/objects", "/v1/subjects"):
+            r = client.get(route, params={"kind": "org"})
+            assert r.status_code == 400, (route, r.text)
+            detail = r.json()["detail"]
+            # the `list_points` shape: the refusal NAMES the vocabulary it
+            # refused against, so a caller can correct a typo from the response.
+            assert detail.startswith("kind must be one of "), (route, detail)
+
+
+def test_layer_lists_refuse_a_kind_declared_on_another_layer(tmp_path):
+    """A layer mix-up is refused too — `organization` is §5's SUBJECT kind."""
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        r = client.get("/v1/objects", params={"kind": "organization"})
+        assert r.status_code == 400, r.text
+        assert "kind must be one of " in r.json()["detail"], r.json()
+
+
+def test_layer_lists_still_read_an_off_vocabulary_kind_the_graph_carries(tmp_path):
+    """The GRAPH wins over the vocabulary — a refusal must not become a false block.
+
+    Both spellings asserted here are UNDECLARED (the first two asserts measure
+    that, rather than trusting it): the write doors on `<layer>Kind` are open, so
+    a stored off-vocabulary kind exists, and refusing a filter over a row the
+    caller can otherwise page to would be worse than the silence being fixed.
+    This is also why a declared-vocabulary-ONLY validator was rejected here — it
+    would refuse this file's own existing rows (`objectKind="organisation"`,
+    `subjectKind="person"`).
+    """
+    from tortoise.kind_layers import declared_layers
+
+    assert declared_layers("organisation") == frozenset()
+    assert declared_layers("person") == frozenset()
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "organisation"})
+        client.post("/v1/objects", json={"name": "GROW", "objectKind": "goal"})
+        r = client.get("/v1/objects", params={"kind": "organisation"})
+        assert r.status_code == 200, r.text
+        assert [o["name"] for o in r.json()["objects"]] == ["ACME"], r.json()
+        client.post("/v1/subjects", json={"name": "Daniel", "subjectKind": "person"})
+        s = client.get("/v1/subjects", params={"kind": "person"})
+        assert s.status_code == 200, s.text
+        assert [x["name"] for x in s.json()["subjects"]] == ["Daniel"], s.json()
+
+
+def test_layer_lists_admit_a_declared_kind_this_graph_does_not_carry(tmp_path):
+    """An honest "you know nothing" is a COMPLETE EMPTY page, never a 400.
+
+    The second half is the trap this fix had to avoid: `known_kinds("subjectKind")`
+    answers the EMPTY set by design (`domain_loader._BUCKET_ATTRS["subjectKind"]
+    is None` — no `subjectKinds` list exists in the manifest schema), so a
+    bucket-read validator would 400 every subject filter, including the §5
+    vocabulary this asserts is admitted.
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "organisation"})
+        r = client.get("/v1/objects", params={"kind": "goal"})
+        assert r.status_code == 200, r.text
+        assert r.json()["objects"] == [], r.json()
+        assert r.json()["truncated"] is False, r.json()
+        t = client.get("/v1/subjects", params={"kind": "core:team"})
+        assert t.status_code == 200, t.text
+        assert t.json()["subjects"] == [], t.json()
+        assert t.json()["truncated"] is False, t.json()
+
+
+def test_layer_list_treats_a_blank_kind_as_no_filter(tmp_path):
+    """#9572's rule at the READ door: blank is not a kind.
+
+    Pre-fix a whitespace `kind` was truthy, so it filtered on
+    `objectKind = "   "` and answered an empty COMPLETE page for a filter the
+    caller never meant to apply — the same silence as the typo above.
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        r = client.get("/v1/objects", params={"kind": "   "})
+        assert r.status_code == 200, r.text
+        assert r.json()["count"] == 1, r.json()
+
+
 # ── GET /v1/sources ────────────────────────────────────────────────────────
 
 def test_sources_list_is_the_mcp_doors_own_population(tmp_path):
