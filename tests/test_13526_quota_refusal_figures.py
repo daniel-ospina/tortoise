@@ -861,14 +861,16 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
     #: TWO shifts, and BOTH are needed because each catches the other's blank.
     #: A reading that genuinely follows the clock moves by EXACTLY the shift, so a
     #: pin is caught wherever the move departs from that by more than the loop's
-    #: 2 s tolerance. Which shift does the catching depends on what the pin
+    #: 2 s tolerance. Which shift catches which pin depends on what the pin
     #: truncates:
     #:
     #: * a CALENDAR pin (`replace(day=…)`, `replace(month=…)`, `replace(year=…)`)
     #:   PASSES `+6h` unless the shift rolls past the boundary that pin truncates —
     #:   midnight for a day pin, a month end for a month pin, 31 Dec for a year pin
-    #:   (and 28 Feb into a pinned leap year). Everywhere else the pin keeps the
-    #:   time-of-day and the move is exactly +21600 s, same as an honest reading.
+    #:   (and 28 Feb when the real year is not leap but the pinned one is — a leap
+    #:   real year rolls into its own 29 Feb and passes). Everywhere else the pin
+    #:   keeps the time-of-day and the move is exactly +21600 s, as an honest reading
+    #:   would.
     #:   At that boundary the move is no longer the shift, and both magnitude and
     #:   SIGN depend on the shape: `day=1` from a mid-month `20:00Z` gives
     #:   −64800 s (the retained time-of-day now sits on the NEXT date, a day less
@@ -888,14 +890,6 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
     #: the shift that catches those on ordinary dates (the `+6h` catch above needs a
     #: month end or a 31 Dec). Conversely `+405d` moves a sub-day pin by exactly
     #: 34992000 s — a whole number of days — so it does NOT catch one.
-    #:
-    #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
-    #: one is the real test": doing so silently stops catching sub-day pins, and
-    #: dropping the year-crossing one stops catching calendar pins. An earlier
-    #: revision of this comment said a pinned calendar component "tracks the
-    #: clock under a six-hour shift" and called the year-crossing shift "the only
-    #: cheap way" — measured false for every sub-day pin, which is the shape the
-    #: source arm above explicitly does not cover.
     #:
     #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
     #: one is the real test": doing so silently stops catching sub-day pins, and
