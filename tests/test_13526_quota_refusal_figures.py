@@ -153,17 +153,52 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
       which is the condition under which the dimension is armed at all;
     * structural — the reading is DERIVED, not a literal. A literal written
       TODAY is fresh for 24 h and then reds this file with no commit in
-      between; asserting the fixture's source carries no hardcoded ISO instant
-      fails at the edit instead of a day later.
+      between; asserting the ``measured_at`` VALUE is clock-derived fails at
+      the edit instead of a day later.
+
+    ⛔ The structural arm asserts the VALUE, not the quoting. It was a regex
+    requiring a quote immediately after `=` first, and that arm was
+    quote-adjacent: measured, a HARDCODED instant survived it two ways with all
+    11 tests green — ``measured_at = f"2026-…"`` (no quote right after `=`) and
+    ``_FIXTURE_MEASURED_AT = "2026-…"`` at module level (``getsource`` of the
+    function never sees the literal). Both are exactly the edits a later lane
+    makes, and both put the 24 h bomb back. So the arm parses the fixture and
+    requires a CLOCK CALL in the bound expression, resolving ONE hop of
+    module-level constant so hoisting the instant out of the function cannot
+    hide it — while a hoisted *derived* reading is still accepted.
     """
+    import ast
     import inspect
-    import re
 
     from tortoise.allowance_gate import STALE_AFTER_SECONDS
 
-    source = inspect.getsource(_single_sample_meter)
-    assert re.search(r"measured_at\s*=\s*[\"']\d{4}-", source) is None, (
-        "the fixture pins an absolute instant again — the gate ages a reading by "
+    fn = next(
+        node for node in ast.parse(inspect.getsource(_single_sample_meter)).body
+        if isinstance(node, ast.FunctionDef))
+    bound = [
+        node.value for node in ast.walk(fn)
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "measured_at"
+                for target in node.targets)]
+    assert bound, (
+        "the fixture no longer binds `measured_at` — this arm cannot see the "
+        "reading it exists to pin, so it would pass vacuously (#14646)")
+    module = ast.parse(inspect.getsource(inspect.getmodule(_single_sample_meter)))
+    hoisted = {
+        target.id: node.value
+        for node in module.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)}
+    resolved = [
+        hoisted.get(value.id, value) if isinstance(value, ast.Name) else value
+        for value in bound]
+    derived = [
+        call for value in resolved for call in ast.walk(value)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"now", "utcnow", "today", "time"}]
+    assert derived, (
+        "the fixture pins an absolute instant again — it holds "
+        f"{[ast.unparse(value) for value in resolved]!r} with no clock call, so "
+        "the gate ages that reading by "
         f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) and will SERVE instead of "
         "arming this dimension 24 h later, reddening this file with no commit in "
         "between. Derive it (`datetime.now(UTC).isoformat()`) or monkeypatch the "
