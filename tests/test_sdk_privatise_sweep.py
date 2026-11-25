@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2299 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2303 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
@@ -272,7 +272,14 @@ def _residue_block() -> str:
     figure. ⛔ AND RE-WALKED ONCE MORE for the `#14583` review's P3 (the carried-parent label below):
     restating `KEPT VERBATIM` as `CARRIED IN SUBSTANCE rather than verbatim` added four `#:` lines
     INSIDE the run, so the figure above is RE-MEASURED by this walk (`2295` -> `2299`) rather than
-    adjusted by arithmetic on the last reading. ⛔ THOSE NUMBERS ARE A
+    adjusted by arithmetic on the last reading. ⛔ AND RE-WALKED AGAIN for the branch-namespace
+    parenthetical below (`2299` -> `2303`): the sentence that cites its evidence command now shows
+    `git for-each-ref --contains … refs/remotes/origin/` instead of `git branch -r --contains`, and
+    names why (`branch -r` reads a PR-checkout ref's first path segment as a REMOTE NAME, so a kept
+    `refs/remotes/pull/<n>/merge` prints as a branch) — measured on this PR's own `test (d)`, where
+    that command returned `pull/14108/merge` while no origin BRANCH contained the commit. The four
+    `#:` lines it added are inside the run, so the figure is RE-MEASURED by this walk, never
+    adjusted by arithmetic. ⛔ THOSE NUMBERS ARE A
     MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
     <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
     re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as

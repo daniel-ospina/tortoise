@@ -394,8 +394,12 @@ SWEEP_NAMES = 66
 #: ISSUE NUMBER, and the REASON is measured rather than asserted, because the draft that gave one
 #: gave a false one: it said a pre-rebase commit "is reachable from no ref and disappears on the
 #: next `gc`", and that commit (`83e94826a8a`) is an ANCESTOR of a ref, `refs/pull/14108/head`, which
-#: `git gc` does not prune. What IS measured of it: on no remote BRANCH (`git branch -r --contains
-#: 83e94826a8a` → empty) and not on `main` (`git merge-base --is-ancestor` → NO). ⛔ "NOT FETCHABLE
+#: `git gc` does not prune. What IS measured of it: on no remote BRANCH (`git for-each-ref
+#: --contains 83e94826a8a refs/remotes/origin/` → empty) and not on `main` (`git merge-base
+#: --is-ancestor` → NO). ⛔ NOT `git branch -r --contains` HERE: it lists every ref under
+#: `refs/remotes/` and reads the first path segment as the remote name, so a PR-checkout ref
+#: (`refs/remotes/pull/<n>/merge`, which `actions/checkout` fetches and a reused runner keeps)
+#: prints as the BRANCH `pull/<n>/merge` — non-empty with no branch containing it. ⛔ "NOT FETCHABLE
 #: BY ITS SHA AT ALL" WAS ITSELF FALSIFIED (raised by review), and by the very command it cited —
 #: which is why it is corrected rather than carried: `git fetch origin 83e94826a8a` fails on the
 #: 11-character ABBREVIATION, NOT on the sha. git cannot `want` an abbreviation, and a FULL
