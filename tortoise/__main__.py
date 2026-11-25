@@ -13637,13 +13637,108 @@ def _is_embedded_default_fallback(target: str,
     return not db_path_env_set
 
 
+def _cmd_mcp_status(args) -> int:
+    """`tortoise mcp-status` — why the MCP is not loaded, in ONE line (#14607).
+
+    Exit codes: 0 loadable · 1 down (named class) · 3 abstention (the probe or the
+    config format could not be read — never a pass).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from tortoise import mcp_selfcheck
+
+    verdict = mcp_selfcheck.check(
+        getattr(args, "harness", "pi") or "pi",
+        project_dir=_Path(getattr(args, "dir", ".") or "."),
+        live=not bool(getattr(args, "offline", False)))
+    if getattr(args, "json", False):
+        print(_json.dumps({
+            "status": verdict.status,
+            "ok": verdict.ok,
+            "detail": verdict.detail,
+            "fix": verdict.fix,
+            "source": verdict.source,
+            "transport": verdict.transport,
+            "configs_read": verdict.configs_read,
+            "exit_code": verdict.exit_code,
+        }, indent=2, ensure_ascii=False))
+    else:
+        # ONE line, on stdout: this is what an agent's turn reads.
+        print(verdict.line())
+    return verdict.exit_code
+
+
+def _cmd_onboard_harness(args) -> int:
+    """`tortoise onboard --harness …` — the AGENT-first install (#14607 part C).
+
+    Register (credential-free bridge) → verify with a live call → install the
+    capture/recall seam → write the two MCP-first sentences (diff shown,
+    idempotent, reversible) → ONE health verdict.
+
+    Exit codes: 0 installed AND verified · 1 something did not verify (the
+    verdict line says which class) · 3 the probe could not run.
+    """
+    from pathlib import Path as _Path
+
+    from tortoise import harness_onboard
+
+    result = harness_onboard.onboard(
+        args.harness,
+        project_dir=_Path(getattr(args, "dir", ".") or "."),
+        # ⛔ NO `or DEFAULT_MCP_URL` here. That fallback made `url` never None on
+        # the CLI path, so `onboard` never consulted `harness_onboard.default_url()`
+        # and a box with `TORTOISE_MCP_URL` exported still got the HOSTED default
+        # written into its entry — the exact write-time disagreement the helper
+        # was added to close, passing at the library level and broken on the only
+        # path users run. `default_url()` is the one owner of "no url given".
+        url=getattr(args, "url", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        verify_only=bool(getattr(args, "verify", False)),
+        live=not bool(getattr(args, "no_verify", False)),
+        hooks=not bool(getattr(args, "no_hooks", False)),
+        instructions=not bool(getattr(args, "no_instructions", False)),
+        uninstall=bool(getattr(args, "uninstall", False)),
+        scope=getattr(args, "scope", "project") or "project",
+    )
+    harness_onboard.render(result)
+    if getattr(args, "uninstall", False):
+        # An uninstall has no health verdict to return (there is nothing left to
+        # verify), but it DID edit the user's instruction file — so a refusal is
+        # non-zero, never a silent 0.
+        return 1 if result.refusals else 0
+    if result.verdict is None:
+        # `--verify` path without a verdict is a programming error, not a pass.
+        print("  ⛔ no verdict was produced — reporting DOWN, never OK")
+        return 1
+    return result.verdict.exit_code
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
     Chains existing commands into a cohesive flow.
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
+
+    #14607: with ``--harness`` this verb takes the AGENT-first branch instead —
+    register the MCP, verify it, install the seam, write the two instruction
+    sentences. The graph-first flow below is untouched when ``--harness`` is
+    absent, so an existing user's `tortoise onboard` behaves exactly as before.
     """
+    # ⛔ `getattr(args, "harness", None)` is NOT a presence test on a duck-typed
+    # args object. `argparse` always SETS the attribute (its default is `None`),
+    # but a `mock.Mock()` FABRICATES every attribute it is asked for — so the bare
+    # truthiness below was true for an args object that never asked for the
+    # harness branch. That routed the graph-first caller into
+    # `_cmd_onboard_harness`, where `args.dir` was a Mock and `_Path(...)` raised
+    # `TypeError: argument should be a str or an os.PathLike object … not 'Mock'`
+    # in 14 `tests/test_cli_context.py` arms. The branch means "`--harness` came
+    # through the CLI", so only a REAL string selects it and every other shape
+    # keeps the graph-first flow exactly as before.
+    harness = getattr(args, "harness", None)
+    if isinstance(harness, str) and harness:
+        return _cmd_onboard_harness(args)
     import os as _os
     import subprocess as _sp
     import sys as _sys
@@ -18641,6 +18736,84 @@ def main(argv: list[str] | None = None) -> int:
              "request to it); the graph-health probe still dials the configured "
              "DB target. Same as `tortoise doctor --offline`",
     )
+    # #14607: `onboard --harness` is the AGENT-first path — register the MCP,
+    # verify it with a live call, install the recall seam, and write the two
+    # instruction sentences into the file this harness's agent actually reads.
+    # Without `--harness`, `onboard` keeps its original graph-first behaviour.
+    onboard.add_argument(
+        "--harness", default=None,
+        choices=["claude", "claude-code", "pi", "codex", "cursor"],
+        help="Onboard an AGENT harness instead of a graph: register the Tortoise "
+             "MCP (credential-free bridge), verify it with a live call, install "
+             "the capture + per-turn recall seam, and write the two MCP-first "
+             "sentences into AGENTS.md/CLAUDE.md (shown as a diff, idempotent, "
+             "reversible with --uninstall). ⛔ For `pi` the config written is the "
+             "`mcp-client` extension's (`.mcp.json` / `~/.pi/agent/.mcp.json`); "
+             "pi's BUILT-IN loader reads `.pi/mcp.json`, so `mcp-status` greens the "
+             "ENDPOINT — restart the client and check for `tortoise_*` tools",
+        )
+    onboard.add_argument(
+        "--url", default=None,
+        help="MCP endpoint the bridge forwards to (default: the hosted "
+             "https://api.premiselabs.co/mcp/). Self-hosters point this at "
+             "http://localhost:8000/mcp")
+    onboard.add_argument(
+        "--verify", action="store_true", default=False,
+        help="With --harness: verify only — change nothing, print ONE health line")
+    onboard.add_argument(
+        "--no-verify", action="store_true", default=False,
+        help="With --harness: skip the live call (offline install). The verdict "
+             "is then reported as unverified, never as OK")
+    onboard.add_argument(
+        "--no-hooks", action="store_true", default=False,
+        help="With --harness: register the MCP but install no capture/recall hooks")
+    onboard.add_argument(
+        "--no-instructions", action="store_true", default=False,
+        help="With --harness: do NOT write the two sentences into the harness's "
+             "instruction file (the diff is still printed so you can paste it)")
+    onboard.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="With --harness: print every planned write as a diff, write nothing")
+    onboard.add_argument(
+        "--scope", default="project", choices=["project", "user"],
+        help="With --harness: which config to register the MCP in — `project` "
+             "(default: the project's own config, reviewable in a diff — the "
+             "repo-root `.mcp.json` inside a git work tree, and never a file "
+             "above that directory) or `user` (the harness's global catalog, "
+             "~/.pi/agent/.mcp.json or ~/.claude.json). Codex has no project "
+             "scope: its single `~/.codex/config.toml` is TOML, so it is "
+             "refused by name rather than written")
+    onboard.add_argument(
+        "--uninstall", action="store_true", default=False,
+        help="With --harness: remove ONLY the marked instruction block this "
+             "installer wrote (a user's own text is never touched)")
+    # #14607: the one verb whose job is "is the MCP loadable FROM THIS AGENT, and
+    # if not, WHY" — a closed class, one line, non-zero exit. It is separate from
+    # `doctor` on purpose: `doctor` grades the graph and the hosted identity; this
+    # grades the file the HARNESS loads.
+    mcp_status = sp.add_parser(
+        "mcp-status",
+        help="Why is the Tortoise MCP not loaded? One line, one named class")
+    mcp_status.add_argument(
+        "--harness", default="pi",
+        choices=["claude", "claude-code", "pi", "codex", "cursor"],
+        help="Harness whose config to inspect (default: pi)")
+    mcp_status.add_argument(
+        "--dir", default=".",
+        help="Project directory holding the harness config (default: cwd)")
+    mcp_status.add_argument(
+        "--offline", action="store_true", default=False,
+        help="Skip the live call: classify the CONFIG only. The verdict then "
+             "reads UNVERIFIED (exit 3) when the entry resolves — an unprobed "
+             "config is never green")
+    mcp_status.add_argument(
+        "--live", action="store_true", default=True,
+        help="Accepted for symmetry — the live call IS the default (use "
+             "`--offline` to skip it). Its failure is reported as its own class "
+             "— transport vs auth — never folded into a credential verdict")
+    mcp_status.add_argument(
+        "--json", action="store_true", default=False,
+        help="Machine-readable verdict (status, detail, fix, source, exit code)")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
@@ -19272,6 +19445,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_config(args)
     elif args.cmd == "onboard":
         return _cmd_onboard(args)
+    elif args.cmd == "mcp-status":
+        return _cmd_mcp_status(args)
     elif args.cmd == "health-server":
         from tortoise.monitoring import serve_health
         print(f"Health server on http://{args.bind}:{args.port}/health")
