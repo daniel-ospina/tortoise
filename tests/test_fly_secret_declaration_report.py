@@ -1111,6 +1111,31 @@ def test_the_resolve_gate_is_supplied_a_default_branch_on_every_event():
     )
 
 
+def test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN():
+    """The CLEAN arm's other two wires fail CLOSED; this one fails OPEN, so pin it.
+
+    `DEFAULT_BRANCH` unset and a short-form `REF` both take the sweep's SKIP arm, so
+    their absence is at least safe, and
+    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event` pins their
+    values for correctness. `FILE_ISSUES` is the opposite direction: the guards read
+    `${FILE_ISSUES:-true}`, so an ABSENT wire means "not a dry run". Delete this one
+    `env:` line from the workflow and a `workflow_dispatch` with the DEFAULT
+    `file_issues=false` closes the ledger again — the exact defect this PR exists to
+    fix — with every behavioural row still green, because `_Harness.run()` supplies
+    `FILE_ISSUES` itself and so cannot see the workflow's own wiring (#14601 item 2,
+    measured there: with that entry deleted nothing in this file reds).
+    """
+    env = json.loads(_report_step_env())
+    assert env.get("FILE_ISSUES") == (
+        "${{ github.event_name != 'workflow_dispatch' || "
+        "github.event.inputs.file_issues == 'true' }}"
+    ), (
+        "the dry-run wire is unpinned: `FILE_ISSUES` is read as `${FILE_ISSUES:-true}`, "
+        "so an ABSENT entry reads as NOT a dry run and a dispatched dry run closes the "
+        f"ledger (#14601 item 2). Got {env.get('FILE_ISSUES')!r}"
+    )
+
+
 def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     """A ledger-closing guard placed BELOW the sweep guards nothing.
 
