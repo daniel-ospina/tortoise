@@ -9308,7 +9308,7 @@ def _unquoted_block(header: str) -> str:
     return _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
 
 
-def _carry_row_claims(header: str) -> tuple[dict[str, float], set[str]]:
+def _carry_row_claims(header: str) -> tuple[dict[str, set[float]], set[str]]:
     """Files the block says CARRY a `durations` row, split by the POLARITY it states.
 
     Returns `(positive, negative)`: `positive` maps each file the sentence says carries a row to
@@ -9329,9 +9329,18 @@ def _carry_row_claims(header: str) -> tuple[dict[str, float], set[str]]:
     return _carry_row_claims_in(_unquoted_block(header))
 
 
-def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, float], set[str]]:
-    """`_carry_row_claims` over ALREADY-MASKED text (the form `_row_claims` holds)."""
-    positive: dict[str, float] = {}
+def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, set[float]], set[str]]:
+    """`_carry_row_claims` over ALREADY-MASKED text (the form `_row_claims` holds).
+
+    ⛔ A FILE MAY BE STATED AT MORE THAN ONE VALUE, and `positive` keeps EVERY value rather than
+    the last one. A plain `positive[name] = value` made the LAST match win, so a block stating the
+    same file at two weights was graded on whichever came later: MEASURED with
+    `durations == {"test_x.py": 2.0}` and a header saying `3.0` … then `2.0`, the predicate answered
+    `([], [], [])` — GREEN over the false `3.0` — and reversing the order redded it. That is the
+    same fail-open the positive-vs-negative split closed, one level in: the two halves did not
+    resolve each other, and now two statements of the same half cannot either.
+    """
+    positive: dict[str, set[float]] = {}
     negative: set[str] = set()
     for claim in _ROW_CLAIM_CARRY_RE.finditer(unquoted):
         names = {m.group("file")
@@ -9339,21 +9348,26 @@ def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, float], set[str]]:
         if claim.group("value") is None:
             negative |= names
         else:
+            stated = float(claim.group("value"))
             for name in names:
-                positive[name] = float(claim.group("value"))
+                positive.setdefault(name, set()).add(stated)
     return positive, negative
 
 
-def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
+def _carry_row_claim_violations(positive: dict[str, set[float]], negative: set[str],
                                 durations: dict) -> tuple[list, list, list]:
     """The three ways a `carry` claim can be false, as `(wrong value, no row, has a row)`.
 
     One predicate, used for the live block AND for the fixture that proves it bites, so the
     fixture cannot drift into grading something the live assertion does not.
+
+    ⛔ EVERY stated value is checked, so a file the block states at two weights reds on
+    whichever of them is wrong — the block's own "a figure beside a weight re-stales" class.
     """
-    wrong_value = sorted((name, stated, durations[name])
+    wrong_value = sorted((name, sorted(stated), durations[name])
                          for name, stated in positive.items()
-                         if name in durations and abs(durations[name] - stated) > 1e-9)
+                         if name in durations
+                         and any(abs(durations[name] - v) > 1e-9 for v in stated))
     no_row = sorted(name for name in positive if name not in durations)
     has_a_row = sorted(name for name in negative if name in durations)
     return wrong_value, no_row, has_a_row
@@ -10163,9 +10177,9 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
         "`tests/test_carry_planted_absent_two.py` carry NO row")
     planted_positive, planted_negative = _carry_row_claims(planted)
     assert planted_positive == {
-        "eval/test_carry_planted_subdir.py": 3.5,
-        "test_carry_planted_first.py": 3.5,
-        "test_carry_planted_second.py": 3.5,
+        "eval/test_carry_planted_subdir.py": {3.5},
+        "test_carry_planted_first.py": {3.5},
+        "test_carry_planted_second.py": {3.5},
     }, f"the `carry` matcher no longer reads the run of names before the verb: {planted_positive!r}"
     assert planted_negative == {
         "test_carry_planted_absent.py",
@@ -10180,7 +10194,7 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     }
     assert _carry_row_claim_violations(
         planted_positive, planted_negative, planted_rows) == (
-            [("test_carry_planted_second.py", 3.5, 2.0)],
+            [("test_carry_planted_second.py", [3.5], 2.0)],
             ["eval/test_carry_planted_subdir.py"],
             ["test_carry_planted_absent.py"],
     ), ("the `carry` predicate does not red on all three false claims (wrong value, absent row, "
@@ -10195,7 +10209,7 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     spliced = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
                "while `#2`'s `tests/test_carry_planted_first.py` carry NO row")
     spliced_positive, spliced_negative = _carry_row_claims(spliced)
-    assert spliced_positive == {"test_carry_planted_first.py": 2.0}, (
+    assert spliced_positive == {"test_carry_planted_first.py": {2.0}}, (
         f"the `carry` matcher lost the positive half of the spliced sentence: {spliced_positive!r}")
     assert spliced_negative == {"test_carry_planted_first.py"}, (
         "the positive half silently resolved the `carry NO row` half of the same sentence, so the "
@@ -10206,6 +10220,25 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             [], [], ["test_carry_planted_first.py"]), (
         "a file whose row the block claims AND whose absence it also claims did not red the "
         "`has_a_row` direction — the splice would ship stating a false absence")
+    # ⛔ AND TWO STATEMENTS OF THE SAME HALF for one file. `positive` used to be a
+    # `dict[str, float]` assigned per match, so the LAST statement won: MEASURED with
+    # `durations == {"x": 2.0}` and a body saying `3.0` … then `2.0`, the predicate answered
+    # `([], [], [])` — GREEN over the false `3.0` — and redded only in the reversed order. Every
+    # stated value is kept now, so EITHER order reds on the one that is wrong.
+    fwd = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `3.0` `durations` row, "
+           "while `#2`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row")
+    rev = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
+           "while `#2`'s `tests/test_carry_planted_first.py` carry an explicit `3.0` `durations` row")
+    for case, label in ((fwd, "stale-first"), (rev, "fresh-first")):
+        pair_positive, pair_negative = _carry_row_claims(case)
+        assert pair_positive == {"test_carry_planted_first.py": {2.0, 3.0}}, (
+            f"the `carry` matcher collapsed two statements of one file ({label}) instead of "
+            f"keeping both: {pair_positive!r}")
+        assert _carry_row_claim_violations(
+            pair_positive, pair_negative, {"test_carry_planted_first.py": 2.0}) == (
+                [("test_carry_planted_first.py", [2.0, 3.0], 2.0)], [], []), (
+            f"a file the block states at TWO weights passed GREEN ({label}) — the last match won, "
+            "which is the fail-open this arm already closed once for positive-vs-negative")
     # …and an ODD quote count refuses to answer here too, rather than masking across the sentence
     # and reporting an empty claim (the fail-open shape the sibling arm already refuses).
     with pytest.raises(AssertionError, match="ODD number of double quotes"):

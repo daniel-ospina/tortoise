@@ -85,6 +85,16 @@ version: 1
 # (a row that moved to `3.1` under a sentence still claiming `2.0` reds it), which is what makes
 # quoting them a graded claim instead of a stale. ⛔ The set is named by VALUE and never counted —
 # see the no-row-count rule below.
+# ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
+# registration status is a THIS-HEAD fact no arm reads, and `#14544` is the proof it moves (the
+# sentence below records that file leaving `core`) — the fold's own doctrine is that a claim
+# graded by nothing rots.
+# ⛔ NO PER-FILE WEIGHT IS WRITTEN BESIDE A FILE NAMED ABOVE, on purpose: a weight beside a file
+# re-stales against the run it came from and `--refresh-durations` rewrites it with no human
+# decision. The emission arm below DOES red on a weight move — even 0.1 s regroups the bins —
+# but its remedy is "re-run the verb and paste its figures", which leaves a quoted weight in
+# place and green; so the figure is not written rather than graded by an arm that would not
+# look for it.
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` — among the files named above, `#14597`'s
 # `tests/test_expansion_fusion_14344.py` row, `#14560`'s
