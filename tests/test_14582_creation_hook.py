@@ -503,6 +503,25 @@ def test_the_registry_publishes_no_tenant_identifiers():
     leak it exists to catch is a false PASS, so the assertion is on the RENDERED
     payload: a substring cannot dodge a substring.
 
+    ⛔ AND THE RENDERED FORM MUST BE `ensure_ascii=False` (#14610 review, third
+    pass P3). "A substring cannot dodge a substring" is FALSE under
+    `json.dumps`'s default `ensure_ascii=True`, which escapes every non-ASCII
+    codepoint: a graph id is *a customer's own name*, so `Café` ships as
+    `Caf\\u00e9` and `assert "Café" not in rendered` passes over it. Measured —
+    a leak of the bare non-ASCII ids from `_UNCUT_GRAPHS` stayed GREEN under the
+    default and RED under `ensure_ascii=False`. That is why the fixture below
+    notes a SECOND graph whose identifiers are non-ASCII: without one, this test
+    could be reverted to the escaping default and nothing would notice.
+    `ensure_ascii=False` does NOT weaken the separator check below — the C0
+    controls, and `\u0000` that forms the registry's separator among them, are
+    escaped by `json.dumps` whatever the flag says, so a NUL is still rendered as
+    the six characters `\\u0000`. (State that narrowly: it is true of C0, NOT of
+    every control character. Measured, `ensure_ascii=False` renders U+007F,
+    U+0080–U+009F and U+2028/U+2029 RAW, and an earlier cut of this paragraph
+    claimed the general case and was wrong. No assertion here depends on those,
+    so nothing was weakened — but a docstring that overstates its own measurement
+    is the exact defect this test exists to stop.)
+
     ⛔ WHAT THIS DOES *NOT* MEASURE — THE WIRE (#14610 review, second pass P3).
     It guards the BUILDER, `armed_but_uncut()`. `hosted_api`'s health block COPIES
     NAMED KEYS one at a time and never spreads the dict, so a leak introduced
@@ -529,6 +548,12 @@ def test_the_registry_publishes_no_tenant_identifiers():
     rw.reset_uncut_graphs()
     try:
         rw.note_uncut_graph("org-SECRET", "graph-SECRET", reason="no_cursor_row")
+        # ⛔ NON-ASCII ON PURPOSE (#14610 review, third pass P3). A tenant's own
+        # name is not guaranteed ASCII, and `json.dumps`'s default
+        # `ensure_ascii=True` would escape these into `Caf\\u00e9`, which a
+        # literal-substring assertion cannot see. This entry is what makes the
+        # `ensure_ascii=False` below load-bearing rather than decorative.
+        rw.note_uncut_graph("org-Caf\u00e9", "graf-Ni\u00f1o", reason="no_cursor_row")
         report = rw.armed_but_uncut()
         reasons = rw.armed_but_uncut_reasons()
     finally:
@@ -548,9 +573,15 @@ def test_the_registry_publishes_no_tenant_identifiers():
     published = set(leaves(report)) | set(leaves(reasons))
     # The whole payload as `/health` would send it, keys included: the composite
     # key can reach an operator as a dict KEY just as easily as a value.
-    rendered = json.dumps({"report": report, "reasons": reasons}, default=str)
+    # `ensure_ascii=False` is load-bearing — see the docstring.
+    rendered = json.dumps(
+        {"report": report, "reasons": reasons}, default=str, ensure_ascii=False)
     assert "org-SECRET" not in rendered
     assert "graph-SECRET" not in rendered
+    assert "org-Caf\u00e9" not in rendered, (
+        "a NON-ASCII tenant id must be caught literally; under the escaping "
+        "default it ships as `Caf\\u00e9` and this assertion would pass over it")
+    assert "graf-Ni\u00f1o" not in rendered
     assert "\\u0000" not in rendered, (
         "no published value may carry the registry's own composite-key shape — "
         "`org\\u0000graph` contains both tenant identifiers and equals neither, "
