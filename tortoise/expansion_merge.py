@@ -10,7 +10,11 @@ exists as its own module for two reasons:
   * **it is the product's fusion, not a second one** — ``rrf_fusion`` in
     ``tortoise/search_engine.py`` is what the strategy-level legs already go
     through, and this module is a thin, documented call onto it. Nothing here
-    introduces a formula, a constant, or a weight of its own.
+    introduces a formula, a constant, or a weight of its own — the damping
+    constant included: unless a caller overrides it, ``k`` is not passed to
+    ``rrf_fusion`` at ALL, so the engine's own default applies by construction
+    rather than through a copy of the literal that could drift from it
+    (#14619 review P3: this module used to re-type ``60``).
 
 ⛔ It does NOT live in ``search_engine.py`` on purpose: that module's line count
 is pinned by cite gates in this repo (``tests/test_12184_shifted_cites.py``,
@@ -28,7 +32,7 @@ def fuse_expansion_pass(
     first_pass: list[tuple[str, float]],
     second_pass: list[tuple[str, float]],
     *,
-    k: int = 60,
+    k: int | None = None,
 ) -> list[tuple[str, float]]:
     """Merge an additive RETRIEVAL PASS into the pass it expands — through
     THIS MODULE'S fusion (:func:`rrf_fusion`), never a second ranking rule.
@@ -121,9 +125,11 @@ def fuse_expansion_pass(
     Args:
         first_pass: the leg being expanded, already ranked (the pass-1 rows).
         second_pass: the expansion's own ranked rows.
-        k: the RRF damping constant — ``rrf_fusion``'s default (Cormack k=60),
-            the same constant the strategy-level fusion uses. Overridable for
-            tests; production callers pass nothing.
+        k: the RRF damping constant — ``rrf_fusion``'s OWN default (Cormack
+            k=60), the same constant the strategy-level fusion uses. ``None``
+            (the default) passes NO ``k`` to the engine, so the default is the
+            engine's and cannot drift from it; set it only to OVERRIDE the
+            damping in a test. Production callers pass nothing.
 
     Returns:
         ``[(id, score), ...]`` in the fused order, scores carried from origin.
@@ -150,5 +156,8 @@ def fuse_expansion_pass(
     # as a pinned residue SHAPE, and a new one reds the non-deferrable
     # surface-guard leg for a reason that has nothing to do with this change.
     by_id: dict[str, float] = {**dict(first), **dict(second)}
-    fused = rrf_fusion([first, second], k)
+    # `k` is passed ONLY when a caller overrides it, so the damping constant is
+    # `rrf_fusion`'s own default rather than a literal re-typed here.
+    fused = (rrf_fusion([first, second], k) if k is not None
+             else rrf_fusion([first, second]))
     return [(pid, by_id[pid]) for pid in fused]

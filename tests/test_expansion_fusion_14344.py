@@ -33,6 +33,7 @@ fails under the concatenation.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -187,6 +188,47 @@ def test_one_empty_side_returns_the_other_unchanged(monkeypatch):
     assert fuse_expansion_pass([], pass1) == pass1
 
 
+def test_the_damping_constant_is_the_engines_not_a_literal_retyped_here(monkeypatch):
+    """#14619 review P3 — this module stated *"Nothing here introduces a formula,
+    a constant, or a weight of its own"* while carrying its own ``k: int = 60``,
+    a second copy of ``rrf_fusion``'s default (``search_engine.py:4995``). If the
+    engine's default ever moved, this module would have stayed at 60 — the exact
+    drift the module was created to end.
+
+    ⛔ DISCRIMINATING IN BOTH DIRECTIONS, EXECUTED: the unoverridden call must
+    reach ``rrf_fusion`` with ONE argument (the pre-fix default handed it two —
+    ``([first, second], 60)``), and an explicit ``k=`` override must still be
+    honoured so a test that moves the damping is not silently ignored. The
+    boundary the prose publishes is derived from the same default
+    (``_ONE_RANK_BOUNDARY``), so a move in the engine reds the prose pin too.
+    """
+    default = inspect.signature(fuse_expansion_pass).parameters["k"].default
+    assert default is None, (
+        "fuse_expansion_pass re-types the damping constant "
+        f"(k default {default!r}) — the engine's default must apply by "
+        "construction, not through a copy of the literal that drifts from it")
+
+    pass1 = [("a", 0.9), ("b", 0.8)]
+    expanded = [("c", 0.7), ("a", 0.6)]
+    calls: list[int] = []
+
+    def _spy(ranked_lists, *args, **_kwargs):
+        calls.append(len(args))
+        return {pid: 1.0 for pid, _score in list(pass1) + list(expanded)}
+
+    monkeypatch.setattr(expansion_merge, "rrf_fusion", _spy)
+    _ids(fuse_expansion_pass(pass1, expanded))
+    assert calls and all(arity == 0 for arity in calls), (
+        "an unoverridden call passed the damping constant to rrf_fusion "
+        f"(positional args seen: {calls}) — the module's own literal is back")
+
+    calls.clear()
+    _ids(fuse_expansion_pass(pass1, expanded, k=7))
+    assert calls == [1], (
+        "an explicit k= override was not passed through to rrf_fusion "
+        f"(positional args seen: {calls})")
+
+
 def test_no_new_expansion_order_when_the_expansion_adds_nothing():
     """When the expansion repeats pass 1 (nothing new), the leg's order is pass
     1's — the fusion must not shuffle a leg it did not enrich."""
@@ -292,7 +334,16 @@ _PAIR_CONDITION = re.compile(
     r"\(\s*122\s*\+\s*h1\s*\+\s*h2\s*\)\s*[-\u2212]\s*61")
 _REFUTED_FORM = re.compile(
     r"r\s*<\s*\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)\s*/\s*2")
-_ONE_RANK_BOUND = re.compile(r"(<=|\u2264)\s*61")
+#: The 1-based rank boundary the SYMMETRIC case turns on, DERIVED from the engine
+#: rather than re-typed: ``rrf_fusion`` scores ``1/(k + 0-based rank + 1)`` at its
+#: own ``k`` default, so the boundary is that default + 1. A move in
+#: ``search_engine``'s default therefore reds this pin instead of leaving the
+#: carriers publishing a number the engine no longer uses.
+_ONE_RANK_BOUNDARY = inspect.signature(rrf_fusion).parameters["k"].default + 1
+_ONE_RANK_BOUND = re.compile(rf"(<=|\u2264)\s*{_ONE_RANK_BOUNDARY}")
+#: Any rank bound a carrier STATES, whatever its number — the shape the clause
+#: grader below compares against ``_ONE_RANK_BOUNDARY``.
+_RANK_BOUND_NUMBER = re.compile(r"(?:<=|\u2264)\s*(\d+)")
 #: The phrases a carrier uses to INTRODUCE the win condition. A clause carrying
 #: one of them must carry the true pair form, because that is the clause a reader
 #: takes the condition from — the two sites in ``expansion_merge`` and the one site
@@ -374,6 +425,44 @@ def _pair_condition_violations(text: str) -> list[str]:
     return violations
 
 
+def _one_rank_bound_violations(text: str) -> list[str]:
+    """Every CLAUSE that states a 1-based rank boundary other than the engine's
+    ``_ONE_RANK_BOUNDARY``.
+
+    ⛔ CLAUSE-SCOPED ON PURPOSE (#14619 review, Finding 1). The first cut asserted
+    ``_ONE_RANK_BOUND.search(whole_carrier_text)`` — a PRESENCE check — and two of
+    the three carriers state the boundary more than once (``expansion_merge``'s
+    docstring 4×, the README 2×), so ONE surviving true occurrence satisfied it.
+    MEASURED at ``00b3e93d03b6``: publishing ``<= 999`` — or the off-by-one
+    ``<= 62``, which is FALSE (``2/122 == 1/61`` is a TIE, not a win) — at the
+    site a reader hits first (the ``(a)`` symmetric-case bullet, which states the
+    authoritative form) left ALL 15 rows green. Only the SDK dense carrier, whose
+    single occurrence the whole-carrier search therefore represented, reddened.
+    ``test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check`` is the
+    executed proof that the same mutants now red.
+
+    The exemption is the co-located one the pair grader already uses: a clause
+    that marks itself as a CORRECTION may quote a wrong number, because "we
+    published ``\u2264 62`` until now, which was false" is an accurate correction
+    and grading it would block an honest record. Stated residual, not a silent
+    one: a live bound smuggled into a clause that also calls itself a correction
+    is not graded here.
+    """
+    violations = []
+    for clause in _CLAUSE_BOUNDARY.split(text):
+        if _CORRECTION.search(clause):
+            continue
+        for number in _RANK_BOUND_NUMBER.findall(clause):
+            if int(number) != _ONE_RANK_BOUNDARY:
+                violations.append(
+                    f"states a 1-based rank boundary of `<= {number}` where the "
+                    f"engine's boundary is `<= {_ONE_RANK_BOUNDARY}` — the SYMMETRIC "
+                    f"case wins while the shared id sits at 1-based rank <= "
+                    f"{_ONE_RANK_BOUNDARY} in BOTH lists, TIES at "
+                    f"{_ONE_RANK_BOUNDARY + 1} and loses past it: {clause[:180]!r}")
+    return violations
+
+
 def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     """#14396 review (P2-1): "an id both passes carry OUTRANKS either pass alone"
     is a guarantee this fusion does not give, and it was stated in four places.
@@ -415,6 +504,16 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     therefore ``_pair_condition_violations``, CLAUSE-scoped in both directions, and
     `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check` is the
     executed proof that the same restoration now reds.
+
+    ⛔ AND THE ``<= 61`` HALF WAS STILL A PRESENCE CHECK (#14619 review, Finding 1),
+    which the #14597 re-review MEASURED: ``_ONE_RANK_BOUND.search(text)`` over the
+    WHOLE carrier, so ``<= 999`` — or ``<= 62``, the off-by-one a real re-cut
+    makes — at the site a reader hits first stayed green while a later occurrence
+    kept the search satisfied. It is now graded per clause AND numerically against
+    the boundary DERIVED from the engine's own ``k`` default
+    (``_one_rank_bound_violations``), and
+    `test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check` executes
+    the mutants that were measured green.
     """
     carriers = _carriers()
     unbounded = "outranks either pass alone"
@@ -426,6 +525,9 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
         assert _ONE_RANK_BOUND.search(text), (
             f"{where} states the two-term advantage without its bound — the "
             "`<= 61` clause is what makes the SYMMETRIC half of the claim true")
+        bound_violations = _one_rank_bound_violations(text)
+        assert not bound_violations, \
+            f"{where} — " + " | ".join(bound_violations)
         assert _PAIR_CONDITION.search(text), (
             f"{where} publishes the `<= 61` case without the PAIR condition "
             "`r > (61+h1)(61+h2)/(122+h1+h2) - 61` — the `<= 61` reading is the "
@@ -488,6 +590,53 @@ def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
         "the refuted form restored at the carrier's FIRST site went ungraded — the "
         "pin is a presence check again, which is the defect this row exists for")
     assert any("refuted closed form" in v for v in violations), violations
+
+
+def test_the_one_rank_bound_pin_is_clause_scoped_not_a_presence_check():
+    """Non-vacuity for the ``<= 61`` half of the row above, EXECUTED rather than
+    remembered (#14619 review, Finding 1).
+
+    The attack is the one MEASURED at ``00b3e93d03b6``: two of the three carriers
+    state the boundary more than once, so a whole-carrier ``_ONE_RANK_BOUND``
+    search stayed satisfied while the AUTHORITATIVE occurrence — the ``(a)``
+    symmetric-case bullet, the first site a reader hits — published a false
+    number. ``<= 999`` is the obvious forgery; ``<= 62`` is the one a real re-cut
+    makes, because ``2/122 == 1/61`` is a TIE, not a win, so 62 is FALSE.
+
+    Each mutation replaces the carrier's FIRST occurrence and leaves the later
+    ones, and that is asserted: a mutation that removed EVERY occurrence would
+    red the old presence check too, so the row would prove nothing about the
+    scoping. The SDK dense carrier is not mutated here — it has one occurrence,
+    which the presence check already represented.
+    """
+    carriers = _carriers()
+    for where, text in carriers.items():
+        assert _ONE_RANK_BOUND.search(text), (
+            f"{where} no longer states the `<= {_ONE_RANK_BOUNDARY}` boundary")
+        assert not _one_rank_bound_violations(text), \
+            f"{where} — " + " | ".join(_one_rank_bound_violations(text))
+
+    for where, replacement in (
+        ("tortoise/expansion_merge.fuse_expansion_pass", "<= 999"),
+        ("tortoise/expansion_merge.fuse_expansion_pass",
+         f"<= {_ONE_RANK_BOUNDARY + 1}"),
+        ("docs/evidence/14344-expansion-fusion/README.md", "\u2264 999"),
+        ("docs/evidence/14344-expansion-fusion/README.md",
+         f"\u2264 {_ONE_RANK_BOUNDARY + 1}"),
+    ):
+        text = carriers[where]
+        first = _ONE_RANK_BOUND.search(text)
+        assert first, f"{where} no longer states the boundary"
+        mutated = text[:first.start()] + replacement + text[first.end():]
+        assert _ONE_RANK_BOUND.search(mutated), (
+            f"the mutation on {where} removed EVERY true occurrence — it would "
+            "not reproduce the first-site attack, which leaves the later ones "
+            "intact")
+        violations = _one_rank_bound_violations(mutated)
+        assert violations, (
+            f"a false bound ({replacement}) at {where}'s FIRST site went "
+            "ungraded — the `<= 61` half is a whole-carrier presence check "
+            "again, which is the defect this row exists for")
 
 
 def test_the_published_pair_condition_is_the_fusions_arithmetic():
