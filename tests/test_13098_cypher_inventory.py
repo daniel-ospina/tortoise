@@ -35,6 +35,7 @@ import ast
 import errno
 import inspect
 import io
+import itertools
 import json
 import os
 import re
@@ -482,6 +483,70 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
                 "`--markdown --all-surface` must emit the WIDE table (thousands of "
                 f"rows at this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
                 "`--all-surface` was accepted and then ignored")
+
+
+def test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list():
+    """The one-verb-per-command guard must be complete over the CLASS, not a list.
+
+    ⛔ THE DEFECT THIS ARM GRADES IS THE ONE THE GUARD ITSELF KEEPS REPEATING. The
+    refusal was first written for `--check` + `--render` alone while its own comment
+    stated the invariant about the SET, so three more pairs exited **0** having run one
+    verb and dropped the other (`#14625` review, P2). The repair enumerated the four
+    verbs — and an enumeration is only a class as long as nothing is added to it, so
+    the SAME hole reopens the moment a fifth output verb reaches `build_parser()`:
+    it would run, the other verb's output would vanish, and every hand-written pair
+    list in this file would stay green. That is the shape this arm closes.
+
+    Two directions, because either alone is bypassable:
+
+    * the parser's flag set must be EXACTLY `OUTPUT_VERBS | MODIFIERS`, so a new flag
+      is a red that forces a classification rather than slack that rides;
+    * every verb's argparse `dest` must be the derived one (`--all-surface` →
+      `all_surface`), because `main()` counts a verb as selected by reading that dest
+      off the parsed namespace — a verb whose dest did not match would be listed in
+      `OUTPUT_VERBS` and silently never counted, i.e. the guard would name it and
+      still drop it;
+    * and EVERY pair is REFUSED with 2, swept from the tuple rather than typed, so
+      the coverage grows with the declaration.
+
+    `--all-surface` is a MODIFIER and is deliberately outside the sweep: the two wide
+    census forms must stay legal (the sibling arm asserts their payload, not only
+    their exit code), because refusing them would break §1's own recipe.
+    """
+    parser = census.build_parser()
+    # `--help` is argparse's OWN flag: it prints usage and exits before any verb runs,
+    # so it is neither an output verb nor a modifier and cannot be combined into a
+    # silent drop. Every other long flag is this module's own and must be classified.
+    declared = {flag for action in parser._actions
+                for flag in action.option_strings
+                if flag.startswith("--") and flag != "--help"}
+    assert declared == set(census.OUTPUT_VERBS) | set(census.MODIFIERS), (
+        "the parser declares a flag that this module has not classified. A flag that "
+        "produces output of its own MUST be in `OUTPUT_VERBS` (otherwise a command "
+        "selecting it plus another verb runs one and SILENTLY DROPS the other with "
+        "rc 0 — measured for three pairs at `#14625`); a flag that only modifies a "
+        "run belongs in `MODIFIERS`. Offending: "
+        f"{sorted(declared ^ (set(census.OUTPUT_VERBS) | set(census.MODIFIERS)))} "
+        f"(parser={sorted(declared)}, OUTPUT_VERBS={sorted(census.OUTPUT_VERBS)}, "
+        f"MODIFIERS={sorted(census.MODIFIERS)})")
+
+    dests = {flag: action.dest for action in parser._actions
+             for flag in action.option_strings}
+    for verb in census.OUTPUT_VERBS:
+        derived = verb.removeprefix("--").replace("-", "_")
+        assert dests.get(verb) == derived, (
+            f"`{verb}` has argparse dest {dests.get(verb)!r}, not the derived "
+            f"{derived!r}. `main()` counts a verb as SELECTED by reading that dest "
+            "off the parsed namespace, so a mismatched dest leaves the verb listed in "
+            "`OUTPUT_VERBS` and never counted — refused in name, dropped in fact")
+
+    for first, second in itertools.combinations(census.OUTPUT_VERBS, 2):
+        rc = census.main([first, second])
+        assert rc == 2, (
+            f"`{first} {second}` answered {rc} — a 0 here reads as 'ran both' when "
+            "one verb's output was SILENTLY DROPPED. Both verbs own their own "
+            "output stream, so the honest answer is 2 (could not run) and the "
+            "message must name both")
 
 
 def test_a_directory_destination_is_refused_AS_a_directory(tmp_path):
@@ -3093,6 +3158,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # HTML comment, which no forge renders, so the served file promised rows it
         # does not carry. Deleting this arm leaves that state unpinned and silent.
         "test_the_source_does_not_end_on_an_appendix_heading_with_nothing_visible",
+        # ⛔ AND THE CLASS-LEVEL PIN ON THE ONE-VERB-PER-COMMAND REFUSAL (#14625
+        # review, P2, twice): the guard was rewritten from one pair to a four-verb
+        # enumeration, and an enumeration is only a class while nothing is added to
+        # it — so the parser's flag SET is pinned, each verb's argparse dest is
+        # pinned to the name `main()` derives, and every pair is swept. Without this
+        # arm a fifth output verb would silently drop its neighbour with every
+        # hand-written pair list in this file still green.
+        "test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -3103,8 +3176,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 25, (
-        f"expected EXACTLY 25 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 26, (
+        f"expected EXACTLY 26 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3114,7 +3187,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 25` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 26` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -3126,8 +3199,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 84, (
-        f"expected EXACTLY 84 test functions in this module; got "
+    assert len(test_functions) == 85, (
+        f"expected EXACTLY 85 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")

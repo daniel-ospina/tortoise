@@ -150,6 +150,28 @@ DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
 #: `diff-tree` per commit), and it was in 6 of 6 then-conflicting PRs.
 DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
 
+#: Every verb that owns an OUTPUT stream of its own. `main()` refuses a command that
+#: selects more than one (2 = could not run), because each verb's branch RETURNS.
+#:
+#: ⛔ DECLARED HERE, NOT INLINE IN `main()`, SO THE REFUSAL CAN BE PINNED OVER THE
+#: CLASS RATHER THAN OVER THE PAIRS SOMEONE THOUGHT OF. The refusal is only as
+#: complete as this tuple: a FIFTH output verb added to `build_parser()` and not
+#: listed here would run and silently DROP the other verb's output. That is measured
+#: history, not a hypothetical — `--check --json`, `--check --markdown` and
+#: `--json --markdown` each exited **0** having run one verb and discarded the other
+#: (#14625 review, P2), and the guard that was meant to stop it tested one pair
+#: (`--check` + `--render`) while its own comment stated the invariant about the set.
+#: `tests/test_13098_cypher_inventory.py` therefore asserts that the parser's flags
+#: are EXACTLY this tuple plus `MODIFIERS`, and that EVERY pair in it is refused —
+#: so a new verb reds a test instead of silently dropping output.
+OUTPUT_VERBS = ("--check", "--markdown", "--json", "--render")
+
+#: Flags that MODIFY a run instead of producing output of their own, so they may
+#: accompany any single output verb. `--all-surface` is refused alongside `--check`
+#: and `--render` for a different reason — the source's 25 pins are PRODUCT-surface
+#: counts — and that refusal is its own branch in `main()`.
+MODIFIERS = ("--all-surface",)
+
 #: A source that carries a census row: the defect this split exists to make
 #: impossible (someone pastes the appendix back into the tracked file, and the
 #: conflict engine returns). `--render` and `--check` both refuse it.
@@ -963,15 +985,15 @@ def _detach_stdout(out) -> None:
         os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
 
 
-def main(argv: list[str] | None = None) -> int:
-    # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
-    # the report/table as a surrogate escape, and under a real UTF-8 locale
-    # (`en_US.UTF-8`, macOS's default) `sys.stdout.errors` is `strict`, so `print(...)`
-    # raised `UnicodeEncodeError` and the bare verb exited 1 — the drift code — while
-    # the same run under `C.UTF-8` exited 0. A locale-dependent exit status is worse
-    # than a mis-rendered byte. (No effect where stdout has no `reconfigure`.)
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="backslashreplace")
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI.
+
+    ⛔ FACTORED OUT OF `main()` SO THE FLAG SET ITSELF CAN BE PINNED. The one-verb-per-
+    command refusal is driven by `OUTPUT_VERBS`, and a pin that reads the parser's own
+    `option_strings` is the only way to make a NEW flag a red instead of a silent
+    output drop (`#14625` review, P2). Keeping the parser inline would leave that pin
+    re-typing the flag list, i.e. asserting a copy against a copy.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--markdown", action="store_true", help="emit the appendix table")
     parser.add_argument("--json", action="store_true", help="emit machine form")
@@ -981,7 +1003,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="write the document (source + this run's appendix) here")
     parser.add_argument("--all-surface", action="store_true",
                         help="census every tracked surface, not only the product")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
+    # the report/table as a surrogate escape, and under a real UTF-8 locale
+    # (`en_US.UTF-8`, macOS's default) `sys.stdout.errors` is `strict`, so `print(...)`
+    # raised `UnicodeEncodeError` and the bare verb exited 1 — the drift code — while
+    # the same run under `C.UTF-8` exited 0. A locale-dependent exit status is worse
+    # than a mis-rendered byte. (No effect where stdout has no `reconfigure`.)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
+    args = build_parser().parse_args(argv)
 
     # ⛔ NEITHER VERB MAY RUN THE WIDE CENSUS UNDER THE SOURCE'S PRODUCT PINS.
     # The source's 25 pins are PRODUCT-surface counts (`census(("tortoise",))`),
@@ -1035,20 +1069,23 @@ def main(argv: list[str] | None = None) -> int:
     # a second one is refused (2 = could not run). `--all-surface` is a MODIFIER, not
     # an output verb, so `--markdown --all-surface` / `--json --all-surface` stay
     # legal; `--check --all-surface` is refused separately above.
+    # ⛔ MEMBERSHIP IS RESOLVED FROM THE PARSED NAMESPACE, NOT FROM A SECOND HAND LIST.
+    # A verb counts as SELECTED when argparse gave it something other than its absent
+    # value — `None` for the `nargs="?"` verbs, `False` for the `store_true` ones — so
+    # adding a verb to `OUTPUT_VERBS` (which a test forces for any new parser flag)
+    # needs no edit here: this line covers it by construction. A hand-written mapping
+    # would be the same pair-vs-class defect one level down, which is the defect this
+    # refusal was rewritten to remove.
     _output_verbs = [
-        verb for verb, chosen in (
-            ("--check", args.check is not None),
-            ("--render", args.render is not None),
-            ("--markdown", args.markdown),
-            ("--json", args.json),
-        ) if chosen
+        verb for verb in OUTPUT_VERBS
+        if getattr(args, verb.removeprefix("--").replace("-", "_")) not in (None, False)
     ]
     if len(_output_verbs) > 1:
         print(
             "these verbs each own their own OUTPUT, so a combination would silently\n"
             f"drop all but one: got {' + '.join(_output_verbs)}. Run one per command —\n"
-            "`--check`, `--render`, `--markdown` and `--json` are four runs, and\n"
-            "`--all-surface` is the modifier that may accompany any of the last two.",
+            f"`{'`, `'.join(OUTPUT_VERBS)}` are {len(OUTPUT_VERBS)} runs, and\n"
+            "`--all-surface` is the modifier that may accompany `--markdown`/`--json`.",
             file=sys.stderr,
         )
         return 2
