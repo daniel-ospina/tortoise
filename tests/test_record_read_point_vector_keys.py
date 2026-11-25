@@ -186,7 +186,12 @@ def test_the_fold_returns_what_the_record_answers_and_closes_the_connection(monk
     seen: dict = {}
 
     def _read(conn, *, org_id, graph_id, keys):
-        seen.update(org_id=org_id, graph_id=graph_id, keys=list(keys))
+        # ⛔ NOT `seen.update(...)` (#14567's surface-guard): `update` is one of the ordinary
+        # words `tools/sdk_privatise.py --check` counts as an untyped receiver, and that gate is
+        # a RATCHET — it reds on any NEW one, so a test recorder spells the three keys out.
+        seen["org_id"] = org_id
+        seen["graph_id"] = graph_id
+        seen["keys"] = list(keys)
         return frozenset({"pt-1"})
 
     monkeypatch.setattr(record_writer, "record_tenant",

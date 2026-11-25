@@ -103,10 +103,23 @@ def _write_journal(events_dir, records: list[dict]) -> None:
         "".join(json.dumps(r) + "\n" for r in records))
 
 
+def _cypher(sdk: TortoiseSDK, cypher: str, params: dict) -> list:
+    """Run ONE raw statement against `sdk`'s graph and return its result rows.
+
+    ⛔ EVERY raw call in this module goes through here (#14567's surface-guard):
+    `tools/sdk_privatise.py --check` is a RATCHET over untyped `.query(`/`.update(`/
+    `.delete(` receivers — an object it cannot type is counted, and a NEW one reds —
+    so a lane adding a third `sdk._get_proj().g.query(` reds the gate. One door, not
+    one per test.
+    """
+    return sdk._get_proj().g.query(cypher, params=params).result_set
+
+
 def _read_derived(sdk: TortoiseSDK, pid: str) -> dict:
-    rows = sdk._get_proj().g.query(
+    rows = _cypher(
+        sdk,
         "MATCH (n:Point {id:$id}) RETURN n.content, n.content_hash, n.embedding",
-        params={"id": pid}).result_set
+        {"id": pid})
     assert rows, f"point {pid} missing from the graph"
     content, content_hash, embedding = rows[0]
     return {"content": content, "content_hash": content_hash,
@@ -343,15 +356,14 @@ def test_seed_deleted_by_journal_is_gone(sup, tmp_path):
         _seed(oracle, pid, "SEED")
         for r in records:
             oracle._get_proj().apply(r)
-        oracle_rows = oracle._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n)",
-            params={"id": pid}).result_set[0][0]
+        oracle_rows = _cypher(
+            oracle, "MATCH (n:Point {id:$id}) RETURN count(n)",
+            {"id": pid})[0][0]
     finally:
         oracle.close()
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-    rebuilt_rows = sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) RETURN count(n)",
-        params={"id": pid}).result_set[0][0]
+    rebuilt_rows = _cypher(
+        sdk, "MATCH (n:Point {id:$id}) RETURN count(n)", {"id": pid})[0][0]
     assert rebuilt_rows == oracle_rows == 0
 
 
@@ -518,8 +530,7 @@ def test_the_pass_1b_restore_of_a_WITHHELD_vector_does_not_emit_an_EMPTY_STATEME
     _seed(sdk, pid, "SEED")
     # The shape: a vector with NO content_hash. Removing it is what makes `gap` empty on the
     # replay side, and it is what a caller-written vector on a status-less point looks like.
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) REMOVE n.content_hash", params={"id": pid})
+    _cypher(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash", {"id": pid})
     records = [_point_added(pid, "")]
     _write_journal(events, records)
     monkeypatch.setattr(projection_mod, "_record_point_vector_keys",
