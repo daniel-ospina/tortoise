@@ -11450,6 +11450,22 @@ ROWED_BY_THIS_FOLD = (
     # the refresher samples push-to-main runs, so a file a PR ADDS cannot have a
     # junit figure yet (#3400/#4348).
     "test_13450_ep_position_axis_participation.py",
+    # #14560 (PR #14572) — the operator slice's population and denominator, MEASURED on a
+    # real graph: a pure `create_operator` carries no `embedding` in either store, a hybrid
+    # `create_point(op_type=…)` carries one in BOTH, `_label_vector_count("operator")`
+    # reads the operator SLICE while `("point")` still reads the whole `:Point` label, and
+    # `:Point`'s DR-restore drop is HELD until `#13971`'s per-ID ask. A file this fold
+    # ADDED, and its first cut shipped with NO surface row and NO `durations:` row at all —
+    # `--integrity` redded the required `manifest-integrity` leg
+    # (`manifest drift: ['test_14560_operator_vectors.py']`), and the larger half is the
+    # `#13826` shape recorded three rows above: selection is surface->membership, so a file
+    # in no surface is selected by no diff class and the real-engine measurements this
+    # change's diagnosis rests on would have run in NO CI leg. Listed here for the reason
+    # every row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file
+    # nobody listed has no `durations:` row and nothing reds. ⛔ The row is the flat
+    # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main
+    # runs, so a file a PR ADDS cannot have a junit figure yet (`#3400/#4348`).
+    "test_14560_operator_vectors.py",
 )
 
 
