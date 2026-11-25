@@ -526,6 +526,32 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
 
 
+def test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY(tmp_path, capsys):
+    """Both `exists()` refusals answer 2 AND name the path they never found.
+
+    ⛔ MESSAGE-ONLY COVERAGE, and that is the point: with either guard deleted the very
+    next `read_text()` raises `FileNotFoundError` (⊂ `OSError`), which the twin guard
+    below answers 2 for — so the VERDICT is redundantly covered and only the stderr
+    text changes. That is exactly why neither guard was graded by any arm (measured:
+    deleting each left 95 passed / 15 skipped): a run told "could not read" instead of
+    "no source at <path>" sends the lane looking for a permission problem that is not
+    there.
+    """
+    missing_src = tmp_path / "no-such-source.md"
+    with pytest.raises(SystemExit) as refused:
+        census.render(missing_src, {"sites": []})
+    assert refused.value.code == 2, (
+        f"a MISSING source must refuse with 2 (could not run), got {refused.value.code!r}")
+    assert f"no source at {missing_src}" in capsys.readouterr().err, (
+        "the refusal must NAME the missing path, not report it as a read failure")
+
+    missing_doc = tmp_path / "no-such-doc.md"
+    assert census.check(missing_doc, {"sites": []}) == 2, (
+        "a MISSING document must answer 2 (could not run), never 1 (drift)")
+    assert f"no doc at {missing_doc}" in capsys.readouterr().err, (
+        "the refusal must NAME the missing path, not report it as a read failure")
+
+
 def test_an_unresolvable_render_target_is_could_not_run(tmp_path):
     """A destination that cannot be RESOLVED answers 2, never 1.
 
@@ -2677,6 +2703,19 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_writes_a_surrogate_escaped_path",
         "test_a_strict_stdout_cannot_turn_a_success_into_drift",
         "test_the_default_render_target_is_the_gitignored_document",
+        # ⛔ TWO ARMS THAT WERE THE SOLE COVERAGE OF THEIR GUARD AND WERE NOT NAMED
+        # (#13098 round 4, P2). Each is the ONLY arm that reaches the branch it grades:
+        # `--check`'s enumeration wrap, `--all-surface`'s wide walk, and the render
+        # target's `Path.resolve()` guard (`RuntimeError` on ELOOP, not an `OSError`).
+        # Measured by deleting each `def` block: BOTH structural pins stayed GREEN.
+        # These are undecorated, so the `len(decorated) == 9` pin above cannot see them
+        # — this set is their only pin, which is why its comment promises names.
+        "test_an_enumeration_failure_is_could_not_run_never_drift",
+        "test_an_unresolvable_render_target_is_could_not_run",
+        # ⛔ AND THE MESSAGE-ONLY PAIR: with either `exists()` guard deleted the twin
+        # `OSError` guard preserves the exit code, so nothing reds unless an arm reads
+        # the stderr text that names the missing path.
+        "test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY",
     }
     missing = sorted(split_arms - defined)
     assert not missing, (
