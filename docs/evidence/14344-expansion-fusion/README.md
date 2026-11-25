@@ -83,9 +83,12 @@ merging it into the `fts` leg. Then the pass-1 leg is byte-identical to the unar
 100 %, by construction rather than by measurement) and the expansion contributes its own independent
 terms (admission = full). Its blocker is a real one and is why it is not in this change: with two legs
 present, `_tortoise_fts_query` stops taking the single-strategy path, and that path is where the
-caller's `threshold` filter on **raw** leg scores lives — so an armed FTS-only read (dense leg down,
-a common shape on a loaded box) would silently stop applying the threshold, contaminating exactly the
-A/B the lever exists to win. Any lane taking this over must handle the threshold explicitly.
+caller's `threshold` filter is applied to **raw** leg scores — the RRF path applies the same number
+to RRF scores instead (`if threshold > 0`, values of order ~1/61), so an armed FTS-only read (dense
+leg down, a common shape on a loaded box) would not be left unfiltered: its page would come back
+**EMPTY**, which is what the two sibling carriers out of the same measurement say, and it would
+contaminate exactly the A/B the lever exists to win. Any lane taking this over must handle the
+threshold explicitly.
 
 ## 3. Why the capstone fixed set cannot answer the graded question
 
