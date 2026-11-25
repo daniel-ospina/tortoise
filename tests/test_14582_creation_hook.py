@@ -76,8 +76,12 @@ _DOORS = (
 )
 
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
-#: yields an id from THREE arms (active-row self-heal, mint, convergent adopt) and
-#: hooks each; a refactor that collapses them to one silently drops two.
+#: yields an id from THREE arms (existing-row short-circuit, mint, convergent
+#: adopt) and hooks each; a refactor that collapses them to one drops two.
+#: ⛔ NOT "self-heal" for the short-circuit arm: a resolver that finds an existing
+#: default row returns it without re-entering this door (`#14624` review 4,
+#: ISSUE 2), so the arm fires on a re-provision or a race — see
+#: `_provision_default_graph_record`'s docstring.
 _DOOR_HOOK_CALLS = {
     ("tortoise/hosted_api.py", "_provision_graph"): 1,
     ("tortoise/supabase_control.py",
@@ -1749,8 +1753,14 @@ def test_the_self_heal_arm_reconciles_a_graph_that_predates_the_hook(
     """⛔ THE FLOOR IS DERIVED, SO A PRE-EXISTING GRAPH IS HEALED, NOT ACCUSED
     (#14582 review P2-6).
 
-    The default-row self-heal runs for a graph that ALREADY EXISTS and may carry a
-    journal this hook never accounted for. A hard-coded `enumerated_floor=0` makes
+    The default row's SHORT-CIRCUIT arm runs for a graph that ALREADY EXISTS and
+    may carry a journal this hook never accounted for. ⛔ It is reached on a
+    re-provision or a race, NOT on every credential resolution — a resolver that
+    finds an existing row returns it without entering
+    `ensure_default_graph_row` (`#14624` review 4, ISSUE 2;
+    `_provision_default_graph_record`'s docstring and
+    `test_a_credential_resolution_over_an_existing_row_never_enters_the_mint`
+    state and pin the same). A hard-coded `enumerated_floor=0` makes
     `SEED_SQL`'s guard (`MAX(seq) <= floor`) refuse it as `divergence`, with text
     claiming the record holds positions the journal cannot reproduce — FALSE for a
     healthy pre-existing graph whose journal holds exactly those positions. So the
