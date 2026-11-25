@@ -3343,6 +3343,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # branch head `7ce74ac20fc0`. The branch's own `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
     # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
+    # ⛔ THAT READING IS SUPERSEDED AT THIS HEAD, and it is marked rather than deleted because it
+    # is the record of what was true at `main` `af40c97ca312`. After the `origin/main` merge the
+    # three premises above are all FALSE here, measured: `git diff origin/main...HEAD --
+    # tortoise/sdk.py` is `25  0` (NOT empty — three hunks at `10783` +6, `29186` +11, `37063`
+    # +8), the four addresses are IDENTICAL to `origin/main` `4b2fba3e8aa0`'s (`23110`, `56446`,
+    # `56448`, `56598`, `57113` — i.e. the block quoted exactly `main`'s CORRECT table, which the
+    # merge resolved this file to) and therefore NOT identical at this head. So the reds this
+    # table's own guard raised were this BRANCH's shift (`+6` above `update_knowledge`, `+25`
+    # below it), not an inherited `main` red. See the re-derivation that follows.
     # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
     # by its own `continue` terminator (`56538`) — never by the start text alone, which would
     # admit either occurrence.
