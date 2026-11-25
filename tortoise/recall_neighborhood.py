@@ -66,6 +66,16 @@ EXCERPT_MAX_CHARS = 160
 #: trimmed deterministically (see `trim_to_budget`), never truncated mid-line.
 NEIGHBORHOOD_TOKEN_BUDGET = 600
 
+#: The STRUCTURAL prefixes of a pointer's sublines. Shared by the renderer and
+#: `trim_to_budget` so the two cannot drift: the trimmer identifies a subline by
+#: its PREFIX, never by a substring, because a pointer's first line embeds
+#: RETRIEVED CONTENT — untrusted text. Measured: a synopsis containing
+#: `from source:` made the stage-1 filter delete the WHOLE pointer (and its
+#: relations) before any excerpt had been trimmed, which is not the documented
+#: drop order and can drop the wrong thing entirely.
+RELATIONS_PREFIX = "  · relations: "
+SOURCE_PREFIX = "  · from source: "
+
 #: Direction words, so the block reads as business logic rather than as a list.
 _DIRECTION_WORD = {"outgoing": "→", "incoming": "←"}
 
@@ -235,10 +245,10 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
                 f"{rel.get('predicate', 'IMPL')} {arrow} "
                 f"\"{detail}\"{suffix}"
                 + (f" — rejected: {mitigation}" if mitigation else ""))
-        lines.append("  · relations: " + "; ".join(rendered))
+        lines.append(RELATIONS_PREFIX + "; ".join(rendered))
     source = hood.get("source") or ""
     if source:
-        lines.append(f"  · from source: \"{source}\"")
+        lines.append(f'{SOURCE_PREFIX}"{source}"')
     return lines
 
 
@@ -265,9 +275,11 @@ def trim_to_budget(header: list[str], bullets: list[list[str]], *,
             if estimate_tokens(_assemble(header, work)) <= budget:
                 return _assemble(header, work)
             if stage == "source":
-                work[i] = [ln for ln in work[i] if "from source:" not in ln]
+                work[i] = [ln for ln in work[i]
+                           if not ln.startswith(SOURCE_PREFIX)]
             elif stage == "relations":
-                work[i] = [ln for ln in work[i] if "relations:" not in ln]
+                work[i] = [ln for ln in work[i]
+                           if not ln.startswith(RELATIONS_PREFIX)]
             else:
                 work[i] = []
         work = [b for b in work if b]

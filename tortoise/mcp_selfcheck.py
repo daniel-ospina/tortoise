@@ -296,11 +296,21 @@ def _read_json(path: Path) -> dict | None:
 
 def read_entry(harness: str, *, project_dir: Path | None = None
                ) -> tuple[str | None, dict | None, list[str], str]:
-    """Find the `tortoise` entry the harness would load.
+    """Find the `tortoise` entry the harness would load, MERGED across layers.
 
     Returns ``(source_path, entry, files_read, status)``. ``status`` is ``"ok"``
     for a found entry, else the class that explains the miss (``entry-absent`` or
     ``probe-unknown`` for a format this verifier does not parse).
+
+    ⛔ THE LAYERS ARE MERGED PER FIELD, not first-match-wins. `pi`'s `mcp-client`
+    extension merges the repo layer over the user layer *"repo winning each field
+    it sets and inheriting each field it omits"*, and its own recovery hint is to
+    set ONLY `timeoutMs` in `.mcp.json`. Stopping at the first file that names the
+    server made that documented shape read as `command-missing` ("the entry declares
+    neither a `url` nor a `command`"), with a fix that would rewrite the delta — a
+    false DOWN against a config the harness runs happily. So: later layers supply
+    only the fields the earlier one omits, and `configs_read` lists every file
+    consulted, not only the one the walk stopped at.
     """
     project_dir = Path(project_dir or Path.cwd()).resolve()
     rels = HARNESS_CONFIG_PATHS.get(harness)
@@ -315,6 +325,7 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         read = [p for p in read if Path(p).exists()]
         return None, None, read, PROBE_UNKNOWN
     read: list[str] = []
+    layers: list[tuple[str, dict]] = []
     for rel in rels:
         if rel.startswith("~"):
             path = Path(rel.replace("~", str(Path.home())))
@@ -333,8 +344,23 @@ def read_entry(harness: str, *, project_dir: Path | None = None
             continue
         entry = servers.get(SERVER_NAME)
         if isinstance(entry, dict):
-            return str(path), entry, read, OK
-    return None, None, read, ENTRY_ABSENT
+            layers.append((str(path), entry))
+    if not layers:
+        return None, None, read, ENTRY_ABSENT
+    # Most specific layer first; the LAST one is the base.
+    merged: dict = {}
+    for _source, entry in reversed(layers):
+        merged.update(entry)     # repo wins each field it SETS; omitted keys inherit
+    # `env`/`headers` are maps a layer may extend rather than replace.
+    for key in ("env", "headers"):
+        combined: dict = {}
+        for _source, entry in reversed(layers):
+            value = entry.get(key)
+            if isinstance(value, dict):
+                combined.update(value)
+        if combined:
+            merged[key] = combined
+    return layers[0][0], merged, read, OK
 
 
 def _repo_root(project_dir: Path) -> Path | None:
@@ -594,13 +620,30 @@ def _fix_for(exc: BaseException, status: str) -> str:
     return _FIX_BY_CLASS.get(status, "")
 
 
+#: Anything URL-shaped. Stripped BEFORE the failure tokens are matched: a path
+#: segment is not a status code, and `…/401/mcp` must not read as an auth verdict.
+_URL_SPAN_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
+
+
+def _without_urls(text: str) -> str:
+    """`text` with every URL removed — the tokens are matched on what is left."""
+    return _URL_SPAN_RE.sub(" <url> ", text)
+
+
 def _classify_probe_failure(exc: BaseException) -> str:
     """Map a probe exception onto the closed set.
 
     Credential classes are NOT inferred from a status code string: they come from
-    `mcp_client.describe_failure`, which is the one owner of that read (it strips
-    a URL before matching `401`, so an endpoint at `…/401/mcp` cannot be read as
-    an auth rejection — the exact inversion this function would otherwise re-add).
+    `mcp_client.describe_failure`, which is the one owner of that read — and the
+    match runs on the text with every URL REMOVED, because a URL's own digits are
+    not a status code.
+
+    ⛔ `describe_failure` redacts the credential VALUE; it does NOT strip a URL.
+    An earlier revision of this docstring claimed it did, and the claim was false:
+    measured against ONE server answering HTTP 500, an endpoint at `…/401/mcp`
+    classified as `auth-rejected` — "re-mint the key" — while the same answer at
+    `…/plain/mcp` classified as `server-error`. That inversion is exactly what this
+    function exists to prevent, so the URL is stripped here, locally.
     """
     try:
         from . import mcp_client
@@ -611,7 +654,7 @@ def _classify_probe_failure(exc: BaseException) -> str:
         described = mcp_client.describe_failure(exc)
     except Exception:
         described = text
-    lowered = f"{described} {text}".lower()
+    lowered = _without_urls(f"{described} {text}").lower()
     if _CREDENTIAL_HOST_MISMATCH in str(exc):
         # ⛔ A WITHHELD credential, checked BEFORE the transport/auth tokens: the
         # request carried NO credential (that is why it was withheld), so it is

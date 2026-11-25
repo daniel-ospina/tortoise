@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -975,3 +976,110 @@ def test_the_project_credential_store_is_read_from_project_dir(tmp_path, monkeyp
                for s in mcp_selfcheck.credentials_present(project)), (
         "the project's own credential store was not read when the cwd differed — a "
         "false `no-credential` whose remedy is a key that is already on disk")
+
+
+# ── a MALFORMED marker pair must be refused, never "repaired" by deleting ──
+
+def test_a_dangling_begin_marker_is_refused_instead_of_eating_user_text(
+        project, monkeypatch):
+    """Measured before the fix: install appended a second block, uninstall then
+    deleted from the FIRST BEGIN to the first END — i.e. the user's own text."""
+    monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9999/mcp")
+    path = project / "AGENTS.md"
+    user_text = "My own later notes: never delete this."
+    path.write_text(
+        f"# House rules\n\n{harness_onboard.BEGIN_MARK}\n\n{user_text}\n",
+        encoding="utf-8")
+
+    install = harness_onboard.write_instructions("pi", project)
+    assert install.refusals, "a dangling BEGIN must REFUSE, not append a second block"
+    assert path.read_text().count(harness_onboard.BEGIN_MARK) == 1
+    assert user_text in path.read_text()
+
+    removal = harness_onboard.remove_instructions("pi", project)
+    assert removal.refusals, "uninstall must refuse a malformed pair"
+    assert user_text in path.read_text(), "the reversal deleted the user's own text"
+
+
+def test_a_well_formed_block_still_round_trips(project, monkeypatch):
+    """The guard must not block the safe path it protects."""
+    monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9999/mcp")
+    path = project / "AGENTS.md"
+    path.write_text("# House\n\nuser notes\n", encoding="utf-8")
+    assert not harness_onboard.write_instructions("pi", project).refusals
+    assert harness_onboard.BEGIN_MARK in path.read_text()
+    assert not harness_onboard.remove_instructions("pi", project).refusals
+    assert harness_onboard.BEGIN_MARK not in path.read_text()
+    assert "user notes" in path.read_text()
+
+
+# ── layers are MERGED per field, the way the harness merges them ──────────
+
+def test_a_repo_delta_that_sets_only_one_field_is_not_a_missing_command(
+        tmp_path, monkeypatch):
+    """`pi`'s own recovery hint is "set only `timeoutMs` in `.mcp.json`"."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "stdio", "command": sys.executable,
+                     "args": ["-m", "tortoise.mcp_bridge"],
+                     "env": {"TORTOISE_MCP_URL": "http://127.0.0.1:9999/mcp"}}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"timeoutMs": 40000}}}), encoding="utf-8")
+
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status != mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert verdict.transport == "stdio"
+    assert len(verdict.configs_read) == 2, (
+        "every layer consulted must be named, not only the one the walk stopped at")
+
+
+# ── a URL's digits are not a status code ─────────────────────────────────
+
+def test_a_url_containing_401_does_not_become_an_auth_verdict():
+    class Fake(Exception):
+        pass
+
+    same_answer = "Client error '500 Internal Server Error' for url '{}'"
+    for url in ("http://127.0.0.1:9/401/mcp", "http://127.0.0.1:9/plain/mcp"):
+        status = mcp_selfcheck._classify_probe_failure(Fake(same_answer.format(url)))
+        assert status == mcp_selfcheck.SERVER_ERROR, (url, status)
+    # …while a REAL refusal and a REAL transport failure still classify.
+    assert mcp_selfcheck._classify_probe_failure(
+        Fake("401 Unauthorized from http://h/mcp")) == mcp_selfcheck.AUTH_REJECTED
+    assert mcp_selfcheck._classify_probe_failure(
+        Fake("All connection attempts failed to http://h/mcp")) == mcp_selfcheck.UNREACHABLE
+
+
+# ── the installer writes where the verifier reads ────────────────────────
+
+def test_the_project_config_is_written_at_the_repo_root_not_a_nested_shadow(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    nested = root / "tortoise"
+    nested.mkdir()
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"x": 1}}}),
+                                    encoding="utf-8")
+    result = harness_onboard.write_config("pi", nested)
+    assert result.wrote == [str(root / ".mcp.json")], result.wrote
+    assert not (nested / ".mcp.json").exists(), (
+        "a nested .mcp.json SHADOWS the repo-root config for every session started "
+        "below it, hiding that file's other servers")
+    servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+    assert "tortoise" in servers and "other" in servers
+
+
+# ── `claude-code` is an alias, not a harness without a seam ──────────────
+
+def test_the_claude_code_alias_finds_the_claude_seam(project, monkeypatch):
+    monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9999/mcp")
+    result = harness_onboard.onboard("claude-code", project_dir=project,
+                                     hooks=True, instructions=False, live=False,
+                                     dry_run=True)
+    assert not [r for r in result.refusals if "seam" in r], (
+        "a seam that IS the right artifact must not be refused by alias")

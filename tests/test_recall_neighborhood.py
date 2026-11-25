@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -444,3 +445,43 @@ def test_a_tradeoff_carries_its_LABEL_and_MITIGATION_not_a_bare_id():
     assert "01JABCDEFTRADEOFF" not in rendered, (
         "the raw ULID reached the block instead of the option's text")
     assert "cost review landed 2026-04" in rendered
+
+
+def test_a_synopsis_that_mentions_a_structural_marker_cannot_delete_its_pointer():
+    """Structural lines are matched by PREFIX, never by substring.
+
+    A pointer's first line embeds RETRIEVED CONTENT, which is untrusted (evidence
+    points are frequently quoted source text). Measured before the fix: a synopsis
+    containing `from source:` made the stage-1 filter delete the WHOLE pointer —
+    and its relations — before any excerpt had been trimmed, which is not the
+    documented drop order.
+    """
+    header = ["h"]
+    pointer = "- **x** → point/p from source: attack (read supports before relying…)"
+    bullets = [[pointer, rn.RELATIONS_PREFIX + 'IMPL ← "y"',
+                rn.SOURCE_PREFIX + '"excerpt"']]
+    full = rn.trim_to_budget(header, bullets, budget=10_000)
+    trimmed = rn.trim_to_budget(
+        header, bullets, budget=int(rn.estimate_tokens(full)) - 3)
+    assert pointer in trimmed, (
+        "the pointer (and its relations) were deleted because its own RETRIEVED "
+        "text happened to contain a structural marker")
+    assert rn.SOURCE_PREFIX not in trimmed, (
+        "stage 1 must still drop the source excerpt first — the documented order")
+
+
+def test_the_skill_mirror_is_byte_identical_to_the_canonical_copy():
+    """`deploy-pages.yml` hard-gates on `cmp`; a divergence only surfaces on main.
+
+    `tests/test_served_skills_parity.py` runs the deploy step with STUB commands
+    (`cmp` answers 0), so a real divergence passes PR CI and then fails the
+    deploy — the served skill also tells readers a `--harness` value the canonical
+    copy was corrected to remove.
+    """
+    root = Path(__file__).resolve().parent.parent
+    canonical = root / "tortoise/onboarding/SKILL.md"
+    served = root / ("website/apps/dashboard/public/skills/"
+                     "tortoise-onboarding/SKILL.md")
+    assert canonical.read_bytes() == served.read_bytes(), (
+        "the served mirror diverged from the canonical skill — deploy-pages will "
+        "fail on main (`cmp`); re-copy the canonical file over the mirror")
