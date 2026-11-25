@@ -397,14 +397,21 @@ FUNNEL_QUERY = (
 # `main` landed `#14592`, the base tree read **727** distinct targets over **208**
 # citing files, the appendix's 244 split 150 above / 93 below / 1 at the pivot, and
 # the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
-# not 242, and the tree reads **484/7/476**, not 483/7/475. `hosted_api.py:19186`
-# was cited in the old sentence as a second shared target; it is NOT one of the
-# appendix's targets at all (`git grep -c 'hosted_api\.py:19186' <base> --
-# docs/architecture/CYPHER-INVENTORY.md` exits 1 — it is cited only by
-# `docs/research/2026-09-10-per-graph-backups-ux.md`), which is why the recount is
-# 243 and not 242. ⛔ Re-take these by MEASUREMENT at the base you are describing,
-# never by adjusting the numbers above: that arithmetic is what produced the stale
-# set in the first place.
+# not 242, and the tree reads **484/7/476**, not 483/7/475. ⛔ AND THE RECOUNT IS A BASE
+# CHANGE, NOT AN ERROR — state it that way, because `242` was CORRECT where it was
+# written. At `939e37f664` (the base the first version used) the appendix's 244 split
+# 143 above the pivot and 101 below with the pivot NOT among them, and TWO of its rows
+# were also cited elsewhere — line `19186` and line `28477` — so
+# 244 − 2 = **242**. `main`'s `#14592` then restamped the appendix (its own lines
+# moved), and at THIS branch's base `1aef0b618bcf` it reads 244 split **150 / 93 / 1**
+# with NEITHER of those two rows present and only the pivot shared, so 244 − 1 =
+# **243**. Both counts are right at their own base; a reader who calls 242 wrong is
+# counting a tree it was never measured on. (Measured with the appendix's own address
+# shape at each sha: `git grep -a -o -E '[[:alnum:]_.-]*hosted_api\.py:[0-9]+' <sha> --
+# docs/architecture/CYPHER-INVENTORY.md`. At `939e37f664` the rows `19186` and `28477`
+# are both present; at `1aef0b618bcf` neither is.) ⛔ Re-take these by MEASUREMENT at
+# the base you are describing, never by adjusting the numbers above: that arithmetic is
+# what produced the stale set in the first place.
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a
