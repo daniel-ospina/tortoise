@@ -900,6 +900,14 @@ def check(doc: Path, result: dict) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
+    # the report/table as a surrogate escape, and under a real UTF-8 locale
+    # (`en_US.UTF-8`, macOS's default) `sys.stdout.errors` is `strict`, so `print(...)`
+    # raised `UnicodeEncodeError` and the bare verb exited 1 — the drift code — while
+    # the same run under `C.UTF-8` exited 0. A locale-dependent exit status is worse
+    # than a mis-rendered byte. (No effect where stdout has no `reconfigure`.)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--markdown", action="store_true", help="emit the appendix table")
     parser.add_argument("--json", action="store_true", help="emit machine form")
@@ -978,9 +986,18 @@ def main(argv: list[str] | None = None) -> int:
             # at all (#13098 review, P2). Same class, same status as every other
             # refusal in this module.
             try:
+                # ⛔ AND THIS PROBE MUST NOT BE ABLE TO FAIL DECODING EITHER. With
+                # `core.quotePath=false` in the user's config, `git` emits RAW filename
+                # bytes on stdout AND stderr, so a strict `text=True` decode raises
+                # `UnicodeDecodeError` — a `ValueError`, not the `OSError` caught below
+                # — and a deliberate "refusing to render over a TRACKED path" (2) became
+                # a traceback and exit 1 (measured with `quotePath false` and a
+                # `caf\xe9.md`). The payload is unused, so decoding is pure overhead
+                # that must never fail.
                 tracked = subprocess.run(
                     ["git", "ls-files", "--error-unmatch", "--", rel],
                     cwd=ROOT, capture_output=True, text=True,
+                    encoding="utf-8", errors="surrogateescape",
                 )
             except OSError as err:
                 print(
@@ -1045,8 +1062,14 @@ def main(argv: list[str] | None = None) -> int:
         # message names the path and the error (#13098 review, P2).
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(text, encoding="utf-8")
-        except OSError as err:
+            # ⛔ THE TABLE CAN CARRY A SURROGATE-ESCAPED PATH (a non-UTF-8 tracked
+            # filename), which strict UTF-8 cannot ENCODE: `write_text` then raised
+            # `UnicodeEncodeError` — a `ValueError`, not an `OSError` — and left an
+            # EMPTY file behind while exiting 1, the drift code, from a verb with no
+            # drift verdict. `backslashreplace` renders such a byte as text, and the
+            # guard names `UnicodeError` so neither half can escape.
+            out.write_text(text, encoding="utf-8", errors="backslashreplace")
+        except (OSError, UnicodeError) as err:
             print(f"render: could not write {out}: {err}", file=sys.stderr)
             return 2
         print(f"render: wrote {len(text.splitlines())} lines to {out}")
