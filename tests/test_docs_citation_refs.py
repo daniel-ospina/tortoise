@@ -257,11 +257,12 @@ It read `docs/architecture/CYPHER-INVENTORY.md` and refused a typed
 `B` by the same test (a number typed into a document, never a product break), and
 this file's surviving scope is the `file:line` sweep, not that document's prose —
 so the arm went with the rest. ⛔ That leaves the numstat pair over
-`CYPHER-INVENTORY.md` UNGRADED BY ANY TEST, and the document is still committed:
-`#11081`'s audit assigns its own cut the row (B1) that removes the document rather
-than the pin, and that cut has not landed — so do not read this deletion as the
-document being gone. Its generator checks live with it
-(`tools/cypher_inventory.py --check`), and this greps to nothing:
+`CYPHER-INVENTORY.md` UNGRADED BY ANY TEST, and the document is now a RENDERED
+build artifact (`docs/architecture/CYPHER-INVENTORY.src.md` is the tracked source;
+`tools/cypher_inventory.py --render` appends the census appendix, which is why it
+left git — `#13098`). Its generator checks live with it
+(`tools/cypher_inventory.py --check`, which reads the SOURCE's 25 pins), and this
+greps to nothing:
 
     grep -n numstat tests/test_13098_cypher_inventory.py
 """

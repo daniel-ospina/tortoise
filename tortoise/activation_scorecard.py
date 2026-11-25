@@ -359,10 +359,10 @@ FUNNEL_QUERY = (
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
-# ``hosted_api.py:<line>`` cite in the tracked tree: **157** distinct cite
-# targets have a line number LARGER than 28477 (29417 … 99999) and those are the
-# ones that shift; **567** have a number smaller than it (26 … 28474) and cannot
-# move. (725 distinct targets in all — the remainder is 28477 itself, which this
+# ``hosted_api.py:<line>`` cite in the tracked tree: **7** distinct cite
+# targets have a line number LARGER than 28477 (35810 … 99999) and those are the
+# ones that shift; **475** have a number smaller than it (26 … 28446) and cannot
+# move. (483 distinct targets in all — the remainder is 28477 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever
@@ -378,6 +378,17 @@ FUNNEL_QUERY = (
 # count — and the command, not a per-PR assertion, is what carries the figures: a
 # per-PR `--check` would red PRs whose only remedy is prose in a module they never
 # opened, which is the false block this note's neighbour paragraph removed.)
+# ⛔ THE DROP FROM A PRE-SPLIT READING IS NOT A HAND-COUNT ERROR, AND MUST NOT BE
+# "CORRECTED" BACK. `docs/architecture/CYPHER-INVENTORY.md` is now a GENERATED,
+# untracked build artifact (`--render`'s output, #13098), and its Appendix A
+# carried **244** distinct targets of those the census counts — 150 above the pivot,
+# 93 below it and the pivot itself — of which **242** were cited NOWHERE ELSE (the
+# pivot is cited by these notes, and `hosted_api.py:19186` also by a research
+# brief). Those 242 are exactly what the population lost: 150 above the pivot and
+# 92 below, which is why the citing-file count fell by one and nothing else moved.
+# So a reader who re-measures the old appendix gets 244/150/93 and a reader who
+# re-measures the tree gets 483/7/475: both are right, they count different trees,
+# and neither licenses typing a figure here.
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a

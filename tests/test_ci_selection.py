@@ -21740,18 +21740,42 @@ def test_the_write_path_cost_instrument_and_its_evidence_select_the_pin():
 
 def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # #13098: `tests/test_13098_cypher_inventory.py` is `core`-registered, and its pins
-    # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN
-    # `docs/architecture/CYPHER-INVENTORY.md` — so both the tool and the doc are subjects
-    # of the suite. Without the CORE_ALSO entries this was the #3261/#6388 silent-drop
+    # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN THE
+    # CENSUS SOURCE — so the tool, its harness, that TRACKED source and the RENDERED
+    # document are ALL subjects of the suite. ⛔ BOTH `.md` paths are entries, for two
+    # DIFFERENT diffs: `CYPHER-INVENTORY.src.md` (tracked) for the ordinary edit, and
+    # `CYPHER-INVENTORY.md` (the rendered, gitignored document) for the one diff that
+    # CAN carry it — a modify/delete conflict resolved by "keep our version" RE-STAGES
+    # the gitignored file. So it is NOT "a file no diff carries": `.gitignore` keeps it
+    # out of every OTHER diff, which is why its entry is inert there — and the reading
+    # this comment used to state ("no diff carries it") is the one round 11 falsified.
+    # Without the CORE_ALSO entries this was the #3261/#6388 silent-drop
     # class: `tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only diff was filtered out
     # BEFORE the `core` fallback and took the docs-only early return, and the harness's
     # exit-code contract was graded by nothing.
     #
-    # Mutation check: removing the three CORE_ALSO entries empties `surfaces` for all
-    # three paths and drops the suite from `test_files` — measured at the reviewed head.
+    # Mutation check: removing any ONE of the entries below empties `surfaces` for that
+    # path and drops the suite from `test_files` — measured at the reviewed head. The
+    # rendered document's re-stage diff is the one where that is most misleading: the
+    # path still takes the docs-only early return, so the outcome is `surfaces: []` with
+    # 107 `test_files` remaining — the census suite is ABSENT, the selection is NOT empty
+    # (measured WITH THAT ENTRY REMOVED: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)`
+    # -> `surfaces=[]`, `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`;
+    # with the entry in place the same call answers `surfaces=['core']`, `n_test_files=969`;
+    # re-taken at the #14625 merge onto `main` `29bb16b5b6b4`, which added test files — this
+    # figure is base-bound and moves with the tree, so re-take it rather than carry it).
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
+        "docs/architecture/CYPHER-INVENTORY.src.md",
+        # ⛔ THE RENDERED DOCUMENT IS ITS OWN SUBJECT, and it is the one that matters
+        # for the failure this split exists to remove: a modify/delete conflict
+        # resolved by "keep our version" RE-STAGES the gitignored file, and
+        # `test_the_rendered_document_is_not_tracked` is the only thing that reds on
+        # it. With this entry removed, that diff selects `surfaces: []` and the suite
+        # is ABSENT — measured at #13098 review round 11 — so the arm was unscheduled
+        # for the exact re-add it was written to catch. On every other diff the entry
+        # is inert: `.gitignore` keeps the path out of the changed set.
         "docs/architecture/CYPHER-INVENTORY.md",
     ):
         r = _sel([subject])

@@ -86,8 +86,17 @@ USAGE
     uv run python tools/cypher_inventory.py                # summary + reconciliation
     uv run python tools/cypher_inventory.py --markdown     # the appendix table
     uv run python tools/cypher_inventory.py --json         # machine form
-    uv run python tools/cypher_inventory.py --check        # exit 1 on doc drift
+    uv run python tools/cypher_inventory.py --check        # exit 1 on pin drift (reads the SOURCE)
+    uv run python tools/cypher_inventory.py --render       # write the document (source + appendix)
     uv run python tools/cypher_inventory.py --all-surface  # every surface, not just the product
+
+⛔ THE DOCUMENT IS GENERATED, NOT COMMITTED. `docs/architecture/CYPHER-INVENTORY.src.md`
+is the tracked source (prose + the 25 pins); `docs/architecture/CYPHER-INVENTORY.md` is
+`--render`'s output — Appendix A, one `file:line` row per classified statement
+site, so its length moves with the tree — restamps on any commit that moves a
+statement, so committing it made every such PR carry its own copy and conflict
+with every other one (#13098). ⛔ No row or line count is typed here: the
+appendix's own length is the number, and a copy of it in prose rots.
 """
 
 from __future__ import annotations
@@ -116,7 +125,9 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import contextlib
 import json
+import os
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -124,6 +135,46 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: The hand-authored SOURCE — the prose and the 25 pins. This is the file git
+#: tracks, and the file `--check` reads.
+DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
+
+#: The rendered DOCUMENT — `DOC_SRC` plus this run's appendix table. It is a
+#: BUILD ARTIFACT and is NOT tracked: the appendix carries one `file:line` row
+#: per statement site, so committing it made every product commit that moved a
+#: statement restamp every later row, and every open PR then carried its own
+#: whole-census copy of it, stamped against a different tree. Measured
+#: 2026-11-24 at `939e37f664`: it appeared in 8 of 11 open PRs and in 3 of the
+#: last 20 commits on `main` (reproducible: `git rev-list -20 main` + a
+#: `diff-tree` per commit), and it was in 6 of 6 then-conflicting PRs.
+DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
+
+#: A source that carries a census row: the defect this split exists to make
+#: impossible (someone pastes the appendix back into the tracked file, and the
+#: conflict engine returns). `--render` and `--check` both refuse it.
+#:
+#: ⛔ IT MATCHES THE GENERATED ROW, NOT "ANY TABLE THAT STARTS WITH A `file:line`".
+#: The broad `^\| `file:line` \|` matched a TWO-cell hand-authored prose row as
+#: readily as a six-cell generated one, so a source whose first table column held
+#: a site address was refused by `--render` (exit 2, "Delete the rows") and read by
+#: `--check` as DRIFT (exit 1) — with correct pins. The remedy the first message
+#: prescribes is then to delete CORRECT PROSE, and `cypher-diff.yml` reads that 1 as
+#: "the doc's numbers are wrong" (#13098 review, P2). The appended table's own
+#: first five cells (`markdown_table`) are the shape nothing but the generator
+#: emits, and they still match a pasted appendix — measured against the tracked
+#: document on `main` BEFORE this split, at `a29b5f24ce` (`git show
+#: a29b5f24ce:docs/architecture/CYPHER-INVENTORY.md` — that path leaves `main` with
+#: this change, so the command is stamped to the sha it was measured at): every one
+#: of its appendix rows matched, and no prose row did. ⛔ No row count is typed
+#: here: the appendix's own length is the number.
+#:
+#: ⚠️ A CHANGE TO `markdown_table`'s COLUMNS MUST RE-CUT THIS PATTERN: the arm
+#: `test_a_hand_authored_prose_row_is_not_read_as_a_census_row` grades the pattern
+#: against `markdown_table`'s own output, so a generator change reds there instead
+#: of leaving the guard silently blind.
+CENSUS_ROW = re.compile(
+    r"^\| `[^`]+:\d+` \| `[^`]*` \| [a-z_]+ \| [a-z_]+ \|", re.MULTILINE)
 
 #: Files whose statements are the PRODUCT's. Everything else is measured, never
 #: folded in — the census unit is named above.
@@ -323,9 +374,17 @@ def surface_files(prefixes: tuple[str, ...]) -> list[str]:
     `git ls-files` reads the index, so this never walks `.worktrees/`,
     `node_modules/` or a build tree: the search-guard rule and the load policy.
     """
+    # ⛔ `-z` EMITS RAW FILENAME BYTES, so `text=True` (strict UTF-8) RAISES on a
+    # tracked name that is not valid UTF-8 — a `UnicodeDecodeError`, which is a
+    # `ValueError`, NOT an `OSError`, so it slips through both of `main()`'s guards and
+    # exits 1 (the DRIFT code) on the DEFAULT verb and on `--check`. Measured in a
+    # scratch repo with a tracked `caf\xe9.py`: bare verb and `--check` both rc 1.
+    # `surrogateescape` round-trips those bytes, so `ROOT / relpath` still opens the
+    # file and the census reads it like any other.
     out = subprocess.run(
         ["git", "ls-files", "-z", "--", *prefixes],
         cwd=ROOT, capture_output=True, text=True, check=True,
+        encoding="utf-8", errors="surrogateescape",
     ).stdout
     files = [p for p in out.split("\0") if p.endswith(".py")]
     return sorted(files)
@@ -720,11 +779,74 @@ def markdown_table(sites: list[Site]) -> str:
 PINNED = re.compile(r"<!-- cypher-inventory:(\w+) = (\d+) -->")
 
 
+def render(src: Path, result: dict) -> str:
+    """`src` (prose + pins) with this run's appendix appended — the document.
+
+    ⛔ THE APPENDIX IS APPENDED, NEVER MERGED: a source that already carries a
+    census row is REFUSED with exit 2 (this module's "could not run") rather than
+    rendered, because rendering it would silently duplicate rows — and
+    re-committing those rows is the whole defect this split removes. (2, never 1:
+    1 is the DRIFT verdict. `--check` on a row-carrying file is a DIFFERENT
+    verdict — 1, naming the rows — because a committed appendix is a census
+    defect, not a tool that could not run.)
+
+    ⛔ THE SEPARATOR IS INSERTED, not assumed: the source ends after the Appendix
+    heading with a SINGLE newline (two would be a markdownlint MD012 finding on
+    the required `docs` check), and this function supplies the blank line that
+    separates the heading from the table.
+    """
+    if not src.exists():
+        print(f"render: no source at {src}", file=sys.stderr)
+        raise SystemExit(2)
+    # ⛔ A SOURCE THAT CANNOT BE READ IS "COULD NOT RUN" (2), NOT A CRASH (1) — the
+    # twin of `check()`'s guard. `--render` has NO drift verdict, so an uncaught
+    # PermissionError / IsADirectoryError / UnicodeDecodeError exits 1, the code
+    # reserved for "the pins drifted", and §7 tells every lane to run this verb: a
+    # lane would re-cut 25 correct pins over a file it never read.
+    try:
+        text = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        print(f"render: could not read {src}: {err}", file=sys.stderr)
+        raise SystemExit(2) from err
+    rows = CENSUS_ROW.findall(text)
+    if rows:
+        print(
+            f"render: refusing {src} — it carries {len(rows)} census row(s) "
+            f"(first: {rows[0]!r}). The appendix is GENERATED: nobody commits it, "
+            "and pasting it back into the source is the conflict this split exists "
+            "to remove. Delete the rows; `--render` appends them from the tree.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return text.rstrip("\n") + "\n\n" + markdown_table(result["sites"]) + "\n"
+
+
 def check(doc: Path, result: dict) -> int:
     if not doc.exists():
         print(f"check: no doc at {doc}", file=sys.stderr)
         return 2
-    text = doc.read_text(encoding="utf-8")
+    # ⛔ A DOC THAT IS PRESENT BUT UNREADABLE IS "COULD NOT RUN" (2), NOT DRIFT (1) —
+    # same class as the census wrap in `main()`, in the same verb: an uncaught
+    # PermissionError/EIO would exit 1, the code reserved for "the pins drifted", and a
+    # lane would re-cut 25 pins that were correct.
+    try:
+        text = doc.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needed naming:
+        # a present-but-non-UTF-8 source exited 1 through this very guard.
+        print(f"check: could not read {doc}: {err}", file=sys.stderr)
+        return 2
+    rows = CENSUS_ROW.findall(text)
+    if rows:
+        print(
+            f"check: {doc} carries {len(rows)} census row(s) (first: {rows[0]!r}) "
+            "— it is a RENDERED document, or a source someone pasted the rows "
+            "into. The pins live in docs/architecture/CYPHER-INVENTORY.src.md, "
+            "and the appendix is generated by `--render`; never committed",
+            file=sys.stderr,
+        )
+        # 1, deliberately: a committed appendix is a RED, not "could not run".
+        return 1
     pinned = {k: int(v) for k, v in PINNED.findall(text)}
     sites: list[Site] = result["sites"]
     actual = {
@@ -775,28 +897,237 @@ def check(doc: Path, result: dict) -> int:
             print(f"STALE pin {key}={pinned[key]} — the tool no longer computes it",
                   file=sys.stderr)
         return 1
-    print(f"check: {len(actual)} pinned counts match")
+    return emit(f"check: {len(actual)} pinned counts match")
+
+
+def emit(text: str, stream=None) -> int:
+    """Write one stdout payload; a write that cannot happen is 2, never 1.
+
+    ⛔ `--markdown` IS the appendix table — the one verb a lane pipes (`| head`) or
+    redirects, and the one whose payload is far larger than the stdout buffer. A
+    closed pipe (`BrokenPipeError`) or a full disk (`OSError ENOSPC`) used to escape
+    uncaught and exit **1**, the code this tool reserves for the DRIFT verdict, so a
+    lane read "the pins drifted" and re-cut 25 correct pins. `--render`'s write and
+    `check()`'s read already answer 2 for their own half of this class; this closes
+    the stdout half for every emitting verb.
+
+    The explicit `flush()` is load-bearing: a payload small enough to sit in the
+    buffer raises at interpreter shutdown (exit **120**) instead of here, so without
+    it the smaller verbs would keep answering something that is not "could not run".
+    """
+    out = sys.stdout if stream is None else stream
+    # ⛔ `sys.stdout` IS `None` WHEN fd 1 IS CLOSED AT START (`>&-`), and `None.write`
+    # raises AttributeError — which exits **1**, the DRIFT code. Measured: `--markdown >&-`
+    # exited 0 before this writer (bare `print()` with a `None` stream is a documented
+    # no-op) and 1 after it, so the guard would have been the one path that INTRODUCED
+    # the misclassification it exists to remove. "Could not run" is 2, named.
+    if out is None:
+        print("census: could not write to stdout (no stream: fd 1 is closed) — this is "
+              "'could not run', not drift", file=sys.stderr)
+        return 2
+    try:
+        out.write(text + "\n")
+        out.flush()
+    except BrokenPipeError:
+        # Python's own advice: re-point fd 1 at devnull so the shutdown flush cannot
+        # re-raise and turn the 2 below into 120. Guarded — a test double has no fd.
+        _detach_stdout(out)
+        print("census: could not write to stdout (closed pipe) — this is 'could not "
+              "run', not drift", file=sys.stderr)
+        return 2
+    except OSError as err:
+        # ⛔ THE SAME DETACH IS OWED HERE, and it is measured, not defensive: the failed
+        # `flush()` leaves its bytes in the buffer, so the interpreter's shutdown flush
+        # retries them and REPLACES the 2 with **120** (a full disk: `>/dev/full`). The
+        # exit code is the whole point of this guard, so a code that says "could not
+        # run" must survive its own teardown.
+        _detach_stdout(out)
+        print(f"census: could not write to stdout: {err} — this is 'could not run', "
+              "not drift", file=sys.stderr)
+        return 2
     return 0
 
 
+def _detach_stdout(out) -> None:
+    """Re-point a failed stdout at devnull so Python's shutdown flush cannot re-raise."""
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
+
+
 def main(argv: list[str] | None = None) -> int:
+    # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
+    # the report/table as a surrogate escape, and under a real UTF-8 locale
+    # (`en_US.UTF-8`, macOS's default) `sys.stdout.errors` is `strict`, so `print(...)`
+    # raised `UnicodeEncodeError` and the bare verb exited 1 — the drift code — while
+    # the same run under `C.UTF-8` exited 0. A locale-dependent exit status is worse
+    # than a mis-rendered byte. (No effect where stdout has no `reconfigure`.)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--markdown", action="store_true", help="emit the appendix table")
     parser.add_argument("--json", action="store_true", help="emit machine form")
-    parser.add_argument("--check", nargs="?", const="docs/architecture/CYPHER-INVENTORY.md",
-                        help="compare the doc's pinned counts with this run (exit 1 on drift)")
+    parser.add_argument("--check", nargs="?", const=str(DOC_SRC.relative_to(ROOT)),
+                        help="compare the SOURCE's pinned counts with this run (exit 1 on drift)")
+    parser.add_argument("--render", nargs="?", const=str(DOC_OUT.relative_to(ROOT)),
+                        help="write the document (source + this run's appendix) here")
     parser.add_argument("--all-surface", action="store_true",
                         help="census every tracked surface, not only the product")
     args = parser.parse_args(argv)
+
+    # ⛔ NEITHER VERB MAY RUN THE WIDE CENSUS UNDER THE SOURCE'S PRODUCT PINS.
+    # The source's 25 pins are PRODUCT-surface counts (`census(("tortoise",))`),
+    # and `--render` appends the run's rows under those pins. Rendering the
+    # all-surface census would write a document whose §0 `sites` pin — a
+    # PRODUCT-surface count — sits above an appendix several times longer,
+    # print success, and be self-contradictory — a false pass in
+    # prose, which is the class this file exists to refuse. The refusal is loud
+    # rather than a silent scope-narrowing: a lane that asked for the wide census
+    # and got the product one would believe it had rendered the wide table.
+    if args.all_surface and (args.render is not None or args.check is not None):
+        verb = "--render" if args.render is not None else "--check"
+        print(
+            f"`{verb} --all-surface` contradicts the source's pins: the 25 pins are\n"
+            "PRODUCT-surface counts, so the wide census can never satisfy --check and\n"
+            "would sit under an appendix that contradicts it under --render. Take the\n"
+            "wide census from `--markdown --all-surface` (or `--json`) instead.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ⛔ `--render` MUST NOT OVERWRITE A TRACKED PATH. The refusal inside `render()`
+    # guards the SOURCE'S CONTENT (a source that already carries rows), never the
+    # DESTINATION — so `--render docs/architecture/CYPHER-INVENTORY.src.md` read the
+    # clean source, passed that refusal, and wrote source + the appendix rows over the tracked
+    # file. That is self-locking: afterwards `--check` exits 1 ("carries N census
+    # row(s)") and `--render` exits 2 (refuses the rowed source), so the tool can
+    # neither grade nor repair the tree it just corrupted. A mistyped path is the
+    # plausible route here — §7 tells every lane to run this verb — and the same
+    # clobber applies to any other tracked doc. Refused before the census runs, so the
+    # refusal costs nothing. `git ls-files` answers "is this path in the index", which
+    # is exactly the invariant (`--render`'s output is never committed); outside a git
+    # work tree (exit 128) it simply does not fire.
+    if args.render is not None:
+        # ⛔ AND A DESTINATION THAT CANNOT BE RESOLVED IS "COULD NOT RUN" (2) TOO.
+        # `Path.resolve()` raises `RuntimeError("Symlink loop …")` on ELOOP — NOT an
+        # OSError — and it runs before every guard, so the traceback escaped and the
+        # interpreter exited 1, the DRIFT code, from a verb that has no drift verdict
+        # (measured with a two-symlink loop: --render /tmp/loop/a/deep.md → rc 1).
+        try:
+            target = (ROOT / args.render).resolve()
+            src_resolved = DOC_SRC.resolve()
+        except (OSError, RuntimeError) as err:
+            print(f"render: could not resolve {args.render}: {err}", file=sys.stderr)
+            return 2
+        if target == src_resolved:
+            print(
+                f"refusing to render over the SOURCE ({args.render}): the document is\n"
+                "`--render`'s output and the source is hand-authored. Pick another\n"
+                "path (the default writes the gitignored `CYPHER-INVENTORY.md`).",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            # `ROOT.resolve()` is inside the guard too: a symlink loop on the tree root
+            # raises `RuntimeError` here, and only `ValueError` (path outside ROOT) was
+            # ever caught.
+            rel = target.relative_to(ROOT.resolve()).as_posix()
+        except (ValueError, OSError, RuntimeError):
+            rel = None
+        if rel is not None:
+            # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent
+            # `git` binary raises FileNotFoundError here, and nothing catches it: the
+            # interpreter then exits 1, which this tool reserves for the DRIFT verdict
+            # — so a lane reads "the census drifted" from a box that could not answer
+            # at all (#13098 review, P2). Same class, same status as every other
+            # refusal in this module.
+            try:
+                # ⛔ AND THIS PROBE MUST NOT BE ABLE TO FAIL DECODING EITHER. With
+                # `core.quotePath=false` in the user's config, `git` emits RAW filename
+                # bytes on stdout AND stderr, so a strict `text=True` decode raises
+                # `UnicodeDecodeError` — a `ValueError`, not the `OSError` caught below
+                # — and a deliberate "refusing to render over a TRACKED path" (2) became
+                # a traceback and exit 1 (measured with `quotePath false` and a
+                # `caf\xe9.md`). The payload is unused, so decoding is pure overhead
+                # that must never fail.
+                tracked = subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", rel],
+                    cwd=ROOT, capture_output=True, text=True,
+                    encoding="utf-8", errors="surrogateescape",
+                )
+            except OSError as err:
+                print(
+                    f"render: could not probe {rel} for tracking: {err}",
+                    file=sys.stderr,
+                )
+                return 2
+            if tracked.returncode == 0:
+                print(
+                    f"refusing to render over a TRACKED path ({rel}): the document is\n"
+                    "`--render`'s output, which is never committed. Pick an untracked\n"
+                    "path (the default is gitignored).",
+                    file=sys.stderr,
+                )
+                return 2
 
     prefixes: tuple[str, ...] = ("tortoise",)
     if args.all_surface:
         prefixes = (".",)
 
-    result = census(prefixes, drop_test_modules=not args.all_surface)
+    # ⛔ EVERY MODE THAT CANNOT ENUMERATE ANSWERS 2, NEVER 1. `surface_files()` runs
+    # `git ls-files … check=True`, so on a box without a `git` binary or without an
+    # index it raises (`FileNotFoundError`, `CalledProcessError` 128) — and an
+    # uncaught exception exits the interpreter with 1, the code this tool reserves
+    # for the DRIFT verdict. `--render` has no drift verdict at all, and `--check`
+    # would then say "the census drifted" about a box that could not answer, sending
+    # a lane to re-cut 25 pins that were correct. The probe wrapper below closes this
+    # class for `git ls-files --error-unmatch`; this one closes it for the census's
+    # own enumeration, which runs on EVERY path.
+    try:
+        result = census(prefixes, drop_test_modules=not args.all_surface)
+        # ⛔ `--json` NEEDS A SECOND, UNGUARDED-UNTIL-NOW ENUMERATION: `rg_totals()`
+        # re-reads the index through `surface_files()`, so a PARTIAL failure (the first
+        # walk succeeds, the second is refused — a transient EAGAIN, an index that
+        # becomes unreadable mid-run) escaped this guard and exited 1, the DRIFT code,
+        # from a verb that has no drift verdict. Measured with a `git` shim that
+        # delegates the first call and exits 128 on the second. It is inside the guard
+        # for the same reason as the first: this tool's "could not run" must be total.
+        rg = (
+            rg_totals(prefixes, drop_test_modules=not args.all_surface)
+            if args.json
+            else None
+        )
+    except (OSError, subprocess.CalledProcessError) as err:
+        print(
+            f"census: could not enumerate {prefixes}: {err} — this is 'could not "
+            "run', not drift",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.check is not None:
         return check(ROOT / args.check, result)
+    if args.render is not None:
+        out = ROOT / args.render
+        text = render(DOC_SRC, result)
+        # ⛔ AND NEITHER DOES A WRITE THAT CANNOT HAPPEN. `--render` has NO drift
+        # verdict, so an uncaught IsADirectoryError/PermissionError/OSError (read-only
+        # mount, ENOSPC) exits 1 — the status this tool reserves for "the pins drifted"
+        # — and §7 tells every lane to run this verb, so a lane that rendered into a
+        # path it cannot write re-cuts 25 correct pins. "Could not run" is 2, and the
+        # message names the path and the error (#13098 review, P2).
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            # ⛔ THE TABLE CAN CARRY A SURROGATE-ESCAPED PATH (a non-UTF-8 tracked
+            # filename), which strict UTF-8 cannot ENCODE: `write_text` then raised
+            # `UnicodeEncodeError` — a `ValueError`, not an `OSError` — and left an
+            # EMPTY file behind while exiting 1, the drift code, from a verb with no
+            # drift verdict. `backslashreplace` renders such a byte as text, and the
+            # guard names `UnicodeError` so neither half can escape.
+            out.write_text(text, encoding="utf-8", errors="backslashreplace")
+        except (OSError, UnicodeError) as err:
+            print(f"render: could not write {out}: {err}", file=sys.stderr)
+            return 2
+        return emit(f"render: wrote {len(text.splitlines())} lines to {out}")
     if args.json:
         payload = {
             "prefixes": result["prefixes"],
@@ -808,16 +1139,23 @@ def main(argv: list[str] | None = None) -> int:
             "shape_matrix": shape_matrix(result["sites"]),
             "verdicts": dict(Counter(s.verdict for s in result["sites"])),
             "partial": result["partial"],
-            "rg_totals": rg_totals(prefixes, drop_test_modules=not args.all_surface),
+            "rg_totals": rg,
             "rows": [s.as_row() for s in sorted(result["sites"], key=lambda s: (s.path, s.line))],
         }
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        return emit(json.dumps(payload, indent=2, sort_keys=True))
     if args.markdown:
-        print(markdown_table(result["sites"]))
-        return 0
-    print(report(result))
-    return 0
+        return emit(markdown_table(result["sites"]))
+    # ⛔ AND THE BARE VERB ENUMERATES TWICE TOO: `report()` calls `rg_totals()`, which
+    # re-reads the index — outside the guard above, so a PARTIAL failure exited 1, the
+    # DRIFT code, from the DEFAULT verb (measured with a `git` shim that delegates the
+    # first `ls-files` and refuses the second).
+    try:
+        text = report(result)
+    except (OSError, subprocess.CalledProcessError) as err:
+        print(f"census: could not enumerate: {err} — this is 'could not run', not drift",
+              file=sys.stderr)
+        return 2
+    return emit(text)
 
 
 if __name__ == "__main__":
