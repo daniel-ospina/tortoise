@@ -1758,7 +1758,8 @@ _INVERSION_FORMS = (
     #     "… once the tools appear". The predicate is REQUIRED — a bare `once the
     #     tools` reddened "… once the tools stop appearing", a remedy with the
     #     restart first (measured). What is required is a COPULA or one of
-    #     appear|show|exist|load|listed|visible; the copulas admit any complement
+    #     appear|show|exist|load|listed|visible; the present-tense copulas `are`/`is`
+    #     admit any complement
     #     on purpose ("… once the tools are ready" is still a tool-state the
     #     reader must reach BEFORE restarting), so the claim here is that
     #     predicate SET, not "a presence sense".
@@ -1807,11 +1808,17 @@ _CONFIG_PREP_RE = re.compile(
 # The lookahead is what keeps `e.g. quit` inside one statement; the cost is that a
 # sentence beginning lower case ("… . otherwise, once the tools …") is graded as
 # though it continued, which is pinned as RED below rather than left implicit.
-_STATEMENT_BREAK_RE = re.compile(r"(?:[;—]\s+|\.\s+(?=[A-Z\"'`(\[]))")
+# ⛔ GLYPH VARIANTS ARE THE SAME PUNCTUATION. The break class carried only the em
+# dash while three `lstrip('—–-:;…')` calls in the same function treat `–` and `-`
+# as the same mark, so an en-dash or spaced-hyphen twin of a declared-GREEN row
+# went RED with a message claiming an inversion (measured):
+# "Restart your client – once the tools are listed, run …".
+_STATEMENT_BREAK_RE = re.compile(
+    r"(?:[;—–]\s+|(?:(?<=\s)|^)-(?=\s)|\.\s+(?=[A-Z\"'`(\[]))")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
-_FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards)\b", re.IGNORECASE)
+_FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNORECASE)
 
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
@@ -1912,10 +1919,11 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     confirm the tools are actually there. Restart your client …" was GREEN
     (measured) — a real pre-cue inversion, invisible to the anchor.
 
-    Graded forms are exactly the six enumerated in `_INVERSION_FORMS`, minus any
-    whose confirmation scopes the config (see above). Rephrasings outside that
-    set are out of scope BY DESIGN; this function grades what it claims and
-    claims only what it grades.
+    Graded forms are exactly the six enumerated in `_INVERSION_FORMS`, minus
+    (i) any whose confirmation scopes the config and (ii) every clause that opens
+    with a forward sequencer (see above) — post-cue, that skip covers all six
+    forms. Rephrasings outside that set are out of scope BY DESIGN; this function
+    grades what it claims and claims only what it grades.
     """
     para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
     flat = " ".join(para.split())
@@ -2100,8 +2108,9 @@ def test_3232_generic_restart_lines_are_exact():
         "asks the user to confirm the tools this session cannot have loaded "
         "yet — the restart comes FIRST (#3232, #14676). Graded forms are the "
         "six enumerated in _INVERSION_FORMS; a pre-restart check of the CONFIG "
-        "is not an inversion unless it also conjoins the tool list, and "
-        "rephrasings outside that closed set are out of scope by design.")
+        "is not an inversion unless it also conjoins the tool list, a clause "
+        "that opens with a forward sequencer is not a deferral, and rephrasings "
+        "outside that closed set are out of scope by design.")
 
 
 # Every row below is a MEASURED case: the GREEN rows are forward copy (a false
@@ -2247,6 +2256,36 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after checking the `.mcp.json` lists the tools.",
      False),
     ("Restart your client after checking the config lists the tools.", False),
+    # glyph and spelling variants of shapes already declared GREEN (each was RED
+    # on a one-character edit of a row above — measured):
+    ("Restart your client – once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client - once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, afterward once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    # ── rows for the remaining named arms ────────────────────────────────────
+    # form (f)'s `please` and its `see|list` verbs, which begin a pre-cue
+    # imperative — nothing else in the table fires those alternatives:
+    ("Please confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Please list the tools you see. Restart your client, then confirm the "
+     "tools are actually there.", True),
+    # form (a)'s `having` subject, and the predicate's `saw`/`seen`/`look`:
+    ("Restart your client after having verified the tools are actually there.",
+     True),
+    ("Restart your client after you saw the tools are actually there.", True),
+    ("Restart your client, having seen the tools are actually there.", True),
+    ("Restart your client, look at the tools beforehand.", True),
+    # `settings` as the config noun, and the (e) predicates beyond `are`:
+    ("Restart your client after checking the settings list the tools.", False),
+    ("Restart your client once the tools exist.", True),
+    ("Restart your client once the tools show up.", True),
+    ("Restart your client once the tools are listed.", True),
+    # the merge loop's `lstrip`, without which a bracketed `and`-clause is not
+    # recognised as continuing the previous one:
+    ("Restart your client after confirming the config is right, (and the tools "
+     "are actually there).", True),
     # ── pre-cue shapes that were GREEN before the statement-break fix ────────
     ("Confirm the tools appear after the v1.2 upgrade. Restart your client, then "
      "confirm the tools are actually there.", True),
@@ -2259,7 +2298,11 @@ def test_3232_generic_restart_lines_are_exact():
      "are actually there.", True),
     ("Restart your client after confirming the config is right, and that the "
      "tools are actually there.", True),
-    # ── one row per arm the comments name, each GREEN today and RED without it ─
+    # ── rows for the arms behind the shapes above; each one flips when the arm
+    # it names is removed (measured per arm). A few alternatives in the regexes
+    # are live but carry no row of their own — they are spelling/morphology
+    # variants of an arm that does, and the comments claim the behaviour, not a
+    # row for every alternative ──────────────────────────────────────────────────
     ("Restart your client, and once the tools are listed run `tortoise "
      "mcp-status`.", False),
     ("Restart your client, next once the tools are listed run `tortoise "
