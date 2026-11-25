@@ -219,12 +219,28 @@ def list_layer(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
     total = int(total_rows[0][0]) if total_rows else 0
+    # ⛔ THE LIST READ CARRIES THE NODE'S LABEL SET TOO, and it must: Cypher label
+    # matching is SUBSET-based, so `MATCH (n:Object)` matches a
+    # `(:Object:Source)` hybrid — and returning `properties(n)` unfiltered put that
+    # node's DENIED `content` on `/v1/objects` and `/v1/subjects` (measured) while
+    # `/v1/sources/{url}` withheld it. The filter is `projection.entities`' own
+    # `filter_source_props` — the ONE home of #3998/D30 — rather than a second copy
+    # of the rule, and it is applied by MEMBERSHIP: a hybrid is a Source for
+    # disclosure purposes whichever branch a MATCH reached it by.
     rows = proj.g.ro_query(
-        f"MATCH (n:{label}) WHERE {where} RETURN properties(n) "
+        f"MATCH (n:{label}) WHERE {where} RETURN properties(n), labels(n) "
         f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit",
         params={**params, "skip": offset, "limit": limit},
     ).result_set
-    return [dict(r[0]) for r in rows], total
+    out: list[dict] = []
+    for r in rows:
+        props = dict(r[0])
+        if "Source" in (r[1] or ()):
+            from .projection.entities import filter_source_props
+
+            props, _denied = filter_source_props(props)
+        out.append(props)
+    return out, total
 
 
 def kind_equivalents(kind: str) -> list[str]:
@@ -479,10 +495,13 @@ def entity_relations(
             # The root's own name, on the SAME label-aware rule as a neighbour's
             # (see `_endpoint_preview`): a `:Source` root answers its name or its
             # url, never its denied `content`.
-            "name": ((root.get("name") or root.get("url") or root.get("eventId"))
-                     if root_label == "Source" else
-                     (root.get("name") or root.get("content")
-                      or root.get("url") or root.get("eventId"))),
+            # ⛔ NO LABEL TEST HERE ON PURPOSE: `navigation._resolve_root` already
+            # decided the #3998/D30 denial by the node's LABEL SET, so a `:Source`
+            # (hybrid included) arrives with `content` withheld and this coalesce
+            # cannot reach it. Testing the branch label a second time is what let
+            # the hybrid leak through in the first place; one home for the rule.
+            "name": (root.get("name") or root.get("content")
+                     or root.get("url") or root.get("eventId")),
         },
         "relations": relations,
         "count": len(relations),

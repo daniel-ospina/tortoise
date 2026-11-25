@@ -53953,7 +53953,13 @@ class TortoiseSDK:
         # same leak, one function away, which is why the filter now lives in one
         # place (`projection.entities.filter_source_props`) instead of being
         # re-stated per read path.
-        if resolved[0].get("label") == "Source":
+        # ⛔ MEMBERSHIP, NOT THE MATCHED BRANCH (#3998 / D30): a hybrid
+        # `(:Object:Source)` resolves through the `Object` branch, so a branch
+        # test here returned its DENIED `content` — measured through this very
+        # door, which is MCP `tortoise_get_entity`. `_resolve_entity` carries the
+        # node's own label set; the branch label is the fallback for a resolver
+        # (or a mock) that cannot answer it.
+        if "Source" in (resolved[0].get("labels") or (resolved[0].get("label"),)):
             _raw = resolved[0]["properties"]
             _props, _denied = filter_source_props(_props)
             if _echo_written:

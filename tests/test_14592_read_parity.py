@@ -1005,6 +1005,45 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         assert belief.json()["entity"]["name"] == url, belief.text
         assert raw not in repr(belief.json()), belief.json()
 
+        # ⛔ AND THE OTHER TWO SHAPES OF THE SAME RULE, which the first cut of
+        # this test missed while all three above were green: the LIST reads
+        # (Cypher label matching is SUBSET-based, so `MATCH (n:Object)` reaches
+        # the hybrid) and the LAYER BY-ID reads (`_layer_payload`). Measured
+        # leaking before this commit; the by-id route is the one the reviewer
+        # reproduced, so it is asserted on the response TEXT, not a field.
+        # … the MCP door (`sdk.get_entity`, the primary read) …
+        sdk = _sdk(ha)
+        try:
+            mcp = sdk.get_entity(hyb)
+        finally:
+            sdk.close()
+        assert raw not in repr(mcp), mcp
+        assert mcp.get("url") == url, mcp
+
+        # … and the layer by-id route.
+        assert raw not in client.get(f"/v1/objects/{hyb}").text
+        body = client.get("/v1/objects", params={"limit": 100}).text
+        assert raw not in body, body
+        assert hyb in body, body  # …and it IS listed, filtered
+
+        # A second hybrid on the OTHER layer, so the Subject routes have a row to
+        # withhold: the first one carries `objectKind`, which the subject listing
+        # filters out (so its absence there proves nothing).
+        sub = "hyb-subject-14592"
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "CREATE (n:Subject:Source {id:$i, url:$u, content:$t, "
+                "subjectKind:'PERSON', name:'HYB SUBJECT'})",
+                params={"i": sub, "u": url + "-subject", "t": raw},
+                read_only=False)
+        finally:
+            sdk.close()
+        assert raw not in client.get(f"/v1/subjects/{sub}").text
+        sub_body = client.get("/v1/subjects", params={"limit": 100}).text
+        assert raw not in sub_body, sub_body
+        assert sub in sub_body, sub_body
+
 
 def test_sources_paging_is_over_a_total_order(tmp_path):
     """⛔ `SKIP`/`LIMIT` needs a TOTAL order (#5346), and Sources TIE on it.
