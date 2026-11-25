@@ -1200,6 +1200,87 @@ def test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree(tmp_path,
         "is what refuses this layout")
 
 
+def test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a probe that CANNOT ANSWER is refused, never read as "not metadata".
+
+    ⛔ THE FAIL-OPEN THIS CLOSES (#14625 review, P1): the guard only acted when
+    `git rev-parse` exited 0, so a layout git could not read — or a broken git —
+    turned the whole metadata guard into a no-op. Measured at `bf0dbcf9` by forcing the
+    probe to exit 128 on a `--separate-git-dir` target: the render landed, rc=0, over a
+    repository config no git command can restore.
+
+    The destination is OUTSIDE `ROOT`, so the tracked-path probe does not run and the
+    only subprocess in this path is the one under test.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "doc.md"
+
+    def _unanswerable(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="",
+            stderr="fatal: unable to read repository\n",
+        )
+
+    monkeypatch.setattr(census.subprocess, "run", _unanswerable)
+    rc = census.main(["--render", str(target)])
+    assert rc == 2, (
+        f"an unanswerable metadata probe must exit 2 (could not run), got {rc}; "
+        "0 here is the fail-open that let a separate git dir's config be overwritten")
+    assert not target.exists(), (
+        "the write landed on a probe that never answered — 'cannot determine' must "
+        "not be read as 'not metadata'")
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err, (
+        f"the refusal must say the class it could not rule out; stderr:\n{err}")
+
+
+def test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard(
+    tmp_path, monkeypatch
+):
+    """…and the fail-closed arm above does not over-block a plain directory.
+
+    ⛔ THE COUNTERWEIGHT TO IT: treating EVERY non-zero probe as metadata refuses
+    `--render /tmp/x.md`, which is a legitimate destination (and what a lane running a
+    one-off comparison uses). git's own `not a git repository`, with no `.git` entry on
+    any ancestor, is the ONE answer that permits the write — so the pair fails closed
+    without turning a refusal (P2-shaped friction) into a wall on the common case.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    target = outside / "doc.md"
+
+    def _not_a_repo(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="",
+            stderr=("fatal: not a git repository (or any of the parent "
+                    "directories): .git\n"),
+        )
+
+    monkeypatch.setattr(census.subprocess, "run", _not_a_repo)
+    rc = census.main(["--render", str(target)])
+    assert rc == 0, (
+        f"a plain directory is a legitimate destination — an honest 'not a "
+        f"repository' must not be refused; got rc={rc}")
+    assert target.is_file(), "the document was not written to a legitimate destination"
+
+
 def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
     """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
 
@@ -3235,13 +3316,22 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # probe-only guard kept the write — measured at `037d0c68`, `--render .git`
         # exited 0, replaced the link, and every later `git` call in that worktree
         # answered 128. Deleting the `.git`-component half reds only this arm; deleting
-        # the probe half reds only the `.git/config` sibling above.
+        # the probe half reds only the `--separate-git-dir` sibling BELOW (the
+        # `.git/config` sibling above is caught by the component half alone).
         "test_the_renderer_refuses_a_linked_worktrees_dot_git_FILE",
         # ⛔ AND THE PROBE HALF'S OWN ARM (#14625 review, P2): a `--separate-git-dir`
         # checkout's metadata carries no `.git` component and sits OUTSIDE the work tree,
         # so the component half cannot see it — with the probe removed, this is the only
         # row that reds, which is what keeps that half from being inert.
         "test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree",
+        # ⛔ AND THE TWO ARMS THAT KEEP THE PROBE FROM BEING PROBE-ONLY (#14625 review,
+        # P1): an UNANSWERABLE probe must refuse (it used to no-op, and a
+        # `--separate-git-dir` config was overwritten), and an honest "not a
+        # repository" must still permit a plain directory — otherwise the fix trades a
+        # fail-open for a wall on the common `--render /tmp/x.md` case. Deleting the
+        # else-branch reds the first; refusing every non-zero probe reds the second.
+        "test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless",
+        "test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3322,8 +3412,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 29, (
-        f"expected EXACTLY 29 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 31, (
+        f"expected EXACTLY 31 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3345,8 +3435,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 88, (
-        f"expected EXACTLY 88 test functions in this module; got "
+    assert len(test_functions) == 90, (
+        f"expected EXACTLY 90 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
