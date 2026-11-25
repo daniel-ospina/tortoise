@@ -1597,21 +1597,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # a LIVE Docker/FalkorDB graph, so the docker DSN is pinned at BOTH entry
     # points and restored afterwards. Nothing here claims a docker-half green on
     # a URI it did not set.
-    #   :64      the module-level `FALKORDB_AVAILABLE` probe. The pin IS the
+    #   :63      the module-level `FALKORDB_AVAILABLE` probe. The pin IS the
     #            point: `DB_URI` is `_live_utils.docker_uri(...)`, the probe
     #            constructs a real SDK and runs `RETURN 1`, and the `finally`
     #            restores. Without the pin the probe would ride whatever ambient
     #            URI the box has, so the `skipif` would be decided by the
     #            environment rather than by a reachable Docker.
-    #   :86/:88  the probe's restore pair — assign the saved value back, or pop
+    #   :85/:87  the probe's restore pair — assign the saved value back, or pop
     #            it when the prior value was unset. A restore, not a second
     #            mutation; the pair is why the module-scope write cannot leak
     #            into a later test in the same process.
-    #   :97      the `autouse` `_isolated_db_uri` fixture — seeds the same docker
+    #   :96      the `autouse` `_isolated_db_uri` fixture — seeds the same docker
     #            DSN per test so no case inherits an ambient one, and the
     #            assertion target is the graph `DB_URI` names.
-    #   :100/:102 the fixture's restore pair (same save/restore contract, run at
-    #         teardown).
+    #   :99/:101 the fixture's restore pair (same save/restore contract, run at
+    #         teardown). ⛔ Re-derived at this head (#14671 review, P3): the
+    #         sites are read from the file, not carried from the branch that
+    #         wrote them — the file is one line shorter here, so an earlier cut
+    #         of this comment named `:64`/`:86`/`:88`/`:97`/`:100`/`:102` and was
+    #         stale by one. The GRADED part (the anchored regexes above) matches
+    #         either way; only this explanation had drifted.
     #
     # The arms are the sibling's, anchored the same way and for the same reason
     # (`_is_declared` matches each censused line on its own, so `^`…`$` keeps a
