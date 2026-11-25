@@ -3260,12 +3260,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # its own LAST-line text `continue`) at `2c1065a52e`, and the numbers are
     # `55206-55208` (the non-scalar refusal), `55358-55367` (the un-supersede arm),
     # `22518-22693` (`update_knowledge`, its end again located as the function's own
-    # last line `return self._update_entity_any(id, **props)`) and `55912` (the
+    # last line `return self._update_entity_any(id, **props)`) and `55807` (the
     # per-label `SET n += $props`). The two deltas — **+186** for the three later rows
     # and **+15** for `update_knowledge` — are the consistency check, not the input.
     # ⛔ Where a pinned first-line text is NOT itself a unique locator, the search used
     # the longer form of the same line and that is what locates the row: `SET n +=
-    # $props` occurred **40×** in `sdk.py` at this re-derivation, so `55912` was found
+    # $props` occurred **40×** in `sdk.py` at this re-derivation, so `55807` was found
     # by its per-label write
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurred **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
@@ -3276,10 +3276,14 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # review — `40×` had become stale on `main`). Do not "correct" them to HEAD.
     # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
     # which carried a locator that could not FAIL on the defect it exists to catch:
-    # `55912`→`55918` stored the bare `SET n += $props` (occurred **40×** in `sdk.py`
-    # at `c50a03a`, 25 of them in comments), so a uniform drift landed it on a comment;
-    # the per-label write it was actually found by occurred **once** and is what it now
-    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # the row at `55918` stored the bare `SET n += $props` (occurred **40×** in
+    # `sdk.py` at `c50a03a`, 25 of them in comments), so a uniform drift landed it on
+    # a comment; the per-label write it was actually found by occurred **once** and is
+    # what it now stores. `55918` is that address at BOTH `ef0abcb` (re-derived) and
+    # `c50a03a` (narrowed) — this note previously read `55912`→`55918`, and `55912`
+    # holds `keys = list(props)` at both trees, so no tree named the per-label write
+    # at `55912` (#12731 review). And `22593-22768` recorded `None` for its end — its
+    # START text
     # `def update_knowledge(` is unique and did red, but an end that is never read
     # let an insert INSIDE the function leave the cited end naming nothing while
     # both guards stayed green.

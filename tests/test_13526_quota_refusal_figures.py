@@ -192,29 +192,58 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     #: argument is a clock (`time.strftime(fmt, time.gmtime())`,
     #: `datetime.fromtimestamp(time.time())`), and when their argument is a literal
     #: they SHOULD be rejected. So the blanket rule is strictly worse than recursion.
-    clock_attrs = {"now", "utcnow", "today", "gmtime", "localtime", "time"}
+    clock_attrs = {"now", "utcnow", "today", "gmtime", "localtime", "time",
+                   "time_ns"}
 
-    def reaches_a_clock(node, scope, seen=frozenset()):
-        """True when `node` reaches a clock call, resolving `scope` Names anywhere in it.
+    def walk_resolved(node, scope, seen=frozenset()):
+        """Yield every node in `node`, following `scope` Names transitively.
 
         Resolution is transitive (bounded by `seen`) rather than one hop at the
         root, because the ordinary correct shapes nest it: `measured_at` names a
         module constant, which names the expression — or names a helper FUNCTION
         whose body holds the clock.
         """
+        yield node
         if isinstance(node, ast.Name):
             if node.id in scope and node.id not in seen:
-                return reaches_a_clock(scope[node.id], scope, seen | {node.id})
-            return False
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in clock_attrs
-        ):
-            return True
+                yield from walk_resolved(scope[node.id], scope, seen | {node.id})
+            return
+        for child in ast.iter_child_nodes(node):
+            yield from walk_resolved(child, scope, seen)
+
+    def reaches_a_clock(node, scope):
+        """True when `node` READS a clock."""
         return any(
-            reaches_a_clock(child, scope, seen)
-            for child in ast.iter_child_nodes(node))
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr in clock_attrs
+            for child in walk_resolved(node, scope))
+
+    def pins_a_calendar(node, scope):
+        """True when a clock-derived value is then pinned to a fixed DATE.
+
+        `datetime.now(UTC).replace(year=2026, month=11, day=24, hour=2, …)`
+        reads a clock and then discards it: the result is a constant that is
+        fresh for one staleness window and reds the file one bound later — the
+        #9127 bomb wearing the fix's clothes. So a `replace` naming a calendar
+        component is not derived. `replace(microsecond=0)` stays accepted: the
+        reading still moves with the clock.
+
+        ⛔ Residual, stated rather than papered over: this is a static guard on
+        the PLAUSIBLE shapes, not a proof. String surgery on a derived value
+        (slicing an ``isoformat()`` and splicing a date back in) is not detected
+        here. The behavioural arm below is the backstop — it rejects any reading
+        outside the freshness window, so such a shape reds within one window
+        instead of waiting for the calendar, and a future-dated instant is red
+        immediately.
+        """
+        return any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "replace"
+            and any(keyword.arg in {"year", "month", "day"}
+                    for keyword in child.keywords)
+            for child in walk_resolved(node, scope))
 
     fn = next(
         node for node in ast.parse(inspect.getsource(_single_sample_meter)).body
@@ -237,11 +266,13 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
                 continue
             for name in targets:
                 scope[name] = value
-    # A helper defined at module level is a legitimate place for the clock; walk
-    # its body so `def _now_iso(): return datetime.now(UTC)...` resolves.
-    for stmt in module.body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scope.setdefault(stmt.name, stmt)
+    # A helper function is a legitimate place for the clock, at module level OR
+    # defined inside the fixture; register its body so `def _now_iso(): return
+    # datetime.now(UTC)…` resolves wherever it is written.
+    for body in (module.body, fn.body):
+        for stmt in body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope.setdefault(stmt.name, stmt)
 
     constructions = [
         node for node in ast.walk(fn)
@@ -261,17 +292,29 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "no `MeterReading(measured_at=…)` keyword found inside "
         "`_single_sample_meter`, so this arm cannot see the reading the gate is "
         "handed and would pass vacuously (#14646)")
-    literals = [
+    undated = [
         value for value in handed if not reaches_a_clock(value, scope)]
-    assert not literals, (
+    pinned = [
+        value for value in handed
+        if reaches_a_clock(value, scope) and pins_a_calendar(value, scope)]
+    assert not undated, (
         "the fixture hands the gate a reading that derives from no clock — "
-        f"{', '.join(ast.unparse(value) for value in literals)} — so the gate "
+        f"{', '.join(ast.unparse(value) for value in undated)} — so the gate "
         "ages it by "
         f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) and will SERVE instead of "
         "arming this dimension 24 h later, reddening this file with no commit in "
         "between (#9127, third recurrence). Derive it from the clock "
         "(`datetime.now(UTC) - timedelta(minutes=5)`) and hand THAT value to "
         "`MeterReading`.")
+    assert not pinned, (
+        "the fixture READS a clock and then discards it — "
+        f"{', '.join(ast.unparse(value) for value in pinned)} pins a calendar "
+        "component, so the value the gate receives is a constant that is fresh "
+        "for one window and reds this file one "
+        f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) later with no commit in "
+        "between. That is the #9127 bomb wearing the fix's clothes: derive an "
+        "OFFSET from now (`datetime.now(UTC) - timedelta(minutes=5)`) instead "
+        "of pinning a date with `.replace(...)`.")
 
     reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
     age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
