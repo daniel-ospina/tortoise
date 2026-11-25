@@ -46,7 +46,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from tests import _live_utils
-from tortoise import live
 from tortoise.live import (
     TERMINAL_EXCLUDED_STATUSES,
     TERMINAL_STAGE_SLOT,
@@ -586,9 +585,12 @@ class TestTheWriteDoorsStateTheirPosture:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-#: The terminal WORD vocabularies a currency read used to be spelled from. Each
-#: is asserted to still exist in ``live`` before the pin below trusts the set, so
-#: a rename in the leaf reds here instead of quietly emptying the population.
+#: The terminal WORD vocabularies a currency read used to be spelled from — the
+#: population `_terminal_vocabulary_refs` scans for. Nothing asserts these NAMES
+#: still exist in ``live``: such an assertion grades a rename rather than a rule,
+#: and the empties it was meant to catch break ``live.py:115``'s composition or
+#: ``sdk``'s import first, so collection dies before any body runs (PR #14600's
+#: mutation pass, N1 — the loop that did assert them is gone).
 _TERMINAL_VOCABULARY_NAMES = (
     "TERMINAL_EXCLUDED_STATUSES",
     "TERMINAL_STATUS_VALUES",
@@ -649,12 +651,17 @@ def test_ep_imports_the_shared_answer_and_spells_no_filter():
     test asserted ``"ending_axes" in source`` — which the module's own comments
     satisfy — and two bare forbidden substrings, which the ``set(...)``-wrapped
     mutant slips past. The AST pairs below are what make the reversion trip.
+
+    ⛔ Neither arm is a namespace check, and the loop that used to assert each
+    ``_TERMINAL_VOCABULARY_NAMES`` member is in ``dir(live)`` was REMOVED by
+    PR #14600's mutation pass (N1). It graded NAMES, not this rule: a
+    behaviour-preserving rename in ``live.py`` reds it (measured). And the states
+    it was meant to catch do not reach this body — a half-applied rename leaves
+    ``live.py:115``'s composition undefined (``NameError``) and dropping
+    ``TERMINAL_EXCLUDED_STATUSES`` breaks ``sdk``'s import (``ImportError``), so
+    collection dies first. The imports are the grade.
     """
     source = Path("tortoise/ep.py").read_text(encoding="utf-8")
-    for vocabulary in _TERMINAL_VOCABULARY_NAMES:
-        assert vocabulary in dir(live), (
-            f"live no longer declares {vocabulary!r}, so the population this pin "
-            "guards has silently emptied")
     assert _shared_answer_calls(source), (
         "ep.py no longer CALLS `ending_axes` — a mention in a comment or "
         "docstring is not an answer, and the participation test must read the "
