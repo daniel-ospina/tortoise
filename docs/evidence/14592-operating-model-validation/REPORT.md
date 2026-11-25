@@ -136,7 +136,7 @@ writes), of which the **extraction** phase alone was 617 reads.
 
 Recorded verbatim from `stats`/`warnings` (doc-01):
 
-```
+```text
 "point 'The delivery partner question was believ' has no resolvable source turn (no quote match)"
 "value-bearing point 'ColdPath Logistics offers a 9pm cutoff that meets the mornin' resolved to turn 3
  by the token-overlap band, not a verbatim anchor — it carries no source span (the value cannot be
@@ -256,7 +256,7 @@ Search returned NAND families over the "viable delivery partner" belief
 name is a surface form that appears in the corpus. The corpus contains no currency symbol and the
 product correctly refused to type the amounts —
 
-```
+```text
 value-normalizer: 6 point(s) carried an amount that was not typed — no_currency_anchor ×6
 (prose only — each value is a drop, never a guess)
 ```
@@ -303,7 +303,7 @@ retrieval failure (6), one confidence field that does not discriminate (18).**
 
 The corpus's whole point is that doc-05 refutes doc-01. The graph holds **both as true**:
 
-```
+```text
 "We choose ColdPath Logistics as our delivery partner"   status: live   conf 0.5
 "We revert to NordicFreight as our delivery partner…"    status: live   conf 0.4622
 "ColdPath Logistics holds a validated cold-chain certificate"  status: live  conf 0.5
