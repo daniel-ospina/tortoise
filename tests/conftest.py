@@ -1183,6 +1183,47 @@ def _restore_ep_calibration_posture():
         os.environ[_CALIBRATION_POSTURE_ENV] = saved
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_uncut_graphs():
+    """The UNCUT-GRAPH registry is process state, never ambient.
+
+    ``record_writer._UNCUT_GRAPHS`` is keyed ``org\\0graph`` and GLOBAL to the
+    process; ``record_writer._record_health`` folds ``len(_UNCUT_GRAPHS)`` into
+    ``record.ok`` as ``armed_but_uncut``. ``tests/test_14002_record_only_journal.py``
+    leaves a ``{'o\\0g': 'no_cursor_row'}`` row behind after its last test, so a
+    suite that asserts the armed-only health payload afterwards reads
+    ``record["ok"] is False`` — an ORDERING dependency between test FILES, not a
+    property of the health fold and not a defect in either file.
+
+    Reproduced on this tree (``TORTOISE_TEST_CARVE_OUT=1``, one pytest process):
+    ``pytest tests/test_14002_record_only_journal.py
+    tests/test_9548_record_arming_health.py`` → **6 failed, 62 passed, 5 skipped**,
+    first failure ``tests/test_9548_record_arming_health.py::test_armed_deployment_reports_armed``
+    (``assert record["ok"] is True`` over a payload carrying ``armed_but_uncut: 1``);
+    ``pytest tests/test_9548_record_arming_health.py`` alone → 36 passed. CI does
+    not currently collect that order (both files land in shard ``a`` and the
+    selector puts ``test_9548`` first), so this is latent rather than a live red —
+    reachable by a local path-ordered run, a re-split, or a re-ordered shard.
+
+    Resolved through ``sys.modules`` on purpose: this is ``autouse``, so importing
+    ``tortoise.record_writer`` at conftest-import time would make every collection
+    depend on that module importing cleanly, and a process that never loaded it has
+    no registry to clear.
+    """
+    import sys
+
+    record_writer = sys.modules.get("tortoise.record_writer")
+
+    def _reset() -> None:
+        if record_writer is None:
+            return
+        record_writer.reset_uncut_graphs()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture
 def provision_test_user():
     created = []
