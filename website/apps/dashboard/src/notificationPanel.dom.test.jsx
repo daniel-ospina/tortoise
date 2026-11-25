@@ -255,9 +255,15 @@ test('#14686: snoozing for 1 h hides the row, and the row is back once the hour 
 // ── 3b. A snooze is suppression, not a resolution ──────────────────────
 
 test('#14686: a snoozed-only ledger does not claim everything was dealt with', () => {
-  // A snooze is neither an acknowledgement nor a dismissal (Carbon: an all-clear
-  // appears only when no active, acknowledged OR snoozed item remains). The
-  // all-clear sentence used to print directly above "Snoozed (1) … in 1 h".
+  // A snooze is neither an acknowledgement nor a dismissal, so the old sentence
+  // printed an affirmative directly above "Snoozed (1) … in 1 h". (The review
+  // attributed the rule to Carbon's notifications guidance; a read of that
+  // pattern page — carbondesignsystem.com/patterns/notification-pattern — does
+  // NOT contain it, so the fix rests on the contradiction in our own render, not
+  // on a citation. What the page does say is relevant and kept: a notification
+  // panel exists so users "can access and read ALL notifications", and users must
+  // be able to "manage or limit noncritical notifications" — which is why snoozed
+  // and dismissed rows stay reachable instead of being deleted.)
   const storage = fakeStorage()
   const row = alert({ message: 'quiet me' })
   const first = renderBell({ alerts: [row], storage })
