@@ -13726,7 +13726,18 @@ def _cmd_onboard(args) -> int:
     sentences. The graph-first flow below is untouched when ``--harness`` is
     absent, so an existing user's `tortoise onboard` behaves exactly as before.
     """
-    if getattr(args, "harness", None):
+    # ⛔ `getattr(args, "harness", None)` is NOT a presence test on a duck-typed
+    # args object. `argparse` always SETS the attribute (its default is `None`),
+    # but a `mock.Mock()` FABRICATES every attribute it is asked for — so the bare
+    # truthiness below was true for an args object that never asked for the
+    # harness branch. That routed the graph-first caller into
+    # `_cmd_onboard_harness`, where `args.dir` was a Mock and `_Path(...)` raised
+    # `TypeError: argument should be a str or an os.PathLike object … not 'Mock'`
+    # in 14 `tests/test_cli_context.py` arms. The branch means "`--harness` came
+    # through the CLI", so only a REAL string selects it and every other shape
+    # keeps the graph-first flow exactly as before.
+    harness = getattr(args, "harness", None)
+    if isinstance(harness, str) and harness:
         return _cmd_onboard_harness(args)
     import os as _os
     import subprocess as _sp

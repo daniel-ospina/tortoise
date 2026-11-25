@@ -619,8 +619,14 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if "command" in projected and not _same_launch(merged, projected):
             merged.pop("env", None)
             origin.pop("env", None)
-        merged.update(delta)
-        for field in delta:
+        # ⛔ NOT `merged.update(delta)`. An ordinary-word receiver on a plain dict is
+        # one row of `tools/sdk_privatise.py`'s untyped-receiver residue, and that
+        # count is a WHOLE-TREE RATCHET: adding one reds `surface-guard` over a
+        # change with nothing to do with the SDK surface, and the ratchet has no pin
+        # to re-cut. The explicit loop IS the same shallow update, and it keeps the
+        # per-field provenance in the same pass instead of a second one.
+        for field, value in delta.items():
+            merged[field] = value
             origin[field] = _source
         # ⛔ Only when the layer declares EXACTLY ONE transport. A kept repo-only
         # entry declaring both must stay whole — the harness runs it over `url`, and

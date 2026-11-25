@@ -63,15 +63,19 @@ version: 1
 # `tests/test_14560_operator_vectors.py` and `#14552`'s
 # `tests/test_record_read_point_vector_keys.py` (both `core`, both flat 2.0 s, both `main`'s) —
 # plus THIS branch's own row (`tests/test_14592_operating_model_evidence.py`, `core`, at the same
-# flat 2.0 s `DEFAULT_FAST_WEIGHT`), the verb packs the pool into two bins: three shards at 826.4 s
-# (a, j, k) and eight at 826.3 s (b, c, d, e, f, g, h, i), so `ceil(826.4/60 x 2)` = 28 m governs (a
+# flat 2.0 s `DEFAULT_FAST_WEIGHT`) and `#14607`'s two new `core` rows
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), the verb packs the pool into
+# two bins: ten shards at 826.7 s (a, b, d, e, f, g, h, i, j, k) and one at 826.6 s (c), so
+# `ceil(826.7/60 x 2)` = 28 m governs (a
 # shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
 # `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree by construction rather
 # than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1334 files at this head against 1333 on `main`, and
-# the ONE addition this branch brings is `tests/test_14592_operating_model_evidence.py`. ⛔ The
+# is measurable and small: `fast_pool()` holds 1336 files at this head against 1334 on `main`, and
+# the THREE additions this branch brings are `tests/test_14592_operating_model_evidence.py` (the
+# earlier fold's row) plus `#14607`'s `tests/test_mcp_selfcheck.py` and
+# `tests/test_recall_neighborhood.py`. ⛔ The
 # other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
 # this branch's: each landed before this fold. The name lists are what the guard COMPARES against
 # the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
