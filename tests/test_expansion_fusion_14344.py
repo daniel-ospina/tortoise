@@ -32,6 +32,8 @@ fails under the concatenation.
 """
 from __future__ import annotations
 
+import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -672,3 +674,190 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
     assert ids.index("newcomer") < ids.index("shared"), (
         f"at 1-based 65 in both lists the single-term rank-0 candidate must "
         f"lead — got {ids}")
+
+
+# ── The committed RECEIPT, and the table that quotes it (#14619 review F3) ──
+# ⛔ WHY THIS SECTION EXISTS. `tools/measure_expansion_merge_14344.py` writes the
+# artifact, and BOTH `docs/` and `tools/` are in `NON_PYTHON_PREFIXES`, so a
+# re-run with a changed `SHAPES`/`KS`/`TRIALS_PER_SHAPE` — or any edit to the tool
+# — re-staled the published record with nothing to notice. Measured at the
+# reviewed head: `grep -c merge-rule-measurement` over this file,
+# `tests/test_entity_key_expansion.py`, `tests/test_ci_selection.py` and
+# `config/ci-surfaces.yml` returned `0 0 0 0`. The numbers were CORRECT then,
+# which is exactly the problem: an unguarded correct number rots in silence.
+_ROOT = Path(__file__).resolve().parent.parent
+_RECEIPT = _ROOT / "docs" / "evidence" / "14344-expansion-fusion" / "merge-rule-measurement.json"
+_README = _ROOT / "docs" / "evidence" / "14344-expansion-fusion" / "README.md"
+_MEASUREMENT_TOOL = _ROOT / "tools" / "measure_expansion_merge_14344.py"
+
+#: §2's four columns in the order the README publishes them, mapped to the
+#: receipt's `summary` field names. The ORDER is load-bearing: a cell compared
+#: against the wrong field could pass on a coincidence of magnitudes.
+_MEASUREMENT_COLUMNS = (
+    "pass1_retained_mean",
+    "pass1_only_retained_mean",
+    "new_admitted_mean",
+    "pass1_rank0_position_mean",
+)
+
+#: A §2 row: its `k` cell, then the four old→new cells.
+_TABLE_ROW = re.compile(r"^\|\s*(?P<k>\d+)\s*\|(?P<cells>.+)\|\s*$", re.MULTILINE)
+_NUMBERS = re.compile(r"\d+\.\d+")
+
+
+def _measurement_tool():
+    """`tools/measure_expansion_merge_14344.py`, loaded by PATH.
+
+    By path because `tools/` is not a package, and through `importlib` rather
+    than `sys.path` so this cannot shadow an installed module. The tool inserts
+    the repo root on `sys.path` itself at import time.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_measure_expansion_merge_14344_under_test", _MEASUREMENT_TOOL)
+    assert spec is not None and spec.loader is not None, (
+        f"could not build an import spec for {_MEASUREMENT_TOOL} — the tool the "
+        "committed receipt rests on is missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _published_measurement_rows(text: str) -> dict[int, list[tuple[float, float]]]:
+    """§2's four `(old, new)` pairs per `k`, read out of the README's prose.
+
+    A row that does not yield exactly two decimals per cell is SKIPPED rather
+    than guessed at, so the caller's row-count assertion is what reports a table
+    this parser can no longer read — never a silently empty comparison.
+    """
+    rows: dict[int, list[tuple[float, float]]] = {}
+    for match in _TABLE_ROW.finditer(text):
+        cells = [cell.strip() for cell in match.group("cells").split("|")]
+        if len(cells) != len(_MEASUREMENT_COLUMNS):
+            continue
+        pairs: list[tuple[float, float]] = []
+        for cell in cells:
+            numbers = _NUMBERS.findall(cell.replace("**", ""))
+            if len(numbers) != 2:
+                pairs = []
+                break
+            pairs.append((float(numbers[0]), float(numbers[1])))
+        if len(pairs) == len(_MEASUREMENT_COLUMNS):
+            rows[int(match.group("k"))] = pairs
+    return rows
+
+
+def _measurement_table_violations(receipt: dict, text: str) -> list[str]:
+    """Every §2 cell that disagrees with the receipt it quotes, and every `k` the
+    table stops publishing. Both arms of every cell are graded, at the two
+    decimals the table states."""
+    rows = _published_measurement_rows(text)
+    summary = receipt["summary"]
+    violations: list[str] = []
+    for k in receipt["ks"]:
+        if k not in rows:
+            violations.append(f"§2 publishes no row for k={k}")
+            continue
+        for field, (old, new) in zip(_MEASUREMENT_COLUMNS, rows[k], strict=True):
+            for arm, stated in (("old", old), ("new", new)):
+                actual = summary[f"k={k}"][field][arm]
+                if f"{actual:.2f}" != f"{stated:.2f}":
+                    violations.append(
+                        f"k={k} {field}[{arm}]: the table says {stated:.2f}, the "
+                        f"receipt says {actual:.4f}")
+    return violations
+
+
+def _shift_first_new_value(text: str, k: int) -> str:
+    """A MUTANT: bump `k`'s first column's NEW value by 0.01 in the table.
+
+    Derived from the parsed row rather than from a hardcoded substring, so it
+    keeps working when the table is re-derived — and it raises rather than
+    returning the text unchanged, because a no-op mutant would make the
+    non-vacuity leg below vacuous itself.
+    """
+    for match in _TABLE_ROW.finditer(text):
+        if int(match.group("k")) != k:
+            continue
+        cells = match.group("cells")
+        numbers = list(_NUMBERS.finditer(cells))
+        assert len(numbers) >= 2, f"k={k}'s row carries fewer than two decimals: {cells!r}"
+        target = numbers[1]
+        bumped = f"{float(target.group()) + 0.01:.2f}"
+        return (text[:match.start("cells")] + cells[:target.start()] + bumped
+                + cells[target.end():])
+    raise AssertionError(f"§2 publishes no row for k={k} — nothing to mutate")
+
+
+def test_the_committed_measurement_is_the_tools_own_output():
+    """#14619 review F3 (P2): the artifact had NO pin — nothing re-derived it.
+
+    Compared as the SERIALIZATION the tool's own `main()` writes
+    (``json.dumps(receipt, indent=2, sort_keys=True) + "\\n"``), not as a subset
+    of fields: a changed key set, a moved seed, a re-ordered shape list or a
+    re-run that produces different means all red here. That is the difference
+    between "the artifact exists" and "the artifact is what this tool produces
+    at this head".
+    """
+    receipt = _measurement_tool().measure()
+    expected = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    assert _RECEIPT.read_text(encoding="utf-8") == expected, (
+        "the committed receipt is not what the committed tool produces at this "
+        "head. Re-run `TORTOISE_TEST_CARVE_OUT=1 uv run python "
+        "tools/measure_expansion_merge_14344.py` and commit the artifact WITH the "
+        "tool change — never edit either one alone, which is how this record "
+        "could re-stale with every pin green")
+
+
+def test_the_published_measurement_table_is_the_committed_receipt():
+    """#14619 review F3 (P2): §2's table is prose over the artifact, and nothing
+    read it — the numbers were correct at the reviewed head, which is precisely
+    why an unguarded copy of them was going to rot.
+
+    Graded CELL BY CELL (both arms, all four columns, both `k`) against the
+    receipt, and the receipt is itself pinned to the tool's output by
+    ``test_the_committed_measurement_is_the_tools_own_output`` — so the chain
+    README → receipt → tool is closed end to end rather than at one link.
+
+    ⛔ NON-VACUITY IS EXECUTED, not asserted, on the three shapes a real drift
+    takes: one README cell moved, one receipt value moved, and a row deleted
+    from the table. Each must be REPORTED by the same helper this test calls on
+    the clean pair.
+    """
+    receipt = json.loads(_RECEIPT.read_text(encoding="utf-8"))
+    text = _README.read_text(encoding="utf-8")
+
+    rows = _published_measurement_rows(text)
+    assert len(rows) == len(receipt["ks"]), (
+        f"§2 publishes {len(rows)} readable row(s) for {len(receipt['ks'])} `k` "
+        f"values — a table this parser cannot read grades NOTHING, so read "
+        f"`_published_measurement_rows`'s contract before trusting a green run: "
+        f"{rows!r}")
+
+    violations = _measurement_table_violations(receipt, text)
+    assert not violations, (
+        "§2's measured table disagrees with the receipt it quotes — re-derive the "
+        "row with `tools/measure_expansion_merge_14344.py` rather than editing "
+        f"the prose: {violations}")
+
+    # (1) a README cell moved by one hundredth.
+    shifted = _shift_first_new_value(text, receipt["ks"][0])
+    assert shifted != text, "the cell mutant did not change the table"
+    assert _measurement_table_violations(receipt, shifted), (
+        "a §2 cell shifted by 0.01 went UNREPORTED — the table pin is decoration")
+
+    # (2) a RECEIPT value moved (the direction a re-run/parameter edit arrives).
+    moved = json.loads(json.dumps(receipt))
+    moved["summary"]["k=10"]["new_admitted_mean"]["new"] += 0.5
+    assert _measurement_table_violations(moved, text), (
+        "a receipt value moved by 0.5 went UNREPORTED against the table")
+
+    # (3) a row deleted from the table.
+    dropped = "\n".join(
+        line for line in text.splitlines()
+        if not line.startswith(f"| {receipt['ks'][-1]} |"))
+    assert len(_published_measurement_rows(dropped)) == len(rows) - 1, (
+        "the dropped-row mutant removed no row — it would prove nothing")
+    dropped_violations = _measurement_table_violations(receipt, dropped)
+    assert dropped_violations, (
+        "a deleted §2 row went UNREPORTED — a table that publishes fewer `k` "
+        "values than the receipt holds must red")
