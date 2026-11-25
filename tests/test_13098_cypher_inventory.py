@@ -1281,6 +1281,274 @@ def test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard(
     assert target.is_file(), "the document was not written to a legitimate destination"
 
 
+def test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR(
+    tmp_path, monkeypatch, capsys
+):
+    """…and neither guard may be answered by a repository the caller's env names.
+
+    ⛔ THE ROOT CAUSE THE ROUND-4 FINDINGS SHARE (#14625 review, P1): both `--render`
+    guards run `git` in the INHERITED environment, so an exported `GIT_DIR` makes the
+    probe describe a DIFFERENT repository — and git's answer is then read as
+    permission. Measured at `4019fa5` from the tool's own bytes: with
+    `GIT_DIR=<other>` and the destination an INTACT `--separate-git-dir` config,
+    `--render` exited **0** and wrote 145,745 bytes over 92, after which
+    `git -C <repo> rev-parse --git-dir` answered 128 ("bad config line 1"). The same
+    repository with a CLEAN env was refused (2, 92 bytes) — so the layout was
+    protected and only the environment was the hole. Git exports `GIT_DIR` into hooks
+    and wrappers/CI export it routinely.
+    """
+    meta = tmp_path / "meta"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", f"--separate-git-dir={meta}", str(repo)],
+                   check=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = meta / "config"
+    assert config.is_file(), "the premise: this layout's metadata lives outside the tree"
+    before = config.read_bytes()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    assert "GIT_DIR" not in census._git_env(), (
+        "the premise: the scrubber must drop the variable under test")
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, (
+        f"an inherited GIT_DIR must not retarget the metadata probe — pre-fix this "
+        f"exited 0 having overwritten the intact config; got {rc}")
+    assert config.read_bytes() == before, (
+        "the render landed on git metadata because the probe answered about the "
+        "repository `GIT_DIR` named instead of the destination's own")
+
+
+def test_the_tracked_path_guard_is_not_defeated_by_an_inherited_GIT_INDEX_FILE(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the TRACKED-path guard is defeated by the same root cause, not only that one.
+
+    ⛔ THE SAME EXPORTED-VARIABLE HOLE POINTS AT THE OTHER GUARD (#14625 review, P1).
+    `git ls-files --error-unmatch` reads the index `GIT_INDEX_FILE` names, so with it
+    pointed at a scratch index the probe answers "untracked" for a path this
+    repository TRACKS — measured at `4019fa5`: `--render <tracked doc>` exited **0** and
+    wrote 145,745 bytes over 14, while the same destination with a clean env was
+    refused (2, 14 bytes unchanged). That is the self-locking corruption the refusal
+    message describes: the document `--render` writes is never committed, so nothing
+    restores the tracked file it replaced.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (repo / "docs").mkdir()
+    tracked = repo / "docs" / "TRACKED.md"
+    tracked.write_text("# a tracked doc\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    before = tracked.read_bytes()
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "junk.idx"))
+    assert "GIT_INDEX_FILE" not in census._git_env(), (
+        "the premise: the scrubber must drop the variable under test")
+    rc = census.main(["--render", "docs/TRACKED.md"])
+    assert rc == 2, (
+        f"a tracked destination must be refused whatever index the caller's env "
+        f"names — pre-fix this exited 0 having overwritten it; got {rc}")
+    assert tracked.read_bytes() == before, (
+        "the tracked document was overwritten because the probe read a FOREIGN index")
+    assert "TRACKED path" in capsys.readouterr().err, (
+        "the refusal must still say WHICH class it hit")
+
+
+def test_a_damaged_git_directory_is_refused_without_any_help_from_git(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a metadata directory git can no longer resolve is still metadata.
+
+    ⛔ "NOT A REPOSITORY" IS NOT "NOT METADATA" (#14625 review, P1). A git directory
+    whose own `HEAD` was removed answers exactly like a plain directory, and the
+    permit for a plain directory asked only whether an ANCESTOR carried a `.git`
+    ENTRY — which a bare repository's metadata never does (there is no separate
+    `.git`, the directory IS the metadata). So the structural term is required: the
+    directory's own `objects/` plus one marker. Measured at `4019fa5` with NO
+    environment variable set at all: `--render <bare>/config` exited **0** and wrote
+    145,745 bytes over a 66-byte config (the same bare repo with `HEAD` intact was
+    refused, 2, 66 bytes) — a fail-open reachable by damage alone.
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (bare / "HEAD").unlink()
+    damaged = subprocess.run(["git", "-C", str(bare), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True)
+    assert damaged.returncode != 0, (
+        "the premise: git must no longer resolve this metadata, and this arm must not "
+        "set any GIT_* variable — the structural term is what has to catch it")
+    assert census._looks_like_git_metadata(bare), (
+        "the premise: the directory still HOLDS metadata (objects/ + refs/)")
+    config = bare / "config"
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, (
+        f"metadata that git cannot resolve is still metadata — pre-fix this exited 0 "
+        f"having overwritten the bare repository's config; got {rc}")
+    assert config.read_bytes() == before, (
+        "the write landed on metadata the probe could not be answered about")
+
+
+def test_a_git_directory_that_lost_objects_is_STILL_refused(tmp_path, monkeypatch, capsys):
+    """…and the damage does not have to be `HEAD`.
+
+    ⛔ THE FIRST VERSION OF THE STRUCTURAL TERM REQUIRED ``objects/``, and a round-5
+    reviewer falsified it in one command: `rm -rf <bare>/objects` leaves `HEAD`,
+    `refs/` and `config` intact, git still answers "not a git repository" (128), the
+    guard said "not metadata" — and `--render` wrote 145,745 bytes over the bare
+    repository's 66-byte config at exit 0 (measured by both the reviewer and again
+    here). A marker set that names ONE required file is a hole that moves when the
+    damage moves, so the predicate is now "a distinctive marker plus any second one".
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    shutil.rmtree(bare / "objects")
+    damaged = subprocess.run(["git", "-C", str(bare), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True)
+    assert damaged.returncode != 0, "the premise: git must no longer resolve this tree"
+    assert not (bare / "objects").exists(), "the premise: objects/ is what was removed"
+    assert (bare / "HEAD").exists() and (bare / "refs").is_dir(), (
+        "the premise: the other markers are INTACT, so a predicate that needs any one "
+        "of them must still see this directory")
+    assert census._looks_like_git_metadata(bare), (
+        "the structural term must recognise metadata through a missing objects/")
+    config = bare / "config"
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, f"a metadata directory is refused however it was damaged; got {rc}"
+    assert config.read_bytes() == before, (
+        "the write landed on a bare repository's config because the marker it happened "
+        "to check was the one that had been removed")
+
+
+def test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the tracked-path guard follows the DESTINATION, not just `ROOT`.
+
+    ⛔ THE PROBE USED TO ANSWER ONLY FOR A TARGET INSIDE `ROOT` (`rel` is not None), so
+    `--render` into ANOTHER checkout's tracked file never asked anybody and overwrote it
+    at exit 0 (measured by a round-5 reviewer and again here: 27 -> 145,745 bytes). The
+    guard's own message prescribes "pick an untracked path" — a global invariant — while
+    the code enforced it over one tree. A destination in no repository at all must
+    still be permitted, which is the second half of this arm.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    peer = tmp_path / "peer"
+    (peer / "docs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(peer)], check=True)
+    victim = peer / "docs" / "README.md"
+    victim.write_text("# tracked in the PEER checkout\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(peer), "add", "-A"], check=True)
+    before = victim.read_bytes()
+    rc = census.main(["--render", str(victim)])
+    assert rc == 2, (
+        f"a TRACKED destination is refused in whichever repository tracks it; got {rc}")
+    assert victim.read_bytes() == before, (
+        "a peer checkout's tracked file was replaced by a generated document")
+    assert "TRACKED path" in capsys.readouterr().err
+    fresh = peer / "docs" / "UNTRACKED.md"
+    assert census.main(["--render", str(fresh)]) == 0, (
+        "the same repository's UNTRACKED path is a legitimate destination — the guard "
+        "must not become a wall on the other checkout")
+    assert fresh.is_file()
+
+
+def test_the_retargeting_env_list_is_the_one_lane_stash_already_scrubs():
+    """The scrubber is ONE list, not a seventh copy of it.
+
+    ⛔ `tools/lane_stash.py` already carries `_RETARGETING_ENV` with the same reasoning
+    (inherited-from-a-hook variables "would silently make this tool write lane refs …
+    against a peer worktree"). Two hand-maintained copies of the same set drift the
+    moment git adds a variable or one list is extended, and this module's list decides
+    whether a DESTRUCTIVE guard can be retargeted — so the pair is pinned rather than
+    trusted.
+    """
+    from tools import lane_stash
+
+    assert set(census._GIT_RETARGETING_ENV) == set(lane_stash._RETARGETING_ENV), (
+        "the metadata/tracked-path guards and lane_stash must scrub the same GIT_* "
+        f"retargeting set; census={sorted(census._GIT_RETARGETING_ENV)} "
+        f"lane_stash={sorted(lane_stash._RETARGETING_ENV)}")
+
+
+def test_the_census_enumerates_ROOTS_repository_not_the_one_GIT_DIR_names(
+    tmp_path, monkeypatch
+):
+    """…and the CENSUS itself is one of the probes that env can retarget.
+
+    ⛔ THE THIRD SYMPTOM OF THE SAME ROOT CAUSE (#14625 review, P1), and the quietest:
+    `surface_files()` runs `git ls-files` in the inherited environment, so an exported
+    `GIT_DIR` enumerates a PEER repository's index — and the census then parses ROOT's
+    copy of those paths, silently DROPPING every file the other index does not list.
+    A truncation at exit 0 is worse than a refusal: the rendered document looks
+    normal, carries fewer rows, and nothing in the run says so. Measured at
+    `4019fa5`: with `GIT_DIR` naming a repo that tracks only one of ROOT's two
+    files, `--render` exited 0 and the appendix lost the other file's sites.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    (repo / "tortoise").mkdir()
+    for name in ("alpha.py", "beta.py"):
+        (repo / "tortoise" / name).write_text(
+            "def f(store):\n    return store.query('MATCH (p:Point) RETURN p')\n",
+            encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    other = tmp_path / "other"
+    (other / "tortoise").mkdir(parents=True)
+    (other / "tortoise" / "alpha.py").write_text(
+        "def f(store):\n    return store.query('MATCH (p:Point) RETURN p')\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(["git", "-C", str(other), "add", "-A"], check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    out = repo / "rendered.md"
+    assert census.main(["--render", str(out)]) == 0
+    clean_rows = len(out.read_text(encoding="utf-8").splitlines())
+    out.unlink()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    rc = census.main(["--render", str(out)])
+    rows = len(out.read_text(encoding="utf-8").splitlines()) if out.exists() else 0
+    assert rc == 0, f"the plain render must still succeed; got {rc}"
+    assert rows == clean_rows, (
+        f"the census enumerated the repository `GIT_DIR` names and silently truncated "
+        f"the document ({rows} lines vs {clean_rows} clean) — a wrong document at "
+        f"exit 0 is the failure mode this scrub exists to prevent")
+
+
 def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
     """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
 
@@ -3332,6 +3600,29 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # else-branch reds the first; refusing every non-zero probe reds the second.
         "test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless",
         "test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard",
+        # ⛔ AND THE THREE ARMS THAT CLOSE THE ROOT CAUSE BOTH GUARDS ABOVE SHARE
+        # (#14625 review, P1, round 5): every probe ran in the INHERITED git
+        # environment and read a non-positive answer as permission. An exported
+        # `GIT_DIR` retargeted the metadata probe (intact config overwritten, rc 0) and
+        # `GIT_INDEX_FILE` retargeted the tracked-path probe (tracked doc overwritten,
+        # rc 0); a DAMAGED metadata directory needed no variable at all. Deleting the
+        # `env=_git_env()` scrub reds the first two; deleting the structural term in
+        # `plainly_outside` reds the third; and the fourth pins the scrub list to the
+        # one `tools/lane_stash.py` already carries, so the two cannot drift apart.
+        "test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR",
+        "test_the_tracked_path_guard_is_not_defeated_by_an_inherited_GIT_INDEX_FILE",
+        "test_a_damaged_git_directory_is_refused_without_any_help_from_git",
+        "test_the_retargeting_env_list_is_the_one_lane_stash_already_scrubs",
+        "test_the_census_enumerates_ROOTS_repository_not_the_one_GIT_DIR_names",
+        # ⛔ AND THE TWO A ROUND-5 REVIEWER FALSIFIED, both measured here before they
+        # were fixed: the structural term's first version REQUIRED ``objects/`` (a bare
+        # repo with objects/ removed was still writable at rc 0, 66 -> 145,745 bytes),
+        # and the tracked-path probe answered only for destinations inside `ROOT` (a
+        # PEER checkout's tracked doc was overwritten at rc 0, 27 -> 145,745 bytes).
+        # Deleting `_looks_like_git_metadata`'s second marker reds the first; reverting
+        # `_tracked_destination_refusal` to the `rel is not None` gate reds the second.
+        "test_a_git_directory_that_lost_objects_is_STILL_refused",
+        "test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3412,8 +3703,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 31, (
-        f"expected EXACTLY 31 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 38, (
+        f"expected EXACTLY 38 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3435,8 +3726,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 90, (
-        f"expected EXACTLY 90 test functions in this module; got "
+    assert len(test_functions) == 97, (
+        f"expected EXACTLY 97 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")

@@ -392,6 +392,74 @@ class Site:
 # --------------------------------------------------------------------------- #
 # enumeration
 # --------------------------------------------------------------------------- #
+#: ``GIT_*`` variables that RETARGET every `git` subprocess at another checkout.
+#:
+#: ⛔ EVERY PROBE IN THIS MODULE DECIDES PERMISSION, SO A PROBE THAT DESCRIBES THE
+#: WRONG REPOSITORY DECIDES THE WRONG PERMISSION (#14625 review, P1). Both
+#: `--render` destination guards (the tracked-path probe and the git-metadata one)
+#: and the census enumeration itself run `git` in the INHERITED environment, so an
+#: exported `GIT_DIR` makes all three answer about a DIFFERENT repository. Measured
+#: at `4019fa5` from this file's own bytes in scratch repos: with `GIT_DIR=<other>`,
+#: `--render <intact --separate-git-dir>/config` exited **0** and wrote 145,745 bytes
+#: over a 92-byte config that `git` could then no longer read ("bad config line 1"),
+#: and a TRACKED destination answered 0 too (14 -> 145,745 bytes) instead of the
+#: "refusing to render over a TRACKED path" this module prints — both guards defeated
+#: by ONE exported variable, with git's non-positive answer read as permission. Git
+#: exports `GIT_DIR` into hooks, and wrappers/CI export it routinely.
+#:
+#: This tool describes ROOT's repository by construction (`ROOT` is its own parent),
+#: so the caller's retargeting is never the intent — the same list
+#: `tools/lane_stash.py` scrubs for the same reason (`_RETARGETING_ENV`: inherited
+#: from a hook they "would silently make this tool write lane refs ... against a peer
+#: worktree"); `tests/test_13098_cypher_inventory.py` pins the two lists equal so
+#: neither can drift. NOT included: `GIT_CEILING_DIRECTORIES`, measured not to bypass
+#: the metadata guard (refused, 2, bytes unchanged).
+_GIT_RETARGETING_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+)
+
+
+def _git_env() -> dict[str, str]:
+    """The environment every `git` subprocess in this module runs under.
+
+    The caller's ``GIT_*`` retargeting is dropped, so each probe answers about the
+    repository it was pointed at rather than the one an inherited variable names.
+    """
+    return {k: v for k, v in os.environ.items() if k not in _GIT_RETARGETING_ENV}
+
+
+def _looks_like_git_metadata(directory: Path) -> bool:
+    """True when ``directory`` itself holds git metadata, resolvable or not.
+
+    A bare repository and a `--separate-git-dir`/worktree git dir all answer True; a
+    work tree's ROOT does not (its metadata is in ``.git``, a separate path), and an
+    ordinary directory does not.
+
+    ⛔ ONE DISTINCTIVE MARKER PLUS ANY SECOND ONE, because the damage that stops git
+    from answering is not always the same file. A removed ``HEAD`` was the first case
+    measured (the bare repo answered like a plain directory and `--render` wrote its
+    config over at exit 0); a removed ``objects/`` is the same class one file over
+    (measured on the version that REQUIRED ``objects/``: 66 -> 145,745 bytes at rc 0,
+    with ``HEAD``, ``refs/`` and ``config`` all intact). A named paired set keeps moving
+    the hole, so the test is: a distinctive marker (``objects/``, ``refs/`` or ``HEAD`` —
+    none of which an unrelated directory carries) PLUS at least one more, which is what
+    a repository always has two of. Two ordinary files called ``config``/``index`` in a
+    project directory are NOT metadata, on purpose.
+    """
+    markers = ("objects", "refs", "HEAD", "config", "packed-refs", "index")
+    present = [marker for marker in markers if (directory / marker).exists()]
+    return len(present) >= 2 and any(
+        (directory / distinctive).exists()
+        for distinctive in ("objects", "refs", "HEAD")
+    )
+
+
 def surface_files(prefixes: tuple[str, ...]) -> list[str]:
     """Tracked Python files under the given prefixes — bounded by the git index.
 
@@ -409,6 +477,10 @@ def surface_files(prefixes: tuple[str, ...]) -> list[str]:
         ["git", "ls-files", "-z", "--", *prefixes],
         cwd=ROOT, capture_output=True, text=True, check=True,
         encoding="utf-8", errors="surrogateescape",
+        # An inherited `GIT_DIR` would enumerate a PEER repository and hand its files
+        # to the parser — a wrong document at exit 0, not a refusal. See
+        # `_GIT_RETARGETING_ENV`.
+        env=_git_env(),
     ).stdout
     files = [p for p in out.split("\0") if p.endswith(".py")]
     return sorted(files)
@@ -1008,6 +1080,67 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
+    """Refuse a destination that git TRACKS; `None` means the path is free.
+
+    Answers the invariant `--render`'s output is never committed — the same one for a
+    destination inside `ROOT` and for one in another checkout, so the probe follows the
+    DESTINATION (`rel` when it is inside `ROOT`, otherwise the destination's own
+    directory and basename). A destination in no repository at all answers
+    "untracked" (git exits 128), which is the documented permit for a plain path.
+
+    Returns 2 (could not run / refused) when git cannot be asked at all — an absent
+    `git` binary raises `FileNotFoundError`, and an uncaught one would exit 1, the
+    DRIFT code this module reserves for `--check`.
+    """
+    # `target.parent` can be a path that does not exist yet; `git -C` needs a
+    # directory, so walk up to the nearest one that does (the write itself creates the
+    # rest, and a directory that does not exist cannot hold a tracked file).
+    probe_dir = target.parent
+    while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
+        probe_dir = probe_dir.parent
+    if rel is not None:
+        probe_cwd, probe_path, label = ROOT, rel, rel
+    else:
+        probe_cwd, probe_path, label = probe_dir, target.name, str(target)
+    # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent `git`
+    # binary raises FileNotFoundError here, and nothing catches it: the interpreter
+    # then exits 1, which this tool reserves for the DRIFT verdict — so a lane reads
+    # "the census drifted" from a box that could not answer at all (#13098 review, P2).
+    # Same class, same status as every other refusal in this module.
+    try:
+        # ⛔ AND THIS PROBE MUST NOT BE ABLE TO FAIL DECODING EITHER. With
+        # `core.quotePath=false` in the user's config, `git` emits RAW filename bytes on
+        # stdout AND stderr, so a strict `text=True` decode raises
+        # `UnicodeDecodeError` — a `ValueError`, not the `OSError` caught below — and a
+        # deliberate "refusing to render over a TRACKED path" (2) became a traceback and
+        # exit 1 (measured with `quotePath false` and a `caf\xe9.md`). The payload is
+        # unused, so decoding is pure overhead that must never fail.
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", probe_path],
+            cwd=probe_cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",
+            # ⛔ SCRUBBED, OR THE ANSWER DESCRIBES ANOTHER REPOSITORY (#14625 review,
+            # P1): with `GIT_INDEX_FILE` pointing at a scratch index, this probe
+            # answered "untracked" for a path this repository tracks and `--render`
+            # overwrote it at rc 0 (measured: 14 -> 145,745 bytes) — the self-locking
+            # corruption this refusal describes.
+            env=_git_env(),
+        )
+    except OSError as err:
+        print(f"render: could not probe {label} for tracking: {err}", file=sys.stderr)
+        return 2
+    if tracked.returncode == 0:
+        print(
+            f"refusing to render over a TRACKED path ({label}): the document is\n"
+            "`--render`'s output, which is never committed. Pick an untracked\n"
+            "path (the default is gitignored).",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
     # the report/table as a surrogate escape, and under a real UTF-8 locale
@@ -1146,41 +1279,15 @@ def main(argv: list[str] | None = None) -> int:
             rel = target.relative_to(ROOT.resolve()).as_posix()
         except (ValueError, OSError, RuntimeError):
             rel = None
-        if rel is not None:
-            # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent
-            # `git` binary raises FileNotFoundError here, and nothing catches it: the
-            # interpreter then exits 1, which this tool reserves for the DRIFT verdict
-            # — so a lane reads "the census drifted" from a box that could not answer
-            # at all (#13098 review, P2). Same class, same status as every other
-            # refusal in this module.
-            try:
-                # ⛔ AND THIS PROBE MUST NOT BE ABLE TO FAIL DECODING EITHER. With
-                # `core.quotePath=false` in the user's config, `git` emits RAW filename
-                # bytes on stdout AND stderr, so a strict `text=True` decode raises
-                # `UnicodeDecodeError` — a `ValueError`, not the `OSError` caught below
-                # — and a deliberate "refusing to render over a TRACKED path" (2) became
-                # a traceback and exit 1 (measured with `quotePath false` and a
-                # `caf\xe9.md`). The payload is unused, so decoding is pure overhead
-                # that must never fail.
-                tracked = subprocess.run(
-                    ["git", "ls-files", "--error-unmatch", "--", rel],
-                    cwd=ROOT, capture_output=True, text=True,
-                    encoding="utf-8", errors="surrogateescape",
-                )
-            except OSError as err:
-                print(
-                    f"render: could not probe {rel} for tracking: {err}",
-                    file=sys.stderr,
-                )
-                return 2
-            if tracked.returncode == 0:
-                print(
-                    f"refusing to render over a TRACKED path ({rel}): the document is\n"
-                    "`--render`'s output, which is never committed. Pick an untracked\n"
-                    "path (the default is gitignored).",
-                    file=sys.stderr,
-                )
-                return 2
+        # ⛔ THE TRACKED-PATH GUARD FOLLOWS THE DESTINATION, NOT `ROOT` (#14625 review,
+        # P2). It used to answer only when the target sat INSIDE `ROOT` (`rel` is not
+        # None), so `--render` into ANOTHER checkout's tracked file never asked anybody
+        # and overwrote it at rc 0 (measured: 27 -> 145,745 bytes). The index that
+        # matters is the one the DESTINATION belongs to, so the probe runs from the
+        # destination's own directory with its basename.
+        refusal = _tracked_destination_refusal(target, rel)
+        if refusal is not None:
+            return refusal
 
         # ⛔ GIT METADATA IS NOT A DESTINATION EITHER, and the probe above cannot see
         # it: `git ls-files` answers "is this path in the INDEX", so `.git/config`,
@@ -1234,6 +1341,13 @@ def main(argv: list[str] | None = None) -> int:
                     ["git", "rev-parse", "--git-dir", "--git-common-dir"],
                     cwd=probe_cwd, capture_output=True, text=True,
                     encoding="utf-8", errors="surrogateescape",
+                    # ⛔ SCRUBBED, OR THE GUARD PROTECTS THE WRONG REPOSITORY (#14625
+                    # review, P1): with `GIT_DIR=<other>`, this probe answered 0 with
+                    # the OTHER checkout's metadata, so `metadata_dirs` named a
+                    # directory the destination is not inside and the write landed on
+                    # an INTACT `<separate-git-dir>/config` at rc 0 (92 -> 145,745
+                    # bytes; `git -C <repo> rev-parse` then answered 128).
+                    env=_git_env(),
                 )
             except OSError as err:
                 print(
@@ -1260,9 +1374,18 @@ def main(argv: list[str] | None = None) -> int:
             # git cannot restore.
             if meta_probe.returncode != 0:
                 stderr_text = meta_probe.stderr or ""
-                plainly_outside = "not a git repository" in stderr_text and not any(
-                    (parent / ".git").exists()
-                    for parent in (target.parent, *target.parent.parents)
+                # ⛔ AND "NOT A REPOSITORY" IS NOT THE SAME AS "NOT METADATA". A
+                # git directory whose own HEAD/refs were damaged answers exactly like
+                # a plain directory, so a `.git`-entry test let `--render <bare>/config`
+                # through at rc 0 and git could not restore it (#14625 review, P1,
+                # reproduced with HEAD removed: 92 -> 391,249 bytes). The structural
+                # term needs no subprocess — which is the point, since the whole reason
+                # this branch runs is that git could not answer.
+                ancestors = (target.parent, *target.parent.parents)
+                plainly_outside = (
+                    "not a git repository" in stderr_text
+                    and not any((parent / ".git").exists() for parent in ancestors)
+                    and not any(_looks_like_git_metadata(parent) for parent in ancestors)
                 )
                 if not plainly_outside:
                     first = stderr_text.strip().splitlines()
