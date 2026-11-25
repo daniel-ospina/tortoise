@@ -1083,9 +1083,10 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
             sdk.close()
         assert raw not in client.get(f"/v1/subjects/{sub}").text
         # …and the SECOND layer's kind survives the same allowlist, by the SAME
-        # code path: the re-attach iterates the node's labels through
-        # `LAYER_KIND_PROP`, so a map that named only `Object` would let this
-        # arm go quiet with nothing red.
+        # code path: the re-attach is keyed on the ROUTE's layer through
+        # `entity_reads.LAYER_KIND_PROP` (label-set MEMBERSHIP decides the
+        # `:Source` DENIAL only, never the kind echo), so a map that named only
+        # `Object` would let this arm go quiet with nothing red.
         assert client.get(f"/v1/subjects/{sub}").json().get("subjectKind") == "PERSON"
         sub_body = client.get("/v1/subjects", params={"limit": 100}).text
         assert raw not in sub_body, sub_body
