@@ -15721,6 +15721,9 @@ def _layer_payload(entry: dict) -> dict:
 #: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
 #: ``(:Document:Source)``, or any label this file has never heard of — is filtered
 #: through ``projection.entities.filter_source_props`` (deny by default, #3998).
+#: ⚠️ The callee reports ONE label (``labels(n)[0]``), so this set is checked
+#: against that label alone; the multi-label residual and why it needs the callee
+#: change are stated in ``_filter_delegation_payloads``' docstring.
 _PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
 
 
@@ -15745,6 +15748,22 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
     Only the properties of a neighbour that is not one of the four publishable
     labels are touched; every other node's map is returned as stored, so no other
     arm's payload changes shape.
+
+    ⛔ THE RESIDUAL, stated because this filter CANNOT see it: the callee sends
+    ONE label (``labels(n)[0]``), so a node that carries a publishable label
+    FIRST and ``:Source`` as well — measured: ``(:Point:Source)``,
+    ``(:Object:Source)``, ``(:Event:Source)``, ``(:Subject:Source)`` — answers a
+    publishable ``node_type`` and its whole map rides, ``text`` included. Label
+    order is allocation-dependent (``CREATE (f:Source:Point)`` yields
+    ``['Point','Source']``), so no rule keyed on a single label can close it.
+    ⚠️ NOT reachable through product code today: the one ``SET n:Source`` writer
+    (``migrate_kinds``) also removes the legacy document label in the same
+    statement, and nothing writes ``:Point:Source`` — the reachable paths are
+    ``hosted_backup``'s operator remedy ("add a SERVED label") and an SDK/
+    direct-edge write. Closing it needs the callee to return ``labels(n)``, which
+    changes the ``tortoise_provenance`` payload and therefore belongs to #14630
+    (this file's claim is narrowed to what it can enforce: a single-label
+    neighbour, deny-by-default on unknown spellings).
 
     ⛔ DENY BY DEFAULT, and the reason is MEASURED, not stylistic. An earlier
     revision tested ``entry.get("node_type") == "Source"`` — and that field is

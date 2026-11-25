@@ -786,16 +786,22 @@ def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
          "props": {"url": url, "id": url, "text": secret}},
         # a label the route has never heard of: deny-by-default must cover it
         {"via": "references", "node_type": "Gadget", "props": {"text": secret}},
+        # ⛔ and the ABSENT arm: no `node_type` at all. `m6`, which denies every
+        # KNOWN non-publishable spelling and lets a missing one through, passes
+        # this test without this entry (measured) — so "deny by default" would
+        # be pinned only for misspellings, never for absence.
+        {"via": "references", "props": {"url": url, "text": secret}},
         # a publishable neighbour is returned AS STORED
         {"via": "dependsOn", "node_type": "Object",
          "props": {"name": "BETA", "objectKind": "goal"}},
     ]}
     out = _filter_delegation_payloads(provenance)
-    assert [d["node_type"] for d in out["delegation"]] == [
-        "Document", "Gadget", "Object"], out
+    assert [d.get("node_type") for d in out["delegation"]] == [
+        "Document", "Gadget", None, "Object"], out
     assert out["delegation"][0]["props"] == {"url": url, "id": url}, out
     assert "text" not in out["delegation"][1]["props"], out
-    assert out["delegation"][2]["props"] == {
+    assert out["delegation"][2]["props"] == {"url": url}, out
+    assert out["delegation"][3]["props"] == {
         "name": "BETA", "objectKind": "goal"}, out
     assert secret not in repr(out), out
     # …and the input is not mutated in place: the route publishes what this
