@@ -341,7 +341,16 @@ def same_destination(a: object, b: object) -> bool:
         text = value.strip()
         scheme, _, rest = text.partition("://")
         authority, _, path = rest.partition("/")
-        host, _, port = authority.partition(":")
+        # ⛔ BRACKET-AWARE: `partition(":")` splits INSIDE `[2001:db8::1]`, so the
+        # default-port rule below could never fire for an IPv6 literal — and the
+        # verifier then DROPPED an inherited credential the harness KEEPS
+        # (`new URL` maps `:443` away for v6 exactly as for v4), turning a working
+        # entry into `no-credential` with the remedy "mint a key".
+        if authority.startswith("[") and "]" in authority:
+            close = authority.index("]")
+            host, port = authority[:close + 1], authority[close + 2:]
+        else:
+            host, _, port = authority.partition(":")
         scheme = scheme.lower()
         host = host.lower()
         # ⛔ A TRAILING SLASH IS SIGNIFICANT: `/mcp` and `/mcp/` are routed
@@ -517,8 +526,19 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # is NOT that case: `Object.hasOwn` is true and `{}` is truthy in JS, so an
     # empty base entry IS inherited. Treating "sanitised to nothing" as inherited
     # reported `command-missing` for a repo entry the harness keeps and runs.
-    sanitised_away = (not base_dropped and not merged.get("url")
-                      and not merged.get("command") and bool(base_entry))
+    # ⛔ A transport FIELD that was PRESENT AND FALSY is the only thing the harness
+    # strips, and it drops the base only if that leaves no transport at all. A base
+    # with NO transport key (`{lazy: true}`, `{timeoutMs: …}`, `{type: "http"}`) is
+    # KEPT and IS inherited — so `bool(base_entry)` (non-emptiness) over-generalised
+    # and re-opened the false PASS the line above it forbids: the repo's
+    # both-transports delta was kept and resolved over `url` for a server the
+    # harness never loads (its `connectServer` throws `has neither 'command' nor
+    # 'url'` on the inherited `{lazy: true}`).
+    stripped_transport = any(
+        field in base_entry and not base_entry[field]
+        for field in ("url", "command"))
+    sanitised_away = (not base_dropped and stripped_transport
+                      and not merged.get("url") and not merged.get("command"))
     base_survives = not base_dropped and not sanitised_away
     # ⛔ "There is no inherited entry" is a FACT that must survive: when the base
     # was dropped (or sanitised to nothing), a more specific layer is no longer a

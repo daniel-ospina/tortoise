@@ -2029,3 +2029,39 @@ def test_a_headerless_http_entry_never_borrows_the_shells_credential(
         "an http entry that declares no Authorization header must be probed as it "
         f"sends: with NO credential borrowed from the shell, got {probed}")
     assert verdict.status == mcp_selfcheck.OK
+
+
+def test_a_base_with_NO_transport_key_is_INHERITED_not_sanitised_away(
+        tmp_path, monkeypatch):
+    """The harness drops a base only when a present-but-falsy transport is STRIPPED.
+
+    `{lazy: true}` / `{timeoutMs: …}` / `{type: "http"}` carry no transport key at
+    all, so they are KEPT and inherited — and then a repo entry declaring both
+    transports is an ambiguous DELTA that is ignored. Treating those as "sanitised
+    away" kept the repo entry and resolved it over `url` for a server the harness
+    never loads (`has neither 'command' nor 'url'`).
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp", "command": "python3"}}}),
+        encoding="utf-8")
+    for base in ({"lazy": True}, {"timeoutMs": 60000}, {"type": "http"}):
+        (home / ".pi/agent/.mcp.json").write_text(
+            json.dumps({"mcpServers": {"tortoise": base}}), encoding="utf-8")
+        verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+        assert verdict.status == mcp_selfcheck.COMMAND_MISSING, (base, verdict.line())
+        assert not verdict.ok
+
+
+def test_destination_identity_normalises_a_default_port_for_ipv6_too():
+    """`partition(":")` splits inside `[2001:db8::1]`, so `:443` never normalised."""
+    assert mcp_selfcheck.same_destination(
+        "https://[2001:db8::1]:443/mcp", "https://[2001:db8::1]/mcp"), (
+        "a default port is not a destination change — dropping the inherited "
+        "credential turned a working entry into `no-credential`")
+    assert mcp_selfcheck.same_destination("https://[::1]:443/mcp", "https://[::1]/mcp")
