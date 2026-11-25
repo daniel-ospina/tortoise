@@ -108,7 +108,8 @@ import sys
 # census gives every runnable entry point: a tool that dies on an old
 # interpreter must say which file needs what, not raise a bare SyntaxError or
 # ImportError from a later edit. The status is 1 and that is DELIBERATE: the set
-# 0-4 below is CLOSED and fully spent, so there is no spare code, and
+# 0-5 below is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/ADVISORY/
+# USAGE), so there is no spare code, and
 # `EXIT_INVALID` is the fail-closed neighbour a refusal can share.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
