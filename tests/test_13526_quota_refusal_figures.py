@@ -859,34 +859,43 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
 
     base = handed(timedelta())
     #: TWO shifts, and BOTH are needed because each catches the other's blank.
-    #: Which one catches a given pin depends on WHAT that pin truncates, so neither
-    #: is "the real test":
+    #: A reading that genuinely follows the clock moves by EXACTLY the shift, so a
+    #: pin is caught wherever the move departs from that by more than the loop's
+    #: 2 s tolerance. Which shift does the catching depends on what the pin
+    #: truncates:
     #:
-    #: * a CALENDAR pin (`replace(day=…)`, `replace(month=…)`, `replace(year=…)`) is
-    #:   caught by `+6h` only when that shift rolls across the boundary the pin
-    #:   truncates — midnight for a day pin, a month end for a month pin, 31 Dec for
-    #:   a year pin (and 28 Feb into a pinned leap year). The value moved depends on
-    #:   which case it is. Away from such a boundary the pin keeps the time-of-day,
-    #:   so the shifted instant rolls BACK about a day and the reading moves
-    #:   NEGATIVE — `day=1` from a mid-month `20:00Z` gives −64800 s, where a reading
-    #:   that followed the clock would give +21600 s. ON the boundary the pin resets
-    #:   to the component's start and the reading jumps FORWARD instead: `day=1` at
-    #:   2026-01-31 `20:00Z` gives +2613600 s, `month=6` at 2026-02-28 `20:00Z` gives
-    #:   −2397600 s, `year=2021` at 2026-12-31 `20:00Z` gives −31514400 s. Caught in
-    #:   every one of those cases, at whichever value;
-    #: * a SUB-DAY pin is the inverse — `replace(hour=2)` moves 0 s under `+6h` when
-    #:   the start is before 18:00Z, and a whole day (86400 s) once that shift rolls
-    #:   the date, because the retained hour then lands on the NEXT date; caught
-    #:   either way.
+    #: * a CALENDAR pin (`replace(day=…)`, `replace(month=…)`, `replace(year=…)`)
+    #:   PASSES `+6h` unless the shift rolls past the boundary that pin truncates —
+    #:   midnight for a day pin, a month end for a month pin, 31 Dec for a year pin
+    #:   (and 28 Feb into a pinned leap year). Everywhere else the pin keeps the
+    #:   time-of-day and the move is exactly +21600 s, same as an honest reading.
+    #:   At that boundary the move is no longer the shift, and both magnitude and
+    #:   SIGN depend on the shape: `day=1` from a mid-month `20:00Z` gives
+    #:   −64800 s (the retained time-of-day now sits on the NEXT date, a day less
+    #:   the shift), `month=6` at 2026-02-28 `20:00Z` gives −2397600 s, `year=2021`
+    #:   at 2026-12-31 `20:00Z` gives −31514400 s, while `day=1` at 2026-01-31
+    #:   `20:00Z` gives +2613600 s because that pin advances into the next month.
+    #:   Caught in every one of those cases, at whichever value and sign;
+    #: * a SUB-DAY pin is the inverse — `replace(hour=2)` is caught by `+6h`, at 0 s
+    #:   when the start is before 18:00Z (the retained hour lands on the same date)
+    #:   and at 86400 s once that shift rolls the date. Caught either way.
     #:
-    #: ⛔ `+405d` is 405 WHOLE days, which is why it is what catches a calendar pin of
-    #: EVERY kind: the date truncation survives the shift, so the reading moves by
-    #: 405 days less that truncation offset (34128000 s / 32400000 s / 3456000 s for
-    #: `day=1` / `month=6` / `year=2020` from a 2026-06-10 start). For a `month` or
-    #: `year` pin it is the ONLY shift that catches at all — `+6h` passes those on
-    #: every non-boundary date, moving exactly +21600 s. Conversely `+405d` moves a
-    #: sub-day pin by exactly 34992000 s, a whole number of days, so it does NOT
-    #: catch one.
+    #: ⛔ `+405d` is 405 WHOLE days, which is why it is what catches a calendar pin
+    #: of every kind: the date truncation survives the shift, so the move is 405
+    #: days less that truncation offset — 34128000 s / 32400000 s / 3456000 s for
+    #: `day=1` / `month=6` / `year=2020` from a 2026-06-10 start. Away from their
+    #: boundary `+6h` passes a `month` or `year` pin at exactly +21600 s, so this is
+    #: the shift that catches those on ordinary dates (the `+6h` catch above needs a
+    #: month end or a 31 Dec). Conversely `+405d` moves a sub-day pin by exactly
+    #: 34992000 s — a whole number of days — so it does NOT catch one.
+    #:
+    #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
+    #: one is the real test": doing so silently stops catching sub-day pins, and
+    #: dropping the year-crossing one stops catching calendar pins. An earlier
+    #: revision of this comment said a pinned calendar component "tracks the
+    #: clock under a six-hour shift" and called the year-crossing shift "the only
+    #: cheap way" — measured false for every sub-day pin, which is the shape the
+    #: source arm above explicitly does not cover.
     #:
     #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
     #: one is the real test": doing so silently stops catching sub-day pins, and
