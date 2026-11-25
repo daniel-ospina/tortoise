@@ -67,7 +67,9 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     call, so the requirement this gate enforces is **every declared writer of the label
     asks the gate** — not "the fold does". The gate therefore refused all four entity
     labels until `#13854` closed them, and it REFUSES `:Point` today on TWO INDEPENDENT
-    arms — the coverage verdict, which currently measures a shortfall, and the writer
+    arms — the coverage verdict (which measured a shortfall when this paragraph was
+    written, and is measured afresh on every run: `#14560` has since made the `operator`
+    conjunct satisfiable, and `point`'s own count is whatever that run measures) and the writer
     census, which names two of its four declared writers that must keep the copy:
     `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
     where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
@@ -81,15 +83,26 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     do stop. When the coverage verdict answers STOP it names each un-cleared writer; while
     it answers KEEP, or cannot be read, it returns before that walk and names the counts
     (or, with the predicate symbol absent, the requirement). That is the
-    true state of a two-pronged retirement, and the WRITER prong is a satisfiable one: as
-    each writer's `stores` entry loses the label, that arm opens for it. ⛔ THE COVERAGE
-    PRONG IS NOT, for this label: `operator`'s graph denominator is the whole `:Point`
-    label while its record numerator is the operator subset, so `record_vectors >=
-    graph_vectors` is UNREACHABLE while any plain point carries an embedding
-    (`tortoise/record_vector.py`, pinned by
-    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`).
-    `:Point`'s cut-over is therefore an OPERATOR act — or a later, kind-aware denominator —
-    not a backfill that will eventually measure true. Testing that the writer arm CAN open
+    true state of a two-pronged retirement, and BOTH prongs are now satisfiable. The WRITER prong
+    opens as each writer's `stores` entry loses the label. ⛔ THE COVERAGE PRONG USED TO BE
+    IMPOSSIBLE FOR THIS LABEL AND IS NOT ANY MORE (`#14560`): `operator`'s graph denominator was the
+    whole `:Point` label while its record numerator was the operator subset, so `record_vectors >=
+    graph_vectors` was UNREACHABLE while any plain point carried an embedding — no backfill could ever
+    close it. The denominator is now KIND-AWARE (`tortoise/record_vector.py`'s
+    `GRAPH_KIND_FILTER`), and the empty operator slice verifies as ``trivial`` with its reason naming
+    why there is nothing to copy (operators store no content, `#548`; the only operator shape with a
+    vector is a hybrid, and it journals it on the same write). Pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_applies_the_operator_predicate_so_the_gate_is_satisfiable`
+    and measured on a real graph by `tests/test_14560_operator_vectors.py`. ⛔ THE CLAIM IS SCOPED
+    TO THE `operator` CONJUNCT, and stated that way on purpose: `label_write_gate('Point')`
+    ANDs every entity type addressing the label (`point` and `operator`), so this change
+    removes ONE of the two reasons the coverage arm could refuse — what still refuses
+    `:Point` is whatever the OTHER conjunct and the writer census answer on the run in front
+    of you, measured per run and never assumed from this paragraph. The writer half is
+    `#14552`'s subject: two declared `:Point` writers must keep the copy on the lanes where it
+    is the sole carrier (`tortoise.sdk::_write_capture_turns`,
+    `tortoise.projection::_rebuild_all_replay`).
+    Testing that the writer arm CAN open
     (rather than only that it refuses) is
     `test_the_gate_OPENS_when_every_declared_writer_asks` — an enforcer whose firing
     condition can never hold would be the defect, not the refusal, which is exactly why

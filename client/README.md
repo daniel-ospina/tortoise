@@ -25,9 +25,20 @@ your script / agent  ──MCP──►  tortoise-server (tortoise-graph)
 
 Requires **Python ≥ 3.12**.
 
+Not on PyPI yet — `pypi.org/pypi/tortoise-client` is a 404 — and it cannot be
+pip-installed straight from the repo, because the driver's shared modules are
+staged at build time. Build the wheel from the tag, then install it:
+
 ```bash
-pip install tortoise-client
+python3 -m venv ~/.venv-tortoise-client && source ~/.venv-tortoise-client/bin/activate   # its OWN venv, never the engine's
+git clone https://github.com/daniel-ospina/tortoise.git ~/tortoise-client-src   # build tree, outside any repo
+cd ~/tortoise-client-src && git checkout v0.2.1   # the released tag — client and engine ship in lockstep
+bash client/build_client.sh          # stages the shared modules, builds dist-client/*.whl
+pip install dist-client/*.whl        # thin driver only — no engine code, no engine deps
 ```
+
+Once `tortoise-client` is published to PyPI, this block collapses to
+`pip install tortoise-client`.
 
 > The bare `tortoise` name on PyPI is taken by an unrelated turtle-graphics
 > package — the engine dist is `tortoise-graph`, the client dist is

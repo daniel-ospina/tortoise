@@ -1764,26 +1764,32 @@ switch?) and never a tenant.
 
 ⚠️ **Stated residuals, not oversights.** The count compares SIZES, so it is a coverage claim and not
 a membership proof (a cardinality-preserving mismatch verifies; the graph keys on `id` while the
-record keys on `name`). For the three labels whose kind predicate splits a graph label (`operator` ⊂
-`point`, and `source`/`document` both ⊂ `:Source`) the numerator applies the label's kind predicate
-while the denominator is the whole graph label, so the comparison there can only be HARDER to pass —
-a longer double-storage, never a short answer. ⛔ **And for all three it is UNREACHABLE, which is a
-different claim and is stated rather than implied:** one `public.source` table splits into two labels
-while the graph's `:Source` label holds BOTH kinds and the denominator counts every vector-bearing
-node of it, so `record >= graph` cannot be satisfied while the other kind carries any embedding; and
-`operator`'s denominator is `MATCH (n:Point) WHERE n.embedding IS NOT NULL`, i.e. EVERY vector-bearing
-Point, while its numerator is only operators — the non-operator Points are exactly the population that
-carries embeddings by default (`projection.entities._upsert_point_props` computes or restores the
-vector for non-operator Points, `#7778`). Nor is `operator` hidden from this claim by its read being
-cheap: it is in the gated set and in no retired set, so it declines to the graph on every armed read,
-for ever, with no signal. For those three the
-cut-over is therefore an OPERATOR act (or a later kind-aware denominator — the graph has no per-kind
-vector property to count today), never something that happens by itself; the failure direction is a
-longer double-storage, never a short answer. The contract is process-local, so a restart between the contract and the
-first write re-opens a bounded window in which the graph copy is already frozen but unmeasured.
-None of these is introduced here by choice, and closing one is a persisted contract, an identity-aware
-sweep, or a kind-aware denominator —
-filed from #13610, not folded into it.
+record keys on `name`). ⛔ **`source`/`document` are ONE-SIDED, and that is stated rather than
+implied:** one `public.source` table splits into two labels while the graph's `:Source` label holds
+BOTH kinds and the denominator counts every vector-bearing node of it, so `record >= graph` cannot be
+satisfied while the other kind carries any embedding — the comparison there can only be HARDER to
+pass, a longer double-storage and never a short answer. Their cut-over is therefore an OPERATOR act
+(or one line in `record_vector.GRAPH_KIND_FILTER`, whose graph discriminator would be
+`documentKind`), never something that happens by itself.
+
+✅ **`operator` was the third and is no longer in that set (`#14560`).** Its denominator used to be
+`MATCH (n:Point) WHERE n.embedding IS NOT NULL` — EVERY vector-bearing Point — against a numerator of
+operators only, so the comparison was impossible by arithmetic (measured: 17,899 operator rows, none
+with a vector, denominator 39,662): the `:Point` strip it gates could never run, and no backfill could
+change that. The denominator is now KIND-AWARE (`record_vector.GRAPH_KIND_FILTER`, one declaration,
+the Cypher twin of the SQL predicate, applied by `projection._label_vector_count`), so the comparison
+is operator-to-operator and a slice empty in BOTH stores verifies as `trivial` with its `reason`
+naming why there is nothing to copy — an operator stores no content to embed (`#548`), and the only
+operator shape that carries a vector (a hybrid `create_point(op_type=…)`) journals it on the same
+write, so its record row is filled at write time. ⚠️ That is not a weakening: the gate now measures
+the population it asks about. And a DESTRUCTIVE consumer still may not act on the vacuous arm
+(`record_vector.mirror_verdict(..., require_substantive=True)` — the DR restore's form), because
+`0 >= 0` proves nothing about the row it would delete.
+
+The contract is process-local, so a restart between the contract and the first write re-opens a
+bounded window in which the graph copy is already frozen but unmeasured. None of these is introduced
+here by choice, and closing one is a persisted contract, an identity-aware sweep, or a kind-aware
+denominator — filed from #13610, not folded into it.
 
 ⚠️ **And one residual is not a defect at all — it is a RELATION that is true of an EMPTY population.** `0 >= 0`
 verifies, so a label holding nothing in EITHER store satisfies the count exactly as a backfilled one does, and
