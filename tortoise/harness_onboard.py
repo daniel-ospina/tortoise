@@ -178,6 +178,63 @@ def _config_path(harness: str, project_dir: Path, *,
     return project_dir / (project_rels[0] if project_rels else ".mcp.json")
 
 
+_JSON_WS = " \t\n\r"
+
+
+def _skip_ws(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _JSON_WS:
+        i += 1
+    return i
+
+
+def _member_span(text: str, key: str, start: int = 0) -> tuple[int, int] | None:
+    r"""`(value_start, value_end)` of `key` in the JSON OBJECT that begins at `start`.
+
+    ⛔ NESTING-AWARE BY CONSTRUCTION, and that is the fix: the previous
+    implementation was `re.search(rf'"{name}"\s*:\s*', text)`, which matched the
+    FIRST occurrence **anywhere** in the document. A file whose `profiles` object
+    held a `"tortoise"` key had that unrelated object overwritten with the server
+    entry, the entry never reached `mcpServers`, and `write_config` reported the
+    file as updated — two silent consequences reported as success, reachable on
+    an advertised path (`--scope user` for `claude` targets `~/.claude.json`,
+    whose `projects` map holds arbitrary per-project state).
+
+    Each value is consumed by `json.JSONDecoder.raw_decode`, which skips a whole
+    object/array, so a `"key"` inside a nested object can never be mistaken for
+    this object's member. Returns None when the object has no such member, or
+    when the text at `start` is not a JSON object.
+    """
+    decoder = json.JSONDecoder()
+    i = _skip_ws(text, start)
+    if i >= len(text) or text[i] != "{":
+        return None
+    i = _skip_ws(text, i + 1)
+    while i < len(text) and text[i] == '"':
+        try:
+            name, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return None
+        if not isinstance(name, str):
+            return None
+        i = _skip_ws(text, i)
+        if i >= len(text) or text[i] != ":":
+            return None
+        i = _skip_ws(text, i + 1)
+        value_start = i
+        try:
+            _value, value_end = decoder.raw_decode(text, i)
+        except ValueError:
+            return None
+        if name == key:
+            return value_start, value_end
+        i = _skip_ws(text, value_end)
+        if i < len(text) and text[i] == ",":
+            i = _skip_ws(text, i + 1)
+            continue
+        return None
+    return None
+
+
 def _splice_entry(text: str, name: str, entry: dict) -> str:
     """Replace ONE entry's value in the JSON TEXT, preserving every other byte.
 
@@ -187,18 +244,20 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     one-entry change would arrive as a whole-file rewrite — the opposite of the
     "merge, never overwrite" promise, and unreviewable in a diff.
 
-    Returns the edited text, or "" when `name` cannot be located (the caller then
-    falls back to a full dump, and SAYS so).
+    The entry is located by walking the document's STRUCTURE
+    (`mcpServers` → `name`), never by text search, so an identically-named key in
+    an unrelated object can never be the thing that gets rewritten.
+
+    Returns the edited text, or "" when `name` cannot be located under
+    `mcpServers` (the caller then falls back to a full dump, and SAYS so).
     """
-    import re as _re
-    match = _re.search(rf'"{_re.escape(name)}"\s*:\s*', text)
-    if match is None:
+    servers = _member_span(text, "mcpServers")
+    if servers is None:
         return ""
-    start = match.end()
-    try:
-        _value, end = json.JSONDecoder().raw_decode(text, start)
-    except ValueError:
+    span = _member_span(text, name, servers[0])
+    if span is None:
         return ""
+    start, end = span
     # Match the indentation of the value being replaced: everything after the
     # first line of the dumped entry shifts right by the original indent.
     line_start = text.rfind("\n", 0, start) + 1
@@ -207,6 +266,28 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     dumped = json.dumps(entry, indent=2, ensure_ascii=False)
     body = dumped.replace("\n", "\n" + indent)
     return text[:start] + body + text[end:]
+
+
+def _toml_table(entry: dict) -> str:
+    """The equivalent `[mcp_servers.tortoise]` table, for a harness that reads TOML.
+
+    Offered instead of written: this installer does not own the TOML format, so
+    the honest output is the table to paste — not a JSON document in a `.toml`
+    file that the harness silently fails to parse.
+    """
+    args = ", ".join(json.dumps(str(a)) for a in entry.get("args") or [])
+    lines = [
+        "[mcp_servers.tortoise]",
+        f"command = {json.dumps(str(entry.get('command', DEFAULT_PYTHON)))}",
+        f"args = [{args}]",
+    ]
+    env = entry.get("env") or {}
+    if isinstance(env, dict) and env:
+        lines.append("")
+        lines.append("[mcp_servers.tortoise.env]")
+        for key, value in env.items():
+            lines.append(f"{key} = {json.dumps(str(value))}")
+    return "\n".join(lines)
 
 
 def write_config(harness: str, project_dir: Path, *, url: str | None = None,
@@ -219,9 +300,25 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     did not ask for.
     """
     out = InstallResult(harness=harness)
+    entry = bridge_entry(url=url, python=python)
     path = _config_path(harness, project_dir, scope=scope)
     if path is None:
         out.refusals.append(f"{harness}: no known config path — nothing written")
+        return out
+    if path.suffix.lower() == ".toml" or harness in mcp_selfcheck._TOML_HARNESSES:
+        # ⛔ FORMAT IS CHECKED BEFORE CONTENT. This path used to write a JSON
+        # document into `~/.codex/config.toml`, which Codex cannot parse — so the
+        # install did nothing while `wrote:` reported the file updated — and, in
+        # the other direction, told an existing Codex user their valid TOML was
+        # "not valid JSON". Writing the wrong format and calling it written is
+        # the silent-fallback class this module exists to remove, so the answer
+        # is a NAMED refusal plus the table to paste, never a write.
+        out.refusals.append(
+            f"{harness}: this installer writes JSON configs only — {path} is "
+            f"TOML, and a JSON document there would leave {harness} unable to "
+            f"parse the file while the install reported success. NOTHING was "
+            f"written. Add this table to {path} by hand:\n"
+            + _toml_table(entry))
         return out
     before = ""
     data: dict = {}
@@ -244,7 +341,6 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         out.refusals.append(f"{path}: `mcpServers` is not an object")
         return out
     existing = servers.get(mcp_selfcheck.SERVER_NAME)
-    entry = bridge_entry(url=url, python=python)
     if existing == entry:
         out.planned.append(str(path))
         return out                      # idempotent: byte-identical, no write
@@ -261,6 +357,25 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
             out.actions.append(
                 f"{path}: the `{mcp_selfcheck.SERVER_NAME}` entry could not be "
                 f"located in the file's text — the whole document was re-written")
+    # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
+    # function intended. Splicing is byte surgery, so a duplicate key, a
+    # structural surprise or a stale offset could otherwise land a file whose
+    # parsed content differs from `data` — with `wrote:` still reporting success.
+    try:
+        rewritten = json.loads(after)
+    except ValueError as exc:
+        out.refusals.append(
+            f"{path}: the merged document did not re-parse "
+            f"({type(exc).__name__}) — NOTHING was written; the file is "
+            f"unchanged. Re-run with the file moved aside to write a fresh one")
+        return out
+    if rewritten != data:
+        out.refusals.append(
+            f"{path}: the merged text does not round-trip to the intended "
+            f"document (it would write something other than the entry this "
+            f"installer built) — NOTHING was written; the file is unchanged. "
+            f"Re-run with the file moved aside to write a fresh one")
+        return out
     diff = "".join(difflib.unified_diff(
         before.splitlines(keepends=True), after.splitlines(keepends=True),
         fromfile=f"a/{path.name}", tofile=f"b/{path.name}"))
@@ -359,9 +474,13 @@ def remove_instructions(harness: str, project_dir: Path, *,
     """The reversal: remove ONLY the marked block (never a user's own text)."""
     out = InstallResult(harness=harness)
     name = INSTRUCTION_FILES.get(harness)
-    path = project_dir / name if name else None
-    if path is None or not path.exists():
-        out.planned.append(str(path or name))
+    if name is None:
+        out.refusals.append(
+            f"{harness}: no instruction file known — nothing was removed")
+        return out
+    path = project_dir / name
+    if not path.exists():
+        out.planned.append(str(path))
         return out
     before = path.read_text(encoding="utf-8")
     if BEGIN_MARK not in before:
@@ -397,8 +516,17 @@ def onboard(harness: str = "pi", *, project_dir: Path | None = None,
     out = InstallResult(harness=harness)
 
     if uninstall:
-        out.refusals.extend(remove_instructions(
-            harness, project_dir, dry_run=dry_run).refusals)
+        # ⛔ `_absorb`, not `.refusals` alone. The reversal EDITS THE USER'S
+        # `AGENTS.md`, so its diff is the consent artifact (#14263's first AX
+        # rule) — forwarding only the refusals printed NOTHING while the file
+        # changed and the command exited 0.
+        removed = remove_instructions(harness, project_dir, dry_run=dry_run)
+        _absorb(out, removed)
+        if not removed.diffs and not removed.refusals:
+            out.actions.append(
+                f"{harness}: no tortoise block in "
+                f"{INSTRUCTION_FILES.get(harness, 'the instruction file')} — "
+                f"nothing to remove")
         return out
 
     if verify_only:
@@ -473,6 +601,10 @@ def _absorb(target: InstallResult, other: InstallResult) -> None:
     target.planned.extend(other.planned)
     target.diffs.extend(other.diffs)
     target.refusals.extend(other.refusals)
+    # `actions` belong here too: `write_config` records the backup it took and a
+    # whole-document rewrite there, and dropping them meant the two writes a user
+    # most needs to see were the two that never rendered (#10241).
+    target.actions.extend(other.actions)
 
 
 def render(result: InstallResult, *, out=None) -> None:

@@ -628,6 +628,13 @@ def build_block(pointers: list[dict], surfaced: list[dict],
     lines = list(header)
     for bullet in bullets:
         lines.extend(bullet)
+    # ⛔ The trailing empty line is PART OF THE PRE-#14607 BLOCK, not decoration:
+    # `trim_to_budget` ends with `"\n"` (`recall_neighborhood._assemble`), so a
+    # neighborhood call has always kept it. Dropping it here made the two arms
+    # disagree by one byte for EVERY existing caller — the opposite of the
+    # "absent ⇒ byte-identical" property this function's docstring states, and
+    # the reason `tests/test_recall_neighborhood.py` now pins a literal block.
+    lines.append("")
     block = "\n".join(lines)
     # Deterministic byte cap (gbrain TURN_CONTEXT_DEFAULT_MAX_BYTES analog —
     # issue §6.2 "≤ 8 KB assembled markdown, asserted by S9"). Trim bullets

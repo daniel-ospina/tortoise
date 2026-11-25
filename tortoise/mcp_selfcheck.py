@@ -35,6 +35,7 @@ DESIGN CONSTRAINTS (stated, because each one is a way this could silently rot):
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -339,8 +340,13 @@ def credentials_present() -> list[str]:
         if (os.environ.get(name) or "").strip():
             found.append(f"env:{name}")
     for rel in CREDENTIAL_FILES:
+        # ⛔ `Path.cwd() / rel`, NOT `rel.lstrip("./")`: `lstrip` strips a
+        # CHARACTER SET, so the first store (`./.tortoise`) became `tortoise` and
+        # a self-hoster keeping the key in the project-scope store — the first
+        # source this module's own docstring names — was told `no-credential`
+        # with the key sitting in the file it was supposed to read.
         path = Path(rel.replace("~", str(Path.home()))) \
-            if rel.startswith("~") else Path.cwd() / rel.lstrip("./")
+            if rel.startswith("~") else Path.cwd() / rel
         data = _read_json(path)
         if not data:
             continue
@@ -356,11 +362,17 @@ def _missing_module(command: str, module: str) -> str:
     A bounded subprocess (`-c "import <module>"`) rather than an import in THIS
     process: the question is about the interpreter the config names, not about the
     one running the verifier, and those differ exactly when this matters.
+
+    ⛔ The DOTTED name is imported, not its top-level package. `import
+    tortoise` passes on an interpreter whose `tortoise` predates `mcp_bridge` —
+    which is the plausible trigger (the entry was made portable precisely
+    because an installed copy can be old), so the top-level form reported
+    `resolves-unprobed` for an interpreter that cannot start the entry at all.
     """
     import subprocess
     try:
         proc = subprocess.run(
-            [command, "-c", f"import {module.split('.')[0]}"],
+            [command, "-c", f"import {module}"],
             capture_output=True, text=True, timeout=20, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"the interpreter could not be run ({type(exc).__name__})"
@@ -616,6 +628,16 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
     absent the client's own resolution stands. The verdict's `detail` names which
     endpoint was graded, because "the endpoint answers" is only meaningful about
     a NAMED host.
+
+    ⛔ THE PROBE RUNS UNDER THE ENVIRONMENT THE HARNESS WILL SPAWN, not the
+    operator's shell (`_as_the_child`). Grading an entry's URL while the CLIENT
+    resolved the credential from the SHELL made `_BearerProvider` see a co-source
+    conflict that the installed shape never has: MCP stdio merges the entry's
+    `env` over the child's environment at spawn, so the bridge child resolves
+    endpoint AND credential from the entry's own `TORTOISE_MCP_URL` and sends the
+    bearer. Without this, the credential is WITHHELD and the probe reports `DOWN`
+    about `localhost:8000` — a host the entry never names — for a config that
+    works (the default install, on any box with `TORTOISE_API_KEY` exported).
     """
     try:
         from . import mcp_client
@@ -637,7 +659,8 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
 
     graded = target or "the client-resolved endpoint"
     try:
-        tools = mcp_client._run(_call())
+        with _as_the_child(target):
+            tools = mcp_client._run(_call())
     except Exception as exc:
         status = _classify_probe_failure(exc)
         return Verdict(status=status, detail=f"{_first_line(exc)} (graded {graded})",
@@ -647,6 +670,40 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
         status=OK,
         detail=f"live call succeeded — {len(tools)} tools registered (graded {graded})",
         transport="http")
+
+
+@contextlib.contextmanager
+def _as_the_child(endpoint: str):
+    """Run with the environment the HARNESS will spawn the bridge with.
+
+    An MCP stdio entry's `env` map is merged OVER the child's environment at
+    spawn (MCP Python SDK `StdioServerParameters`, FastMCP transports), so the
+    bridge child resolves its endpoint from the entry's `TORTOISE_MCP_URL` — and
+    `mcp_client.resolve_connection` then resolves the credential from that same
+    endpoint. Reproducing it here means the probe grades the SHAPE the harness
+    runs, not the shape this shell happens to hold.
+
+    It changes only `TORTOISE_MCP_URL`, and only for the duration: the co-source
+    rule (#2369 D1.1) is untouched, because this is the SAME code path a child
+    takes — a credential that came from a STORE still decides its own host
+    (`resolve_connection` honours the env URL only for an env-sourced key), so
+    no store credential can be aimed at a host an installer chose.
+
+    An empty `endpoint` (a bare stdio entry that declares none) leaves the
+    environment alone: then the client's own resolution IS the right answer.
+    """
+    if not endpoint:
+        yield
+        return
+    previous = os.environ.get("TORTOISE_MCP_URL")
+    os.environ["TORTOISE_MCP_URL"] = endpoint
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TORTOISE_MCP_URL", None)
+        else:
+            os.environ["TORTOISE_MCP_URL"] = previous
 
 
 def _first_line(exc: BaseException, limit: int = 240) -> str:

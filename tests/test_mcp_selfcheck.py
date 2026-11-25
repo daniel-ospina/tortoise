@@ -481,3 +481,301 @@ def test_declared_endpoint_is_none_for_a_bare_stdio_entry(project):
         "args": ["-m", "tortoise.mcp_bridge"],
     })
     assert mcp_selfcheck.declared_endpoint("pi", project_dir=project) is None
+
+
+# ── 7 · the probe runs under the CHILD'S environment, not the shell's ────
+#
+# The installed shape is: the harness spawns `python3 -m tortoise.mcp_bridge`
+# with the entry's `env` MERGED over its own environment (MCP stdio transport),
+# so the child resolves endpoint AND credential from the entry's
+# `TORTOISE_MCP_URL` and they agree. A probe that grades the entry's URL while
+# the CLIENT resolves the credential from the operator's shell manufactures a
+# co-source conflict the child never has, withholds the bearer, and reports
+# `DOWN` about `localhost:8000` — a host the entry never names — for a config
+# that works. That is the DEFAULT install on any box with `TORTOISE_API_KEY`
+# exported, i.e. the one path this change is for.
+
+RIGHT_KEY_14607 = "tt_right_key_14607"
+
+
+class _AuthOk(BaseHTTPRequestHandler):
+    """An endpoint that answers MCP only for `Bearer <RIGHT_KEY_14607>`."""
+
+    def _refuse(self) -> None:
+        body = json.dumps({"jsonrpc": "2.0", "id": None, "error": {
+            "code": -32001,
+            "message": "Unauthorized: invalid or missing Bearer token."}},
+        ).encode()
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.headers.get("Authorization") != f"Bearer {RIGHT_KEY_14607}":
+            return self._refuse()
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        method = payload.get("method")
+        if method == "initialize":
+            result = {"protocolVersion": "2024-11-05",
+                      "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "tortoise", "version": "test"}}
+        elif method == "tools/list":
+            result = {"tools": [{"name": "tortoise_health",
+                                 "description": "health",
+                                 "inputSchema": {"type": "object"}}]}
+        else:
+            result = {}
+        body = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"),
+                           "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture()
+def auth_endpoint():
+    server = HTTPServer(("127.0.0.1", 0), _AuthOk)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_default_install_verifies_although_the_shell_declares_no_endpoint(
+        project, auth_endpoint, monkeypatch):
+    """⛔ THE SHAPE THE PR IS FOR: entry names a live endpoint, shell names none.
+
+    Pre-fix this reported `DOWN [server-error]` / `MCP-CREDENTIAL-HOST-MISMATCH`
+    about `http://localhost:8000/mcp`: `_BearerProvider` resolved the credential
+    from the SHELL (which had no `TORTOISE_MCP_URL`, so the built-in default) while
+    the transport dialled the ENTRY's endpoint, so the two disagreed and the
+    bearer was withheld. The entry's own `env` is the child's environment, so both
+    halves must resolve from it — as this asserts by requiring a live `OK` from an
+    endpoint that refuses anything but the exact bearer.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_API_KEY", RIGHT_KEY_14607)
+    _write_config(project, {
+        "type": "stdio",
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": auth_endpoint},
+    })
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.ok, (
+        "the entry's endpoint is live and the key is the one it accepts, so this "
+        "must verify — a DOWN here is about a host the entry never names:\n"
+        + verdict.line())
+    assert "localhost:8000" not in verdict.line(), (
+        "the verdict must never name an endpoint the entry does not declare")
+
+
+def test_the_probe_restores_the_shell_endpoint_it_borrowed(
+        project, auth_endpoint, monkeypatch):
+    """The child-environment window must not leak into the caller's process."""
+    monkeypatch.setenv("TORTOISE_API_KEY", RIGHT_KEY_14607)
+    monkeypatch.setenv("TORTOISE_MCP_URL", "http://shell-14607.invalid/mcp")
+    _write_config(project, {
+        "type": "stdio", "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": auth_endpoint},
+    })
+    mcp_selfcheck.check("pi", project_dir=project, live=True)
+    import os
+    assert os.environ.get("TORTOISE_MCP_URL") == "http://shell-14607.invalid/mcp", (
+        "the probe left the CHILD's endpoint in this process's environment")
+
+
+# ── 8 · a nested object that happens to be called `tortoise` ─────────────
+#
+# `_splice_entry` located the entry with an unanchored regex, so the FIRST
+# `"tortoise":` ANYWHERE won — an unrelated object (a profile, a per-project
+# entry) was overwritten with the server entry, the harness still had no
+# `tortoise` server, and `write_config` reported the file as updated.
+
+def test_an_unrelated_object_named_tortoise_is_never_rewritten(project):
+    path = project / ".mcp.json"
+    path.write_text(json.dumps({
+        "profiles": {"tortoise": {"enabled": False, "note": "my personal profile"}},
+        "mcpServers": {"other": {"command": "x"}},
+    }, indent=2) + "\n", encoding="utf-8")
+
+    result = harness_onboard.write_config("pi", project)
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["profiles"]["tortoise"] == {
+        "enabled": False, "note": "my personal profile"}, (
+        "an unrelated `tortoise` object was overwritten with the server entry")
+    assert written["mcpServers"]["tortoise"]["args"] == [
+        "-m", "tortoise.mcp_bridge"], (
+        "the entry must land in `mcpServers` — reporting a write while the harness "
+        "still has no tortoise server is the silent-failure class")
+    assert written["mcpServers"]["other"] == {"command": "x"}, (
+        "a sibling server must survive the merge")
+    assert result.wrote, "the entry WAS added, so the write must be reported"
+
+
+def test_the_splice_targets_mcpservers_when_the_name_appears_twice(project):
+    """Both objects hold `tortoise`; only the `mcpServers` one may move."""
+    path = project / ".mcp.json"
+    path.write_text(json.dumps({
+        "mcpServers": {"tortoise": {"type": "http", "url": "https://old/mcp",
+                                    "headers": {"Authorization": "Bearer tt_x"}}},
+        "profiles": {"tortoise": {"enabled": False}},
+    }, indent=2) + "\n", encoding="utf-8")
+
+    harness_onboard.write_config("pi", project)
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["mcpServers"]["tortoise"]["args"] == [
+        "-m", "tortoise.mcp_bridge"]
+    assert "headers" not in written["mcpServers"]["tortoise"], (
+        "the credential-carrying entry must be replaced, not merged into")
+    assert written["profiles"]["tortoise"] == {"enabled": False}
+
+
+# ── 9 · a TOML harness is REFUSED by name, never written as JSON ─────────
+#
+# `--harness codex` wrote a JSON document into `~/.codex/config.toml`, which
+# Codex cannot parse — so the install did nothing while `wrote:` said the file
+# was updated — and, in the other direction, told an existing Codex user their
+# valid TOML was "not valid JSON".
+
+def test_codex_is_refused_by_name_and_no_file_is_written(project):
+    result = harness_onboard.write_config("codex", project, scope="user")
+    target = Path(harness_onboard.Path.home()) / ".codex" / "config.toml"
+    assert not result.wrote, "a TOML harness must never be written by this installer"
+    assert not target.exists(), "a file appeared at a .toml path that we cannot write"
+    joined = "\n".join(result.refusals)
+    assert "TOML" in joined, joined
+    assert "[mcp_servers.tortoise]" in joined, (
+        "the refusal must hand the reader the table to paste — refusing without "
+        f"a remedy leaves them stuck: {joined}")
+
+
+def test_an_existing_codex_config_is_not_called_broken_json(project):
+    target = Path(harness_onboard.Path.home()) / ".codex"
+    target.mkdir(parents=True)
+    config = target / "config.toml"
+    config.write_text('[mcp_servers.tortoise]\ncommand = "python3"\n',
+                      encoding="utf-8")
+    result = harness_onboard.write_config("codex", project, scope="user")
+    joined = "\n".join(result.refusals)
+    assert "not valid JSON" not in joined, (
+        "valid TOML reported as broken JSON sends the user to fix a file that is "
+        f"fine: {joined}")
+    assert config.read_text(encoding="utf-8").startswith("[mcp_servers.tortoise]"), (
+        "the user's own config must be left byte-identical")
+
+
+# ── 10 · `--uninstall` is VISIBLE ────────────────────────────────────────
+#
+# The reversal EDITS the user's `AGENTS.md`. Forwarding only `.refusals` printed
+# nothing while the file changed, and the CLI returned 0 before any verdict — the
+# file's own first AX rule ("its diff is PRINTED") inverted on the arm that has
+# no test.
+
+def test_uninstall_prints_the_diff_it_applied(project):
+    import io
+    harness_onboard.write_instructions("pi", project)
+    assert harness_onboard.BEGIN_MARK in (project / "AGENTS.md").read_text()
+
+    result = harness_onboard.onboard("pi", project_dir=project, uninstall=True)
+    after = (project / "AGENTS.md").read_text()
+    assert harness_onboard.BEGIN_MARK not in after, "the block was not removed"
+    assert result.diffs, "the file changed, so the change must be shown"
+    buffer = io.StringIO()
+    harness_onboard.render(result, out=buffer)
+    assert buffer.getvalue().strip(), (
+        "`--uninstall` rendered NOTHING while editing the user's AGENTS.md")
+    assert harness_onboard.BEGIN_MARK in buffer.getvalue(), (
+        "the rendered diff must be the one that was applied")
+
+
+def test_uninstall_says_so_when_there_is_nothing_to_remove(project):
+    (project / "AGENTS.md").write_text("# House rules\n", encoding="utf-8")
+    result = harness_onboard.onboard("pi", project_dir=project, uninstall=True)
+    assert not result.diffs
+    assert result.actions, (
+        "a silent exit 0 leaves the user unable to tell 'removed' from "
+        "'nothing was there'")
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == "# House rules\n"
+
+
+# ── 11 · `credentials_present` reads `./.tortoise` ───────────────────────
+#
+# `rel.lstrip("./")` strips a CHARACTER SET, not a prefix, so the first store
+# became `tortoise` — a self-hoster keeping the key in the project-scope store
+# (the first source this module's own docstring names) was told `no-credential`
+# with the key sitting in the file it was supposed to read.
+
+def test_the_project_scope_store_is_read_at_the_project_path(project, monkeypatch):
+    monkeypatch.chdir(project)
+    (project / ".tortoise").write_text(
+        json.dumps({"api_key": "tt_project_store_14607"}), encoding="utf-8")
+    found = mcp_selfcheck.credentials_present()
+    assert any(entry.startswith("file:") and entry.endswith(".tortoise")
+               for entry in found), (
+        "the project-scope store was not read — it looks for <cwd>/tortoise "
+        f"instead of <cwd>/.tortoise; found {found!r}")
+
+
+# ── 12 · `_missing_module` checks the module the entry RUNS ──────────────
+#
+# `import {module.split('.')[0]}` passed on an interpreter whose `tortoise`
+# predates `mcp_bridge` — the plausible trigger, since the entry was made
+# portable precisely because an installed copy can be old.
+
+def test_missing_module_checks_the_dotted_module_not_its_package(
+        tmp_path, monkeypatch):
+    import sys
+
+    package = tmp_path / "pkgs14607" / "pkg14607"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "pkgs14607"))
+
+    assert mcp_selfcheck._missing_module(sys.executable, "pkg14607") == "", (
+        "the package itself imports, so this row must be clean")
+    reason = mcp_selfcheck._missing_module(sys.executable, "pkg14607.sub14607")
+    assert reason, (
+        "a package that imports while its SUBMODULE does not was reported as "
+        "spawnable — the check must import the dotted name the entry runs")
+
+
+# ── 13 · the CLI lets `default_url()` supply the endpoint ────────────────
+
+def test_the_cli_does_not_hardcode_the_hosted_default(project, monkeypatch):
+    """`TORTOISE_MCP_URL` must win at WRITE time on the path users run.
+
+    `url=getattr(args,"url",None) or DEFAULT_MCP_URL` meant `onboard` never saw
+    `None`, so `default_url()` was dead on the CLI and a self-hosting box still got
+    the hosted default written into its entry — the write-time disagreement the
+    helper was added to close, passing at the library level only.
+    """
+    from types import SimpleNamespace
+
+    from tortoise import __main__ as cli
+
+    self_hosted = "http://self-hosted-14607.invalid/mcp"
+    monkeypatch.setenv("TORTOISE_MCP_URL", self_hosted)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x")
+    args = SimpleNamespace(
+        harness="pi", dir=str(project), url=None, dry_run=False, verify=False,
+        no_verify=True, no_hooks=True, no_instructions=True, uninstall=False,
+        scope="project")
+    cli._cmd_onboard_harness(args)
+    entry = json.loads((project / ".mcp.json").read_text(
+        encoding="utf-8"))["mcpServers"]["tortoise"]
+    assert entry["env"]["TORTOISE_MCP_URL"] == self_hosted, (
+        "the operator's own endpoint must win at WRITE time — otherwise the entry "
+        "and the verification disagree by construction")
