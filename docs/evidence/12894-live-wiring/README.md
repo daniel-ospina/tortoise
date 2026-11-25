@@ -427,6 +427,12 @@ pretend*:
   is no longer reachable by following the documented steps.
 * A read-only `sweep` finds the graphs the record has seen that have NO counter row, with the seed
   command and the warning that the floor is the JOURNAL's count, not `row_max`.
+  ⛔ **Since #14624 that population is everything NOT ALLOCATING**, not just everything missing a row:
+  a counter row in `seeded` or `halted` allocates nothing either, so a `WHERE c.graph_id IS NULL`
+  population read **CLEAN** over the graphs `backfill` had just seeded (it seeds without arming), and
+  an operator following the printed checklist rolled the global flag over them — silently, because the
+  live door is fail-soft. Each entry carries `counter_mode`, because `seeded` is healed by `arm` and
+  `halted` by `reopen`. The verb's own docstring is the canonical statement.
   ⚠️ Its first cut answered "no born-uncut graphs" on a real org: an unscoped connection returns zero
   rows under RLS, and a false CLEAN is the worst answer a pre-flight can give. The DB-backed leg
   caught it; `record_allocator.scope_tenant` is the fix.
