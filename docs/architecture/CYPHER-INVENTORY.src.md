@@ -783,7 +783,7 @@ scalar, so every number below is the `0774035055` cut's, re-measured here and un
 cut carried `ast_door_calls` **1573** / `non_cypher_door_calls` **260**, which were the `34bd33d22a`
 tree's two scalars; `main`'s `#13249` (`bf3a7b8e77`) then converted the org purge's two
 `public.graphs` reads from `query` to `query_all`, and `query_all` is **not** a `DOORS` entry
-(`tools/cypher_inventory.py:148`), so each conversion REMOVES one door call and adds no statement
+(`tools/cypher_inventory.py::DOORS`), so each conversion REMOVES one door call and adds no statement
 site. The branch merged that commit (`56142ad8f1`) without re-recording the two scalars, so on this
 merged tree they read **1571 / 258** while every other scalar holds: `sites` **1313** (`plain` **860**
 — read **579**, write **281**), `candidates` **579**, `unresolved` **107**, `partial` **315**,
@@ -852,7 +852,7 @@ rather than moving them.
 **Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`bf3a7b8e77`**, and
 re-derived from that merged tree — not by arithmetic on the markers. The branch converts the two
 `public.graphs` reads in the org purge from `query` to `query_all`, and `query_all` is **not** a
-`DOORS` entry (`tools/cypher_inventory.py:148`), so each conversion REMOVES one door call and adds no
+`DOORS` entry (`tools/cypher_inventory.py::DOORS`), so each conversion REMOVES one door call and adds no
 statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **260→258** while
 `sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half, which
 is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99: both
