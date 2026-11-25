@@ -2987,6 +2987,24 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         f"the #13098 split's own invariant arms are GONE: {missing} — they are "
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
+    # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
+    # `len(split_arms) == 24` reds a name PRUNED from the literal and `missing` reds a
+    # name that no longer resolves; neither can red for an arm that was never named at
+    # all, because such an arm adds nothing to either set. MEASURED, which is why this
+    # is a pin and not a comment: a `def test_…(): assert True` appended to this file
+    # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
+    # the size pin closes "the same hole from the other side" — was false as written.
+    # The module's TEST population is therefore pinned EXACTLY, the same shape and for
+    # the same reason as `len(decorated) == 9`: an arm that arrives must either be named
+    # in `split_arms` (when it carries a #13098 split invariant) or bump this count
+    # deliberately — a red a reviewer reads rather than slack that a silently-added arm
+    # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
+    test_functions = {n for n in defined if n.startswith("test_")}
+    assert len(test_functions) == 83, (
+        f"expected EXACTLY 83 test functions in this module; got "
+        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+        " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
+        "either way bump this count, so the addition is a decision rather than slack")
 
 
 def _psql_install_run() -> str:
