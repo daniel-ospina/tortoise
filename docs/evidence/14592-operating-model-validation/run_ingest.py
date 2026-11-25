@@ -39,6 +39,25 @@ OUT.mkdir(exist_ok=True)
 GRAPH = "xv14592_operating_model"
 
 
+def assert_graph_is_empty(overview: dict) -> None:
+    """Refuse to write unless the target graph holds no Points.
+
+    Step 1's isolation claim (§2 of the report) rests on `empty_before` being
+    all-zero, and this file's docstring invites a re-run in the same sitting.
+    READING the overview was not enough: a second invocation APPENDS five
+    captures onto the 120 Points the first one wrote, every document still
+    reports `ok: true, errors: []`, and this receipt is OVERWRITTEN — so the
+    dirty reading lands in the receipt's own `empty_before` and no run reds.
+    """
+    points = ((overview or {}).get("taxonomy") or {}).get("Point", 0) or 0
+    if points:
+        raise SystemExit(
+            f"refusing to write: {GRAPH} already holds {points} Point(s). "
+            "This step writes into a FRESH graph; delete the graph or point "
+            "it at a new name, otherwise the run appends and overwrites the "
+            "receipt with a graph that was never empty.")
+
+
 def verdict(receipt: dict) -> int:
     """0 only when every document's capture SUCCEEDED.
 
@@ -69,9 +88,10 @@ def main() -> int:
         "documents": [],
     }
 
-    # ── Confirm empty BEFORE any write ────────────────────────────────
+    # ── Confirm empty BEFORE any write, and REFUSE if it is not ────────
     before = sdk.graph_overview()
     receipt["empty_before"] = before
+    assert_graph_is_empty(before)
     print("=== graph_overview BEFORE any write ===")
     print(json.dumps(before, indent=2, default=str)[:4000])
 
