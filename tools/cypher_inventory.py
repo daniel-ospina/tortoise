@@ -852,10 +852,13 @@ def check(doc: Path, result: dict) -> int:
     actual = {
         "sites": len(sites),
         "files": result["files_with_sites"],
-        # ⛔ `files_scanned` is pinned too: §0 publishes "295 files scanned" and
-        # `files` is a DIFFERENT number (the files that CARRY a site — 97). Before
-        # this key existed the doc's scanned count could drift by any amount while
-        # `--check` stayed green (`#13098` review P3).
+        # ⛔ `files_scanned` is pinned too: §0 publishes the scanned-file count as
+        # its own row, and `files` is a DIFFERENT number (only the files that CARRY
+        # a site — a module can be scanned and carry none). Before this key existed
+        # the doc's scanned count could drift by any amount while `--check` stayed
+        # green (`#13098` review P3). ⛔ Neither figure is quoted here: a number
+        # beside a claim rots at the next file that lands, which is why this
+        # comment said "295 files scanned" long after §0 had stopped saying it.
         "files_scanned": result["files_scanned"],
         "unresolved": sum(1 for s in sites if s.shape == "unresolved"),
         "candidates": sum(1 for s in sites if s.verdict.startswith("candidate")),
