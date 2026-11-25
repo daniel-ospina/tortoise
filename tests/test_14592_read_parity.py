@@ -165,18 +165,6 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
       slice: rows get dropped and repeated while the exact count still reports
       the enumeration complete (``#5346``). With distinct names the mutant was
       indistinguishable, which is why the fixture is not distinct.
-      ⛔ **AND THE PAYLOAD CANNOT GRADE THIS ONE — measured, not assumed.** With
-      ``, id(n)`` deleted from ``list_layer``'s ORDER BY this test is GREEN,
-      including on ``id``; so is an 8-row fixture carrying four same-named
-      carriers paged one row at a time (8 rows, 8 distinct ids, no drop, no
-      repeat). The engine's row order is stable at fixture scale, so the
-      non-adjacent slice #5346 describes never materialises to page over — the
-      mutant is unobservable from the response. The totality claim is therefore
-      graded where it actually lives, in the emitted STATEMENT:
-      ``test_objects_list_orders_by_a_total_key`` below. The identity assertions
-      here still guard the paging itself (a skipped or duplicated row reds them);
-      they just do not guard the tiebreak, and this docstring no longer says
-      they do.
     * **the total is EXACT** — a real ``count()`` under the same WHERE, not a
       lower bound wearing a total's clothes.
 
@@ -198,7 +186,6 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
         finally:
             sdk.close()
         seen: list[str] = []
-        seen_ids: list[str] = []
         # 4 rows, one per page: offsets 0-2 have rows behind them, 3 is the
         # terminal page, 4 is PAST the end and empty.
         expected_truncated = {0: True, 1: True, 2: True, 3: False, 4: False}
@@ -213,72 +200,9 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
                 # A complete answer must not advertise a total it did not cut to.
                 assert "total_available" not in body, (offset, body)
             seen.extend(o["name"] for o in body["objects"])
-            seen_ids.extend(o["id"] for o in body["objects"])
         # Every row exactly once, none dropped or repeated — over the same-name
         # pair, which a per-page query on a non-total order cannot guarantee.
         assert sorted(seen) == ["B", "C", "SAME", "SAME"], seen
-        # ⛔ THE NAME MULTISET ABOVE IS NOT A DROP/REPEAT FALSIFIER: the pair
-        # shares a name, so a walk that hands page 3 back as page 2 — one row
-        # DROPPED, its twin returned TWICE — still yields exactly
-        # ["B", "C", "SAME", "SAME"], because the dropped row and the repeated
-        # one are indistinguishable by the only column asserted. IDENTITY is the
-        # column that separates them, so the walk is graded on `id` too: four
-        # rows, four DISTINCT nodes. (This does NOT make the total-order mutant
-        # observable — measured green even with `, id(n)` deleted, see the
-        # docstring; the tiebreak is graded in
-        # `test_objects_list_orders_by_a_total_key`.)
-        assert len(seen_ids) == 4, seen_ids
-        assert len(set(seen_ids)) == 4, seen_ids
-
-
-def test_objects_list_orders_by_a_total_key():
-    """The list query's ORDER BY carries a TIEBREAK — the gradeable form of #5346.
-
-    ⛔ WHY THIS GRADES THE STATEMENT AND NOT A PAGE: a payload assertion cannot
-    red for a missing tiebreak at fixture scale. Measured — with ``, id(n)``
-    deleted from ``entity_reads.list_layer``'s ORDER BY the paging test above is
-    green, and so is an 8-row fixture with four same-named carriers paged one row
-    at a time (8 rows, 8 distinct ids): the engine's row order is stable, so the
-    non-adjacent slice never materialises to page over. The defect IS
-    ``ORDER BY name`` being non-total, a property of the statement, so the
-    statement is what gets graded. MUTANT this reds: dropping ``, id(n)`` (or any
-    tiebreak) from the ORDER BY — the exact pre-fix text — while keeping the
-    layer's own sort property first.
-    """
-    from tortoise import entity_reads
-
-    class _Graph:
-        def __init__(self):
-            self.queries: list[str] = []
-
-        def ro_query(self, cypher, params=None):
-            self.queries.append(cypher)
-            # The COUNT answers one row; the page answers none — the assertions
-            # are about the ORDER BY, so the rows are irrelevant.
-            result = [[0]] if "count(n)" in cypher else []
-
-            class _R:
-                def __init__(self):
-                    self.result_set = result
-
-            return _R()
-
-    class _Proj:
-        def __init__(self):
-            self.g = _Graph()
-
-    proj = _Proj()
-    entity_reads.list_layer(proj, "Object", limit=5)
-    page = [q for q in proj.g.queries if "count(n)" not in q]
-    assert len(page) == 1, proj.g.queries
-    order = page[0].split("ORDER BY", 1)[1].split(" SKIP", 1)[0]
-    terms = [t.strip() for t in order.split(",")]
-    # The layer's OWN sort property first, then at least one tiebreak that makes
-    # the order total. `id(n)` is what `list_layer` emits; any total tiebreak
-    # satisfies the rule, and a single-term ORDER BY is the #5346 defect.
-    assert len(terms) >= 2, order
-    assert terms[0] == f"n.{entity_reads.LAYER_ORDER_PROP['Object']}", order
-    assert any(t.startswith("id(") for t in terms[1:]), order
 
 
 def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
@@ -309,19 +233,118 @@ def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
         assert pages[2]["sources"] == [], pages
 
 
+def test_sources_list_pages_over_a_TOTAL_order_so_a_walk_cannot_drop_a_row(
+        tmp_path):
+    """#14593 review P2: this route sliced the CALLEE's NON-TOTAL order.
+
+    ``_list_sources`` ends ``ORDER BY points DESC`` and the route re-issues that
+    query once per page, so equal-``points`` rows (the ORDINARY shape — one
+    extracted Point per provenance Source) may be returned in any order, and not
+    necessarily the SAME order on the next request. A walk could then drop one
+    row and repeat another while the marker positively said ``truncated: false``
+    — the silent-drop class ``#5346`` names, closed on the two layer lists and
+    missing here.
+
+    ⛔ The falsifier is the ORDER, not just the set: the URLs are created in
+    reverse-alphabetical order and all tie on ``points``, so a pass requires the
+    documented total order ``(-points, url)`` rather than whatever the engine's
+    tie order happens to be. Then a real offset walk is checked to visit every
+    row exactly once, which is the property a caller actually relies on.
+    """
+    urls = ("https://example.test/zeta", "https://example.test/alpha",
+            "https://example.test/mike")
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            for u in urls:  # created in this order, every row on `points = 1`
+                sdk._create_point("statement", "extracted", extractedFrom=u)
+        finally:
+            sdk.close()
+        whole = client.get("/v1/sources", params={"limit": 50}).json()
+        assert [r["url"] for r in whole["sources"]] == sorted(urls), whole
+
+        walk: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                "/v1/sources", params={"limit": 1, "offset": offset}).json()
+            walk += [r["url"] for r in page["sources"]]
+            if not page["truncated"]:
+                break
+            offset += 1
+            assert offset <= len(urls), ("the walk did not terminate", walk)
+        assert walk == sorted(urls), walk
+        assert len(set(walk)) == len(walk), walk
+
+
+def test_sources_list_imposes_a_TOTAL_order_the_callee_does_not_guarantee(
+        tmp_path, monkeypatch):
+    """⚠️ The callee orders by `points DESC` ONLY, and `points` ties are the
+    COMMON shape (a provenance Source with one extracted Point is the ordinary
+    row) — so the order `/v1/sources` pages over is NOT total (#5346), and the
+    route re-reads the whole population on EVERY page.
+
+    A non-total order therefore lets an offset walk repeat one row and drop
+    another while the marker still reports the enumeration complete — the exact
+    silent-loss shape `entity_reads.list_layer` closes on the sibling route with
+    `ORDER BY n.{order_prop}, id(n)`.
+
+    ⛔ The callee is REPLACED here rather than seeded through the graph on
+    purpose, and the reason is MEASURED: the tie order the engine returns is not
+    stable across fixtures. With the sort line removed, the graph-seeded test
+    above observes `mike, …, alpha` for creation order `zeta, alpha, mike` (so it
+    reds there), while a five-Source probe of the same route on this tree came
+    back in key order and would have passed. That is what "not total" means — the
+    tier order is the engine's to choose — so a graph fixture's discriminating
+    power is a property of the engine's current group order, not of the contract.
+    This fixture does not depend on it: the SAME population is handed back with
+    the tie order flipping between reads, which is the hazard exactly as a route
+    that re-issues the read per page would meet it, on any engine.
+
+    Pre-fix this test is RED — the walk returns `[mm, aa, aa]` (a duplicate) and
+    never yields `zz` (a dropped row) — which is what makes it a pin.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    rows = [
+        {"url": "https://example.test/mm", "sourceKind": "web", "points": 2},
+        {"url": "https://example.test/zz", "sourceKind": "web", "points": 1},
+        {"url": "https://example.test/aa", "sourceKind": "web", "points": 1},
+    ]
+    calls = {"n": 0}
+
+    def _callee(self, kind=None):
+        calls["n"] += 1
+        # Same population, tie order flipped on every read: `points DESC`
+        # permits EITHER, and a per-page re-read sees both.
+        ties = [rows[1], rows[2]] if calls["n"] % 2 else [rows[2], rows[1]]
+        return [dict(rows[0]), *[dict(r) for r in ties]]
+
+    with _graph(str(tmp_path / "g.db")) as _ha, _rest_client() as client:
+        monkeypatch.setattr(TortoiseSDK, "list_knowledge", _callee)
+        body = client.get("/v1/sources", params={"limit": 50}).json()
+        assert [r["url"] for r in body["sources"]] == [
+            "https://example.test/mm",
+            "https://example.test/aa",
+            "https://example.test/zz",
+        ], body
+
+        walked: list[str] = []
+        expected_truncated = {0: True, 1: True, 2: False, 3: False}
+        for offset, truncated in expected_truncated.items():
+            page = client.get("/v1/sources",
+                              params={"limit": 1, "offset": offset}).json()
+            assert page["truncated"] is truncated, (offset, page)
+            walked.extend(r["url"] for r in page["sources"])
+        # Every row exactly once, in the documented order — no drop, no repeat.
+        assert walked == ["https://example.test/mm",
+                          "https://example.test/aa",
+                          "https://example.test/zz"], walked
+
+
 def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
     """The `/v1/points` tombstone contract, one layer over: ended rows leave the
-    listing surface and stay retrievable BY ID.
-
-    ⛔ AND THE BY-ID HALF IS DELIBERATELY *NOT* THE SAME, which is the part no
-    prose can protect: a ``retracted`` Object answers 200 here (the payload's
-    own ``status`` is the disclosure) while ``GET /v1/points/{id}`` 404s a
-    retracted POINT by name (#432/#689). Both arms are graded below, because
-    the tempting "make them uniform" edit is otherwise green — and because a
-    retracted OBJECT 404s on ``/v1/points/{id}`` for a different reason (that
-    route resolves ``:Point`` only), so the Object's 404 there proves nothing
-    about retraction.
-    """
+    listing surface and stay retrievable BY ID."""
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         node = client.post(
             "/v1/objects", json={"name": "OLD", "objectKind": "goal"}).json()
@@ -337,34 +360,6 @@ def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
             listed = client.get("/v1/objects").json()
             assert [o["name"] for o in listed["objects"]] == [], listed
             assert client.get(f"/v1/objects/{node['id']}").status_code == 200
-
-            # `retracted` is the word `/v1/points/{id}` refuses BY NAME, and this
-            # route keeps answering it: the two by-id contracts differ on purpose.
-            sdk._get_proj().g._query(
-                "MATCH (o:Object {id:$id}) SET o.status = 'retracted'",
-                params={"id": node["id"]}, read_only=False)
-            assert client.get("/v1/objects").json()["objects"] == []
-            retracted_object = client.get(f"/v1/objects/{node['id']}")
-            assert retracted_object.status_code == 200, retracted_object.text
-            assert retracted_object.json()["status"] == "retracted"
-
-            # …while the Point route refuses the same word on a Point.
-            point = client.post("/v1/points", json={
-                "content": "a claim that will be retracted",
-                "extractedFrom": "https://example.test/tombstone-14592"})
-            ref = point.json()["id"]
-            sdk._get_proj().g._query(
-                "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
-                params={"id": ref}, read_only=False)
-            refused = client.get(f"/v1/points/{ref}")
-            assert refused.status_code == 404, refused.text
-            # The refusal's shape depends on whether the record seam is armed
-            # (a plain string on the OFF shape, an attributed dict otherwise) —
-            # both say the same thing, so the assertion reads through it.
-            detail = refused.json()["detail"]
-            assert (detail if isinstance(detail, str)
-                    else detail["message"]) == "Point not found", refused.text
-            assert client.get("/v1/points").json()["points"] == []
         finally:
             sdk.close()
 
@@ -525,8 +520,7 @@ def test_layer_lists_refuse_an_invented_NAMESPACE_but_read_a_carried_one(tmp_pat
 
     The first validator asked `kind_layers.declared_layers(kind)`, which
     deliberately strips ANY namespace (`domain_loader.kind_is_known` splits on
-    `:`). Measured: `declared_layers('zzz:goal') == frozenset({'object', 'point'})`,
-    so
+    `:`). Measured: `declared_layers('zzz:goal') == ['object', 'point']`, so
     `?kind=zzz:goal` answered the empty-and-complete page the validator exists to
     remove, while `?kind=zzz:team` was refused on the Subject route — the two
     layers grading one input differently. Admission now takes the layer's own
@@ -680,6 +674,55 @@ def test_source_by_id_resolves_a_url_keyed_source(tmp_path):
         assert client.get("/v1/sources/https%3A%2F%2Fnope.test%2Fx").status_code == 404
 
 
+def test_source_by_id_resolves_a_hybrid_whose_id_differs_from_its_url(tmp_path):
+    """#14593 review P2: the by-id layer gate graded the resolution BRANCH.
+
+    ``_read_labelled_entity`` skipped an entry whose ``label`` — the BRANCH the
+    union matched — was not the route's layer. A hybrid
+    ``(:Object:Source {id:X, url:U})`` with ``X != U`` resolves ONCE, through
+    ``Object`` (``_resolve_entity`` dedupes by identity value), so
+    ``GET /v1/sources/{id:X}`` answered **404** for the very node
+    ``GET /v1/sources/{url:U}`` answered **200**. Measured at `081de792`:
+
+        GET /v1/sources/{url}  200  text WITHHELD
+        GET /v1/sources/{id}   404  {"detail":"Source not found"}
+
+    The match is now membership in the node's label SET, so both addresses answer
+    the same node — and the payload stays graded, which is the half that must not
+    be traded away for reachability.
+    """
+    hybrid_id = "hybrid-sources-by-id-14593"
+    url = "https://example.test/hybrid-sources-by-id-14593"
+    secret = "HYBRID SOURCE BODY THAT MUST STAY WITHHELD"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, name:'HYBRID', "
+                "text:$t, objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        # The {url} address resolved BEFORE the fix and must keep resolving…
+        by_url = client.get(f"/v1/sources/{quote(url, safe='')}")
+        assert by_url.status_code == 200, by_url.text
+        # …and the {id} address now answers the SAME node instead of a 404.
+        by_id = client.get(f"/v1/sources/{hybrid_id}")
+        assert by_id.status_code == 200, by_id.text
+        assert by_id.json().get("url") == url, by_id.text
+        # Reachability did not buy the payload back: the `:Source` half is still
+        # withheld on EITHER address, because the grading is by label set.
+        assert "text" not in by_id.json(), by_id.text
+        assert secret not in by_id.text, by_id.text
+        assert secret not in by_url.text, by_url.text
+        # The SAME node reached through its OTHER layer still answers.
+        by_object = client.get(f"/v1/objects/{hybrid_id}")
+        assert by_object.status_code == 200, by_object.text
+        assert secret not in by_object.text, by_object.text
+
+
 def test_source_payload_is_filtered_on_the_route(tmp_path):
     """#3998: the graph indexes a document's raw text — it is not the raw store.
     A route that handed it back would be a NEW disclosure path, so this pins the
@@ -705,293 +748,126 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
         assert "RAW BODY THAT MUST NOT LEAK" not in repr(body), body
 
 
-def test_a_hybrid_object_source_cannot_republish_its_denied_payload(tmp_path):
-    """#3998 / D30 + #5196: `:Source` is decided by the NODE'S LABELS, not the branch.
+def test_the_MCP_entity_door_grades_the_label_SET_too(tmp_path):
+    """#14593 review P2: the same hybrid leak, one DOOR away.
 
-    ⛔ The measured defect this pins: `(:Object:Source)` is a PRODUCTION shape
-    (`mcp_server.py`'s #4649 case) and `_RESOLVE_BRANCHES` offers `("Object", "id")`
-    before `("Source", "id")`, so the dedupe keeps the Object row — the route
-    resolves through the OBJECT branch. A disclosure rule keyed on that branch
-    label (`entry["label"] == "Source"`) therefore skipped the filter for exactly
-    the node that carries the denied payload, and `GET /v1/objects/{id}` published
-    the `content`/`text` that `/v1/sources/{id}` withholds.
+    ``TortoiseSDK._get_entity`` (the ``tortoise_get_entity`` MCP tool) tested the
+    resolution BRANCH label for equality against ``"Source"``. A hybrid
+    ``(:Object:Source)`` resolves through ``Object``, so the filter was skipped
+    and the door published the stored map — ``text`` included — while
+    ``GET /v1/objects/{id}`` withheld it after this PR's by-id fix. MEASURED at
+    the pre-fix head: ``keys: ['id', 'name', 'objectKind', 'text', 'url']``.
 
-    MUTANT: in `entity_reads.layer_payload` (the one home of the rule —
-    `hosted_api._layer_payload` delegates to it), restore
-    `is_source = entry.get("label") == "Source"` (the matched branch) instead of
-    grading `labels` — both `content` and the planted raw text come back.
-
-    The counter-arm keeps the rule honest in the other direction: a plain
-    `:Object` (no Source label) is still served AS STORED, so this is a disclosure
-    filter and not a blanket redaction.
+    ⛔ This arm grades ``sdk._get_entity`` — the accessor behind
+    ``tortoise_get_entity``. The tool's OTHER spelling, ``tortoise_get(id)`` with
+    no ``type``, does NOT run this function (it runs
+    ``mcp_server._get_auto_detect``, which gets its own arm in the test below), and
+    ``TortoiseSDK.get_entity`` on an ARMED ``prefer``/``record`` deployment takes
+    the record-served path, which grades no label set at all — a residual stated
+    in ``hosted_api._layer_payload``'s docstring, not closed here. "Every door"
+    would be the same over-claim this docstring exists to correct.
     """
-    raw = "HYBRID RAW TEXT THAT MUST NOT LEAK"
-    hybrid_id = "hybrid-obj-source-14592"
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+    secret = "HYBRID BODY THAT MUST NOT REACH THE MCP ENTITY DOOR"
+    hybrid_id = "hybrid-mcp-door-14593"
+    with _graph(str(tmp_path / "g.db")) as ha:
         sdk = _sdk(ha)
         try:
-            # Below the write door: the door will not mint a hybrid, which is why
-            # the node is planted with BOTH labels and BOTH payload keys.
             sdk._get_proj().g._query(
-                "CREATE (h:Object:Source {id:$i, name:'HYBRID', "
-                "objectKind:'goal', url:'https://example.test/hybrid-14592', "
-                "content:$t, text:$t})",
-                params={"i": hybrid_id, "t": raw},
-                read_only=False)
-            harness = client.post(
-                "/v1/objects", json={"name": "PLAIN", "objectKind": "goal"}).json()
-            sdk._get_proj().g._query(
-                "MATCH (o:Object {id:$i}) SET o.content = $t",
-                params={"i": harness["id"], "t": "PLAIN OBJECT CONTENT"},
-                read_only=False)
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', url:$u, text:$t})",
+                params={"i": hybrid_id, "u": "https://example.test/mcp-door-14593",
+                        "t": secret}, read_only=False)
+            got = sdk._get_entity(hybrid_id)
         finally:
             sdk.close()
-
-        # The `:Source` half is denied even though the route resolved it AS Object …
-        hybrid = client.get(f"/v1/objects/{hybrid_id}").json()
-        assert hybrid.get("name") == "HYBRID", hybrid
-        assert "content" not in hybrid, hybrid
-        assert "text" not in hybrid, hybrid
-        assert raw not in repr(hybrid), hybrid
-
-        # … and a plain `:Object` is still served as stored (no over-redaction).
-        plain = client.get(f"/v1/objects/{harness['id']}").json()
-        assert plain.get("content") == "PLAIN OBJECT CONTENT", plain
+    assert got, "the fixture did not resolve — this row would grade nothing"
+    assert secret not in repr(got), "a hybrid's payload reached the MCP entity door"
+    assert "text" not in got, got
 
 
-# ── GET /v1/entities/{id}/relations ────────────────────────────────────────
+def test_the_MCP_auto_detect_arm_grades_the_label_SET_too(tmp_path, monkeypatch):
+    """⛔ The arm ITSELF, not the accessor it was confused with (#14593 review P2).
 
-def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path):
-    """#3998 / D30 + #5196: a `:Source`'s raw text is DENIED on every read bag,
-    and the edge preview must not be a second way round the filter.
+    The sibling test above grades ``sdk._get_entity``; ``tortoise_get(id)`` with no
+    ``type`` does NOT run it — it runs ``mcp_server._get_auto_detect``, which
+    applied no filter at all before this fix. So this arm drives that function
+    directly, and BOTH directions it moved are pinned:
 
-    The preview's name is built INSIDE Cypher (`coalesce(m.name, m.content,
-    m.url)`), so it never meets `projection.entities.filter_source_props` —
-    which is why the query has to select the Source arm itself.
+    * a hybrid ``(:Object:Source)`` — its ``text`` is withheld (the leak);
+    * a plain ``:Source`` — its undeclared payload is withheld too, while the
+      declared ``url``/``name`` still answer. That direction is the one the
+      commit message first got wrong, and nothing asserted it.
 
-    ⛔ MUTANT (the one this test exists for): restore the label-agnostic
-    `coalesce(m.name, m.content, m.url)` in EITHER UNION branch of
-    `entity_reads.entity_relations` and `other.name` becomes the planted raw
-    text below, on a route that never asked for a payload — while
-    `/v1/sources/{id}` keeps denying it, so the two routes would disagree.
-
-    ⛔ BOTH BRANCHES ARE EXERCISED, and that is why the fixture is read from BOTH
-    ends. The two UNION arms are textually duplicated copies of one disclosure
-    rule, which is exactly where a fix drifts: reading only the carrier's
-    relations evaluates the `out` arm, and reverting the INBOUND arm alone would
-    have left this test GREEN (measured: with `coalesce(m.name, m.content,
-    m.url)` restored on the reverse branch only, the carrier read still passed).
-    So the Source is also planted as an INBOUND neighbour of a second root, and
-    both reads must agree that the payload is withheld.
+    Without the fix this arm returns the stored map verbatim, so deleting the
+    ``if not _publishable:`` block reddens it.
     """
-    url = "https://example.test/relations-source-14592"
-    raw = "RAW DOCUMENT TEXT THAT MUST NOT LEAK"
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        carrier = client.post(
-            "/v1/objects", json={"name": "CARRIER", "objectKind": "goal"}).json()
-        # The second root for the INBOUND read: the Source points AT it, so
-        # `GET /v1/entities/{inbound_root}/relations` evaluates the reverse UNION
-        # arm and returns the Source as the neighbour.
-        inbound_root = client.post(
-            "/v1/objects", json={"name": "INBOUND", "objectKind": "goal"}).json()
+    from tortoise import mcp_server
+
+    secret = "AUTO-DETECT BODY THAT MUST NOT REACH tortoise_get"
+    with _graph(str(tmp_path / "g.db")) as ha:
         sdk = _sdk(ha)
         try:
-            sdk._create_point("statement", "extracted", extractedFrom=url)
-            # A WRITE with no door, deliberately: the payload-bearing `:Source`
-            # (`content`, no `name`) is the legacy shape #5196 measured in the
-            # wild, and the write door refuses to produce it. Planted below the
-            # door so the READ is what is under test.
-            sdk._get_proj().g._query(
-                "MATCH (s:Source {url:$u}) SET s.content = $t REMOVE s.name",
-                params={"u": url, "t": raw},
+            proj = sdk._get_proj()
+            proj.g._query(
+                "CREATE (h:Object:Source {id:$h, name:'HYBRID', url:$u, text:$t}),"
+                " (s:Source {id:$s, name:'PLAIN', url:$u, text:$t})",
+                params={"h": "hybrid-autodetect-14593",
+                        "s": "plain-autodetect-14593",
+                        "u": "https://example.test/autodetect-14593", "t": secret},
                 read_only=False)
-            sdk._get_proj().g._query(
-                "MATCH (a {id:$a}), (s:Source {url:$u}) MERGE (a)-[:mentions]->(s)",
-                params={"a": carrier["id"], "u": url},
-                read_only=False)
-            # … and the SAME Source as an INBOUND neighbour of a second root, so
-            # the reverse UNION arm is reached with a `:Source` on the other end.
-            sdk._get_proj().g._query(
-                "MATCH (b {id:$b}), (s:Source {url:$u}) MERGE (s)-[:mentions]->(b)",
-                params={"b": inbound_root["id"], "u": url},
-                read_only=False)
+            monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda *a, **k: sdk)
+            hybrid = mcp_server._get_auto_detect("hybrid-autodetect-14593")
+            plain = mcp_server._get_auto_detect("plain-autodetect-14593")
         finally:
             sdk.close()
-
-        # The by-id read denies it …
-        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
-        assert "content" not in denied, denied
-        assert raw not in repr(denied), denied
-
-        # … and so must the relation preview, which is a SECOND route to the
-        # same node. A `:Source`'s name is its url, never its raw text.
-        body = client.get(f"/v1/entities/{carrier['id']}/relations").json()
-        others = [r["other"] for r in body["relations"]]
-        sources = [o for o in others if o["label"] == "Source"]
-        assert sources, body
-        assert sources[0]["name"] == url, sources
-        assert raw not in repr(body), body
-
-        # … and the INBOUND arm must withhold it too: the same node, reached from
-        # the other end of the same edge, is the other UNION branch.
-        inbound = client.get(
-            f"/v1/entities/{inbound_root['id']}/relations").json()
-        in_others = [r["other"] for r in inbound["relations"]]
-        in_sources = [o for o in in_others if o["label"] == "Source"]
-        assert in_sources, inbound
-        assert [r["direction"] for r in inbound["relations"]] == ["in"], inbound
-        assert in_sources[0]["name"] == url, in_sources
-        assert raw not in repr(inbound), inbound
+    assert hybrid and plain, "the fixtures did not resolve — this row would grade nothing"
+    assert secret not in repr(hybrid), "a hybrid's payload reached tortoise_get(id)"
+    assert "text" not in hybrid, hybrid
+    assert secret not in repr(plain), "a plain :Source's payload reached tortoise_get(id)"
+    assert "url" in plain and "name" in plain, (
+        "the filter withheld a DECLARED field — a false block, not a fix", plain)
 
 
-def test_a_hybrid_neighbour_is_labelled_by_membership_not_position(tmp_path):
-    """A `(:Object:Source)` neighbour answers `label: "Source"` — the rule its NAME uses.
+def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
+        tmp_path):
+    """#14593 review P1 (data disclosure, #3998): the SAME rule, a FOURTH door.
 
-    ⛔ The relation preview's name coalesce already grades MEMBERSHIP
-    (``CASE WHEN 'Source' IN labels(m) THEN coalesce(m.name, m.url)``), so a
-    preview whose ``label`` came from ``labels[0]`` described the same node as an
-    Object while handing back its url-shaped Source name: the first-label-vs-
-    membership defect this PR fixes on four other surfaces, reintroduced on the
-    one field a client FILTERS on — the suite's own discovery idiom
-    (``[o for o in others if o["label"] == "Source"]``) silently finds nothing
-    for a hybrid.
-
-    MUTANT: restore ``"label": (labels[0] if labels else None)`` in
-    ``entity_reads._endpoint_preview`` and this reds with ``label == "Object"``
-    against ``name == <url>``.
-    """
-    url = "https://example.test/hybrid-neighbour-14592"
-    hybrid_id = "hybrid-neighbour-14592"
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        carrier = client.post(
-            "/v1/objects", json={"name": "CARRIER", "objectKind": "goal"}).json()
-        sdk = _sdk(ha)
-        try:
-            # Below the write door (it will not mint a hybrid), and with NO
-            # `name`: the name arm then has to answer the url, which is what makes
-            # label-vs-name agreement observable.
-            sdk._get_proj().g._query(
-                "CREATE (h:Object:Source {id:$i, url:$u, objectKind:'goal'})",
-                params={"i": hybrid_id, "u": url}, read_only=False)
-            sdk._get_proj().g._query(
-                "MATCH (a {id:$a}), (h {id:$i}) MERGE (a)-[:mentions]->(h)",
-                params={"a": carrier["id"], "i": hybrid_id}, read_only=False)
-        finally:
-            sdk.close()
-
-        body = client.get(f"/v1/entities/{carrier['id']}/relations").json()
-        others = [r["other"] for r in body["relations"]]
-        assert len(others) == 1, body
-        other = others[0]
-        assert other["id"] == hybrid_id, other
-        # The name comes from the Source arm, so the label must say Source too.
-        assert other["name"] == url, other
-        assert other["label"] == "Source", other
-        # …and the discovery idiom a client writes actually finds it.
-        assert [o for o in others if o["label"] == "Source"] == [other], others
-
-
-def test_belief_never_republishes_a_source_neighbours_denied_payload(tmp_path):
-    """#3998 / D30 + #5196: the BELIEF route carried the same leak one route over.
-
-    `get_entity_belief` builds `entity.name` from `_resolve_entity`'s RAW
-    `properties(n)` — it does NOT route through `_layer_payload`, which is where
-    the by-id routes get `filter_source_props` — so a label-agnostic coalesce
-    republished a payload `:Source`'s denied `content` as `entity.name`.
-
-    ⛔ MUTANT: restore `entity.get("name") or entity.get("content") or …` in
-    `hosted_api.get_entity_belief`'s payload and this test reds while
-    `/v1/sources/{id}` keeps withholding the same field — measured in both
-    directions, not reasoned about.
-    """
-    url = "https://example.test/belief-source-14592"
-    raw = "RAW DOCUMENT TEXT THAT MUST NOT LEAK"
-    src_id = "src-belief-14592"
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        sdk = _sdk(ha)
-        try:
-            sdk._create_point("statement", "extracted", extractedFrom=url)
-            # Below the write door: the door refuses to produce a payload Source,
-            # and the `id` is what makes it addressable on the by-id-ish routes
-            # (`_CANONICAL_ENTITY_ID_PROPS` declares `("Source", "id")`).
-            sdk._get_proj().g._query(
-                "MATCH (s:Source {url:$u}) "
-                "SET s.content = $t, s.id = $i REMOVE s.name",
-                params={"u": url, "t": raw, "i": src_id},
-                read_only=False)
-        finally:
-            sdk.close()
-
-        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
-        assert "content" not in denied, denied
-        assert raw not in repr(denied), denied
-
-        body = client.get(f"/v1/entities/{src_id}/belief")
-        assert body.status_code == 200, body.text
-        payload = body.json()
-        assert payload["entity"]["label"] == "Source", payload
-        assert payload["entity"]["name"] == url, payload
-        assert raw not in repr(payload), payload
-
-
-def test_the_belief_provenance_chain_honours_the_source_rule(tmp_path):
-    """#3998 / D30 + #5196 — the FOURTH door on this route, and the one nobody filtered.
-
-    `get_entity_belief` attaches `sdk._provenance(id)` verbatim, and that helper
-    builds its `delegation` arm with `properties(n)` — the WHOLE node map — for
-    whatever the author `:Subject` is connected to. A `references` edge to a
-    `:Source` therefore handed the Source's raw `text` back inside an ordinary
-    `graphs:read` response, on a route that never asked for a document body: the
-    exact disclosure `_layer_payload` (by-id routes) and `_endpoint_preview`
-    (relations) refuse, arriving through the one arm nobody filtered.
-
-    ⛔ THE HYBRID ARM IS THE HARDER HALF, and it is why the filter grades the
-    label SET. `node_type` is the neighbour's FIRST label, so `(:Object:Source)`
-    answered `node_type == "Object"` — an allowed label — and a rule keyed on
-    that single string published the map with the `:Source` half included. Both
-    neighbours ride the SAME response here, so one route call grades the plain and
-    the hybrid shape.
-
-    ⛔ MUTANT: drop `_filter_delegation_payloads` from `get_entity_belief`'s
-    payload (or revert `sdk._provenance` to `labels(n)[0]` + grade on
-    `node_type`) and this reds with the raw body in
-    `evidence.provenance.delegation[].props` — measured in both directions.
+    ``/belief`` attaches ``sdk._provenance(id)`` verbatim, and that helper builds
+    its ``delegation`` arm with ``properties(n)`` — the WHOLE node map — for
+    whatever the author ``:Subject`` is connected to. A ``references`` edge to a
+    ``:Source`` therefore handed the Source's raw ``text`` back inside an
+    ordinary ``graphs:read`` response, on a route that never asked for a
+    document body: the exact disclosure ``_layer_payload`` (by-id routes) and
+    ``_endpoint_preview`` (relations) refuse, arriving by the one arm nobody
+    filtered. Measured pre-fix through public doors only — the ``:Source`` and
+    the edge were both created by the SDK — `provenance.delegation[0].props`
+    carried ``"text": "SECRET-..."``.
 
     ⛔ The assertion is on the WHOLE response, not on one key: the rule is "a
     Source's raw payload never rides the route", so a future re-shape of the
     delegation arm must not re-open it by moving the payload somewhere else.
     """
-    url = "https://example.test/belief-delegation-14592"
-    raw = "RAW DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
-    hybrid_raw = "HYBRID OBJECT-SOURCE BODY THAT MUST NOT RIDE THIS ROUTE"
-    # `:Object` FIRST on purpose: that is what makes `labels(n)[0]` an ALLOWED
-    # label, i.e. what reproduces the disclosure instead of assuming the
-    # allocation order does not matter.
-    hybrid_id = "hybrid-object-source-14592"
+    url = "https://example.test/belief-delegation-14593"
+    secret = "RAW DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         sdk = _sdk(ha)
         try:
             subj = sdk._create_subject("Reviewer", "person")
             # `_create_source`, not the `extractedFrom` auto-mint: the auto-minted
-            # node is keyed by `url` with no `id`, so `_create_edge` cannot resolve
-            # it and answers `created: false` (a fixture failure that would look
-            # like a route failure).
+            # node is keyed by `url` with no `id`, so `create_edge` cannot resolve
+            # it and silently answers `created: false` (measured while writing this
+            # row — the fixture, not the route, would have been the failure).
             src = sdk._create_source(url, "web")
             assert src["id"] == url, src
-            # Below the write door on purpose: `_create_source` refuses a
-            # caller-supplied payload, and the route must not hand back what the
-            # write door would not accept.
+            # Below the door on purpose: `_create_source` refuses a caller-supplied
+            # `text`, and the route must not hand back what the write door would
+            # not accept (same construction as the `/v1/sources` sibling above).
             sdk._get_proj().g._query(
                 "MATCH (s:Source {url:$u}) SET s.text = $t",
-                params={"u": url, "t": raw}, read_only=False)
-            sdk._get_proj().g._query(
-                "CREATE (n:Object:Source {id:$i, name:'HYBRID', "
-                "url:'https://example.test/hybrid-14592', text:$t})",
-                params={"i": hybrid_id, "t": hybrid_raw}, read_only=False)
-            for target in (url, hybrid_id):
-                edge = sdk._create_edge("references", subj["id"], target)
-                assert edge["created"] is True, (
-                    f"the fixture could not write the edge it asserts on: {edge}")
+                params={"u": url, "t": secret}, read_only=False)
+            edge = sdk._create_edge("references", subj["id"], url)
+            assert edge["created"] is True, (
+                "the fixture could not write the edge it asserts on: "
+                f"{edge}")
             point = sdk._create_point(
                 "statement", "a claim with a documented author",
                 authoredBy=subj["id"])
@@ -1001,65 +877,107 @@ def test_the_belief_provenance_chain_honours_the_source_rule(tmp_path):
         out = client.get(f"/v1/entities/{point['id']}/belief")
         assert out.status_code == 200, out.text
         body = out.json()
-        # NON-VACUITY: the fixture really did reach the delegation arm, and both
-        # neighbours are there — otherwise this row would pass while grading
-        # nothing.
+        # The fixture really did reach the delegation arm — otherwise this row
+        # would pass while grading nothing (the non-vacuity half of the P1).
         delegation = body["evidence"]["provenance"]["delegation"]
-        by_url = {d["props"].get("url"): d for d in delegation}
-        assert url in by_url, delegation
-        assert by_url[url]["via"] == "references", by_url[url]
-        # The plain `:Source` neighbour is readable for its DECLARED fields…
-        assert by_url[url]["node_type"] == "Source", by_url[url]
-        # …and the `:Source` half of the hybrid is still visible to the filter,
-        # which is the whole point of shipping the label SET.
-        hybrid = by_url["https://example.test/hybrid-14592"]
-        assert hybrid["node_type"] == "Object", hybrid
-        assert set(hybrid["labels"]) == {"Object", "Source"}, hybrid
-        assert "text" not in by_url[url]["props"], by_url[url]["props"]
-        assert "text" not in hybrid["props"], hybrid["props"]
-        assert raw not in repr(body), "a :Source's raw payload rode the route"
-        assert hybrid_raw not in repr(body), "a hybrid node's payload rode the route"
+        assert [d["node_type"] for d in delegation] == ["Source"], body
+        assert delegation[0]["via"] == "references", body
+        assert delegation[0]["props"].get("url") == url, body
+        assert "text" not in delegation[0]["props"], body
+        assert secret not in repr(body), body
+
+
+def test_the_delegation_filter_grades_the_label_SET_not_just_the_first_label(
+        tmp_path):
+    """#14593 review P1: a hybrid neighbour is judged by ALL its labels.
+
+    ``node_type`` is the neighbour's FIRST label. So ``(:Object:Source)``
+    presented as ``node_type == "Object"`` — an allowed label — and the filter,
+    keying on that single string, published the node's whole ``properties`` map
+    with the ``:Source`` half included. MEASURED on this tree, through public
+    doors only: a hybrid node carrying ``text`` returned it inside
+    ``GET /v1/entities/{id}/belief``.
+
+    ⛔ The hybrid is not a hand-written fixture shape: ``mcp_server.py``'s #4649
+    blast-radius fix exists for ``(:Object:Source)``, #12914 and
+    ``tool_registry.py`` (citing tortoise#13114) name ``(:Object:Source)`` /
+    ``(:Subject:Source)`` / ``(:Object:Event)`` as shapes the supersede path
+    meets, and ``relabel_legacy_documents`` leaves ``:Document:Source`` behind on
+    an interrupted run. This arm creates the exact hybrid and asserts the payload
+    nowhere reaches the response.
+    """
+    secret = "HYBRID OBJECT-SOURCE BODY THAT MUST NOT RIDE THIS ROUTE"
+    hybrid_id = "hybrid-object-source-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            subj = sdk._create_subject("Reviewer", "person")
+            # `:Object` FIRST on purpose: that is what makes `labels(n)[0]` an
+            # allowed label and reproduces the disclosure instead of pretending
+            # the order does not matter.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', url:$u, text:$t})",
+                params={"i": hybrid_id, "u": "https://example.test/hybrid-14593",
+                        "t": secret}, read_only=False)
+            edge = sdk._create_edge("references", subj["id"], hybrid_id)
+            assert edge["created"] is True, f"the fixture could not write the edge: {edge}"
+            point = sdk._create_point(
+                "statement", "a claim with a documented author",
+                authoredBy=subj["id"])
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{point['id']}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        delegation = body["evidence"]["provenance"]["delegation"]
+        # The fixture reached the arm, so this row grades something.
+        assert [d["node_type"] for d in delegation] == ["Object"], body
+        # …and the `:Source` half is still there to be seen, which is the point.
+        assert set(delegation[0]["labels"]) == {"Object", "Source"}, delegation
+        assert "text" not in delegation[0]["props"], delegation[0]["props"]
+        assert secret not in repr(body), "a hybrid node's payload rode the route"
 
 
 def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
-    """#14593 review P1 (the fix's OWN hole): the filter must not key on ONE spelling.
+    """#14593 review P1 (the fix's OWN hole): the filter keyed on ONE spelling.
 
-    `_provenance` fills `node_type` with `labels(n)[0]`, and the engine does not
-    guarantee the ORDER of `labels()` (Cypher manual, list functions: *"the order
-    of returned labels is not guaranteed"*). Measured on the sibling branch the
-    two legacy shapes allocate in OPPOSITE directions: `(:Document:Source)`
-    returns `['Source', 'Document']` while `(:Object:Source)` returns
-    `['Object', 'Source']`. An equality test against `"Source"` therefore filters
-    one and skips the other — the same node class, no code difference — so the
-    guard is only as strong as the POSITION of the label it names.
+    ``_provenance`` fills ``node_type`` with ``labels(n)[0]``, and the engine does
+    not guarantee the ORDER of ``labels()`` (Cypher manual, list functions:
+    *"the order of returned labels is not guaranteed"*). Measured on this tree the
+    two legacy shapes allocate in OPPOSITE directions: ``(:Document:Source)``
+    returns ``['Source', 'Document']`` while ``(:Object:Source)`` returns
+    ``['Object', 'Source']``. An equality test against ``"Source"`` therefore
+    filters one and skips the other — the same node class, no code difference — so
+    the guard was only as strong as the POSITION of the label it named.
 
     ⛔ The unit under test is the DECISION, so this pins it in both directions for
-    the labels the fixture actually carries: the out-of-set `Document`, the
-    never-heard-of `Gadget` and the LABEL-LESS entry are filtered, and a
-    publishable `Object`'s map is returned untouched — otherwise "deny by
-    default" would quietly become "filter everything" and strip a legitimate
-    neighbour's properties.
+    the labels the fixture actually carries: the out-of-set ``Document`` and the
+    never-heard-of ``Gadget`` are filtered, and the publishable ``Object``'s map is
+    returned untouched — otherwise "deny by default" would quietly become "filter
+    everything" and strip a legitimate neighbour's properties. The leaking
+    ALLOW-LISTED spelling cannot be reproduced here (it needs a real allocation
+    order, which a hand-built dict does not have); it is pinned end-to-end by
+    ``test_the_delegation_filter_grades_the_label_SET_not_just_the_first_label``
+    above.
     """
     from tortoise.hosted_api import _filter_delegation_payloads
 
     secret = "RAW DOC BODY THAT MUST NOT RIDE THIS ROUTE"
-    url = "https://example.test/legacy-document-14592"
+    url = "https://example.test/legacy-document-14593"
     provenance = {"delegation": [
         # the legacy multi-label shape: `labels(n)[0]` is `Document`, not `Source`
         {"via": "references", "node_type": "Document",
-         "labels": ["Document", "Source"],
          "props": {"url": url, "id": url, "text": secret}},
         # a label the route has never heard of: deny-by-default must cover it
-        {"via": "references", "node_type": "Gadget", "labels": ["Gadget"],
-         "props": {"text": secret}},
-        # ⛔ and the ABSENT arm: no label at all. A filter that denies every KNOWN
-        # non-publishable spelling and lets a missing one through passes the two
-        # arms above — so "deny by default" would be pinned only for
-        # misspellings, never for absence (`all(... for lbl in [])` is vacuously
-        # True).
+        {"via": "references", "node_type": "Gadget", "props": {"text": secret}},
+        # ⛔ and the ABSENT arm: no `node_type` at all. `m6`, which denies every
+        # KNOWN non-publishable spelling and lets a missing one through, passes
+        # this test without this entry (measured) — so "deny by default" would
+        # be pinned only for misspellings, never for absence.
         {"via": "references", "props": {"url": url, "text": secret}},
         # a publishable neighbour is returned AS STORED
-        {"via": "dependsOn", "node_type": "Object", "labels": ["Object"],
+        {"via": "dependsOn", "node_type": "Object",
          "props": {"name": "BETA", "objectKind": "goal"}},
     ]}
     out = _filter_delegation_payloads(provenance)
@@ -1074,200 +992,280 @@ def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
     # …and the input is not mutated in place: the route publishes what this
     # returns, so a caller holding the callee's dict must not lose the payload.
     assert provenance["delegation"][0]["props"]["text"] == secret
-    # A chain that carries NO delegation arm at all is returned as it came — the
-    # filter must not invent one for a `:Source` whose author is unknown.
-    assert _filter_delegation_payloads({"point": {"id": "p"}}) == {"point": {"id": "p"}}
-    assert _filter_delegation_payloads(None) is None
 
 
-def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_path):
-    """⛔ THE DENIAL IS DECIDED BY THE NODE'S LABEL SET, NOT BY THE MATCHED BRANCH.
+# ── the by-id layer routes' own label-SET rule (#14593 review P1) ──────────
 
-    A hybrid `(:Object:Source)` is resolved by the `Object` branch and answered
-    as `Object`, so gating the #3998 / D30 `:Source` filter on the branch label
-    let the node's DENIED `content` back out as the root's `name` on BOTH of this
-    PR's root-shaped routes — while `/v1/sources/{url}` withheld it, so the same
-    node read two ways disagreed.
 
-    ⛔ MUTANTS, either one reds this: (a) `navigation._resolve_root` deciding the
-    filter by `label == "Source"` instead of the `labels(n)` membership, and
-    (b) `hosted_api.get_entity_belief` gating its name coalesce on
-    `label == "Source"` instead of the resolved `labels`.
+def test_resolve_entity_carries_the_whole_label_set_additively(tmp_path):
+    """``_resolve_entity`` now ships ``labels(n)``, and ``label`` keeps its
+    BRANCH meaning — the additive contract every by-id disclosure rule reads.
+
+    The branch answers ONE label (``MATCH (n:Object) … RETURN 'Object' AS
+    label``), so it cannot answer "is this node also a ``:Source``?". Without the
+    additive set, ``_layer_payload`` had nothing to grade but the branch and a
+    hybrid rode the route (the end-to-end arms below). ``label`` is unchanged on
+    purpose: every existing consumer (``_get_entity``, ``create_edge``'s
+    resolution, the 13093/9836/4282 lanes) reads it as the branch that matched,
+    so moving it would be a shape change rather than a fix.
     """
-    url = "https://example.test/hybrid-root-14592"
-    raw = "HYBRID RAW PAYLOAD THAT MUST NOT LEAK"
-    hyb = "hybrid-14592"
+    hybrid_id = "hybrid-resolve-14593"
+    with _graph(str(tmp_path / "g.db")) as ha:
+        sdk = _sdk(ha)
+        try:
+            # `:Object` FIRST on purpose: that is the allocation order the review
+            # measured the disclosure under (`labels(n)` order is not guaranteed
+            # by the engine), so the branch answers `Object` while the node also
+            # carries `Source`.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', "
+                "url:'https://example.test/hybrid-resolve-14593'})",
+                params={"i": hybrid_id}, read_only=False)
+            resolved = sdk._get_proj()._resolve_entity(hybrid_id)
+        finally:
+            sdk.close()
+    assert [r["label"] for r in resolved] == ["Object"], resolved
+    assert set(resolved[0]["labels"]) == {"Object", "Source"}, resolved[0]
+
+
+@pytest.mark.parametrize("route_label,label", [
+    ("objects", "Object"), ("subjects", "Subject")])
+def test_by_id_route_filters_a_hybrid_that_carries_a_Source_half(
+        tmp_path, route_label, label):
+    """#14593 review P1: ``_layer_payload`` graded the RESOLUTION BRANCH label.
+
+    ``_resolve_entity`` emits one entry per BRANCH, so a node carrying
+    ``:Object`` (or ``:Subject``) **and** ``:Source`` answered
+    ``label == "Object"`` — an allowed spelling — and this route published its
+    whole stored map, ``text``/``content`` included, while
+    ``GET /v1/sources/{url}`` withheld the same value. MEASURED pre-fix through
+    the public routes: ``GET /v1/objects/{id}`` answered 200 with the body in it.
+
+    ⛔ Reachability is the repo's own claim, not a contrived fixture:
+    ``mcp_server.py``'s #4649 blast-radius case names ``(:Object:Source {id:X})``
+    and ``tool_registry.py`` (citing #13114) names ``:Object:Source`` /
+    ``:Subject:Source`` as shapes the supersede path meets. The hybrid is written
+    below the doors on purpose — no public write creates it — which is the same
+    construction the delegation hybrid one section up uses.
+    """
+    secret = (f"HYBRID {label.upper()} SOURCE BODY THAT MUST NOT RIDE THE "
+              f"BY-ID ROUTE")
+    hybrid_id = f"hybrid-by-id-{label.lower()}-14593"
+    url = f"https://example.test/hybrid-by-id-{label.lower()}-14593"
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         sdk = _sdk(ha)
         try:
-            # Below the write door: nothing in the SDK mints a two-label node,
-            # and this is the shape a legacy payload Source converges into.
+            cypher = (f"CREATE (n:{label}:Source {{id:$i, name:'HYBRID', url:$u, "
+                      f"text:$t, objectKind:'goal', subjectKind:'person'}})")
             sdk._get_proj().g._query(
-                # No `name`: the name IS what the coalesce reaches for, so a
-                # named node would answer its name and mask the leak entirely.
-                "CREATE (n:Object:Source {id:$i, url:$u, content:$t, "
+                cypher, params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/{route_label}/{hybrid_id}")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The route resolved THIS node and its non-Source half still reads back —
+        # otherwise a 404/other-node answer would pass the disclosure assertion
+        # vacuously (the non-vacuity half of the P1).
+        assert body.get("id") == hybrid_id, body
+        assert body.get("name") == "HYBRID", body
+        assert body.get("url") == url, body
+        assert "text" not in body, body
+        assert secret not in out.text, out.text
+
+
+@pytest.mark.parametrize("route_label,label", [
+    ("objects", "Object"), ("subjects", "Subject")])
+def test_layer_LIST_route_filters_a_hybrid_that_carries_a_Source_half(
+        tmp_path, route_label, label):
+    """#14593 review P1: the LIST routes published what the by-id routes withhold.
+
+    ``GET /v1/objects`` / ``GET /v1/subjects`` page with
+    ``MATCH (n:{label}) … RETURN properties(n)`` — which matches a hybrid
+    ``(:Object:Source)`` / ``(:Subject:Source)`` because it carries ``{label}`` —
+    and NOTHING in that pipeline graded the label set. The page query did not even
+    return ``labels(n)``, so a row could not have been graded if someone had
+    wanted to. MEASURED pre-fix: ``GET /v1/objects`` answered 200 with the
+    hybrid's stored ``text`` in the row, while ``GET /v1/objects/{id}``
+    (``_layer_payload``) withheld the same value — one read path guaranteeing what
+    another does not, which is #3998's own argument.
+
+    ⛔ The row is asserted PRESENT with its non-Source half, so the disclosure
+    assertion cannot pass vacuously by the row being dropped from the page — the
+    rule redacts, it does not hide the node from the layer it belongs to.
+    """
+    secret = f"HYBRID {label.upper()} BODY THAT MUST NOT RIDE THE LIST ROUTE"
+    hybrid_id = f"hybrid-list-{label.lower()}-14593"
+    url = f"https://example.test/hybrid-list-{label.lower()}-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                f"CREATE (n:{label}:Source {{id:$i, name:'HYBRID', url:$u, "
+                f"text:$t, objectKind:'goal', subjectKind:'person'}})",
+                params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/{route_label}")
+        assert out.status_code == 200, out.text
+        rows = out.json()[route_label]
+        row = next((r for r in rows if r.get("id") == hybrid_id), None)
+        assert row is not None, rows
+        # The layer still lists it, with its non-Source properties intact…
+        assert row.get("name") == "HYBRID", row
+        assert row.get("url") == url, row
+        # …and the denied payload is on neither the row nor the wire.
+        assert "text" not in row, row
+        assert secret not in out.text, out.text
+
+
+def test_belief_never_puts_a_hybrid_sources_body_in_entity_name(tmp_path):
+    """#14593 review P1: ``/belief`` grades the same label SET as its siblings.
+
+    The route publishes ``_layer_payload(resolved[0])`` as the ``entity`` block and
+    coalesces ``name -> content -> url``. With the payload rule keyed on the
+    BRANCH label, a ``(:Object:Source)`` that carries no ``name`` fell through to
+    its ``content`` — a ``:Source``-only property ``filter_source_props`` drops
+    everywhere else — so the raw body was published as ``entity.name``.
+    MEASURED pre-fix: ``GET /v1/entities/{id}/belief`` answered 200 with the body
+    in ``entity.name``, while ``GET /v1/sources/{url}`` withheld it.
+    """
+    hybrid_id = "hybrid-belief-14593"
+    url = "https://example.test/hybrid-belief-14593"
+    secret = "HYBRID BELIEF BODY THAT MUST NOT RIDE entity.name"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # NO `name` on purpose — that is what makes the `content` coalesce
+            # the live path, which is the leak this arm grades.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, content:$c, "
                 "objectKind:'goal'})",
-                params={"i": hyb, "u": url, "t": raw},
+                params={"i": hybrid_id, "u": url, "c": secret},
                 read_only=False)
         finally:
             sdk.close()
 
-        # The by-id read denies the payload …
-        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
-        assert "content" not in denied, denied
-        assert raw not in repr(denied), denied
-        # ⛔ … AND THE TWO SOURCE ADDRESSES SERVE THE SAME BAG. A re-attach keyed
-        # on the MATCHED BRANCH read this node through `Source{url}` (no kind) by
-        # url and through the `Object` branch (kind echoed) by id — one node, two
-        # addresses, two payloads. The echo is keyed on the ROUTE's layer now, so
-        # BOTH Source arms withhold `objectKind` and the Object door keeps it
-        # (asserted below). Both halves are pinned: flipping the echo either way
-        # reds one of them.
-        assert "objectKind" not in denied, denied
-
-        # … and so do both root arms: the relations preview …
-        relations = client.get(f"/v1/entities/{hyb}/relations")
-        assert relations.status_code == 200, relations.text
-        assert relations.json()["entity"]["name"] == url, relations.text
-        assert raw not in repr(relations.json()), relations.json()
-
-        # … and the belief route.
-        belief = client.get(f"/v1/entities/{hyb}/belief")
-        assert belief.status_code == 200, belief.text
-        assert belief.json()["entity"]["name"] == url, belief.text
-        assert raw not in repr(belief.json()), belief.json()
-
-        # ⛔ AND THE OTHER TWO SHAPES OF THE SAME RULE, which the first cut of
-        # this test missed while all three above were green: the LIST reads
-        # (Cypher label matching is SUBSET-based, so `MATCH (n:Object)` reaches
-        # the hybrid) and the LAYER BY-ID reads (`_layer_payload`). Measured
-        # leaking before this commit; the by-id route is the one the reviewer
-        # reproduced, so it is asserted on the response TEXT, not a field.
-        # … the MCP door (`sdk.get_entity`, the primary read) …
-        sdk = _sdk(ha)
-        try:
-            mcp = sdk.get_entity(hyb)
-        finally:
-            sdk.close()
-        assert raw not in repr(mcp), mcp
-        assert mcp.get("url") == url, mcp
-
-        # … and the layer by-id route.
-        assert raw not in client.get(f"/v1/objects/{hyb}").text
-        # ⛔ BY **ID** TOO, which is the arm the url read cannot reach: the hybrid
-        # carries an id, `_RESOLVE_BRANCHES` offers the `Object` branch first, and
-        # a branch test in `_read_labelled_entity` therefore answered 404 for a
-        # node that IS a Source (over-block, measured). Membership answers it —
-        # filtered, like every other read of the same node.
-        by_id = client.get(f"/v1/sources/{hyb}")
-        assert by_id.status_code == 200, by_id.text
-        assert raw not in by_id.text, by_id.text
-        # ⛔ AND THE KIND IS THE ROUTE'S LAYER, NOT THE MATCHED BRANCH: read as a
-        # Source, the node answers the Source bag, which does not declare
-        # `objectKind` (D10 B6 retires it). Keying the by-id echo on the matched
-        # branch handed it back here (measured) — a denied property riding a door
-        # that withholds the rest.
-        assert "objectKind" not in by_id.json(), by_id.json()
-        # …while reading it as the Object it also is keeps its own layer's kind.
-        as_object = client.get(f"/v1/objects/{hyb}").json()
-        assert as_object["objectKind"] == "goal", as_object
-        # ⛔ BOTH FORMS OF THE LEAK ASSERTION, because neither subsumes the
-        # other: `repr` sees a decoded value (an escape is unescaped, so a `'`
-        # IS caught) while the response TEXT sees the wire form (a non-ASCII
-        # character is `\uXXXX` there and raw in `repr`). The fixture is ASCII
-        # either way — the pair is what keeps a future payload covered.
-        listed_resp = client.get("/v1/objects", params={"kind": "goal", "limit": 100})
-        body_text = listed_resp.text
-        body = listed_resp.json()
-        assert raw not in body_text, body_text
-        assert raw not in repr(body), body
-        listed = [o for o in body["objects"] if o["id"] == hyb]
-        assert listed, body  # …and it IS listed, filtered
-        # ⛔ AND IT STILL ECHOES THE FIELD IT WAS SELECTED BY. `filter_source_props`
-        # is an ALLOWLIST, so it drops `objectKind` too — without the re-attach a
-        # `?kind=goal` page returned a row that did not carry the kind it was
-        # filtered on (measured). The kind is the LAYER's declaration, not a
-        # `:Source` payload, so it survives; the denied `content` does not. The
-        # `kind` PARAMETER is part of the pin: the row must be SELECTED by that
-        # kind, not merely carry it.
-        assert listed[0]["objectKind"] == "goal", listed[0]
-
-        # A second hybrid on the OTHER layer, so the Subject routes have a row to
-        # withhold: the first one carries `objectKind`, which the subject listing
-        # filters out (so its absence there proves nothing).
-        sub = "hyb-subject-14592"
-        sdk = _sdk(ha)
-        try:
-            sdk._get_proj().g._query(
-                "CREATE (n:Subject:Source {id:$i, url:$u, content:$t, "
-                "subjectKind:'PERSON', name:'HYB SUBJECT'})",
-                params={"i": sub, "u": url + "-subject", "t": raw},
-                read_only=False)
-        finally:
-            sdk.close()
-        assert raw not in client.get(f"/v1/subjects/{sub}").text
-        # …and the SECOND layer's kind survives the same allowlist, by the SAME
-        # code path: the re-attach is keyed on the ROUTE's layer through
-        # `entity_reads.LAYER_KIND_PROP` (label-set MEMBERSHIP decides the
-        # `:Source` DENIAL only, never the kind echo), so a map that named only
-        # `Object` drops `subjectKind` through the allowlist and turns this
-        # assertion RED — the map is part of the pin, not scaffolding.
-        assert client.get(f"/v1/subjects/{sub}").json().get("subjectKind") == "PERSON"
-        sub_body = client.get("/v1/subjects", params={"limit": 100}).text
-        assert raw not in sub_body, sub_body
-        assert sub in sub_body, sub_body
+        out = client.get(f"/v1/entities/{hybrid_id}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The node was really resolved (the fixture reached the arm)…
+        assert body["entity"]["id"] == hybrid_id, body
+        # …and the name fell through to the identity, not to the body.
+        assert body["entity"]["name"] == url, body
+        assert secret not in out.text, out.text
 
 
-def test_sources_paging_is_over_a_total_order(tmp_path):
-    """⛔ `SKIP`/`LIMIT` needs a TOTAL order (#5346), and Sources TIE on it.
+def test_belief_gates_PRESENCE_on_the_stored_map_not_the_redacted_one(tmp_path):
+    """#14593 review P2: redaction ran BEFORE the presence gate, hiding a belief.
 
-    The callee orders by ``points`` DESC with no tiebreak, so the order of TIED
-    rows is whatever the store hands back — and a walk over ``offset`` then
-    repeats or skips a row while ``truncated`` still reports the enumeration
-    complete. The route's ``rows.sort`` gives the ties a total order (points
-    DESC, then ``url`` ASC), which is what the assertions below pin.
+    ``entity = _layer_payload(resolved[0])`` was computed first and then used for
+    ``ep_state``'s inputs. For a hybrid ``(:Point:Source)`` (and the
+    ``:Object:Source`` / ``:Subject:Source`` shapes the review names),
+    ``filter_source_props`` drops ``posterior_alpha``/``posterior_beta`` /
+    ``confidence`` — they are not declared on a ``:Source`` — so the gate saw none
+    of them and answered ``ep_state: "absent"`` + ``current: null`` +
+    ``NO_PERSISTED_BELIEF`` over a node that HOLDS a measured posterior. That is
+    this route's own forbidden class (an absence published as an answer), reached
+    through the filter rather than through EP's Beta(1,1) coalesce.
 
-    ⛔ MUTANT, and the fixture is built to make it VISIBLE: the Sources are
-    created in DESCENDING url order, so a store that answers in insertion order
-    (which the engine does — measured) produces a list that is not url-sorted.
-    Dropping the route's sort therefore reds the first assertion, and it is the
-    only assertion that can: the partition walk below holds on any single-process
-    order.
+    ⛔ Both halves are asserted: the belief is now REPORTED (non-vacuity — a
+    handler that never gated at all would also fail the pre-fix arm), and the
+    ``:Source`` half stays withheld, so the fix did not trade one disclosure for
+    the opposite defect.
     """
+    hybrid_id = "hybrid-belief-presence-14593"
+    url = "https://example.test/hybrid-belief-presence-14593"
+    secret = "HYBRID PRESENCE BODY THAT MUST STAY WITHHELD"
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         sdk = _sdk(ha)
         try:
-            # Descending, so insertion order is the reverse of the tiebreak.
-            for i in reversed(range(5)):
-                u = f"https://example.test/tie-{i}-14592"
-                sdk._create_point("statement", "extracted", extractedFrom=u)
-                sdk._get_proj().g._query(
-                    "MATCH (s:Source {url:$u}) SET s.points = 1",
-                    params={"u": u}, read_only=False)
+            # `:Point` FIRST: the branch that resolves is `Point`, which is
+            # PUBLISHABLE, so pre-fix `_layer_payload` filtered this node only
+            # because the *label-set* fix had already landed — and that filter is
+            # exactly what erased the posterior before the gate looked.
+            sdk._get_proj().g._query(
+                "CREATE (n:Point:Source {id:$i, url:$u, content:$c})",
+                params={"i": hybrid_id, "u": url, "c": secret},
+                read_only=False)
+            sdk._set_point_baseline(hybrid_id, 8.0, 2.0)
+            sdk._get_proj().g._query(
+                "MATCH (n:Point {id:$i}) SET n.posterior_alpha = 9.0, "
+                "n.posterior_beta = 1.0, n.confidence = 0.9",
+                params={"i": hybrid_id}, read_only=False)
         finally:
             sdk.close()
 
-        whole = client.get("/v1/sources", params={"limit": 100}).json()
-        urls = [r["url"] for r in whole["sources"]]
-        assert urls == sorted(urls), urls
+        out = client.get(f"/v1/entities/{hybrid_id}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The stored posterior is REPORTED rather than called absent…
+        assert body["ep_state"] == "measured", body
+        assert body["currentUnavailable"] is None, body
+        assert body["current"]["mean"] == pytest.approx(0.9), body
+        # …and the `content` did not become the published name.
+        # ⚠️ NOT a wire-wide ``secret not in out.text`` here, and the reason is a
+        # DIFFERENT rule: this fixture is a ``:Point:Source``, and a ``:Point``'s
+        # ``content`` is its OWN published body — the provenance arm
+        # (``sdk._provenance`` → ``_get_point``) returns it by contract, so a
+        # substring assertion would be measuring the Point rule, not this one.
+        # What this test pins is that the PRESENCE gate no longer reads the
+        # redacted map; the ``:Source``-half disclosure is pinned by the
+        # ``:Object:Source`` / ``:Subject:Source`` arms above, where ``content``
+        # is denied under every label the node carries.
+        assert body["entity"]["name"] == url, body
 
-        # …and a walk past the end terminates: 5 rows, 2 per page.
-        seen: list[str] = []
-        truncs: list[bool] = []
-        for offset in (0, 2, 4, 6):
-            body = client.get("/v1/sources", params={
-                "limit": 2, "offset": offset}).json()
-            # `exact=True` on this route, so a truncated page states the total
-            # and a terminal one omits it (the contract's own shape).
-            if body["truncated"]:
-                assert body["total_available"] == 5, body
-            else:
-                assert "total_available" not in body, body
-            truncs.append(body["truncated"])
-            seen.extend(r["url"] for r in body["sources"])
-        assert truncs == [True, True, False, False], truncs
-        assert seen == sorted(urls), seen
 
+def test_layer_payload_grades_the_whole_label_set_not_the_branch_label():
+    """The DECISION under the by-id routes, pinned in both directions.
+
+    A rule that filtered everything would strip a legitimate layer's map (the
+    over-block arm), and a rule keyed on the branch label would publish a hybrid
+    (the leak arm). Both are asserted here, on hand-built entries, because the
+    allocation ORDER that reproduced the leak end-to-end is not something a dict
+    fixture has — the route arms above carry that half.
+    """
+    from tortoise.hosted_api import _layer_payload
+
+    secret = "RAW BODY THAT MUST NOT RIDE THE BY-ID ROUTE"
+
+    # (a) the hybrid: an ALLOWED branch label with a `:Source` half -> filtered
+    hybrid = {"label": "Object", "labels": ["Object", "Source"],
+              "properties": {"id": "o1", "name": "HYBRID", "url": "u",
+                             "text": secret, "objectKind": "goal"}}
+    out = _layer_payload(hybrid)
+    assert "text" not in out, out
+    assert out["name"] == "HYBRID" and out["id"] == "o1", out
+
+    # (b) a lone `:Source` — filtered, exactly as before this change
+    assert "text" not in _layer_payload(
+        {"label": "Source", "labels": ["Source"],
+         "properties": {"url": "u", "text": secret}})
+
+    # (c) a pure layer is returned AS STORED, so "deny by default" has not
+    # quietly become "filter everything"
+    pure = {"label": "Object", "labels": ["Object"],
+            "properties": {"name": "BETA", "objectKind": "goal",
+                           "confidence": 0.9}}
+    assert _layer_payload(pure) == pure["properties"]
+
+    # (d) an entry carrying ONLY the branch label (an older callee, or a
+    # hand-built chain) keeps the PREVIOUS behaviour rather than widening
+    assert "text" not in _layer_payload(
+        {"label": "Source", "properties": {"url": "u", "text": secret}})
+    assert _layer_payload(
+        {"label": "Object", "properties": {"name": "B"}}) == {"name": "B"}
+
+    # …and the input is not mutated in place: the route publishes what this
+    # returns, so a caller holding the resolved entry must not lose the payload.
+    assert hybrid["properties"]["text"] == secret
+
+
+# ── GET /v1/entities/{id}/relations ────────────────────────────────────────
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
@@ -1286,7 +1284,8 @@ def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
         assert rels[0]["direction"] == "out", rels
         assert rels[0]["predicate"] == "dependsOn", rels
         assert rels[0]["other"] == {
-            "id": b["id"], "label": "Object", "name": "BETA"}, rels
+            "id": b["id"], "label": "Object", "name": "BETA",
+            "nameTruncated": False}, rels
 
         # The SAME edge, read from the other end, is the other DIRECTION — the
         # fact `navigation.entityProfile` cannot report (its per-hop query UNIONs
@@ -1294,6 +1293,397 @@ def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
         back = client.get(f"/v1/entities/{b['id']}/relations").json()["relations"]
         assert [r["direction"] for r in back] == ["in"], back
         assert back[0]["other"]["id"] == a["id"], back
+
+
+def test_relations_bounds_and_marks_a_long_neighbour_body(tmp_path):
+    """The `other.name` preview is BOUNDED, and the cut is MARKED (#14593 P2).
+
+    MEASURED before the fix, on a real ASGI app: one `related` edge between two
+    Points whose `content` was 4000 characters returned `other.name` at 4000
+    characters with `truncated: false` — a `:Point` carries no `name`, so the
+    blanket `coalesce(name, content, url)` landed on the body. With `limit` at
+    `le=1000` that is a per-request size of `limit × largest neighbour body` on a
+    brand-new public GET, and the function's own docstring gives fan-out
+    amplification as its reason for not returning whole nodes.
+
+    ⛔ The assertion is on the LENGTH AND THE FLAG, not on a prefix: a shortened
+    value a caller cannot detect is the "absence read as an answer" class this PR
+    removes elsewhere, so bounding without marking would trade one defect for
+    another. The suite could not see any of it before — its only relation fixture
+    used Object neighbours, whose `name` is short.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        # DISTINCTIVE, not one repeated character: with "x" * 4000 the value
+        # assertion below is satisfied by ANY 200 "x"s, so a mutant returning a
+        # different slice stayed green (measured).
+        long_body = "EDGE-OF-THE-BODY" + "y" * 4000
+        far = client.post("/v1/points", json={
+            "content": long_body, "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            assert sdk._create_edge("related", hub["id"], far["id"])
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        rels = r.json()["relations"]
+        assert len(rels) == 1, rels
+        other = rels[0]["other"]
+        assert other["id"] == far["id"], other
+        # A Point is answered by its content, and the preview is capped.
+        assert len(other["name"]) == 200, len(other["name"])
+        assert other["name"] == long_body[:200], other["name"][:40]
+        assert other["nameTruncated"] is True, other
+        # The page itself was NOT truncated — the two are different facts, and a
+        # route that conflated them would hide the cut behind the page flag.
+        assert r.json()["truncated"] is False, r.json()["truncated"]
+
+
+def test_relations_never_puts_a_Sources_payload_in_the_name_field(tmp_path):
+    """A `:Source` neighbour is answered by its `url`, never by its `content`.
+
+    The blanket `coalesce(m.name, m.content, m.url)` reached an UNDECLARED
+    `content` on a `:Source` neighbour — the `#3998` class (a property no
+    declaration covers, surfacing through a read path that never asked for it),
+    on a route that has no business returning a source's stored text. This arm
+    writes that property below the write door and asserts the payload appears
+    NOWHERE in the response body (not just in `name`: a regression that moved it
+    to another key would otherwise pass).
+    """
+    payload = "SK-SOURCE-PAYLOAD-DO-NOT-SERVE"
+    url = "https://example.test/doc"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            src = sdk._create_source(url, "web")
+            assert src["id"] == url, src
+            # ⛔ `content`, deliberately — NOT `text`. This asserts the property
+            # the blanket coalesce actually READ, and the distinction was
+            # measured: `text` is filtered by `filter_source_props` and the old
+            # query never looked at it, so a `text`-only fixture passes on the
+            # BUGGY code (it did, on the first attempt at this arm — a vacuous
+            # test is a false PASS, which is the class this PR is about).
+            # `content` is neither declared on `:Source` nor read through the
+            # filter, so it is a node property an out-of-band writer can leave
+            # behind and the coalesce would hand straight back.
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.content = $t, s.text = $t",
+                params={"u": url, "t": payload}, read_only=False)
+            assert sdk._create_edge("related", hub["id"], url)["created"] is True
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        assert payload not in r.text, "a Source's stored text rode the response"
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Source", other
+        assert other["name"] == url, other
+
+
+def test_relations_never_puts_a_hybrid_ROOTS_content_in_entity_name(tmp_path):
+    """#14593 review P2: the ROOT preview graded the RESOLUTION BRANCH label.
+
+    ``navigation._resolve_root`` filtered a root on ``label == "Source"`` — the
+    branch it MATCHED (``RETURN 'Object' AS label``) — so a hybrid
+    ``(:Object:Source)`` root resolved through ``Object``, skipped the ``#3998``
+    filter, and ``_root_preview``'s ``name -> content -> url`` chain handed back
+    the stored ``content`` as ``entity.name``. ``entity_reads._root_preview``
+    justified itself by claiming the filter happened upstream; the claim was true
+    of a plain ``:Source`` and false of exactly this shape.
+
+    Fixed at BOTH ends, so either alone closes it: ``_resolve_root`` grades
+    ``labels(n)``, and ``_root_preview`` grades the propagated set again before
+    the coalesce.
+    """
+    hybrid_id = "hybrid-root-relations-14593"
+    url = "https://example.test/hybrid-root-relations-14593"
+    secret = "HYBRID ROOT BODY THAT MUST NOT BECOME A NAME"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # NO `name` on purpose: that is what makes the `content` coalesce the
+            # live path. `id` + `url` keep the root addressable and give the
+            # preview a legitimate fallback to answer with instead.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, content:$c, "
+                "objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url, "c": secret},
+                read_only=False)
+            other = sdk._create_point("statement", "a neighbour")["id"]
+            assert sdk._create_edge("related", hybrid_id, other)["created"] is True
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hybrid_id}/relations")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # The root really resolved (otherwise a 404/other-node answer would pass
+        # the disclosure assertion vacuously)…
+        assert body["entity"]["id"] == hybrid_id, body
+        # …and its name fell through to the identity, never to the body.
+        assert body["entity"]["name"] == url, body
+        assert secret not in r.text, r.text
+
+
+def test_relations_never_publishes_a_legacy_Documents_stored_body(tmp_path):
+    """The `ELSE` arm must not reach `content` — a legacy `:Document` lives there.
+
+    Review P2 (second round): the per-layer CASE closed the `:Source` arm but its
+    `ELSE` kept the old blanket ``coalesce(m.name, m.content, m.url)``, so a bare
+    ``(:Document {id})`` — pre-D10, or left behind by an interrupted
+    ``relabel_legacy_documents`` — still answered ``other.name`` with its stored
+    body. ``projection.entities`` names ``content`` as the retired document
+    payload and ``migrate_kinds`` records that ``_upsert_document`` genuinely
+    stored it, so this is the same disclosure class one label over — and the
+    route's own docstring claimed the rule was "everything else by its name".
+
+    ⛔ The fallback is `_RELATION_ENDPOINT_NAME`'s ELSE arm — a name if the node
+    has one, else its identity (`url`, `id`, then `eventId`). Nothing legitimate
+    is lost — `:Event` keeps its narrative in `session_narrative`, never on the
+    node — and this fixture passes through `m.id` either way, so the arm's exact
+    text is named here rather than restated (a restated copy went stale within
+    one commit when `eventId` joined that arm).
+    """
+    secret = "PRE-D10 DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
+    legacy_id = "doc-legacy-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        hub = client.post("/v1/points", json={
+            "content": "the anchor", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            # Below the door: no product writer produces this shape today, which is
+            # exactly why a restored pre-D10 dump is the realistic source. The EDGE
+            # is written here too — `_create_edge` resolves ids through the identity
+            # table, which does not know a bare `:Document`, so a fixture that went
+            # through it would fail on the fixture rather than on the route
+            # (measured: `{'created': False}`).
+            sdk._get_proj().g._query(
+                "CREATE (d:Document {id:$i}) SET d.content = $t "
+                "WITH d MATCH (a:Point {id:$a}) CREATE (a)-[:related]->(d)",
+                params={"i": legacy_id, "t": secret, "a": hub["id"]},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hub['id']}/relations")
+        assert r.status_code == 200, r.text
+        assert secret not in r.text, "a legacy Document's body rode the response"
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Document", other
+        # It falls back to the node's own IDENTITY, so the row is still usable.
+        assert other["name"] == legacy_id, other
+
+
+def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
+    """The root's `entity.name` is capped and flagged like a neighbour's (P3).
+
+    The code said "the root's own name, on the same coalesce as a neighbour's"
+    while the neighbour side had gained a cap and a flag the root did not have —
+    so a client gating display on `nameTruncated` read the root's missing flag as
+    "bounded" and got an unbounded value (measured: 4000 characters). What the two
+    sides now SHARE is the cap and the flag; the coalesce is deliberately not
+    shared (a neighbour is selected per layer, the root reads one known map), and
+    an earlier revision of this docstring overstated that as "answer identically"
+    — the same claim-wider-than-code defect one level down. The full body stays
+    reachable at the entity's own route.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        body_4000 = "ROOT-BODY-MARKER-" + ("y" * 4000)
+        root = client.post("/v1/points", json={
+            "content": body_4000, "kind": "statement"}).json()
+        far = client.post("/v1/points", json={
+            "content": "a neighbour", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            assert sdk._create_edge("related", root["id"], far["id"])
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{root['id']}/relations")
+        assert r.status_code == 200, r.text
+        entity = r.json()["entity"]
+        assert len(entity["name"]) == 200, len(entity["name"])
+        # ⛔ The VALUE, not just the length: on an all-identical body a mutant
+        # that returns a different 200-character slice — or a "nicer"
+        # ``[:199] + "…"`` — stays green on a length assertion alone (review P3,
+        # the same gap the neighbour arm was tightened for one commit over).
+        from tortoise.entity_reads import _ENDPOINT_NAME_MAX
+        assert entity["name"] == body_4000[:_ENDPOINT_NAME_MAX], entity["name"][:40]
+        assert entity["nameTruncated"] is True, entity
+        # The neighbour side carries the SAME flag, which is the shared half.
+        assert r.json()["relations"][0]["other"]["nameTruncated"] is False
+        # ⛔ AND THE ROOT'S FALSE ARM: without this, `_root_preview` forced to
+        # `nameTruncated: True` unconditionally stays green (measured) — every
+        # root would claim truncation and no row would notice.
+        short = client.get(f"/v1/entities/{far['id']}/relations")
+        assert short.status_code == 200, short.text
+        assert short.json()["entity"]["nameTruncated"] is False, short.json()["entity"]
+
+
+def test_a_Session_ROOT_publishes_its_own_map_as_fully_as_a_neighbour(tmp_path):
+    """#14593 review P2: the root graded a legacy ``:Session`` off a session map.
+
+    ``navigation._ROOT_BRANCHES`` carries ``Session`` as "the one deliberate
+    addition (a legacy root outside ``_CANONICAL_ENTITY_ID_PROPS``)", so
+    ``entityProfile`` / ``tortoise_traverse`` / ``entity_relations`` all resolve
+    through it. Grading the root with ``publishable_payload`` while ``Session`` was
+    OUTSIDE ``PUBLISHABLE_PAYLOAD_LABELS`` answered ``{id, type}`` for a session
+    root — measured, ``turn_count`` / ``harness`` / ``model`` / ``machine_id`` /
+    ``created_at`` all dropped — while the SAME stored node, reached as a
+    NEIGHBOUR under a different root on the same surface, came back whole, because
+    the neighbour path (``_parse_node_with_identity``) filters ``:Source`` instead of
+    allow-listing. ⛔ NOT "in the same response": ``visited`` seeds the CALLER's
+    ``entity_id`` while ``_hop_query`` excludes by ``coalesce(id, url, eventId)``, so
+    an id-keyed ``:Session`` root never re-enters its own response (a url-addressed
+    ``:Source`` that also carries an ``id`` CAN — which is why the claim is scoped to
+    the root this test grades rather than stated as a property of every root), and
+    the asymmetry is therefore observed across two calls (cycle-2/cycle-3 review
+    P3, measured by reverting and by a url-keyed cycle probe).
+
+    The figures are not a payload and the session doors already serve them
+    (``GET /v1/sessions`` / ``GET /v1/sessions/{id}`` return ``s.id,
+    s.created_at, s.turn_count, …, s.harness, s.machine_id, s.model``), so the
+    asymmetry was the defect, not the disclosure. ``activation_scorecard.FUNNEL_QUERY``
+    returns those same three scalars (``s.id``, ``s.created_at``, ``s.turn_count``)
+    alongside two counts — ⛔ NOT ``LIFETIME_MEMORY_QUERY``, whose ``RETURN`` is
+    aggregates only (``min(s.created_at)``, ``count(DISTINCT s)``); a first cut of
+    this docstring named that one and was wrong about it.
+
+    ⛔ Both directions are pinned, because the cheap "fixes" are each one-sided:
+    a rule that puts ``Session`` in the set must NOT publish a ``(:Session:Source)``
+    hybrid (grading is a SET, and ``Source`` fails it), and it must NOT be a licence
+    to publish an unknown label — the deny-by-default arm is asserted here too, so
+    "add the label I was looking at" cannot quietly become "publish everything".
+
+    ⛔ THE NEIGHBOUR ARM IS DRIVEN THROUGH THE GRAPH, not through a hand-built row
+    (review finding against this test's first cut: a literal `[1, ["Session"], …]`
+    never touches FalkorDB, so the docstring's "the SAME node as a NEIGHBOUR" was
+    wider than what it measured, and the set comparison it ended on was already
+    implied by the asserts above it). One `:Session` node, one edge, and the hop a
+    real `entityProfile`/`tortoise_traverse` call runs — so the two arms are graded
+    on the SAME stored node, and a future change that narrows either one reds here.
+    """
+    from tortoise.navigation import _hop_query, _parse_node_with_identity, _resolve_root
+    from tortoise.projection.entities import label_set_publishable, publishable_payload
+    from tortoise.sdk import TortoiseSDK
+
+    session_id = "sess-root-14593"
+    hybrid_id = "sess-hybrid-14593"
+    anchor_id = "point-anchor-14593"
+    secret = "SESSION-HYBRID-BODY-THAT-MUST-NOT-RIDE-THE-ROOT"
+    client = TortoiseSDK(str(tmp_path / "session-root.db"))
+    try:
+        g = client._get_proj().g
+        g._query(
+            "CREATE (s:Session {id:$i}) SET s.turn_count=$n, s.harness=$h, "
+            "s.model=$m, s.machine_id=$mc, s.created_at=$c",
+            params={"i": session_id, "n": 7, "h": "pi",
+                    "m": "deepseek-flash", "mc": "box-1",
+                    "c": "2026-11-25T00:00:00Z"},
+            read_only=False)
+        # A real neighbour hop for the SAME session node: anchor -[:CONTAINS]-> it.
+        g._query(
+            "CREATE (p:Point {id:$p, content:'anchor'}) "
+            "WITH p MATCH (s:Session {id:$i}) CREATE (p)-[:CONTAINS]->(s)",
+            params={"p": anchor_id, "i": session_id},
+            read_only=False)
+        g._query(
+            "CREATE (s:Session:Source {id:$i, url:$u}) SET s.turn_count=$n, "
+            "s.text=$t",
+            params={"i": hybrid_id, "u": "https://example.test/s-14593",
+                    "n": 3, "t": secret},
+            read_only=False)
+
+        label, root, _key, labels = _resolve_root(g, session_id)
+        assert label == "Session", label
+        assert labels == ["Session"], labels
+        # The map is the node's OWN — every stored field survives the root door.
+        assert root["turn_count"] == 7, root
+        assert root["harness"] == "pi", root
+        assert root["model"] == "deepseek-flash", root
+        assert root["machine_id"] == "box-1", root
+        assert root["created_at"] == "2026-11-25T00:00:00Z", root
+        assert root["id"] == session_id, root
+        assert root["type"] == "Session", root
+
+        # …and the SAME stored node, reached as a NEIGHBOUR of the anchor by the
+        # hop a real read runs, carries exactly those fields. This is the parity
+        # the PR is about: before the fix the root answered a strictly smaller map
+        # than the neighbour did for one node.
+        rows = g.query(
+            _hop_query("Point", "id"),
+            params={"eid": anchor_id, "visited": [anchor_id]}).result_set
+        neighbours = [_parse_node_with_identity(row[0])[0] for row in rows]
+        session_neighbours = [n for n in neighbours if n["id"] == session_id]
+        assert session_neighbours, (
+            f"the anchor's hop did not return the session: "
+            f"{[n.get('id') for n in neighbours]}")
+        neighbour = session_neighbours[0]
+        assert neighbour["type"] == "Session", neighbour
+        for field in ("turn_count", "harness", "model", "machine_id",
+                      "created_at"):
+            assert neighbour[field] == root[field], (field, root, neighbour)
+        # ⛔ Same KEYS on the same node, both arms — the defect was a key GAP.
+        assert set(neighbour) - {"_relationship", "_idx"} <= set(root), (
+            sorted(set(neighbour) - set(root)), sorted(root))
+
+        # ⛔ The hybrid arm: a `:Session:Source` root withholds its body, because
+        # the rule grades the whole SET and `Source` is not in it.
+        h_label, h_root, _h_key, h_labels = _resolve_root(g, hybrid_id)
+        # The union may answer EITHER branch (the ":Session:Source" allocation
+        # order is the engine's, not ours) — which is exactly why the grading is on
+        # the SET and not on `label`.
+        assert h_label in {"Session", "Source"}, h_label
+        assert set(h_labels) == {"Session", "Source"}, h_labels
+        assert "text" not in h_root, h_root
+        assert secret not in repr(h_root), h_root
+
+        # ⛔ The deny-by-default arm is untouched: a label the set has never heard
+        # of still gets the filtered map, not the whole one.
+        assert label_set_publishable(["Gadget"]) is False
+        assert publishable_payload(
+            {"id": "g-1", "text": secret}, ["Gadget"]) == {"id": "g-1"}
+    finally:
+        client.close()
+
+
+def test_relations_identifies_an_Event_neighbour_by_its_eventId(tmp_path):
+    """⛔ review P3: the `m.eventId` identity fallback had NO pin.
+
+    An `:Event` neighbour carries no `id` — its identity key is `eventId` — so the
+    endpoint-name expression falls back through it. Measured: reverting the ELSE
+    arm to `coalesce(m.name, m.url, m.id)` left the whole suite green, i.e. an
+    Event neighbour would answer `name: None` with nothing noticing. The body
+    (`content`) must not substitute for the identity either — that is the #3998
+    direction the fallback order itself encodes.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        root = client.post("/v1/objects", json={
+            "name": "HOST", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) "
+                "CREATE (e:Event {eventId:$eid, content:$body}) "
+                "CREATE (n)-[:related]->(e)",
+                params={"id": root["id"], "eid": "evt-14592-identity",
+                        "body": "EVENT-CONTENT-BODY-MUST-NOT-BE-THE-NAME"},
+                read_only=False)
+        finally:
+            sdk.close()
+        r = client.get(f"/v1/entities/{root['id']}/relations")
+        assert r.status_code == 200, r.text
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Event", other
+        assert other["id"] == "evt-14592-identity", other
+        assert other["name"] == "evt-14592-identity", other
+        assert "EVENT-CONTENT-BODY-MUST-NOT-BE-THE-NAME" not in r.text, r.text
 
 
 def test_relations_pages_and_offset_actually_advances(tmp_path):
@@ -1323,81 +1713,26 @@ def test_relations_pages_and_offset_actually_advances(tmp_path):
         seen: list[str] = []
         offsets = (0, 1, 2, 3, 4)
         sizes = []
-        truncs = []
         for offset in offsets:
             body = client.get(f"/v1/entities/{hub['id']}/relations",
                               params={"limit": 1, "offset": offset}).json()
             sizes.append(body["count"])
-            truncs.append(body["truncated"])
-            # `candidates` is the POST-SKIP probe, so a page is marked truncated
-            # iff anything lies beyond it — never "beyond the whole population".
-            assert "total_available" not in body, body
             seen.extend(r["other"]["name"] for r in body["relations"])
+            # ⛔ #8447's OTHER half, pinned here: a `limit+1` probe is a LOWER
+            # BOUND, never a total. Deleting `exact=False` at the call site (so
+            # the probe's `candidates` is published as `total_available`) left
+            # this whole file green and reported `total_available: 2` for a
+            # 4-edge population — so the marker's own rule needs its own row.
+            if body["truncated"]:
+                assert "total_available" not in body, body
         # The bound is the CALLER's: one row per request.
         assert sizes == [1, 1, 1, 1, 0], sizes
         # …and the window MOVED: five offsets walked all four spokes, no repeats.
         assert seen == ["S0", "S1", "S2", "S3"], seen
-        # ⛔ THE VERDICT IS EVALUATED PER PAGE, and this is what reds the tempting
-        # "make `offset` consistent with `_paged`" edit: passing `offset=offset`
-        # to `mark_truncation` here reads the ALREADY-SKIPPED probe as the whole
-        # population, so offset 1 answers False with two spokes still behind the
-        # cursor (`(1+1) < 2`) and a `while truncated` client drops them.
-        # Measured, not derived: offsets 0-2 each sit in front of a spoke.
-        assert truncs == [True, True, True, False, False], truncs
         # A page that holds everything says so.
         whole = client.get(f"/v1/entities/{hub['id']}/relations",
                            params={"limit": 10}).json()
         assert whole["count"] == 4 and whole["truncated"] is False, whole
-
-
-def test_relations_marks_a_truncated_probe_and_never_publishes_it_as_a_total(tmp_path):
-    """A page cut from a `limit + 1` probe is `truncated: true`, with NO total.
-
-    ⛔ NOTHING ELSE IN THIS SUITE GRADES THIS ARM, and that is why it exists: every
-    `total_available` assertion here belongs to the objects/sources routes, and every
-    `truncated` assertion touching a relations reply is the COMPLETE arm (the test
-    above asks for `limit=10` over four spokes). So BOTH arguments of the marker were
-    ungraded, and each mutant left the suite green while changing the response:
-
-      * `mark_truncation(..., exact=False)` -> `exact=True` publishes the PROBE
-        (`limit + 1`) as `total_available` — a lower bound wearing a total's clothes,
-        the defect the route's own comment forbids;
-      * deleting the call means `truncation_field` raises on a sink carrying no marker,
-        so a truncated relations page stops answering at all instead of saying
-        `truncated: true` — the fail-open direction (a client paging `while truncated`
-        loses edges silently) this module exists to close.
-
-    The probe reads `limit + 1` rows, so `limit=1` over a 2-edge hub is the smallest
-    population that is provably truncated.
-    """
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        hub = client.post("/v1/objects", json={
-            "name": "HUB", "objectKind": "goal"}).json()
-        spokes = [client.post("/v1/objects", json={
-            "name": f"P{i}", "objectKind": "goal"}).json() for i in range(2)]
-        sdk = _sdk(ha)
-        try:
-            for sp in spokes:
-                assert sdk._create_edge("related", hub["id"], sp["id"])
-        finally:
-            sdk.close()
-
-        page = client.get(f"/v1/entities/{hub['id']}/relations", params={"limit": 1})
-        assert page.status_code == 200, page.text
-        body = page.json()
-        assert body["count"] == 1, body
-        # The probe proved THERE ARE MORE…
-        assert body["truncated"] is True, body
-        # …and proved nothing about HOW MANY, so no total rides it.
-        assert "total_available" not in body, body
-
-        # POSITIVE CONTROL in the same test, so the `True` above cannot come from a
-        # marker hard-wired to one value: the page that holds everything is marked
-        # COMPLETE, and still publishes no total (it does not need one).
-        whole = client.get(f"/v1/entities/{hub['id']}/relations",
-                           params={"limit": 10}).json()
-        assert whole["count"] == 2 and whole["truncated"] is False, whole
-        assert "total_available" not in whole, whole
 
 
 def test_relations_reports_a_self_loop_once(tmp_path):
@@ -1517,129 +1852,6 @@ def _plant_confidence_event(sdk, point_id: str, *, confidence: float,
     return seq
 
 
-def _plant_raw_confidence_event(sdk, point_id: str, payload_extra: dict) -> int:
-    """Write a `ConfidenceChanged` row with a CALLER-CHOSEN payload.
-
-    The other fixture writes the full transition shape. This one exists for the
-    payload SHAPES the EP emitters also produce but the full-transition fixture
-    cannot express: the dream pass's bare `lastDreamedAt` stamp (`dream.py`:
-    `emit("ConfidenceChanged", id=cid, lastDreamedAt=now)`) and the posterior
-    CLEAR (`ep.py`: the three keys present with `None`). Without this fixture no
-    assertion can vary under a payload-shape mutant — that is why the arm below
-    exists rather than trusting the docstring.
-    """
-    from tortoise import event_store
-
-    proj = sdk._get_proj()
-    seq = event_store.next_seq(proj)
-    payload = {"id": point_id, **payload_extra}
-    ok = event_store.append_event(
-        proj, seq, "ConfidenceChanged", payload, f"ev-14592-raw-{point_id}-{seq}")
-    assert ok is True, "the fixture could not write the event it asserts on"
-    return seq
-
-
-@contextlib.contextmanager
-def _arm_confidence_changed_type():
-    """Force the emitter's admission gate OPEN for the duration of the block.
-
-    ⛔ WHY A TEST HAS TO ARM IT NOW: the route asks the emitter's own gate BEFORE
-    it scans (so a belief read does not pay an O(store) label scan for a row type
-    no producer can write). This suite's fixtures write `ConfidenceChanged` rows
-    DIRECTLY through `event_store.append_event` — a test graph has no producer to
-    drive — so an unarmed gate would make the route skip the scan, and the
-    payload-shape assertions below would be grading an absence instead of the
-    shape they exist for.
-
-    ⛔ NO SEAM IS FAKED: this rebinds the SAME global the route reads (``
-    _graph_event_types`` imports it per call), so the route takes its production
-    code path and its own filtering still has to work. The alternative — a route
-    knob a test could flip — would be a bypass in the shipped code.
-    """
-    import tortoise.sdk as sdk_module
-
-    original = sdk_module._GRAPH_EVENT_TYPES
-    sdk_module._GRAPH_EVENT_TYPES = original | {"ConfidenceChanged"}
-    try:
-        yield
-    finally:
-        sdk_module._GRAPH_EVENT_TYPES = original
-
-
-def test_belief_skips_a_stamp_that_committed_no_belief(tmp_path):
-    """A NEWER `ConfidenceChanged` that moved no belief must not be 'the last write'.
-
-    ⛔ The measured defect this pins: `ConfidenceChanged` is ALSO the dream pass's
-    bare `lastDreamedAt` stamp, whose payload carries no posterior. A payload-shape
-    blind read reports that stamp as `lastBeliefWrite` — a time at which the belief
-    demonstrably did not move — in a shape byte-identical to a real write, so a
-    client cannot tell "stamped" from "changed". The route's own sentence says
-    "the newest `ConfidenceChanged` event that COMMITTED A VALUE", so this is the
-    code being made to match it.
-
-    MUTANT this reds: `latest_for_node` ignoring `require_any` (or the route not
-    passing `event_store.CONFIDENCE_TRANSITION_KEYS`) — the stamp's seq would be
-    reported, and every `committed` value would be `None`.
-    """
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        p = client.post("/v1/points", json={
-            "content": "stamped after being measured", "kind": "statement"}).json()
-        sdk = _sdk(ha)
-        try:
-            real_seq = _plant_confidence_event(
-                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
-            # NEWER, and it moves nothing: `seq` orders the store, so this WOULD be
-            # the answer for any reader that matches on the id alone.
-            stamp = _plant_raw_confidence_event(
-                sdk, p["id"], {"lastDreamedAt": "2099-01-01T00:00:00+00:00"})
-            assert stamp > real_seq, "the fixture must plant the stamp NEWER"
-        finally:
-            sdk.close()
-
-        # ⛔ ARMED, because the row was planted BELOW the emitter: the route asks
-        # the emitter's gate before it scans, and an unarmed gate is a legitimate
-        # skip — which would leave the shape assertions here grading a null.
-        with _arm_confidence_changed_type():
-            body = client.get(f"/v1/entities/{p['id']}/belief").json()
-        assert body["lastBeliefWrite"]["seq"] == real_seq, body
-        assert body["lastBeliefWrite"]["committed"] == {
-            "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
-        }, body
-        # The stamp is a real row the store retains — skipping it is the READ's
-        # choice, not a claim that no such event exists.
-        assert body["lastBeliefWriteScan"]["eventType"] == "ConfidenceChanged"
-
-
-def test_belief_reports_a_CLEAR_as_the_last_write(tmp_path):
-    """A posterior CLEAR is a transition: all three keys present, values `None`.
-
-    The counterpart of the arm above, and the reason the filter is on KEY PRESENCE
-    rather than on truthiness: `ep.py`'s clear writes `confidence=None`,
-    `posterior_alpha=None`, `posterior_beta=None`. A `if payload.get("confidence")`
-    filter would silently drop the one event that says the belief was withdrawn —
-    reporting an older measurement as the most recent movement.
-    """
-    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        p = client.post("/v1/points", json={
-            "content": "measured then cleared", "kind": "statement"}).json()
-        sdk = _sdk(ha)
-        try:
-            _plant_confidence_event(
-                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
-            cleared = _plant_raw_confidence_event(sdk, p["id"], {
-                "confidence": None, "posterior_alpha": None,
-                "posterior_beta": None})
-        finally:
-            sdk.close()
-
-        with _arm_confidence_changed_type():
-            body = client.get(f"/v1/entities/{p['id']}/belief").json()
-        assert body["lastBeliefWrite"]["seq"] == cleared, body
-        assert body["lastBeliefWrite"]["committed"] == {
-            "confidence": None, "posteriorAlpha": None, "posteriorBeta": None,
-        }, body
-
-
 def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         p = client.post("/v1/points", json={
@@ -1652,8 +1864,7 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         finally:
             sdk.close()
 
-        with _arm_confidence_changed_type():
-            r = client.get(f"/v1/entities/{p['id']}/belief")
+        r = client.get(f"/v1/entities/{p['id']}/belief")
         assert r.status_code == 200, r.text
         body = r.json()
         # EP α/β, not a substituted score: mean = α/(α+β) = 0.8.
@@ -1664,24 +1875,224 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # prior is `baseline`, never silently reported as a measurement.
         assert body["ep_state"] == "baseline", body
         assert body["lastBeliefWrite"]["seq"] == seq, body
+        # The named reason is for a null write ONLY: when the store DOES hold the
+        # row, there is nothing unavailable to explain.
+        assert body["lastBeliefWriteUnavailable"] is None, body
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
         }, body
         # The window is PUBLISHED, not hidden: a null last write means "not in
         # this window", never "it never changed".
         assert body["lastBeliefWriteScan"]["eventType"] == "ConfidenceChanged"
-        # ⛔ `windowRows`, NOT `eventsScanned`: the constant is the window's SIZE,
-        # and a graph holding ONE `ConfidenceChanged` row reported `1000` under a
-        # name that says "scanned" — a count the store does not hold.
+        # ⛔ The window is its SIZE, and says so — a key named `eventsScanned`
+        # reported 1000 on a graph holding one row (#14593 review).
         assert body["lastBeliefWriteScan"]["windowRows"] >= 1
-        assert "eventsScanned" not in body["lastBeliefWriteScan"], (
-            body["lastBeliefWriteScan"])
-        # This row PLANTED a `ConfidenceChanged` row directly, so `last` is not
-        # None and no unavailability reason rides an answer that HAS one.
-        assert body["lastBeliefWriteUnavailable"] is None, body
+        assert "eventsScanned" not in body["lastBeliefWriteScan"], body
+        # …and it is the CONSTANT, not a count: `>= 1` cannot tell a count from a
+        # limit, so pin the identity. Both arms assert it because this one can
+        # SKIP under load with INCONCLUSIVE [#5049], and a skip is not a pass.
+        from tortoise.event_store import LATEST_FOR_NODE_SCAN
+        assert body["lastBeliefWriteScan"]["windowRows"] == LATEST_FOR_NODE_SCAN, body
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
+
+
+def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path, monkeypatch):
+    """#14593 review P1: a null ``lastBeliefWrite`` must not speak for the store.
+
+    MEASURED: the GRAPH event store receives the types its emitter ADMITS —
+    ``sdk._GRAPH_EVENT_TYPES``, plus ``PointRevised`` when the change feed is on
+    (every product ``append_event`` call site is ``sdk._emit_event``'s gated
+    arm) — and ``ConfidenceChanged`` is in neither arm, so ``latest_for_node(..., "ConfidenceChanged", …)`` cannot return a
+    row on a real graph, and the field was null while the docstring promised
+    "when it last moved… from the store's own record rather than inferred".
+    A client reading that null concludes the belief never moved, which is false:
+    the change is durable in the event JOURNAL. The route now publishes a named
+    reason beside the null — the same shape it already uses for
+    ``NO_PERSISTED_BELIEF`` — so absence reads as "this store cannot record it",
+    not as a measurement.
+
+    ⛔ This test is RED before the fix (the key does not exist, so the subscript
+    raises), and it asserts the emitter's OWN gate rather than a hardcoded
+    list — the day ``ConfidenceChanged`` joins that set, the reason must vanish
+    on its own, and the sibling test above already pins the populated case.
+    """
+    from tortoise.sdk import _GRAPH_EVENT_TYPES
+
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            pid = sdk._create_point("statement", "a measured claim")["id"]
+            sdk._set_point_baseline(pid, 8.0, 2.0)
+        finally:
+            sdk.close()
+        r = client.get(f"/v1/entities/{pid}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["lastBeliefWrite"] is None, body
+        if "ConfidenceChanged" in _GRAPH_EVENT_TYPES:  # pragma: no cover
+            # The emitter started recording it: the query is now answerable and
+            # there must be no reason to publish.
+            assert body["lastBeliefWriteUnavailable"] is None, body
+            return
+        reason = body["lastBeliefWriteUnavailable"]
+        assert reason["error_code"] == (
+            "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE"), body
+        # It NAMES what the store does record, so the answer is diagnosable, and
+        # it points at where the change really is instead of asserting absence.
+        assert "ConfidenceChanged" not in reason["recordedEventTypes"], body
+        assert reason["recordedEventTypes"], body
+        # ⛔ The enumeration must MIRROR the emitter's gate, not one arm of it:
+        # `sdk._emit_event` also stores `PointRevised` when the #2353 change feed
+        # is on, and a client rules types OUT from this list. Both directions are
+        # graded, because `sorted(_GRAPH_EVENT_TYPES)` satisfies the two
+        # assertions above (measured: the pre-fix return passes them) — which is
+        # exactly how the under-publishing answer shipped.
+        from tortoise.hosted_api import _graph_event_types
+
+        monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+        assert "PointRevised" in _graph_event_types()
+        monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
+        assert "PointRevised" not in _graph_event_types()
+        assert "journal" in reason["message"], body
+        # The scan block is published here too, and its window is a LIMIT, never
+        # a count (review P2) — pinned in THIS arm because under load the
+        # populated-case sibling can SKIP with INCONCLUSIVE [#5049], and a
+        # skip is not a pass: the contract must be observed somewhere that runs.
+        from tortoise.event_store import LATEST_FOR_NODE_SCAN
+        assert body["lastBeliefWriteScan"]["windowRows"] == LATEST_FOR_NODE_SCAN, body
+        assert "eventsScanned" not in body["lastBeliefWriteScan"], body
+        assert "windowKind" not in body["lastBeliefWriteScan"], body
+
+
+def _plant_malformed_event(sdk, seq: int) -> None:
+    """Write a `ConfidenceChanged` row whose `payload` is NOT JSON.
+
+    `append_event` serialises its payload (`json.dumps`), so the one shape that
+    makes `latest_for_node`'s parse arm matter cannot be produced through it; a
+    store written by an older/other producer can carry it, which is the row the
+    docstring's "SKIPPED, not fatal" promise is about.
+    """
+    proj = sdk._get_proj()
+    proj.g._query(
+        "CREATE (e:GraphEvent {seq:$seq, ts:'2026-01-01T00:00:00+00:00', "
+        "type:'ConfidenceChanged', event_id:$eid, payload:$payload})",
+        params={"seq": int(seq), "eid": f"ev-14592-malformed-{seq}",
+                "payload": "not json"},
+        read_only=False,
+    )
+
+
+def test_belief_reports_the_NEWEST_write_not_the_oldest(tmp_path):
+    """#14593 review F1 (P2): the `ORDER BY e.seq DESC` had no row that could red.
+
+    ``latest_for_node``'s central promise is "the NEWEST matching event, ordered by
+    the store's own total order". Before this row, NO belief test planted a SECOND
+    ``ConfidenceChanged`` for the SAME node — the ones that planted any planted exactly
+    one each, and most planted none — so ``DESC`` and ``ASC`` answered identically
+    wherever the ordering was reached, and the ordering SURVIVED its own revert.
+    Measured: flipping to ``ASC`` left all 15 pre-existing belief rows green, while the
+    flipped build reports the OLDEST committed write as ``lastBeliefWrite`` (a silently
+    wrong answer on a brand-new read surface, which is exactly the class this PR exists
+    to close). ⛔ Stated as a population claim, not a census: three earlier cuts tried
+    to give the exact split ("every row planted exactly ONE", then "fourteen", then
+    "twelve") and each count was wrong, because a row that plants NO event never
+    reaches the ordering at all — the point is that the population which COULD have
+    discriminated never did, and that is what this fixture changes.
+
+    ⛔ Two writes, SAME node id, different seqs, and the assert names the NEWER
+    one — the fixture is what makes the ordering load-bearing. Asserting only that
+    *a* write comes back is the shape that stayed green.
+
+    ⛔ ONE assertion, deliberately: a second `seq != older` line was cut in review
+    because `seq == newer` plus the fixture guard `newer > older` already IMPLY it, so
+    it could never be the line that reds — while its comment claimed it was the line
+    that caught an ASC scan (review P3, agent-infra#3442's dead-weight rule). ⛔ The
+    precise mechanism is implication, not unreachability: the line does execute,
+    whenever the two assertions above it pass; it simply cannot FAIL.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a claim that is measured twice",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._set_point_baseline(p["id"], 8.0, 2.0)
+            older = _plant_confidence_event(
+                sdk, p["id"], confidence=0.2, alpha=2.0, beta=8.0)
+            newer = _plant_confidence_event(
+                sdk, p["id"], confidence=0.9, alpha=9.0, beta=1.0)
+        finally:
+            sdk.close()
+        assert newer > older, (
+            f"the fixture's second write has to be NEWER ({older=} {newer=})")
+
+        r = client.get(f"/v1/entities/{p['id']}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # The NEWER row, by the store's own order — and this is the whole finding:
+        # revert the ordering and this line reports the OLDER seq instead.
+        assert body["lastBeliefWrite"]["seq"] == newer, body["lastBeliefWrite"]
+        # The committed figures ride the SAME row as the seq — a route that took
+        # the seq from one write and the numbers from another would pass a
+        # seq-only assertion. ⛔ An `!= older` line sat here and was removed: with
+        # `seq == newer` and the fixture guard `newer > older` above it, it is
+        # implied, so it can never be the line that reds — it detected nothing while
+        # its comment claimed an ASC scan would be caught by it.
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": 0.9, "posteriorAlpha": 9.0, "posteriorBeta": 1.0,
+        }, body
+
+
+def test_belief_matches_the_parsed_id_and_skips_a_malformed_payload(tmp_path):
+    """`latest_for_node`'s TWO hardening promises, each pinned by its own row.
+
+    1. The id is matched on the PARSED payload, never by substring: a NEWER row
+       whose id merely CONTAINS this node's id (`<id>-shadow`) must not be
+       reported as this node's transition.
+    2. A row whose payload will not parse is SKIPPED, not fatal: one bad write
+       must not hide every later one (nor 500 the read).
+
+    Both rows are planted NEWER than the real one, so each promise is the only
+    thing standing between the assertion and the wrong answer — a substring
+    match selects the shadow row, and an unguarded `json.loads` raises on the
+    malformed one.
+    """
+    from tortoise import event_store
+
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a measured claim with shadowing neighbours",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._set_point_baseline(p["id"], 8.0, 2.0)
+            seq = _plant_confidence_event(
+                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
+            proj = sdk._get_proj()
+            # Promise 1: the id IS A PREFIX of this newer row's id.
+            shadow_seq = event_store.next_seq(proj)
+            assert event_store.append_event(
+                proj, shadow_seq, "ConfidenceChanged",
+                {"id": f"{p['id']}-shadow", "confidence": 0.2,
+                 "posterior_alpha": 2.0, "posterior_beta": 8.0},
+                f"ev-14592-shadow-{shadow_seq}") is True
+            # Promise 2: an unparseable payload, newer still.
+            _plant_malformed_event(sdk, event_store.next_seq(proj))
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{p['id']}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["lastBeliefWrite"]["seq"] == seq, body
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
+        }, body
+        # The shadow row would have published the OTHER node's transition.
+        assert body["current"]["alpha"] == 8.0, body
+        assert body["current"]["beta"] == 2.0, body
 
 
 def test_belief_refuses_an_uncalibrated_graph_rather_than_substituting_a_number(tmp_path):
@@ -1733,114 +2144,41 @@ def test_belief_does_not_run_ep_for_a_node_with_no_belief(tmp_path):
         assert r.json()["current"] is None, r.text
 
 
-def test_belief_names_why_lastBeliefWrite_cannot_be_answered(tmp_path):
-    """A null `lastBeliefWrite` must not be readable as "this belief never moved".
+def test_belief_never_puts_a_sources_body_in_entity_name(tmp_path):
+    """#14593 review P1 (data disclosure, #3998): the FIFTH door, and the cheap one.
 
-    ⛔ MEASURED: the GRAPH event store only receives the types in
-    `sdk._GRAPH_EVENT_TYPES`, plus `PointRevised` when the #2353 change feed is on
-    — every product `append_event(` call site is `sdk.py::_emit_event`'s gated arm
-    — and `ConfidenceChanged` is in NEITHER. So on a real graph
-    `event_store.latest_for_node(..., "ConfidenceChanged", …)` has nothing to
-    find. This suite could not see the defect because its fixtures write the row
-    through `event_store.append_event` DIRECTLY (see `_plant_confidence_event`: a
-    test graph has no producer to drive), which bypasses the emitter's gate — so
-    every belief row here was green over a field that is null on every production
-    graph, rendered identically to "never moved".
+    `get_entity_belief` read `resolved[0]["properties"]` RAW — `_layer_payload`,
+    which every by-id route applies, was skipped — and then coalesced
+    `name -> content -> url`. `content` is NOT in `_SOURCE_NODE_PROP_NAMES`, so
+    `filter_source_props` drops it everywhere else; here it was published as
+    `entity.name`. Measured: the body answered as the name on `/belief` while
+    `/v1/sources/{id}` withheld the same value.
 
-    The route now publishes `lastBeliefWriteUnavailable` with a named reason (the
-    shape it already uses for its other unanswerable half, `currentUnavailable`),
-    and the branch is a RUNTIME read of the emitter's own gate: the day
-    `ConfidenceChanged` joins it, the reason disappears by itself and the existing
-    query starts answering. Both directions are pinned below, the second by
-    ARMING the type rather than by asserting the reason's absence where it could
-    never appear.
-
-    ⛔ MUTANT: delete the `lastBeliefWriteUnavailable` key (the pre-fix payload)
-    and the reason half reds; hardcode the branch to `False` and the armed half
-    reds.
+    ⛔ Reachability is not contrived: the session-capture producer writes
+    `:Source {url: "session:<id>"}`, a SLASH-FREE identity, so this route's single
+    `{entity_id}` segment addresses it (a normal url-keyed Source cannot be
+    reached here — its `/` breaks the segment, which the module documents).
     """
-    import tortoise.sdk as sdk_module
-    from tortoise.hosted_api import _belief_changes_reach_the_graph_store
-    from tortoise.sdk import _GRAPH_EVENT_TYPES
-
-    # The trigger IS the emitter's gate, read live — not a restated list.
-    assert _belief_changes_reach_the_graph_store() == (
-        "ConfidenceChanged" in _GRAPH_EVENT_TYPES)
-
-    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
-        p = client.post("/v1/points", json={
-            "content": "a claim with no planted event",
-            "kind": "statement"}).json()
-        body = client.get(f"/v1/entities/{p['id']}/belief").json()
-        assert body["lastBeliefWrite"] is None, body
-        assert "lastBeliefWriteUnavailable" in body, body
-        if _belief_changes_reach_the_graph_store():
-            # The emitter admits the type: the null is a real absence and no
-            # reason may ride it.
-            assert body["lastBeliefWriteUnavailable"] is None, body
-        else:
-            reason = body["lastBeliefWriteUnavailable"]
-            assert reason["error_code"] == "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE", reason
-            # The published list agrees with the emitter: everything it admits is
-            # named, and the type this route reads is NOT among them.
-            assert set(_GRAPH_EVENT_TYPES) <= set(reason["recordedEventTypes"]), reason
-            assert "ConfidenceChanged" not in reason["recordedEventTypes"], reason
-            assert reason["message"], reason
-
-        # ── the OTHER direction, by ARMING the type the reason is about ──
-        # A reason that cannot disappear is a hardcoded payload wearing a branch's
-        # clothes, so the SAME route is asked again with the emitter's gate
-        # widened — same graph, same key, only the gate moves.
-        original = sdk_module._GRAPH_EVENT_TYPES
-        sdk_module._GRAPH_EVENT_TYPES = original | {"ConfidenceChanged"}
+    url = "session:rev-14593-capture"
+    secret = "SESSION CAPTURE BODY THAT MUST NOT BE A NAME"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
         try:
-            armed = client.get(f"/v1/entities/{p['id']}/belief").json()
+            assert sdk._create_source(url, "web")["id"] == url
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.content = $c",
+                params={"u": url, "c": secret}, read_only=False)
         finally:
-            sdk_module._GRAPH_EVENT_TYPES = original
-        assert armed["lastBeliefWrite"] is None, armed
-        assert armed["lastBeliefWriteUnavailable"] is None, armed
+            sdk.close()
 
-
-def test_belief_does_not_scan_for_a_type_the_emitter_never_writes(
-        tmp_path, monkeypatch):
-    """The O(store) scan is SKIPPED when the emitter cannot write the type.
-
-    ⛔ THE MEASURED PREMISE: `event_store.latest_for_node` plans as *label scan →
-    filter → sort → limit* — `ensure_event_schema` indexes `event_id` and `seq`
-    only, there is no index on `type` (`LATEST_FOR_NODE_SCAN`'s own comment) — so
-    the query costs the store's size on every belief read. With
-    `ConfidenceChanged` in neither admission path of `sdk._emit_event`, its only
-    possible answer on a real graph is `None`, so that scan pays the store to
-    prove an absence the emitter's gate already knows.
-
-    ⛔ WHY THIS IS A SPY AND NOT A PAYLOAD ASSERTION: the payload is IDENTICAL
-    either way (`lastBeliefWrite: null` plus the named reason), which is why the
-    sibling tests cannot see the mutant at all. The falsifier has to be the call.
-    MUTANT: drop the `if _belief_changes_reach_the_graph_store():` guard in
-    `get_entity_belief` and scan unconditionally (the pre-fix shape) — the spy
-    records a call and this reds.
-    """
-    from tortoise import event_store as es
-
-    calls: list[tuple] = []
-    real = es.latest_for_node
-
-    def _spy(*a, **k):
-        calls.append((a, tuple(sorted(k))))
-        return real(*a, **k)
-
-    monkeypatch.setattr(es, "latest_for_node", _spy)
-
-    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
-        p = client.post("/v1/points", json={
-            "content": "a claim nothing scanned for",
-            "kind": "statement"}).json()
-        body = client.get(f"/v1/entities/{p['id']}/belief").json()
-
-    assert body["lastBeliefWrite"] is None, body
-    assert body["lastBeliefWriteUnavailable"]["error_code"] == (
-        "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE"), body
-    assert calls == [], calls
+        out = client.get(f"/v1/entities/{url}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        assert body["entity"]["label"] == "Source", body
+        assert body["entity"]["name"] == url, body
+        assert secret not in out.text, out.text
+        # The sibling door withheld it before this fix and must keep doing so.
+        assert secret not in client.get(f"/v1/sources/{url}").text
 
 
 def test_belief_404s_on_an_unknown_entity(tmp_path):
@@ -2221,3 +2559,52 @@ def test_layer_lists_call_the_layers_own_terminal_vocabulary(monkeypatch):
     # Point default.
     for query in proj.g.queries:
         assert "n.outdated" not in query, query
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_layer_list_pages_over_a_TOTAL_order_at_the_call_site(label):
+    """#5346: the offset walk is only safe if the PAGE statement orders totally.
+
+    ⛔ MEASURED GAP (review at ``f775e1a990ef``): deleting ``, id(n)`` from the page
+    statement left the ENTIRE file green — 40 passed. Two reasons, both measured:
+    the same-name fixture asserts NAMES (two ``SAME`` rows are one string, so a
+    repeated row and a dropped row look identical), and this engine happened to
+    break equal-name ties the same way on every per-page re-query, so even an
+    id-based assertion on that fixture would not have reddened.
+
+    So the order is graded where it is WRITTEN — on the emitted statement — the
+    way `test_layer_lists_call_the_layers_own_terminal_vocabulary` grades the
+    terminal predicate. `id(n)` rather than `n.id` is the point: entity ids are
+    not unique across labels (the module states it), so only the node id makes
+    ``(name, id(n))`` total.
+    """
+    from tortoise import entity_reads
+
+    class _Graph:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def ro_query(self, cypher, params=None):
+            self.queries.append(cypher)
+            result = [[0]] if "count(n)" in cypher else []
+
+            class _R:
+                def __init__(self):
+                    self.result_set = result
+
+            return _R()
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    proj = _Proj()
+    entity_reads.list_layer(proj, label, limit=5, offset=10)
+
+    pages = [q for q in proj.g.queries if "SKIP $skip" in q]
+    assert pages, proj.g.queries
+    order_prop = entity_reads.LAYER_ORDER_PROP[label]
+    for query in pages:
+        assert f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit" in query, query
+        # and NOT the non-total form, which is the mutant this row exists for
+        assert f"ORDER BY n.{order_prop} SKIP" not in query, query

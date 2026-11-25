@@ -785,19 +785,26 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 
-    # ⛔ THE `(?:env:)?` GROUP IS A LOCATOR REPAIR, not a relaxation, and `main`'s `#14607`
-    # landing is why it was owed: that landing spells the header snippet
-    # `"Authorization": "Bearer ${env:TORTOISE_API_KEY}"` (the harness-config spelling), which
-    # the previous regex could not match AT ALL — so this pin redded on a served document that
-    # still carries the env-indirect Bearer it asks for, and `referenced` read empty (a red
-    # that says "no snippet" about a file that has one). What the pin GRADES is unchanged and
-    # still non-vacuous: the name extracted here — whichever spelling carried it — must be one
-    # `tortoise/mcp_client.py` actually READS (`_env_names_the_client_reads`), so a snippet
-    # repointed at an unread name still reds this test, which is the #5153 defect it exists for.
+    # BOTH indirection forms, because the document's ONE Bearer snippet is the
+    # Cursor one and `.cursor/mcp.json` expands `${env:NAME}` — the PLAIN
+    # `${NAME}` form is Claude Code's `--header` and is NOT expanded by Cursor
+    # (cursor.com/docs/mcp; the same split is already recorded below, at the
+    # `CURSOR_MCP_CONFIG_ENV` / `PI_MCP_CONFIG_ENV` wizard pins). A regex that
+    # accepted only the plain form therefore found no snippet at all and redded
+    # a CORRECT document (#5153's guard, red since #5343 wrote it). The `env:`
+    # prefix is optional in the EXTRACTION only — the pin immediately below
+    # still grades which form Cursor's snippet must carry.
     referenced = set(
-        re.findall(r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}', skill))
+        re.findall(
+            r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
+            skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
+    assert '"Authorization": "Bearer ${env:TORTOISE_API_KEY}"' in skill, (
+        "the Cursor `.cursor/mcp.json` snippet must interpolate `${env:NAME}` — "
+        "Cursor does not expand the plain `${NAME}` form in `headers`, so a "
+        "snippet repointed at it ships the literal `Bearer ${...}` text and "
+        "every request is a 401")
     # ASK THE CLIENT WHAT IT READS, and prove it READS. The precedence loop (a
     # names tuple consulted with `os.environ.get(name)`) has no per-variable
     # literal for a shape-pin to find — pinning one redded a correct fix
@@ -1680,13 +1687,23 @@ def test_3232_generic_restart_lines_are_exact():
         "the installer's closing cue must restart, THEN confirm/list the "
         "skills — the skills directory is read at agent start")
     quick = QUICKSTART.read_text(encoding="utf-8")
-    # ⛔ RE-POINTED, and the artifact is what moved, not the claim: `main`'s `#14607`
-    # onboarding landing REWROTE this cue from two sentences (`Restart your client.` then the
-    # tools-appear sentence) into ONE — `Restart your client, then confirm the tools are
-    # actually there` — so the pinned string stopped occurring while the doc still says
-    # restart-then-confirm. The assertion therefore pins the live sentence, which carries
-    # BOTH halves the docstring asks for; what it still refuses is a doc that tells a reader
-    # to confirm the tools WITHOUT the restart, because this string is the whole cue.
-    assert "Restart your client, then confirm the tools are actually there" in quick, (
-        "docs/quickstart-cloud.md must keep its restart-then-confirm cue before a reader "
-        "hunts for the tools")
+    # #3429's lesson, applied to THIS line: pin the ORDER, not one wording.
+    # #14607 reworded "Restart your client. You should now have Tortoise's
+    # tools …" into "Restart your client, then confirm the tools are actually
+    # there — `tortoise_*` in the client's MCP/tool list …", which KEEPS the
+    # requirement and strengthens it (it names the confirmation), yet the
+    # equality pin called it a regression — the shape that trains the next
+    # author to delete the pin instead of keeping the order (measured red at
+    # `7107272801e5` on `main` and on this head alike).
+    cue = "Restart your client"
+    assert cue in quick, (
+        "docs/quickstart-cloud.md must keep its restart cue — the config is "
+        "read at client start, so a written config is not a loaded one")
+    para = next(p for p in quick.split("\n\n") if cue in p)
+    flat_para = " ".join(para.split())
+    after_cue = flat_para[flat_para.index(cue):]
+    assert re.search(r"\btools\b", after_cue), (
+        "docs/quickstart-cloud.md must keep a tools-appear clause AFTER its "
+        "restart cue — 'restart' alone never tells the user what to look for, "
+        "and a clause placed before the cue points them at tools the running "
+        "session cannot have yet (#3232)")

@@ -113,58 +113,6 @@ def _safe_label(label: str) -> str:
     return label
 
 
-def layer_payload(
-    props: dict, labels: Any, label: str,
-) -> dict:
-    """One layer node's publishable property bag — the ONE home of the rule.
-
-    A ``:Source`` goes through ``projection.entities.filter_source_props`` (#3998 /
-    D30 — the graph indexes the raw; it is not the raw store), decided by the
-    node's WHOLE LABEL SET and never by the branch a MATCH reached it by: Cypher
-    label matching is SUBSET-based, so ``MATCH (n:Object)`` also matches a
-    ``(:Object:Source)`` hybrid, and returning ``properties(n)`` unfiltered put
-    that node's DENIED ``content`` on ``/v1/objects`` and ``/v1/subjects``
-    (measured) while ``/v1/sources/{url}`` withheld it.
-
-    ⛔ AND THE HYBRID KEEPS ITS OWN LAYER'S KIND. ``filter_source_props`` is an
-    ALLOWLIST (``_SOURCE_NODE_PROP_NAMES``), so filtering a ``(:Object:Source)``
-    drops ``objectKind`` — and a list filtered on ``?kind=goal`` then returned a
-    row that did not echo the field it was selected by (measured). The KIND is the
-    LAYER's declaration, not a ``:Source`` payload, so it is re-attached from the
-    PRE-filter bag (``raw``) and everything the filter denied stays denied.
-
-    ⛔ ONE HOME, TWO CALLERS, because the two copies had already drifted. The list
-    read (``list_layer``) and the by-id read (``hosted_api._layer_payload``) each
-    carried a hand-copied form of this rule — and it is the half that most
-    recently shipped wrong (a branch-keyed echo handed ``objectKind`` back through
-    ``GET /v1/sources/{id}``). ``label`` is the ROUTE's layer declaration, never a
-    matched branch, and it is a required positional with no branch fallback — a caller
-    that OMITTED it gets a ``TypeError``, while a caller that passed the matched branch
-    instead would silently re-open that door, which is the hazard the required
-    positional is there to make loud.
-    """
-    # ⛔ A COPY, not an alias: the re-attach below reads the pre-filter bag, and an
-    # alias would make "the kind comes from before the filter" true only by
-    # accident of ``filter_source_props`` being pure.
-    raw = dict(props or {})
-    # ⛔ NOT fail-closed when `labels` is None: a legacy/mock row that is really a
-    # hybrid but declares only ``Object`` publishes what the filter would
-    # withhold. Stated because it is a residual, not a guarantee — it is
-    # unreachable in production only because ``_resolve_entity`` always emits
-    # ``labels``, which is a property of the callee.
-    is_source = (label == "Source" if labels is None else "Source" in labels)
-    if not is_source:
-        return raw
-
-    from .projection.entities import filter_source_props
-
-    out, _denied = filter_source_props(raw)
-    kind_prop = LAYER_KIND_PROP.get(label)
-    if kind_prop and kind_prop in raw and kind_prop not in out:
-        out[kind_prop] = raw[kind_prop]
-    return out
-
-
 def list_layer(
     proj: Any,
     label: str,
@@ -199,6 +147,26 @@ def list_layer(
     the SAME shared predicate (``live._terminal_excluded``) so the vocabulary and
     the position axis cannot drift between the two list routes — with the layer's
     OWN status family (see ``_layer_terminal_predicate``), never the Point one.
+
+    ⛔ AND EVERY ROW IS GRADED BY ITS LABEL SET (#14593 review P1, measured).
+    ``MATCH (n:Object)`` matches a hybrid ``(:Object:Source)`` — the shape
+    ``mcp_server``'s #4649 blast-radius case and ``tool_registry``'s #13114 note
+    both name as real — so ``RETURN properties(n)`` published that node's stored
+    ``text``/``content`` here while the BY-ID route withheld it through the same
+    ``#3998`` rule (``hosted_api._layer_payload``). A disclosure guarantee that
+    holds on one read path and not another is not a guarantee, which is #3998's
+    own argument one route over. The page query therefore returns ``labels(n)``
+    with each row — a row carrying only ``properties(n)`` CANNOT be graded, and
+    an ungraded row is what the finding measured — and each map goes through
+    ``projection.entities.publishable_payload``, the one composition of the
+    shared decision and the shared filter.
+
+    ⛔ The row is REDACTED, never DROPPED. A hybrid node genuinely IS this layer
+    — ``POST /v1/objects`` can reach it, its by-id route answers it — so hiding
+    it from the list would make ``total`` disagree with what a by-id walk can
+    reach and would answer "this layer holds N" over N rows of which one is
+    unreachable. Withholding the denied properties is the same answer the by-id
+    route gives for the same node.
     """
     label = _safe_label(label)
     order_prop = LAYER_ORDER_PROP.get(label)
@@ -225,16 +193,26 @@ def list_layer(
         # DROPPED by `kind_fallbacks.named_kind` (which also TRIMS surrounding
         # whitespace, so the stored value is the caller's spelling apart from
         # that trim), an uninstalled NAMESPACE is refused by
-        # `hosted_api._require_approved_kind` — a check on the namespace, never
-        # on the spelling — and nothing else rewrites the value. Measured: one
+        # `hosted_api._require_approved_kind` when the graph's approval set is
+        # not ``None`` — the #2714 back-compat rule in
+        # `pack_state.kind_namespace_is_approved`: ``None`` means no
+        # `:PackInstall` records AND no `:PackSelection` marker (every namespace
+        # admitted), while a graph CONFIGURED empty (`set_graph_packs(packs=[])`,
+        # #2728) resolves to ``frozenset()`` and refuses — UNLESS its data leg
+        # already carries the namespace (`recorded ∪ data`, #2714 indicator 2, so
+        # a namespace this graph has written stays writable). That is a check on
+        # the namespace, never on the spelling — and nothing else rewrites the
+        # value.
+        # Measured: one
         # graph holds `team` and `core:team` side by side. So an EQUALITY filter
         # answered `200 count: 0, truncated: false` for the spelling that
         # happened not to be the stored one — the "byte-identical to *this graph
         # names no such thing*" page this read exists not to produce, and it was
         # a spelling the route's own refusal list recommends. The set is exactly
         # {bare, core:bare} for a `core:`-namespaced kind and its bare form; an
-        # ARBITRARY namespace stays exact, because `zzz:goal` is a vocabulary
-        # item of its own and must not pull in the bare `goal` rows.
+        # ARBITRARY namespace stays exact, because `kind_equivalents` folds ONLY
+        # the repo's `core:` namespace — `zzz:goal` names one value and must not
+        # pull in the bare `goal` rows.
         # ⛔ `kind_is_known` appears nowhere in this rule: it is a boolean
         # VALIDATOR (reached on a create through the warn-not-block
         # `kind_other_layer` advisory, and none of those calls raises or
@@ -252,44 +230,106 @@ def list_layer(
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
     #
-    # ⚠️ INHERITED RESIDUE, stated as a MECHANISM rather than a list: this module's
-    # OWN calls hold the rule, and that is the whole of what it can promise. A GET
-    # that delegates inherits whatever verb the arm it delegates to uses, and
-    # several of these mint — `projection._resolve_entity` (behind every by-id route
-    # and `/belief`), `navigation._resolve_root` (behind `entity_relations`),
-    # `TortoiseSDK._list_sources` (the `list_knowledge(kind='source')` arm behind
-    # `/v1/sources`, `MATCH (s:Source) …` over `proj.g.query`), and `/belief`'s
-    # `TortoiseSDK._provenance` (further `proj.g.query` sites, reached on that
-    # route's most common input, a Point). ⛔ There is deliberately NO COUNT here: a
-    # number is a claim about call sites in OTHER modules, so it goes stale without
-    # anyone touching this file — which is why an earlier cut of this paragraph said
-    # "two" and was wrong. What stays true: "the new GETs cannot mint a graph" is a
-    # guarantee about the Cypher BELOW, never about these routes end to end. Fixing
-    # the delegated arms is pre-existing debt in their own homes; `grep -n
-    # 'g\.query(' ` on the module a route delegates to is how to audit it.
+    # ⚠️ INHERITED RESIDUE, stated rather than implied — SEVEN delegated helpers
+    # behind these GETs still resolve through GRAPH.QUERY (`query`), the verb
+    # that MINTS a graph which does not exist; this module's OWN calls hold the
+    # `ro_query` rule above. `proj.g.query` is the wrapper that dispatches that
+    # minting verb (`projection/__init__.py::_ProjectionHandle.query` →
+    # `_dispatch_decided(…, "query", …)`), which is why this is residue and not
+    # a style note. Enumerated PER ROUTE rather than counted, because a count
+    # with no route beside it is what let this paragraph read two of five, and
+    # then four of five, and then five of six, under three separate reviewers:
+    #
+    #   * `projection.FalkorProjection._resolve_entity`
+    #     (`projection/__init__.py:21099`) — behind every by-id route
+    #     (`/v1/objects/{id}`, `/v1/subjects/{id}`, `/v1/sources/{id}`) AND
+    #     `/belief`'s own resolution;
+    #   * `navigation._resolve_root` (`navigation.py:95`) — behind
+    #     `entity_relations`;
+    #   * `TortoiseSDK._list_sources` (`sdk.py:31679`) — behind `/v1/sources`,
+    #     which reaches it through `list_knowledge(kind='source')`;
+    #   * `ep.TortoiseEP._read_node` (`ep.py:790`, the `self.g.query` at `:804`)
+    #     — behind `/belief`, through `sdk.check_confidence(claim_id=…)` →
+    #     `_get_confidence` → `ep.compute_confidence`;
+    #   * `TortoiseSDK._get_point` (`sdk.py:30632`, the cache arm's
+    #     `_cache_handle().g.query` at `:30717`) — behind `/belief`'s evidence
+    #     arm for a Point, through `sdk._provenance`;
+    #   * `TortoiseSDK._provenance` itself (`sdk.py:38256`) — the CALLER of
+    #     `_get_point` above, and its own minting reads are the Subject arm at
+    #     `:38292` and the delegation rels at `:38315`, on top of
+    #     `_raw_entry_for_point`'s `proj.g.query` at `:38239` and
+    #     `resolve_entity_id_same_entity(proj.g, …)` at `:38288`
+    #     (`entity_identity.py`'s `g.query`) — so listing only its callee would
+    #     read as one locus where there are three;
+    #   * `TortoiseSDK._uncalibrated_ep_participants` (`sdk.py:43696`, the
+    #     `proj.g.query` inside its per-label loop) — behind EVERY `/belief` that
+    #     has a belief to report, through `sdk.check_confidence` →
+    #     `_get_confidence` → `_ensure_calibrated` (that gate is on by default:
+    #     `_ep_require_calibration_default()` is `True`).
+    #
+    # The unit is ENTRY-POINT HELPERS (seven), over nine query-issuing functions
+    # once the callees named above are counted — stated explicitly because the
+    # sentence that follows is easy to read as a complete census of FUNCTIONS.
+    #
+    # So "the new GETs cannot mint a graph" is true of the Cypher IN THIS MODULE
+    # and NOT yet of those seven resolutions: the object/subject by-id routes
+    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` four
+    # (`_read_node` + `_provenance` + its `_get_point` callee +
+    # `_uncalibrated_ep_participants`) on top of the
+    # `_resolve_entity` its own resolution already reaches. Fixing them is pre-existing debt in their own
+    # homes; it is not a guarantee this module's comment can confer. ⛔ A reader
+    # auditing these routes' write-verb exposure takes this paragraph as the
+    # COMPLETE residual, so an enumeration that is short by even one is a false
+    # clean verdict on a route — the "claim wider than the measurement" class
+    # this comment exists to prevent.
+    #
+    # ⛔ And ONE MORE, which the SEVEN above do not cover and a review measured
+    # (P3): every one of the eight routes is served with
+    # `attach_projection=True` (`hosted_api._data_sdk_with_projection`), and
+    # `Projection.__init__` runs `_ensure_indexes()`, whose body issues
+    # `self.g.query("CREATE INDEX …")` / a `DROP INDEX …` — so on a graph whose
+    # schema is not current, the FIRST GET of ANY route here mints schema. That
+    # is a SEPARATELY DECLARED write class (`_graph_metadata_write_scope(
+    # "schema-ddl")`, #9124), not an undeclared one, and it is conditional on
+    # `_schema_is_current()` — but it does mean no route in this file is literally
+    # free of `GRAPH.QUERY`, so a reader must not take the seven resolutions above
+    # as the whole story: "the new GETs cannot mint a graph" is true of the Cypher
+    # in THIS MODULE and of those resolutions only.
+    #
+    # ⛔ AND THE HANDLE OPEN IS NOT FREE EITHER, measured rather than assumed
+    # (review at 6c6b0f88): an instrumented census of `_GuardedGraph.query` shows
+    # FOUR statements issued by the projection open on EVERY one of the eight
+    # routes, before the route's own read — `FalkorProjection._probe_ok` (×2),
+    # `_schema_is_current` and `_array_valued_fts_prop_exists` — all through
+    # `query`, the minting verb. So this paragraph's "seven resolutions" is a
+    # census of ROUTE-LEVEL reads, NOT of every GRAPH.QUERY a request can emit:
+    # the open is shared, pre-existing machinery (`_data_sdk_offloaded(
+    # attach_projection=True)`), it fires whether or not the schema is current,
+    # and fixing the seven does not make these GETs non-minting. Anyone auditing
+    # write-verb exposure must count the open too.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
     total = int(total_rows[0][0]) if total_rows else 0
-    # ⛔ THE LIST READ CARRIES THE NODE'S LABEL SET TOO, and it must: Cypher label
-    # matching is SUBSET-based, so `MATCH (n:Object)` matches a
-    # `(:Object:Source)` hybrid — and returning `properties(n)` unfiltered put that
-    # node's DENIED `content` on `/v1/objects` and `/v1/subjects` (measured) while
-    # `/v1/sources/{url}` withheld it. The filter is `projection.entities`' own
-    # `filter_source_props` — the ONE home of #3998/D30 — rather than a second copy
-    # of the rule, and it is applied by MEMBERSHIP: a hybrid is a Source for
-    # disclosure purposes whichever branch a MATCH reached it by.
+    # ``labels(n)`` rides the page so each row can be graded; without it a row's
+    # label set is unknowable here and the page cannot apply the ``#3998`` rule
+    # at all (see the docstring). ``count(n)`` above is deliberately UNCHANGED by
+    # that rule: the row is redacted, not dropped, so the total still counts the
+    # rows the page can return.
+    from .projection.entities import publishable_payload
+
     rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN properties(n), labels(n) "
         f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit",
         params={**params, "skip": offset, "limit": limit},
     ).result_set
-    out: list[dict] = []
-    for r in rows:
-        # ``layer_payload`` is the ONE home of the filter + kind re-attach rule
-        # (see its docstring: the by-id read applies the same one).
-        out.append(layer_payload(r[0], r[1], label))
-    return out, total
+    # A 1-column row is the pre-fix shape (mock fixtures, older drivers): the
+    # label set is then unknowable, and the branch label is the strongest thing
+    # the row states — the same fallback the by-id routes take for an entry that
+    # carries no ``labels``, rather than a silent skip of the rule.
+    return [publishable_payload(dict(r[0]),
+                                r[1] if len(r) > 1 else [label])
+            for r in rows], total
 
 
 def kind_equivalents(kind: str) -> list[str]:
@@ -352,50 +392,141 @@ def layer_kind_values(proj: Any, label: str) -> frozenset[str]:
     return frozenset(str(r[0]) for r in rows if r[0] is not None)
 
 
+#: The most characters of a neighbour's own text a relation row carries. The
+#: same VALUE as the inline ``[:200]`` in ``search_engine.get_relationships``'
+#: ``related_content`` (there is no named constant there to share) — a relation
+#: list is per-EDGE, so an unbounded preview scales as
+#: ``limit × largest neighbour body`` (#14593 review P2, measured at 4000 chars
+#: through a Point). Deliberately NOT imported from ``search_engine``: that slice
+#: is inline to its own rendering, and coupling the two would mean a change there
+#: silently re-caps a public REST field here.
+_ENDPOINT_NAME_MAX = 200
+
+#: Which property answers "the neighbour's own name" — PER LAYER, and the
+#: ``ELSE`` arm deliberately does NOT read ``content`` (#14593 review P2, second
+#: round). ``content`` is a Point's own text (handled explicitly) and, for anything
+#: else that carries it, a LEGACY DOCUMENT PAYLOAD: ``projection.entities`` names
+#: ``content`` in ``_DOC_RETIRED_KEYS`` as the pre-D10 document body, and
+#: ``migrate_kinds`` records that ``_upsert_document`` DID store the raw ``content``
+#: on its subpopulation — so a bare ``(:Document {id})`` left behind by an
+#: interrupted ``relabel_legacy_documents`` is exactly the shape the Source arm
+#: exists to stop, and with the blanket fallback still in place it was MEASURED to
+#: answer ``other.name`` with the full planted body. ``:Event`` loses nothing here:
+#: its narrative lives in ``session_narrative``, never on the node
+#: (``_EVENT_SERVER_MANAGED_PROPS``).
+_RELATION_ENDPOINT_NAME = (
+    "CASE WHEN m:Source THEN m.url "
+    "     WHEN m:Point THEN coalesce(m.content, m.name) "
+    # ⛔ ``m.eventId`` last, the same order the IDENTITY projection uses in the
+    # SELECT beside this one (``coalesce(m.id, m.eventId, m.url) AS oid``): an
+    # ``:Event``'s identity key is ``eventId`` and it writes no ``id``
+    # (``why.py``: ``MERGE (e:Event {eventId:$eid})``), so without it an unnamed
+    # Event neighbour answered ``name: null`` while the SAME row carried its
+    # eventId as ``other.id`` — measured (#14593 review P3).
+    "     ELSE coalesce(m.name, m.url, m.id, m.eventId) END"
+)
+
+
+def _root_preview(entity_id: str, root_label: str, root: dict,
+                  labels: list[str] | None = None) -> dict:
+    """The entity the caller ASKED for — same BOUND, same FLAG, not same coalesce.
+
+    ⛔ THE PARITY IS CAP + FLAG, AND ONLY THAT (#14593 review, four rounds). The
+    CAP (``_ENDPOINT_NAME_MAX``) and the ``nameTruncated`` FLAG are shared with a
+    neighbour's preview, so a client may treat both sides the same way.
+
+    ⛔ THE COALESCE IS NOT SHARED, and this docstring does NOT paraphrase it —
+    earlier revisions did, three times, and each copy was wider than the code:
+    "the same coalesce … so the two sides render the same way" (wrong: they do
+    not), "the asymmetry is SOURCE-SHAPED" (wrong: it is not layer-specific), and
+    a per-layer restatement that gave ``:Point → content`` while the arm is
+    ``coalesce(m.content, m.name)``. The rule has ONE home — the code:
+    ``_RELATION_ENDPOINT_NAME`` ABOVE (the neighbour side, per layer) and
+    ``raw = …`` BELOW (the root side, one ``or``-chain). Read those two sites.
+
+    What is asserted HERE is only what was measured, and it is enough to stop the
+    mistake this paragraph exists for: the two sides CAN answer different strings
+    for the same node — MEASURED on this head for a ``:Point`` carrying both
+    ``name`` and ``content``, for a ``:Source`` carrying a ``name``, and for an
+    ``:Event`` carrying ``content``. ``_create_source(url, "web",
+    name="My Doc Name")`` is the shortest of the three: ``name: "My Doc Name"`` as
+    a ROOT, ``name: <url>`` as a neighbour.
+    ⛔ Operationally: do not dedupe ``entity.name`` against ``other.name`` on any
+    layer, and do not infer the per-layer rule from this comment — it does not
+    state one.
+
+    The full body of a Point is not lost by the cap: the root is by definition
+    reachable at its own route (``/v1/points/{id}`` and siblings), and this route
+    answers "what is this entity connected to", not "give me its text".
+
+    ``:Source`` cannot reach ``content`` here, and the reason is a GRADED LABEL
+    SET rather than the resolution branch. ⛔ An earlier revision said
+    ``navigation._resolve_root`` "filters a Source root before this point" — true
+    of a plain ``:Source``, FALSE of a hybrid, because that helper tested the
+    branch label it matched (``label == "Source"``) and a ``(:Object:Source)``
+    root resolves through the ``Object`` branch (#14593 review P2, measured: the
+    hybrid's stored ``content`` came back as ``entity.name`` here). Both halves
+    are fixed: ``_resolve_root`` now grades ``labels(n)``, AND this helper grades
+    the propagated label set through the same shared
+    ``projection.entities.publishable_payload`` before the coalesce runs — so a
+    caller that ever hands this function an unfiltered map cannot re-open the
+    disclosure through the name field.
+    """
+    from .projection.entities import publishable_payload
+
+    published = publishable_payload(root, labels if labels else [root_label])
+    raw = (published.get("name") or published.get("content")
+           or published.get("url") or published.get("eventId"))
+    name = None if raw is None else str(raw)
+    return {
+        "id": entity_id,
+        "label": root_label,
+        "name": None if name is None else name[:_ENDPOINT_NAME_MAX],
+        "nameTruncated": name is not None and len(name) > _ENDPOINT_NAME_MAX,
+    }
+
+
 def _endpoint_preview(row: Any) -> dict:
     """The OTHER endpoint of one edge, as identity + label + its own name.
 
     ⛔ Deliberately NOT ``properties(m)``. Two reasons, and the second is not
     stylistic: (1) a relation list's payload is per-EDGE, so returning whole
     nodes multiplies a dense node's fan-out by its neighbours' size; (2) a
-    ``:Source`` neighbour must not hand back its stored payload — the exact
-    disclosure ``#3998``'s filter exists to stop, on a route that never asked
-    for it.
+    ``:Source`` neighbour would hand back its stored payload — the exact
+    disclosure ``#3998``'s filter exists to stop, on a route that never asked for
+    it.
 
-    ⛔ THE NAME COALESCE IS LABEL-AWARE, NOT PAYLOAD-FREE BY CONSTRUCTION — which
-    is the distinction that makes point (2) true rather than merely intended. A
-    ``:Source``'s text is its declared ``name`` (or, failing that, its ``url``),
-    NEVER its ``content``, because ``projection.entities._SOURCE_NODE_PROP_NAMES``
-    drops ``content`` from every `:Source` read bag (#3998 / D30, #5196). Coalescing
-    ``m.content`` into a neighbour's name inside Cypher would put that raw text
-    on a route that never asked for it, so the query selects the Source arm
-    first (see ``entity_relations``). The two arms are therefore
-    ``coalesce(m.name, m.url)`` for a `:Source` and
-    ``coalesce(m.name, m.content, m.url)`` for everything else — never "name,
-    then body, then identity keys" in the abstract, because the third term is the
-    ``url`` ALONE. ⛔ The ROOT's arm is not identical to a neighbour's: it also
-    falls back to ``eventId`` (a ``:Point`` carries an eventId and no url),
-    so a root answers ``name`` → ``url`` → ``eventId`` and a non-`:Source`
-    root ``name`` → ``content`` → ``url`` → ``eventId``.
+    ⛔ THE BOUND IS PART OF THE CONTRACT, not a nicety (#14593 review P2). The
+    field is a *preview*, and ``_ENDPOINT_NAME_MAX`` is the same 200-character
+    limit ``search_engine.get_relationships`` applies to the equivalent
+    ``related_content``. Without it this route's per-request size scaled as
+    ``limit × largest neighbour body``: MEASURED on this tree, one ``related``
+    edge between two Points whose ``content`` was 4000 characters returned
+    ``other.name`` at 4000 — a ``:Point`` carries no ``name``, so the fallback
+    landed on ``content`` — and ``limit`` is ``le=1000``. A cut is MARKED
+    (``nameTruncated`` below) rather than silent, because a shortened value a
+    caller cannot detect is the "absence read as an answer" class this PR
+    removes elsewhere.
+
+    ⛔ And the per-layer SELECTION is done in Cypher (``_RELATION_ENDPOINT_NAME``
+    above the two UNION branches), because a single blanket ``coalesce(m.name,
+    m.content, m.url)`` reached ``content`` for a ``:Source`` too — the ``#3998``
+    payload disclosure arriving through the name field, which
+    ``filter_source_props`` never sees.
+    ⚠️ The arms are NOT restated here. An earlier revision summarised them as
+    "a Source by its ``url``; a Point by its ``content``; everything else by its
+    ``name``", which was false twice over — the ``:Point`` arm is
+    ``coalesce(m.content, m.name)`` and the ``ELSE`` arm ends in an identity
+    (``url``, ``id``, ``eventId``), not in ``name`` alone. Read the constant.
     """
     labels = row[1] or []
+    raw = row[2]
+    name = None if raw is None else str(raw)
     return {
         "id": row[0],
-        # ⛔ MEMBERSHIP, NOT POSITION — the SAME rule the NAME coalesce above
-        # already applies (``CASE WHEN 'Source' IN labels(m) …``), so the two
-        # fields of one preview cannot disagree about what the neighbour is.
-        # ``labels[0]`` is whatever the engine happened to order first, so a
-        # hybrid ``(:Object:Source)`` neighbour answered ``{"label": "Object",
-        # "name": <its url>}``: the NAME came from the Source arm while the LABEL
-        # came from position, and a client that reads ``label`` saw a plain
-        # Object carrying a url-shaped name — the first-label-vs-membership
-        # defect this PR fixes on four other surfaces, reintroduced on the one
-        # field a client filters on (``sources = [o for o in others if
-        # o["label"] == "Source"]`` finds nothing for a hybrid). The ``:Source``
-        # half is what decides the payload, so it decides the label too.
-        "label": ("Source" if "Source" in labels
-                  else (labels[0] if labels else None)),
-        "name": row[2],
+        "label": (labels[0] if labels else None),
+        "name": None if name is None else name[:_ENDPOINT_NAME_MAX],
+        "nameTruncated": name is not None and len(name) > _ENDPOINT_NAME_MAX,
     }
 
 
@@ -461,17 +592,10 @@ def entity_relations(
     # document read is `/v1/sources/{url}` (which uses the `:path` converter).
     # Stated rather than implied, because the alternative — a `:path` converter
     # here — would greedily swallow the trailing `/relations`.
-    root_label, root, root_key = _resolve_root(proj.g, entity_id)
+    root_label, root, root_key, root_labels = _resolve_root(proj.g, entity_id)
     if root_label is None:
-        # ⛔ ``None``, NOT ``True``: this arm never calls
-        # ``declared_relation_packs()``, so it has not asked whether the
-        # declarations are readable and must not answer yes. It is unreachable
-        # through the route (which 404s on the null ``entity``) but this module is
-        # the library Phase B's ``entity_profile`` will adopt, and a positive
-        # claim about a registry the path never read is the substituted-value
-        # class the docstring one screen up spends a paragraph on.
         return ({"entity": None, "relations": [], "count": 0,
-                 "declarationsReadable": None}, 0)
+                 "declarationsReadable": True}, 0)
     _safe_label(root_label)
     if root_key not in _HOP_KEYS:
         # `_resolve_root` can only produce a key from its own constant table;
@@ -493,12 +617,7 @@ def entity_relations(
     inner = (
         f"MATCH (n:{root_label} {{{root_key}:$eid}})-[r]->(m) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        # ⛔ `:Source` FIRST, and its arm omits `content` — a `:Source`'s stored
-        # ``content`` is a DENIED property (#3998/D30), so coalescing it into a
-        # neighbour's name would republish what `/v1/sources/{id}` withholds.
-        "       CASE WHEN 'Source' IN labels(m) "
-        "            THEN coalesce(m.name, m.url) "
-        "            ELSE coalesce(m.name, m.content, m.url) END AS name, "
+        f"       {_RELATION_ENDPOINT_NAME} AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'out' AS direction, id(r) AS rid "
         "UNION ALL "
@@ -518,9 +637,7 @@ def entity_relations(
         # and no neighbour is filtered out for lacking a name.
         "WHERE id(m) <> id(n) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        "       CASE WHEN 'Source' IN labels(m) "
-        "            THEN coalesce(m.name, m.url) "
-        "            ELSE coalesce(m.name, m.content, m.url) END AS name, "
+        f"       {_RELATION_ENDPOINT_NAME} AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'in' AS direction, id(r) AS rid"
     )
@@ -558,20 +675,7 @@ def entity_relations(
                            else list(declared.get(predicate, ()))),
         })
     return {
-        "entity": {
-            "id": entity_id,
-            "label": root_label,
-            # The root's own name, on the SAME label-aware rule as a neighbour's
-            # (see `_endpoint_preview`): a `:Source` root answers its name or its
-            # url, never its denied `content`.
-            # ⛔ NO LABEL TEST HERE ON PURPOSE: `navigation._resolve_root` already
-            # decided the #3998/D30 denial by the node's LABEL SET, so a `:Source`
-            # (hybrid included) arrives with `content` withheld and this coalesce
-            # cannot reach it. Testing the branch label a second time is what let
-            # the hybrid leak through in the first place; one home for the rule.
-            "name": (root.get("name") or root.get("content")
-                     or root.get("url") or root.get("eventId")),
-        },
+        "entity": _root_preview(entity_id, root_label, root, root_labels),
         "relations": relations,
         "count": len(relations),
         "declarationsReadable": declared is not None,

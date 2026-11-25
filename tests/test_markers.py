@@ -71,6 +71,17 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (e)`
     # shard, which is how it was found (the module landed in `516af8e42`).
     "test_10180_promote_default_graph.py": {"registry": "prod-coupled"},
+    # #14593: `_seed_registry` (tests/test_14592_read_parity.py) builds a REAL
+    # embedded registry (`ha._make_sdk(namespace="registry")`) because every route
+    # in that module resolves its org through `get_current_org`'s REGISTRY branch
+    # — an org that exists nowhere is refused before any read, so the fixture has
+    # to mint the Team row in the store the resolver actually opens. The literal IS
+    # the namespace that branch resolves in production, so a `test_*` rename would
+    # seed a graph the resolver never reads and every route would 403/500 over
+    # nothing — the same `prod-coupled` class as the row above. The db_path is
+    # tmp_path-bound (`TORTOISE_DB_PATH` per test), so the shared-graph hazard is
+    # closed by the redirect's per-path derivation, not by a rename.
+    "test_14592_read_parity.py": {"registry": "prod-coupled"},
     # #10015 row 28: the account-read fixtures build a REAL embedded registry
     # (`TortoiseSDK(db_path=..., namespace="registry")`) because the behaviour
     # under test is `quota.resolve_org_limits`' REGISTRY resolution — the
@@ -119,20 +130,6 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (c)`
     # shard, which is how it was found (the module landed without the row).
     "test_13110_goalstate_doors.py": {"registry": "prod-coupled"},
-    # #14592 read parity: `_seed_registry` provisions the `:Team` node the
-    # MCP/quota lanes read the allowance from (`ha._make_sdk(namespace="registry")
-    # ._get_registry()`), so the literal IS the namespace PROD code resolves —
-    # `quota`/`hosted_api` call `_make_sdk(namespace="registry")` themselves.
-    # A `test_*` rename would seed a graph the resolver never reads, and every
-    # write in the suite would then be refused `Team '<id>' not found in
-    # registry` before reaching the route it measures — the `prod-coupled` class
-    # exactly, same helper shape as test_13110 above. The db_path is
-    # tmp_path-bound, so the shared-graph hazard is closed by the redirect's
-    # per-path derivation, not by a rename.
-    # MEASURED: without this row the literal reds
-    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (d)`
-    # shard, which is how it was found (the module landed without the row).
-    "test_14592_read_parity.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the
