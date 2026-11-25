@@ -9182,12 +9182,19 @@ _DERIVATION_LOOKAHEAD = 60
 #: `main`'s copy of that paragraph — where it reads "drift-reporter row" — and silently REVERTED
 #: the fix. The diff is comment-only, so no executable arm could notice; the WORD is the whole
 #: claim, which is why the word is graded rather than the sentence trusted.
-#: Both reversion shapes are read, because a matcher narrowed to one shape is how the same word
-#: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
+#: Three reversion shapes are read, because a matcher narrowed to one shape is how the same word
+#: rotted: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
 #: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
 #: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs 0
 #: times, so the second pattern is exercised by the fixture below and NOT by live text; saying
-#: "both spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: "the spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: ⛔ THE THIRD SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
+#: verb there, so neither anchor above could reach it: `… `<file>`, `<file>` and `<file>` carry an
+#: explicit `2.0` `durations` row, while `…` carry NO row`. That is the row-vs-default sentence the
+#: block relies on, and planting a FALSE claim in that spelling left this arm GREEN (measured).
+#: `_ROW_CLAIM_CARRY_RE` below reads it, in BOTH directions — the same sentence states absences,
+#: and a matcher that collected every path in the window would red five TRUE statements and then be
+#: narrowed back to nothing.
 #: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
 #: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
 #: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
@@ -9215,6 +9222,86 @@ _ROW_CLAIM_BEFORE_COLON_RE = re.compile(
     r"\brows?\b[\s*_]{0,4}:\s*(?P<names>`?tests/[\w/.-]+\.py`?"
     r"(?:\s*,\s*`?tests/[\w/.-]+\.py`?)*)", re.IGNORECASE)
 _ROW_CLAIM_PATH_IN_LIST_RE = re.compile(r"`?tests/(?P<file>[\w/.-]+\.py)`?")
+#: The CARRY spelling — a RUN of named files followed by the claim verb: `… `<file>`, `<file>` and
+#: `<file>` **carry an explicit `2.0` `durations` row**`, and `… **carry NO row**`. The run may
+#: interleave an issue label before each path (`#14409`'s `<file>`) and may separate its items with
+#: a comma OR `and`, which is how the live sentence is written; `\s` spans the line breaks the
+#: comment block wraps at, so a re-wrap does not un-grade it. The label admits OPTIONAL backticks
+#: around the number (`#14415's` beside ``#14415`'s`): the live sentence uses the bare form, and a
+#: matcher bound to one of them leaves the other spelling ungraded — the class this whole arm
+#: exists to close. The polarity is part of the match
+#: (`positive` value vs `negative`), not a filter applied afterwards: the two halves of that
+#: sentence make OPPOSITE claims about the same map, so folding them together would grade five
+#: true absences as five missing rows.
+_ROW_CLAIM_CARRY_RE = re.compile(
+    r"(?P<names>`?tests/[\w/.-]+\.py`?"
+    r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
+    r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
+    r"\s+carry\s+"
+    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)`?\s+`?durations`?\s+rows?"
+    r"|no\s+rows?)",
+    re.IGNORECASE,
+)
+
+
+def _unquoted_block(header: str) -> str:
+    """The block with double-quoted spans masked, refusing to answer on ODD quote parity.
+
+    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `"` re-pairs with the next
+    span's opening quote and swallows the live prose IN BETWEEN. Both arms that read the block
+    (the row word and the carry run) mask with this, so the parity precondition lives here, once:
+    a guard that cannot read its subject must not certify it. `_splice_shingle_positions` already
+    RAISES rather than de-splicing around the mis-pairing, for exactly this reason.
+    """
+    quotes = header.count('"')
+    if quotes % 2:
+        raise AssertionError(
+            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}), "
+            "so the quoted-span mask would re-pair across live prose and this arm would grade a "
+            "block it cannot actually read — refusing to answer rather than answering `no row "
+            "claim` over a claim it silently masked")
+    return _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+
+
+def _carry_row_claims(header: str) -> tuple[dict[str, float], set[str]]:
+    """Files the block says CARRY a `durations` row, split by the POLARITY it states.
+
+    Returns `(positive, negative)`: `positive` maps each file the sentence says carries a row to
+    the value the sentence states for it, and `negative` is the set it says carries NO row. Both
+    halves are real claims about the map, and they are graded in opposite directions by
+    `_carry_row_claim_violations`, so neither can be dropped without a red.
+    """
+    return _carry_row_claims_in(_unquoted_block(header))
+
+
+def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, float], set[str]]:
+    """`_carry_row_claims` over ALREADY-MASKED text (the form `_row_claims` holds)."""
+    positive: dict[str, float] = {}
+    negative: set[str] = set()
+    for claim in _ROW_CLAIM_CARRY_RE.finditer(unquoted):
+        names = {m.group("file")
+                 for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+        if claim.group("value") is None:
+            negative |= names
+        else:
+            for name in names:
+                positive[name] = float(claim.group("value"))
+    return positive, negative - set(positive)
+
+
+def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
+                                durations: dict) -> tuple[list, list, list]:
+    """The three ways a `carry` claim can be false, as `(wrong value, no row, has a row)`.
+
+    One predicate, used for the live block AND for the fixture that proves it bites, so the
+    fixture cannot drift into grading something the live assertion does not.
+    """
+    wrong_value = sorted((name, stated, durations[name])
+                         for name, stated in positive.items()
+                         if name in durations and abs(durations[name] - stated) > 1e-9)
+    no_row = sorted(name for name in positive if name not in durations)
+    has_a_row = sorted(name for name in negative if name in durations)
+    return wrong_value, no_row, has_a_row
 
 
 def _row_claims(header: str) -> list[str]:
@@ -9233,23 +9320,20 @@ def _row_claims(header: str) -> list[str]:
                    (`tests/test_fly_secret_declaration_report.py`), then "a quoted dead claim"'
         before -> `_row_claims(...)` == []      # GREEN over a reverted `row` claim
 
-    — i.e. the arm answers "no row claim" over the very reversion it exists to catch.
-    `_splice_shingle_positions` already treats this as a precondition and RAISES rather than
-    de-splicing around the mis-pairing, for exactly this reason; a guard that cannot read its
-    subject must not certify it, so the same parity test runs BEFORE the mask. Its sibling also
-    reds the tree, which is why this is defence in depth rather than the only gate — but a
-    fail-open member of a fail-closed family is still a defect, and this one is reachable from a
-    single typo in prose nobody re-reads.
+    — i.e. the arm answers "no row claim" over the very reversion it exists to catch. The
+    precondition now lives in `_unquoted_block`, which BOTH arms call, so the carry arm cannot
+    answer over a block this one would refuse: a guard that cannot read its subject must not
+    certify it, and a fail-open member of a fail-closed family is still a defect.
+
+    ⛔ It returns the files claimed to HAVE a row, from all three spellings (`_ROW_CLAIM_AFTER_FILE_RE`,
+    the list/colon forms, and `_ROW_CLAIM_CARRY_RE`'s positive half). The carry sentence's NEGATIVE
+    half is graded by `test_the_fast_shards_header_block_grades_the_carry_row_spelling` instead —
+    a file the block says has NO row must not be handed to an arm that reds on absence.
     """
-    quotes = header.count('"')
-    if quotes % 2:
-        raise AssertionError(
-            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}), "
-            "so the quoted-span mask would re-pair across live prose and this arm would grade a "
-            "block it cannot actually read — refusing to answer rather than answering `no row "
-            "claim` over a claim it silently masked")
-    unquoted = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+    unquoted = _unquoted_block(header)
     found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
+    carried, _ = _carry_row_claims_in(unquoted)
+    found |= set(carried)
     for claim in _ROW_CLAIM_BEFORE_LIST_RE.finditer(unquoted):
         found |= {m.group("file")
                   for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
@@ -9906,7 +9990,8 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     assert claimed, (
         "the `fast_shards` header block names no test file as a `durations` row, so this arm "
         "grades nothing at all — re-point the row-claim matchers ("
-        "`_ROW_CLAIM_AFTER_FILE_RE`, `_ROW_CLAIM_BEFORE_LIST_RE`) at the sentence the block "
+        "`_ROW_CLAIM_AFTER_FILE_RE`, `_ROW_CLAIM_BEFORE_LIST_RE`, `_ROW_CLAIM_BEFORE_COLON_RE`, "
+        "`_ROW_CLAIM_CARRY_RE`) at the sentence the block "
         "actually uses")
     missing = [name for name in claimed if name not in rows]
     assert not missing, (
@@ -9942,7 +10027,8 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "test_row_claim_upper.py",
     ], (
         "the row-claim matcher no longer reads every reversion shape (a file then `row`, "
-        "`row (` then the files, and `rows:` then the files), or it misses a SUBDIRECTORY row, or "
+        "`row (` then the files, `rows:` then the files, and a run of files followed by `carry an "
+        "explicit `N` `durations` row`), or it misses a SUBDIRECTORY row, or "
         "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
         "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
         "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
@@ -9965,6 +10051,79 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
             "quoted-span mask re-pairs across live prose and this arm grades a block it cannot "
             "read — measured, that is how a reverted `drift-reporter row (…)` claim passes it "
             "GREEN")
+
+
+def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
+    """The `carry an explicit `N` `durations` row` / `carry NO row` spelling is GRADED both ways.
+
+    #14612 review round 3 (P2): the block states the row-vs-default split in a THIRD spelling —
+    "`<A>`, `<B>` and `<C>` carry an explicit `2.0` `durations` row, while `<D>` … carry NO row" —
+    and `_row_claims` read NOTHING of it, because both of its matchers anchor on the `row` WORD
+    and take the names from what FOLLOWS it. MEASURED on that head: planting a false row claim in
+    this spelling left the arm GREEN, so the sentence the block leans on was graded by nothing.
+
+    Both halves are graded, and each direction is exercised by a fixture the predicate must red
+    on: a claim of a row the map does not carry, a claim of a row at the WRONG value, and a claim
+    that a file has NO row while the map carries one. One predicate
+    (`_carry_row_claim_violations`) runs over the live block and over the planted fixture, so the
+    fixture cannot drift into grading something the live assertion does not.
+    """
+    rows = cs.load_manifest()["durations"]
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    positive, negative = _carry_row_claims(header)
+    # NON-VACUITY, both polarities: if either half empties, the corresponding assertion below is
+    # decoration. The block states both halves at this head, so an empty one means the matcher
+    # stopped reading the sentence rather than that the sentence went away.
+    assert positive, (
+        "the `fast_shards` block names no file as carrying an explicit `durations` row, so the "
+        "`carry` arm grades nothing — re-point `_ROW_CLAIM_CARRY_RE` at the sentence the block "
+        "actually uses")
+    assert negative, (
+        "the `fast_shards` block names no file as carrying NO `durations` row, so the absence "
+        "half of the `carry` arm grades nothing — re-point `_ROW_CLAIM_CARRY_RE`")
+    assert _carry_row_claim_violations(positive, negative, rows) == ([], [], []), (
+        "the block's `carry`/`carry NO row` sentence is false of the map: "
+        f"(file, stated value, real value)={_carry_row_claim_violations(positive, negative, rows)[0]}, "
+        f"claimed-rowed-but-absent={_carry_row_claim_violations(positive, negative, rows)[1]}, "
+        f"claimed-rowless-but-rowed={_carry_row_claim_violations(positive, negative, rows)[2]}")
+    # …and the predicate BITES on every direction, planted in the SAME spelling the live sentence
+    # uses (so a matcher narrowed to one polarity, or to the wrong verb, reds here rather than
+    # passing over a fixture it never matched).
+    planted = (
+        "`#1`'s `tests/test_carry_planted_first.py`, `#2`'s `tests/test_carry_planted_second.py` "
+        "and `#3`'s `tests/eval/test_carry_planted_subdir.py` carry an explicit `3.5` "
+        "`durations` row, while `#4`'s `tests/test_carry_planted_absent.py` and `#5`'s\n"
+        "`tests/test_carry_planted_absent_two.py` carry NO row")
+    planted_positive, planted_negative = _carry_row_claims(planted)
+    assert planted_positive == {
+        "eval/test_carry_planted_subdir.py": 3.5,
+        "test_carry_planted_first.py": 3.5,
+        "test_carry_planted_second.py": 3.5,
+    }, f"the `carry` matcher no longer reads the run of names before the verb: {planted_positive!r}"
+    assert planted_negative == {
+        "test_carry_planted_absent.py",
+        "test_carry_planted_absent_two.py",
+    }, f"the `carry NO row` half is no longer read: {planted_negative!r}"
+    # All three directions in one map: `second` carries the row at the wrong value, `subdir` has
+    # no row at all, and `absent` DOES carry one while the sentence says it does not.
+    planted_rows = {
+        "test_carry_planted_first.py": 3.5,
+        "test_carry_planted_second.py": 2.0,
+        "test_carry_planted_absent.py": 2.0,
+    }
+    assert _carry_row_claim_violations(
+        planted_positive, planted_negative, planted_rows) == (
+            [("test_carry_planted_second.py", 3.5, 2.0)],
+            ["eval/test_carry_planted_subdir.py"],
+            ["test_carry_planted_absent.py"],
+    ), ("the `carry` predicate does not red on all three false claims (wrong value, absent row, "
+        "row claimed absent) — measured, each of these was green under the pre-fix matchers:"
+        f" {_carry_row_claim_violations(planted_positive, planted_negative, planted_rows)!r}")
+    # …and an ODD quote count refuses to answer here too, rather than masking across the sentence
+    # and reporting an empty claim (the fail-open shape the sibling arm already refuses).
+    with pytest.raises(AssertionError, match="ODD number of double quotes"):
+        _carry_row_claims('a stray " then `tests/test_carry_planted_first.py` carry an explicit '
+                          '`2.0` `durations` row')
 
 
 def test_the_emission_block_guard_is_not_vacuous():
