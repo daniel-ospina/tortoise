@@ -632,9 +632,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # ``projection/entities.py::_fold_object_superseded``), so the shape check 4
     # reports as LEFTOVER WIRING on a :Point is LOST BELIEF on an :Object: the
     # operator's input stays anchored to the node the supersession just made
-    # terminal for EP, EP strips that input (``1/2 inputs stripped — factor
-    # skipped (degenerate, #780/#2422)``), and the factor stops funding the
-    # successor that should carry it — silently, because nothing reports it.
+    # terminal for EP, EP strips that input (the run's ``degenerate`` skip RECORD
+    # names the axis and the inputs — #6105, #780/#2422/#13450), and the factor
+    # stops funding the successor that should carry it, with no audit check
+    # surfacing it — which is what this check adds.
     #
     # HIGH, and deliberately not check 4's ``medium``: on a :Point the transfer
     # is the lane's own job and a surviving edge is an anomaly; on an :Object the
