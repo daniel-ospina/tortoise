@@ -57,53 +57,31 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6b` folded in, which itself
-# carried `#14612`'s and `#14606`'s re-writes of this very block — every registration the partition
-# below counts is `main`'s EXCEPT the ONE row this PR adds. `main`'s are `#14596`'s
+# reader of the prose can see. On THIS tree — `origin/main` `4b2fba3e8a` folded in, which itself carried `#14612`'s and
+# `#14606`'s re-writes of this very block — every registration the partition below counts is
+# `main`'s EXCEPT the ONE row this PR adds. `main`'s are `#14596`'s
 # `tests/test_14560_operator_vectors.py` and `#14552`'s
 # `tests/test_record_read_point_vector_keys.py` (both `core`, flat 2.0 s `DEFAULT_FAST_WEIGHT`),
 # `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, that same
-# flat weight), `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row, `#14606`'s
-# `tests/test_14592_operating_model_evidence.py` (`core`, that same flat weight) and `#14344`'s
-# `tests/test_expansion_fusion_14344.py` (`core`, the same flat weight, landed on the base this fold
-# takes) — each of them landed before this fold, so none is this PR's. THIS PR adds exactly ONE
-# file, `tests/test_14592_read_parity.py`, and with it the verb
-# packs the pool into two bins: ten shards at 826.7 s
-# (a, b, d, e, f, g, h, i, j, k) and one at 826.6 s (c), so `ceil(826.7/60 x 2)` = 28 m governs
-# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` on every one of the eleven shards, so the
-# two agree by construction rather than by a hand re-read.
-# ⛔ THE POOL DELTA IS ONE, and it is measured BOTH ways because a delta asserted from one side is
-# how an older "1333 here against 1332 on `main`" spelling outlived the landing that made it
-# false: `fast_pool()` holds 1336 files at this head and 1335 on `origin/main`. ⛔ No parent's
-# FIGURE is carried here: the fold re-packed every bin (the packer is greedy), so the per-fold
-# readings that stood in this block before the union splice describe trees that no longer exist,
-# and they are deleted rather than re-pointed. The name lists are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
-# a graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
-# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
-# `#14597`'s `tests/test_expansion_fusion_14344.py`, `#14415`'s two batch rows, `#14548`'s residue
-# RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py`, `#14565`'s reaper-schedule row,
-# `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`) and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (all `core`; every one of them at the flat 2.0 s
-# weight EXCEPT `#14548`'s residue RATCHET, which is `tests/test_sdk_privatise_sweep.py` at
-# **28.0 s** — a `core` file whose weight is not flat, so do not read this list as "all 2.0 s")
-# — plus `#14607`'s two new `core` rows (`tests/test_mcp_selfcheck.py`,
-# `tests/test_recall_neighborhood.py`), the verb
-# packs the pool into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s
-# (c, d, h), so `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 826.9 = 2.0317), so the two agree by construction rather than
-# by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1337 files at this head against 1335 on `main`, and
-# the TWO entries this branch adds are `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py` — re-derived by running the verb on BOTH manifests
-# (`origin/main`'s and this tree's), not carried from either parent's paragraph, and `main` carries
-# nothing this tree lacks. ⛔ Every row named above is `main`'s at this head, NOT this branch's:
-# counting one as this branch's would make the list disagree with the paragraph's own
-# 1337 − 1335 = 2. The name lists are what the guard COMPARES against the live emission
+# flat weight), `#14548`'s residue RATCHET (which is `tests/test_sdk_privatise_sweep.py` at
+# **28.0 s** — a `core` row whose weight is NOT flat, so do not read this list as "all 2.0 s"),
+# `#14565`'s reaper-schedule row, `#14606`'s `tests/test_14592_operating_model_evidence.py`
+# (`core`, that same flat weight), `#14344`'s `tests/test_expansion_fusion_14344.py` (`core`, the
+# same flat weight, landed on the base this fold takes) and `#14607`'s two new `core` rows
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — each of them landed
+# before this fold, so none is this PR's. THIS PR adds exactly ONE file,
+# `tests/test_14592_read_parity.py`, and with it the verb packs the pool into two bins: six
+# shards at 827.1 s (a, b, g, i, j, k) and five at 827.0 s (c, d, e, f, h), so `ceil(827.1/60 x
+# 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same
+# emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.1 = 2.0312)
+# on every one of the eleven shards, so the two agree by construction rather than by a hand
+# re-read. ⛔ THE POOL DELTA IS ONE, and it is measured BOTH ways because a delta asserted from
+# one side is how an older "1333 here against 1332 on `main`" spelling outlived the landing that
+# made it false: `fast_pool()` holds 1338 files at this head and 1337 on `origin/main`
+# `4b2fba3e8a`, and `main` carries nothing this tree lacks. ⛔ No parent's FIGURE is carried here:
+# the fold re-packed every bin (the packer is greedy), so the per-fold readings that stood in
+# this block before the union splice describe trees that no longer exist, and they are deleted
+# rather than re-pointed. The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
