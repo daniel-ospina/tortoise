@@ -295,10 +295,11 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
 
     The source's 25 pins are PRODUCT-surface counts, and `--render` appends one row
     per site under them. The all-surface census is ~8x wider, so the pair produced a
-    document whose §0 pin read `sites = 1327` above an appendix of ~9,230 rows while
-    `--render` printed success — a self-contradictory artifact, which is the "false
-    pass in prose" class this file exists to refuse. Measured on the combination
-    before the refusal: `render: wrote 10327 lines`.
+    document whose §0 `sites` pin — a product-surface count — sat above an appendix
+    several times longer while `--render` printed success — a self-contradictory
+    artifact, which is the "false pass in prose" class this file exists to refuse.
+    The recorded measurement of the unguarded run — a historical observation, not a
+    live count: `render: wrote 10327 lines` when it was taken.
 
     ⛔ A LOUD REFUSAL, NOT A SILENT SCOPE-NARROWING: a lane that asked for the wide
     census and quietly got the product one would believe it had rendered the wide
@@ -503,7 +504,7 @@ NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 # ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
 # the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
-# per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
+# per arm — one row for each `_exactly_one` arm — makes that claim executable. A deleted row, a
 # DUPLICATED row and a row whose `what=` matches nothing are all reds
 # (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
 # why that test asserts multiplicity and arm-id uniqueness on top of set equality.
@@ -862,7 +863,8 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
 
 @pytest.fixture(scope="module")
 def measured_census() -> dict[str, int]:
-    """The census, measured ONCE — the arm-coverage test grades seven mutants of ONE doc.
+    """The census, measured ONCE — the arm-coverage test grades one mutant per
+    `_GRADED_LOOKUPS` row against ONE doc.
 
     `census()` is a full tree walk (measured ~6 s at `#13458`), so measuring it per case
     would add ~40 s to prove what one measurement already settles.

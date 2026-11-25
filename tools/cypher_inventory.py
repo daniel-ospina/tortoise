@@ -884,9 +884,9 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ NEITHER VERB MAY RUN THE WIDE CENSUS UNDER THE SOURCE'S PRODUCT PINS.
     # The source's 25 pins are PRODUCT-surface counts (`census(("tortoise",))`),
     # and `--render` appends the run's rows under those pins. Rendering the
-    # all-surface census would write a document whose §0 pin reads `sites = 1327`
-    # above an appendix of ~9,230 rows (measured on the combination: `render: wrote
-    # 10327 lines`), print success, and be self-contradictory — a false pass in
+    # all-surface census would write a document whose §0 `sites` pin — a
+    # PRODUCT-surface count — sits above an appendix several times longer,
+    # print success, and be self-contradictory — a false pass in
     # prose, which is the class this file exists to refuse. The refusal is loud
     # rather than a silent scope-narrowing: a lane that asked for the wide census
     # and got the product one would believe it had rendered the wide table.
