@@ -9190,9 +9190,13 @@ _DERIVATION_LOOKAHEAD = 60
 #: Both ADJACENT shapes are read, because a matcher narrowed to one shape is how the same word
 #: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
 #: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
-#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs 0
-#: times, so the second pattern is exercised by the fixture below and NOT by live text; saying
-#: "the spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs ONCE,
+#: on `#14592`'s own clause — "`tests/test_14592_read_parity.py` row (`core` and `api` — ONE
+#: `fast_pool()` entry, two surfaces, the same flat 2.0 s)" — so the second pattern DOES read live
+#: text and that parenthetical IS graded: a path added inside it becomes a row claim this arm
+#: reds or clears. (An earlier revision of this comment said "0 times", which was false of the
+#: block it describes; it is corrected here rather than dropped, because "which of the two shapes
+#: live prose uses" is the whole point of keeping both.)
 #: ⛔ THE CARRY SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
 #: verb there, so neither anchor above could reach it: `… `<file>`, `<file>` and `<file>` carry an
 #: explicit `2.0` `durations` row, while `…` carry NO row`. That is the row-vs-default sentence the
@@ -9291,6 +9295,16 @@ def _carry_row_claims(header: str) -> tuple[dict[str, float], set[str]]:
     the value the sentence states for it, and `negative` is the set it says carries NO row. Both
     halves are real claims about the map, and they are graded in opposite directions by
     `_carry_row_claim_violations`, so neither can be dropped without a red.
+
+    ⛔ THE TWO HALVES DO NOT RESOLVE EACH OTHER, and subtracting one from the other is a FAIL-OPEN
+    this arm shipped once. The pre-fix form returned `negative - set(positive)`, so a file named in
+    BOTH halves lost its absence claim: MEASURED on the exact shape a `merge=union` splice
+    produces — "`<A>` carry an explicit `2.0` `durations` row, while `<A>` carry NO row", which is
+    what a fold yields when `--refresh-durations` ADDS the row one side's sentence denies —
+    `negative` came back EMPTY and `_carry_row_claim_violations` answered `([], [], [])`, i.e. both
+    arms GREEN over a stated absence that is false. The two halves make OPPOSITE claims about one
+    map, so a file in both is a CONTRADICTION to be redded by the `has_a_row` direction (the claim
+    of absence is the false one whenever the map carries the row), never a duplicate to drop.
     """
     return _carry_row_claims_in(_unquoted_block(header))
 
@@ -9307,7 +9321,7 @@ def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, float], set[str]]:
         else:
             for name in names:
                 positive[name] = float(claim.group("value"))
-    return positive, negative - set(positive)
+    return positive, negative
 
 
 def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
@@ -10150,11 +10164,152 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     ), ("the `carry` predicate does not red on all three false claims (wrong value, absent row, "
         "row claimed absent) — measured, each of these was green under the pre-fix matchers:"
         f" {_carry_row_claim_violations(planted_positive, planted_negative, planted_rows)!r}")
+    # ⛔ AND THE SPLICE SHAPE, which is the one this arm's own block is most likely to receive: a
+    # `merge=union` fold keeping one side's "carry an explicit `2.0` `durations` row" beside the
+    # other's "carry NO row" FOR THE SAME FILE. Neither half may resolve the other — the sentence
+    # states an absence that is false — so the `has_a_row` direction must red it. MEASURED on the
+    # pre-fix form (`negative - set(positive)`): `negative` came back empty and this returned
+    # `([], [], [])`, i.e. GREEN over the false absence.
+    spliced = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
+               "while `#2`'s `tests/test_carry_planted_first.py` carry NO row")
+    spliced_positive, spliced_negative = _carry_row_claims(spliced)
+    assert spliced_positive == {"test_carry_planted_first.py": 2.0}, (
+        f"the `carry` matcher lost the positive half of the spliced sentence: {spliced_positive!r}")
+    assert spliced_negative == {"test_carry_planted_first.py"}, (
+        "the positive half silently resolved the `carry NO row` half of the same sentence, so the "
+        "false absence it states is graded by NOTHING — the two halves are separate claims about "
+        f"one map and neither may subtract the other: negative={spliced_negative!r}")
+    assert _carry_row_claim_violations(
+        spliced_positive, spliced_negative, {"test_carry_planted_first.py": 2.0}) == (
+            [], [], ["test_carry_planted_first.py"]), (
+        "a file whose row the block claims AND whose absence it also claims did not red the "
+        "`has_a_row` direction — the splice would ship stating a false absence")
     # …and an ODD quote count refuses to answer here too, rather than masking across the sentence
     # and reporting an empty claim (the fail-open shape the sibling arm already refuses).
     with pytest.raises(AssertionError, match="ODD number of double quotes"):
         _carry_row_claims('a stray " then `tests/test_carry_planted_first.py` carry an explicit '
                           '`2.0` `durations` row')
+
+
+#: The row enumeration's OPENING. The arms below assert properties of THIS list, so they bound it
+#: rather than reading them out of the whole block (where a `#N`'s,` in another paragraph would be
+#: prose they do not own).
+_ROW_ENUMERATION_OPEN_RE = re.compile(r"A ROW is an entry in")
+#: A claim that the enumeration is EXHAUSTIVE — the shape that is FALSE one `--refresh-durations`
+#: sweep after a named file is measured, because that sweep ADDS a row rather than editing the
+#: sentence. Matched on masked text (`_unquoted_block`), so the block's own QUOTED record of the
+#: retired wording (it keeps one, deliberately) is not read as a live claim.
+_COMPLETENESS_CLAIM_RE = re.compile(
+    r"enumeration\s+is\s+complete|is\s+a\s+completeness\s+claim"
+    r"|those\s+are\s+the\s+named\s+files", re.IGNORECASE)
+#: An entry that names its file by ISSUE LABEL ONLY (`#14597`'s,`) — no path, so `_row_claims`
+#: cannot reach it and the row it claims is graded by nothing. MEASURED: the enumeration claimed
+#: `#14597`'s row while the earlier paragraph wrote the path WITHOUT the word `row` beside it, so
+#: deleting that file's `durations` entry left every arm in this module GREEN.
+_SHORTHAND_ONLY_ENTRY_RE = re.compile(r"`?#\d+`?\s*'s\s*(?=,)")
+
+
+def _row_enumeration(header: str) -> str:
+    """The row-vs-registration enumeration, bounded from its opening to the next `⛔` marker.
+
+    Fails closed on a missing bound instead of grading the whole block: a bound that disappears is
+    a REWORDING of the sentence, and an arm that silently widened would either pass over nothing
+    (the no-op-gate class this module's siblings name) or red on prose it does not own.
+    """
+    unquoted = _unquoted_block(header)
+    opening = _ROW_ENUMERATION_OPEN_RE.search(unquoted)
+    assert opening is not None, (
+        "the block no longer opens its row enumeration with `A ROW is an entry in` — re-point this "
+        "arm at the sentence the block uses rather than letting it grade nothing")
+    end = unquoted.find("⛔", opening.end())
+    assert end != -1, (
+        "the row enumeration has no `⛔` marker after its opening, so it runs to the end of the "
+        "block and this arm would grade every sentence after it — restore the bound")
+    return unquoted[opening.start():end]
+
+
+def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
+    """#14612: the row enumeration is graded ONE-DIRECTIONALLY, and it says only that.
+
+    The block said "THAT ENUMERATION IS COMPLETE … those are the named files that carry a
+    `durations` entry". Nothing graded that, and nothing CAN: `tools/ci_timing.py
+    --refresh-durations` ADDS a row the first time a sweep measures a `fast_pool()` member, so the
+    claim is false one sweep after any named file is measured, with no arm able to see it — the
+    same sweep-falsifiable class as the absence claim this branch dropped in `e5310e39bf`.
+
+    MEASURED on the pre-fix block, both halves of the finding:
+
+        drop three of the four shorthand enumeration entries -> every arm GREEN
+        delete `durations['test_expansion_fusion_14344.py']`  -> every arm GREEN
+            (the enumeration claims that row, but `#14597`'s entry was a bare `#14597`'s,` with
+            no path beside it, so `_row_claims` never returned the file)
+
+    So two things are asserted: no live completeness claim, and no entry a matcher cannot reach —
+    every file the list calls a row is spelled with its path and is returned by `_row_claims`.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    rows = set(cs.load_manifest()["durations"])
+    # 1. No LIVE completeness claim anywhere in the block.
+    live_claim = _COMPLETENESS_CLAIM_RE.search(_unquoted_block(header))
+    assert live_claim is None, (
+        "the `fast_shards` block claims its row enumeration is COMPLETE "
+        f"({live_claim.group(0)!r}) — the list is graded one-directionally and cannot be graded "
+        "for completeness: `--refresh-durations` ADDS a row whenever a sweep measures a "
+        "`fast_pool()` member, so the claim is false one sweep later and no arm can see it. "
+        "State what the list DOES assert (these named files carry a row) and drop the "
+        "completeness clause")
+    # …and the retired wording IS matched by that pattern, so assertion 1 is not decoration: this
+    # is the block's own pre-fix sentence, verbatim beside the `⛔` that closes the enumeration.
+    retired = (
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s, `#14560`'s, "
+        "`tests/test_retired_row.py` row. ⛔ THAT ENUMERATION IS COMPLETE, and it is a completeness "
+        "claim about the files this paragraph names BY PATH, not a count of anything: those are "
+        "the named files that carry a `durations` entry. ⛔ It does NOT claim")
+    retired_hits = _COMPLETENESS_CLAIM_RE.findall(retired)
+    assert retired_hits, (
+        "the completeness-claim pattern no longer reads the sentence it was cut for, so assertion "
+        "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
+        "retired wording")
+    # …and a QUOTED record of the retired wording is NOT a live claim: the block keeps one on
+    # purpose (it is the record of why the claim is gone), and a guard that reds on its own
+    # retraction would force the record out of the file.
+    quoted_record = (
+        "A ROW is an entry in `durations` — `tests/test_quoted_record.py` row. ⛔ it once said "
+        '"THAT ENUMERATION IS COMPLETE" · and does not now. ⛔ next sentence')
+    assert _COMPLETENESS_CLAIM_RE.search(_row_enumeration(quoted_record)) is None, (
+        "a QUOTED record of the retired completeness claim is being read as a live claim — the "
+        "quoted-span mask has regressed, and the repair this message would push is to delete the "
+        "block's record of why the claim is gone")
+    # 2. Every entry in the enumeration is REACHABLE: an issue label with no path beside it claims a
+    # row no matcher can see, and that is how `#14597`'s row went ungraded for three review rounds.
+    enumeration = _row_enumeration(header)
+    shorthand = _SHORTHAND_ONLY_ENTRY_RE.findall(enumeration)
+    assert not shorthand, (
+        f"the row enumeration names {shorthand} by ISSUE LABEL ONLY — a bare `#N`'s,` carries no "
+        "path, so `_row_claims` cannot reach the file and the row this list claims for it is "
+        "graded by nothing (measured: `#14597`'s row could be deleted with every arm GREEN). "
+        "Spell the path beside the word `row`, as `#14415`'s entries already do")
+    # …and the pre-fix spelling IS matched, so the arm above bites on the shape it names.
+    assert _SHORTHAND_ONLY_ENTRY_RE.findall(
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s, `#14560`'s, "
+        "`tests/test_reachable.py` row. ⛔ next"), (
+        "the shorthand-only pattern no longer reads `#14597`'s,` — the arm above would pass over "
+        "an enumeration that reintroduced the ungraded entry")
+    # 3. …and every path the enumeration names IS graded against the map, which is the half that
+    # makes the surviving one-directional claim true.
+    named = {m.group(1) for m in re.finditer(r"`tests/([\w/.-]+\.py)`", enumeration)}
+    assert named, (
+        "the row enumeration names no file by path, so this arm grades nothing — re-point "
+        "`_row_enumeration` at the list the block actually writes")
+    ungraded = sorted(named - set(_row_claims(header)))
+    assert not ungraded, (
+        f"the row enumeration names {ungraded}, which `_row_claims` does not return as a row — a "
+        "row claim no matcher reaches is graded by nothing. Put the word `row` beside the path so "
+        "`test_the_fast_shards_header_block_calls_a_row_only_what_has_one` checks it")
+    rowless = sorted(named - rows)
+    assert not rowless, (
+        f"the row enumeration calls {rowless} a `durations` row, but the map carries none: the "
+        "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
