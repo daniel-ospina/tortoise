@@ -33,6 +33,8 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from tortoise import pricing
@@ -88,10 +90,18 @@ def _single_sample_meter(used: float):
 
     ``repeats`` is None, so the gate takes its single-sample arm and composes the
     refusal this test is about (``… the reading comes from a single sample``).
+
+    ⛔ ``measured_at`` is FRESH, not a literal. The gate ages a reading by
+    ``STALE_AFTER_SECONDS`` (24 h) and REFUSES to cap from a stale gauge, so a
+    hardcoded date is a time bomb: this fixture read
+    ``"2026-11-24T02:00:00+00:00"``, and at 2026-11-25T02:00Z the dimension went
+    UNARMED (``reason=stale``), the write was SERVED, ``state`` became ``open``
+    and these three tests reddened on every PR — nothing about the behaviour they
+    measure had changed.
     """
     return lambda _org: MeterReading(
         used=used,
-        measured_at="2026-11-24T02:00:00+00:00",
+        measured_at=datetime.now(UTC).isoformat(),
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )
