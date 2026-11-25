@@ -1018,8 +1018,7 @@ def classify(harness: str, *, project_dir: Path | None = None
                 detail=f"the entry's command `{cmd}` does not exist on this machine",
                 fix=("point the entry at a real interpreter, or re-register it: "
                      f"`tortoise onboard --harness {harness}`"),
-                source=_origin_of("command") or source, transport=transport,
-                configs_read=read)
+                source=source, transport=transport, configs_read=read)
         if not cmd:
             return Verdict(
                 status=COMMAND_MISSING,
@@ -1064,8 +1063,7 @@ def classify(harness: str, *, project_dir: Path | None = None
                         fix=(f"install tortoise for `{cmd}`, or pin this box's "
                              f"interpreter: `tortoise onboard --harness "
                              f"{harness}` from the environment that has it"),
-                        source=_origin_of("command", "args") or source,
-                        transport=transport, configs_read=read)
+                        source=source, transport=transport, configs_read=read)
                 if missing:
                     # ⛔ NOT EVERY IMPORT FAILURE IS A MISSING MODULE. `python -c
                     # "import tortoise.mcp_server"` on an interpreter that HAS

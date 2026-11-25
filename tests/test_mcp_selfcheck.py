@@ -2274,12 +2274,17 @@ def test_a_field_detail_names_the_layer_that_supplied_that_FIELD(tmp_path, monke
 
 
 def test_the_command_arms_attribute_a_REPO_supplied_command(tmp_path, monkeypatch):
-    """Both command-arm provenance resolutions need a MERGED two-layer input.
+    """A repo-supplied COMMAND is attributed to the repo in both command arms.
 
-    Mutation-checked: deleting `_origin_of("command")` from the command-missing arm,
-    or `_origin_of("command", "args")` from the python-lacks-tortoise arm, left every
-    other arm green — a single-layer config returns the same `source` either way, so
-    only a merge can discriminate.
+    ⛔ Not a mutation-discriminating arm, and it must not claim to be: for a stdio
+    entry `read_entry` returns the TRANSPORT's origin, and the stdio branch has
+    already popped `url` from `origin` — so `source` IS `origin["command"]`, and a
+    per-field `_origin_of("command")` in these arms could only ever return the same
+    file. Measured over 81 base×repo configs: zero divergence. The two redundant
+    calls were therefore REMOVED rather than left looking load-bearing; this arm
+    keeps the behaviour pinned, and the per-field resolutions that ARE observable
+    (`cwd`, and the `env` that carried an unset `${VAR}`) are covered by
+    `test_a_field_detail_names_the_layer_that_supplied_that_FIELD`, which does red.
     """
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
