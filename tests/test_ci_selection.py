@@ -9171,10 +9171,12 @@ _DERIVATION_LOOKAHEAD = 60
 #: A test file the block calls a `durations` ROW. The map's own vocabulary separates a ROW (an
 #: entry in `durations`) from a surface REGISTRATION, and calling a registration a row is a false
 #: claim about the map. ⛔ A registration is an entry on ANY `surfaces` key — `fast_pool()` folds
-#: every one of them — and it is NECESSARY but NOT SUFFICIENT for pool membership: the same call
-#: then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand`, so a file can be
-#: registered on three surfaces and still be outside the pool. `core` is the common case, `eval` a
-#: real one (the block's own `#14544` sentence is carried by an `eval` registration alone).
+#: every one of them — but it is NEITHER necessary NOR sufficient for pool membership, and both
+#: directions mislead: the call also folds `tier1`, so a `tier1`-only file is in the pool with no
+#: registration at all, and it then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and
+#: `on_demand`, so a file can be registered on three surfaces and still be outside the pool. `core`
+#: is the common case, `eval` a real one (the block's own `#14544` sentence is carried by an `eval`
+#: registration alone).
 #: ⛔ The row is NOT the map's only place a weight is recorded, and this arm must not claim it is:
 #: `durations_floors` can additionally PIN a declared value (`{value: N, pinned: true}`, e.g.
 #: `test_lane_stash.py`), so a pinned file's weight appears in both blocks. The distinction graded
@@ -9207,13 +9209,16 @@ _DERIVATION_LOOKAHEAD = 60
 #: universal property: `<file>` row, `row (`A`, `B`)`, `rows:` then a comma-separated run, and the
 #: CARRY run (`#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` — the
 #: paragraph that sorts the block's named files into rows and registrations uses this one, with the
-#: files several tokens away from the word). MEASURED at this head: `_row_claims` returns TEN files
-#: the block calls rows, every one of them carries a `durations` row, and deleting the row for ANY
-#: one of the ten reds this arm — including `tests/test_sdk_privatise_sweep.py` (the `#14548`
-#: residue RATCHET) and `tests/test_14559_reaper_schedule.py` (`#14565`), which an earlier revision
-#: of this arm could not see at all. The CARRY sentence's ABSENCE half is graded separately
-#: (`test_the_fast_shards_header_block_grades_the_carry_row_spelling`), because handing a file the
-#: block says has NO row to an arm that reds on absence would invert its meaning.
+#: files several tokens away from the word). MEASURED at this head: `_row_claims` returns every
+#: row-carrying file the block names, each one carries a `durations` row, and deleting the row for
+#: ANY of them reds this arm — including `tests/test_sdk_privatise_sweep.py` (the `#14548` residue
+#: RATCHET), `tests/test_14559_reaper_schedule.py` (`#14565`) and `#14415`'s files, which earlier
+#: revisions of the block or of this arm could not reach at all. The CARRY sentence's ABSENCE half
+#: is graded separately (`test_the_fast_shards_header_block_grades_the_carry_row_spelling`), because
+#: handing a file the block says has NO row to an arm that reds on absence would invert its meaning.
+#: ⛔ NO COVERAGE COUNT IS STATED HERE: a number of graded files written as a figure goes stale the
+#: moment the prose it describes moves, which is the rot this whole block is about — the relation
+#: above is what holds.
 #: ⛔ CASE-INSENSITIVE ON PURPOSE (#14612 review round 3, P3). This block states its own vocabulary
 #: in CAPS — "A REGISTRATION IS NOT A ROW", "A ROW is an entry in `durations`" — so a matcher bound
 #: to lowercase `row` is bound to a spelling the block does not itself use. MEASURED: re-spelling
@@ -9318,8 +9323,6 @@ def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
     no_row = sorted(name for name in positive if name not in durations)
     has_a_row = sorted(name for name in negative if name in durations)
     return wrong_value, no_row, has_a_row
-
-
 def _row_claims(header: str) -> list[str]:
     """Every test file the block calls a `durations` ROW, in any shape it spells one.
 
@@ -9990,9 +9993,9 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
 
     The block's vocabulary is load-bearing: a ROW is an entry in `durations`, while a surface
     REGISTRATION is the map's word for a `surfaces` entry and does not establish a row at all. A
-    registration is NECESSARY but NOT SUFFICIENT for `fast_pool()` membership — that call subtracts
-    `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and `core` is its common case,
-    not its definition. Measured
+    registration is NEITHER necessary NOR sufficient for `fast_pool()` membership — that call folds
+    every surface AND `tier1`, then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and
+    `on_demand` — and `core` is its common case, not its definition. Measured
     2026-11-25: `tests/test_fly_secret_declaration_report.py` is `core`-registered on `main` and
     carries NO `durations` row, so this PR's review had the clause read "drift-reporter
     registration". The `4cdd732ab7ab` fold kept `main`'s copy of the paragraph, where it reads
@@ -10014,10 +10017,10 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     missing = [name for name in claimed if name not in rows]
     assert not missing, (
         f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
-        "no row for it. A REGISTRATION is the map's word for a `surfaces` entry — necessary but "
-        "NOT sufficient for `fast_pool()` membership, since that call subtracts `slow_files`, "
-        "`ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and it is not a row: with no row the "
-        "weight comes from `DEFAULT_FAST_WEIGHT`. "
+        "no row for it. A REGISTRATION is the map's word for a `surfaces` entry — NEITHER "
+        "necessary NOR sufficient for `fast_pool()` membership, which folds `tier1` too and then "
+        "subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and it is not a "
+        "row: with no row the weight comes from `DEFAULT_FAST_WEIGHT`. "
         "Say `registration`, or add the row.")
     # …and every shape above is read while `registration` is deliberately not, and while a
     # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
