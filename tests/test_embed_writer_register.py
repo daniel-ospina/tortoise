@@ -1217,9 +1217,12 @@ def test_the_AST_bought_population_is_the_one_the_register_names():
     """The register's OTHER population sentence, held to the standard it applies 30 lines above.
 
     The bullet closes with "the writers whose membership the AST pass actually bought are
-    `api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and
-    `sdk::_write_capture_turns` (the four named at the start of this bullet), and nothing else".
-    Nothing re-derived it — the four names appeared in a docstring and nowhere else — so a FIFTH
+    `api::add_point`, `consistency::_graph_fingerprint` and `sdk::_index_gate_read` (the three
+    named at the start of this bullet), and nothing else". (`sdk::_write_capture_turns` WAS a
+    fourth until `#14552` changed its row build to spell the vector through an
+    `embedding`-named local, so the regex explains its membership now and the AST arm does
+    not — the addendum right after the sentence says so.)
+    Nothing re-derived it — the names appeared in a docstring and nowhere else — so a further
     container-key-only writer would have been discovered, forced to declare, and this "and nothing
     else" would have silently become false. That is exactly the rot the enumeration one line above
     is pinned against, and the register's own argument for pinning it ("a pin can read it, not
@@ -1239,7 +1242,7 @@ def test_the_AST_bought_population_is_the_one_the_register_names():
         f"merely hold the shape for another reason: {anchor!r}"
     )
     # The same token reader the CALL-population arm uses: the enumeration is the maximal run of
-    # backticked `module::symbol` tokens after the anchor, and `(the four named …)` ends it.
+    # backticked `module::symbol` tokens after the anchor, and `(the N named …)` ends it.
     separator = re.compile(r"[\s,:()]*(?:and\s+)?`([A-Za-z_][\w.]*)::([A-Za-z_]\w*)`")
     stated: list[tuple[str, str]] = []
     position = start + len(anchor)

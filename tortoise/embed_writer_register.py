@@ -245,8 +245,11 @@ claim and a slogan:
   (`cache_projection::fill_missing_row_vectors`, the `record-restore` half that puts a row's vector
   back or derives it through that same seam). Membership and visibility are different
   questions; the writers whose membership the AST pass actually bought are `api::add_point`,
-  `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and `sdk::_write_capture_turns` (the
-  four named at the start of this bullet), and nothing else.
+  `consistency::_graph_fingerprint` and `sdk::_index_gate_read` (the three named at the start
+  of this bullet), and nothing else. ⛔ `sdk::_write_capture_turns` WAS a fourth until `#14552`,
+  which changed its row build to spell the vector through an `embedding`-named local — so the
+  regex now explains its membership and the AST arm does not. The pin that reads this
+  sentence redded on exactly that, which is the standard it exists for.
   ⚠️ "Every module discovery walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
