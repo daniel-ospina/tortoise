@@ -3696,7 +3696,8 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
     # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
-    # ⛔ #14682 then registered row 46 (`entity_reads.py::entity_relations`), whose ONE
+    # ⛔ THIS BRANCH's `5a86688cf7` ("fix(14682)") then registered row 46
+    # (`entity_reads.py::entity_relations`), whose ONE
     # door is the REST route `GET /v1/entities/{entity_id}/relations` (21 -> 22): the
     # route handler calls the reader directly, so it is one reference inside the
     # default hop budget.
@@ -4102,7 +4103,9 @@ _13_8_ENUMERATION = (
     # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
     # retired row 32, and 17 -> 18 when #13448 added the `ended.py::build_cypher` row —
     # NOT #8542, whose merged commit `8a04a96630` does not carry that row — and
-    # 18 -> 19 when #14592's `entity_reads.py::entity_relations` registered §13 row 46), so
+    # 18 -> 19 when this branch's `5a86688cf7` registered §13 row 46 for
+    # `entity_reads.py::entity_relations` — NOT `#14592`, which is the parent programme
+    # issue and carries no such registration), so
     # this marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
@@ -5740,7 +5743,8 @@ def test_the_module_filter_admits_a_split_traversal():
     # carries in those files — `_export_graph_snapshot`,
     # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
     # is PRE-EXISTING, so P7 added none of them.
-    # ⛔ 29/43 -> 30/45 with `#14682` (from `#14593`, "read parity"):
+    # ⛔ 29/43 -> 30/45 with this branch's `5a86688cf7` ("fix(14682)"; the reader itself
+    # arrived from `#14593`, "read parity"):
     # `tortoise/entity_reads.py` arrived carrying TWO untyped walks —
     # `entity_relations`' outgoing `-[r]->` and its reverse `<-[r]-`, one site
     # each — and `_resolve` inlines the `inner` statement into the

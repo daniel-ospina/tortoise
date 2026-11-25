@@ -296,7 +296,8 @@ projection fetches all four columns on the SAME statement — `coalesce(c.isClos
 `c.pipelineSlot` beside the status and `outdated` ones (`ep.py:2261-2263`). The two axes are therefore
 read by `live.ending_axes` and not by a second spelling here; `TERMINAL_EXCLUDED_STATUSES` no longer
 appears in `ep.py` at all, which is what makes the drift impossible rather than merely fixed. The
-diagnostic names the axis through `live._input_status_label(status, ending)`.
+diagnostic names the axis through `ep._input_status_label(status, ending)` (`ep.py:223`, called from the
+participation test).
 
 **The pre-fix measurement below is what the fix is graded against**, and stays as the record of the
 defect: at the head it was taken, the participation test decided from two columns and Batch 2's
