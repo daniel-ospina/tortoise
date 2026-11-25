@@ -761,8 +761,16 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: keeps the graph as a named fallback on `point`, the primary retrieval label, exactly as
 #: `main` answered (`#13617` review F1). ⛔ `#13971` retires the STORED `:Point` vectors and
 #: gates the two writers that place a redundant copy (`sdk::_update_entity` and
-#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — so
-#: this set must stay without `point`, which
+#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — and
+#: since `#14552` the OTHER two declared `:Point` writers ask too, PER ROW but in two
+#: different shapes (conflating them is how a lane concludes the CAPTURE is protected by a
+#: per-turn record read, which it is NOT): the CAPTURE answers `mirror_required("point")` per
+#: row on the lane where `record_writer.record_holds_turns(...)` — a DEPLOYMENT predicate —
+#: says the record is expected to hold the turns, and RE-ATTACHES the vector per turn for any
+#: turn the record then REFUSES; the PASS-1B snapshot restore is the one that asks the RECORD
+#: per ID (`record_read.point_vector_keys` — does it SERVE a vector for THIS id). So
+#: `tools/strip_graph_entity_vectors.py`'s census no longer refuses `:Point` on its writers.
+#: This set still stays without `point`, which
 #: `test_13610_graph_vector_copy.py::
 #: test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback` pins.
 #:
