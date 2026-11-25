@@ -731,6 +731,49 @@ def test_the_MCP_entity_door_grades_the_label_SET_too(tmp_path):
     assert "text" not in got, got
 
 
+def test_the_MCP_auto_detect_arm_grades_the_label_SET_too(tmp_path, monkeypatch):
+    """⛔ The arm ITSELF, not the accessor it was confused with (#14593 review P2).
+
+    The sibling test above grades ``sdk._get_entity``; ``tortoise_get(id)`` with no
+    ``type`` does NOT run it — it runs ``mcp_server._get_auto_detect``, which
+    applied no filter at all before this fix. So this arm drives that function
+    directly, and BOTH directions it moved are pinned:
+
+    * a hybrid ``(:Object:Source)`` — its ``text`` is withheld (the leak);
+    * a plain ``:Source`` — its undeclared payload is withheld too, while the
+      declared ``url``/``name`` still answer. That direction is the one the
+      commit message first got wrong, and nothing asserted it.
+
+    Without the fix this arm returns the stored map verbatim, so deleting the
+    ``if not _publishable:`` block reddens it.
+    """
+    from tortoise import mcp_server
+
+    secret = "AUTO-DETECT BODY THAT MUST NOT REACH tortoise_get"
+    with _graph(str(tmp_path / "g.db")) as ha:
+        sdk = _sdk(ha)
+        try:
+            proj = sdk._get_proj()
+            proj.g._query(
+                "CREATE (h:Object:Source {id:$h, name:'HYBRID', url:$u, text:$t}),"
+                " (s:Source {id:$s, name:'PLAIN', url:$u, text:$t})",
+                params={"h": "hybrid-autodetect-14593",
+                        "s": "plain-autodetect-14593",
+                        "u": "https://example.test/autodetect-14593", "t": secret},
+                read_only=False)
+            monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda *a, **k: sdk)
+            hybrid = mcp_server._get_auto_detect("hybrid-autodetect-14593")
+            plain = mcp_server._get_auto_detect("plain-autodetect-14593")
+        finally:
+            sdk.close()
+    assert hybrid and plain, "the fixtures did not resolve — this row would grade nothing"
+    assert secret not in repr(hybrid), "a hybrid's payload reached tortoise_get(id)"
+    assert "text" not in hybrid, hybrid
+    assert secret not in repr(plain), "a plain :Source's payload reached tortoise_get(id)"
+    assert "url" in plain and "name" in plain, (
+        "the filter withheld a DECLARED field — a false block, not a fix", plain)
+
+
 def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
         tmp_path):
     """#14593 review P1 (data disclosure, #3998): the SAME rule, a FOURTH door.

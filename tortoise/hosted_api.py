@@ -15706,15 +15706,24 @@ def _layer_payload(entry: dict) -> dict:
     A node whose label SET is not entirely publishable goes through
     ``projection.entities.filter_source_props``, and the DECISION is the shared
     ``projection.entities.label_set_publishable`` — the one home of both halves of
-    the rule, called by this route, by ``/belief``'s delegation arm, and by the
-    SDK/MCP entity door (``TortoiseSDK._get_entity`` / ``tortoise_get_entity``), so
-    no two doors can grade the same node differently.
+    the rule, called by this route, by ``/belief``'s delegation arm, by the SDK
+    entity accessor (``TortoiseSDK._get_entity``), and by the MCP auto-detect arm
+    (``mcp_server._get_auto_detect``), so none of those can grade the same node
+    differently.
     ⚠️ That parity was a P2 finding, not a given: an earlier revision of this very
     docstring asserted ``get_entity`` already applied the rule, while ``sdk.py``
-    still tested ``label == "Source"`` and ``mcp_server.tortoise_get`` applied no
-    filter at all — measured, a hybrid ``(:Object:Source)`` returned its ``text``
-    through ``tortoise_get_entity`` while this route withheld it. The sentence is
-    true now because both doors were changed to use the shared predicate.
+    still tested ``label == "Source"`` and ``_get_auto_detect`` applied no filter
+    at all — measured, a hybrid ``(:Object:Source)`` returned its ``text`` through
+    ``tortoise_get_entity`` while this route withheld it. The sentence is true now
+    because those doors were changed to use the shared predicate.
+    ⛔ ANOTHER FINDING, NAMED RATHER THAN CLOSED: the RECORD-served arm
+    (``TortoiseSDK.get_entity`` → ``_get_entity_served``, taken only in an armed
+    ``prefer``/``record`` deployment) returns the served row's map without grading
+    any label — ``ServedAnswer`` carries no label set to grade with — so the parity
+    above holds for the cache/accessor path and is NOT claimed for that arm.
+    Closing it is a ``record_serve`` change (the label has to travel with the
+    answer), tracked separately; asserting it here without the code would re-arm
+    exactly the defect this paragraph corrects.
 
     ⛔ THE WHOLE LABEL SET DECIDES, never the single resolution BRANCH label
     (#14593 review P1). ``_resolve_entity`` emits one entry per BRANCH
@@ -15751,17 +15760,6 @@ def _layer_payload(entry: dict) -> dict:
     return props
 
 
-#: The labels whose WHOLE property map a read route may publish. Everything else
-#: — a ``:Source``, a legacy ``(:Document:Source)``, or any label this file has
-#: never heard of — is filtered through ``projection.entities.filter_source_props``
-#: (deny by default, #3998). Every label on the node must be in this set — the
-#: WHOLE set, never the first one, because a hybrid ``(:Object:Source)`` answers
-#: an allowed first label while carrying a ``:Source`` half. The RULE lives in
-#: ``projection.entities.label_set_publishable`` — the home every door shares
-#: (these by-id routes, ``/belief``'s delegation arm, and the SDK/MCP
-#: ``get_entity`` door) — so this module holds no second copy of it.
-
-
 def _entry_label_set(entry: dict, *, fallback_key: str) -> list[str]:
     """Every label on one payload entry, else the single label it carries.
 
@@ -15782,8 +15780,13 @@ def _label_set_publishable(labels: list[str]) -> bool:
     """Thin delegate to the shared rule in ``projection.entities``.
 
     ⛔ NOT a re-implementation: the same predicate grades these routes, the
-    ``/belief`` delegation arm and the SDK/MCP entity door. Two copies is two
+    ``/belief`` delegation arm and the SDK/MCP entity accessor. Two copies is two
     rules, and the copy that drifts is always the one nobody re-read.
+
+    The rule itself, and why every label on the node must be publishable rather
+    than the first one, are documented at its home —
+    ``projection.entities.label_set_publishable``. Not restated here: a copy of a
+    rationale is how three separate restatements of this one went stale.
     """
     from tortoise.projection.entities import label_set_publishable
 
