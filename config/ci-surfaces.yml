@@ -79,8 +79,8 @@ version: 1
 # `core` registration block below contradicts; the conclusion was right and its stated premise was
 # false, which is exactly the class this block exists to re-derive rather than carry. The same holds
 # for `tests/test_expansion_fusion_14344.py`: it is `main`'s row (landed as `#14597`), so it is in
-# `fast_pool()` at BOTH trees and is NOT this branch's delta — which is precisely what the spliced
-# copy below claimed.
+# `fast_pool()` at BOTH trees and is NOT this branch's delta — which is precisely what the DELETED
+# spliced copy claimed.
 # ⛔ THIS BLOCK ARRIVED SPLICED, and the repair is recorded rather than hidden:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold applied BOTH parents'
 # derivations under a dangling `# reader of the prose can see.` fragment — one naming `origin/main`
