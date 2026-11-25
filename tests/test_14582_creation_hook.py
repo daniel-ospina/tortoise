@@ -31,8 +31,15 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
   body claimed this pin and nothing pinned it);
 * a graph the record ALREADY knows is REFUSED, not seeded (`#12894`'s divergence
   rule) — `SEED_SQL`'s own guard decides it, there is no second predicate here;
-* `/health` CANNOT report `record.ok: true` on an armed deployment carrying an
-  uncut graph, and it publishes COUNTS ONLY (the endpoint is unauthenticated);
+* `/health` CANNOT report `record.ok: true` for a graph THIS PROCESS has
+  OBSERVED uncut, and it publishes COUNTS ONLY (the endpoint is unauthenticated).
+  ⛔ That is the whole claim, and it is a WINDOW rather than a census (#14587
+  review P3-1): the registry has no runtime population source, so a graph that
+  was already uncut when the process started has not been observed and is not
+  counted until it writes. The measured form is pinned here
+  (`test_health_cannot_report_ok_for_a_graph_it_has_observed_uncut`) and so is
+  the bound it does NOT cross (`test_health_is_a_window_not_a_census`), so the
+  caveat cannot be deleted as tidying;
 * the BACKFILL reports `considered / seeded / refused` and is idempotent, and its
   `--dry-run` runs the real decision and writes nothing.
 
@@ -48,6 +55,7 @@ import os
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -508,9 +516,20 @@ def test_health_is_ok_on_an_unarmed_deployment_that_has_seen_nothing(monkeypatch
         rw.reset_uncut_graphs()
 
 
-def test_health_cannot_report_ok_with_an_uncut_armed_graph(monkeypatch):
+def test_health_cannot_report_ok_for_a_graph_it_has_observed_uncut(monkeypatch):
     """FALSIFIER (c). Red before this change: `armed_but_uncut` did not exist and
-    `ok` stayed `true` for exactly this state — production's measured shape."""
+    `ok` stayed `true` for exactly this state — production's measured shape.
+
+    ⛔ THE NAME STATES THE MEASURED FORM, NOT THE DEPLOYMENT-GLOBAL ONE (#14587
+    review P3-1). This test calls `note_uncut_graph(...)` and asserts the fold, so
+    what it establishes is "a graph this process has OBSERVED uncut cannot sit
+    under `ok: true`". The global form — "no armed deployment carrying an uncut
+    graph reads ok" — is NOT established here and is NOT true: the registry is process
+    state with no population source, so an uncut graph that has not written since
+    the process started is invisible until it does. The honest bound is pinned by
+    `test_health_is_a_window_not_a_census`; the name said the stronger thing and
+    is how the next lane deletes the caveats.
+    """
     rw.reset_uncut_graphs()
     try:
         block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
@@ -530,6 +549,38 @@ def test_health_cannot_report_ok_with_an_uncut_armed_graph(monkeypatch):
         # `degraded` keeps its documented window meaning (#10185) — it is not
         # re-used as a second, weaker statement of the same state.
         assert block["degraded"] is False
+    finally:
+        rw.reset_uncut_graphs()
+
+
+def test_health_is_a_window_not_a_census(monkeypatch):
+    """⛔ THE HONEST HALF OF FALSIFIER (c), PINNED SO IT CANNOT BE DELETED.
+
+    #14587 review P3-1: the field, the test name and one module-header bullet all
+    stated the deployment-global form ("no armed deployment carrying an uncut
+    graph reads `ok: true`") while the code and the other tests measure the
+    OBSERVED form. `armed_but_uncut` has NO runtime population source — it is
+    process state fed from the write path and the hook — so a process that starts
+    with a graph that is already uncut and has not written since reports `0` and
+    `ok: true` over a real gap. That is a WINDOW, not a census, and the field's
+    own docstring says so.
+
+    This test asserts the BOUND rather than the gap: a fresh registry must read 0
+    and `ok: true`. If a later change gave the field a census (an enumeration at
+    startup, a periodic probe), this test fails — which is the point, because
+    then the docstring's caveat would be the stale half and the wording would have
+    to move to the other one deliberately instead of by tidying.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
+        assert block["armed"] is True
+        assert block["armed_but_uncut"] == 0, (
+            "`armed_but_uncut` claims a population it does not measure — it is a "
+            "WINDOW fed by observations, so an unobserved graph cannot appear in "
+            "it. A non-zero count here means the field became a census, and the "
+            "docstring/tests that say otherwise are then wrong")
+        assert block["ok"] is True
     finally:
         rw.reset_uncut_graphs()
 
@@ -863,12 +914,40 @@ def test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row():
         "set by the arm whose graph has no `public.graphs` row")
 
 
+class _RecordingCursor:
+    """The cursor half of :class:`_FakeConn`: records what was EXECUTED.
+
+    ⛔ IT EXISTS BECAUSE THE HOOK NOW ISSUES A STATEMENT OF ITS OWN (#14587
+    review P3-2): `_bound_provision_statements` scopes a transaction-local
+    `statement_timeout` on the connection before the allocator runs, so a fake
+    connection the hook opens must be able to answer `cursor()`. Without this the
+    only way to keep these tests green would be to skip the bound in tests, which
+    is how the claim and the guard drift apart again.
+    """
+
+    def __init__(self, log: list[tuple[str, Any]]) -> None:
+        self._log = log
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._log.append((sql, params))
+
+    def fetchone(self) -> None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeConn:
     """What `record_writer` accepts as a connection: commit/rollback/close."""
 
     def __init__(self) -> None:
         self.committed = 0
         self.closed = 0
+        self.statements: list[tuple[str, Any]] = []
+
+    def cursor(self) -> _RecordingCursor:
+        return _RecordingCursor(self.statements)
 
     def commit(self) -> None:
         self.committed += 1
@@ -1023,6 +1102,98 @@ def test_the_provision_connect_is_bounded_by_its_own_timeout(monkeypatch):
         f"create endpoint for the live door's "
         f"{rw.CONNECT_TIMEOUT_SECONDS}s budget")
     assert seen["connect_timeout"] < rw.CONNECT_TIMEOUT_SECONDS
+
+
+def test_the_provision_statements_are_bounded_transaction_locally(monkeypatch):
+    """⛔ THE CONNECT BOUND WAS NOT THE STATEMENT BOUND (#14587 review P3-2).
+
+    `PROVISION_CONNECT_TIMEOUT_SECONDS` bounded the CONNECT only, and the hook's
+    advertised claim was "a record outage at creation must cost the user a bounded
+    pause". A record that ACCEPTS the TCP connection and then hangs on a statement
+    is the shape that refutes it: `_default_connect` sets `connect_timeout` and
+    `idle_in_transaction_session_timeout` and NO `statement_timeout`, and this sync
+    hook runs inside an `async` endpoint, so the hang blocked the worker's event
+    loop (including a co-located `/health`) forever.
+
+    Two assertions, two mutants: delete the `_bound_provision_statements(connection)`
+    call → no `statement_timeout` statement is executed at all; flip the scope flag
+    `true` → `false` (a SESSION setting on a POOLED handle, #9558) → the scope
+    assertion reds.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _FakeConn()
+    order: list[str] = []
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: conn)
+
+    def provision(*_a, **_kw):
+        order.append(f"allocator_after_{len(conn.statements)}_statements")
+        return SimpleNamespace(seq=0, mode="active", already_cut_over=False,
+                               seeded=True, healed_tail=False, burned=False)
+
+    monkeypatch.setattr(ra, "provision_graph_record", provision)
+
+    assert rw.provision_graph_record(
+        org_id="org-14582", graph_id="graph-14582")["provisioned"] is True
+
+    bounds = [(sql, params) for sql, params in conn.statements
+              if "statement_timeout" in sql]
+    assert len(bounds) == 1, (
+        "the hook issued no statement bound — `connect_timeout` does not bound a "
+        f"statement, so a hung SELECT blocks the create unbounded: {conn.statements}")
+    sql, params = bounds[0]
+    assert params == (str(rw.PROVISION_STATEMENT_TIMEOUT_MS),), (
+        f"the bound applied is not PROVISION_STATEMENT_TIMEOUT_MS: {params!r}")
+    assert rw.PROVISION_STATEMENT_TIMEOUT_MS > 0, (
+        "Postgres reads statement_timeout = 0 as NO TIMEOUT AT ALL, so a zero "
+        "here is the unbounded hang spelled as a bound")
+    assert sql.rstrip().endswith("true)"), (
+        "the bound must be TRANSACTION-LOCAL (`set_config(..., true)`): the "
+        "handle is POOLED (#9558), so a session-level SET follows it into the next "
+        f"borrower's transaction — got {sql!r}")
+    assert order and order[0].startswith("allocator_after_1"), (
+        "the bound must be scoped BEFORE the allocator's statements run, or those "
+        f"statements are the unbounded ones: {order}")
+
+
+def test_the_halted_remedy_names_reopen(caplog):
+    """⛔ `seed` THEN `arm` CANNOT ARM A HALTED GRAPH (#14587 review P3).
+
+    `_warn_uncut_graph(reason="mode_halted")` printed the un-halted sequence —
+    `seed --enumerated-floor 0`, then `arm`. `ARM_SQL` is scoped
+    `WHERE mode='seeded'` and `_transition` refuses a halted row with "its mode is
+    'halted', not 'seeded'", and `SEED_SQL`'s `ON CONFLICT` is scoped to
+    `seeded`/`halted` and sets only `seq` — so re-seeding a halted row leaves it
+    halted and the operator's second command fails. `reopen`
+    (`halted -> seeded`) is the missing verb, in the order `record_allocator`'s
+    own halt message prints: `seed` -> `reopen` -> `arm`.
+
+    Mutant: drop the `mode_halted` branch in `_remedy_for_reason` → `reopen` is
+    absent from the emitted line and the ordering assertion reds.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        remedy = rw._remedy_for_reason("org-14582", "graph-halted", "mode_halted")
+        assert "reopen" in remedy, (
+            f"the halted remedy omits `reopen`, the only verb that leaves `halted`: {remedy}")
+        assert remedy.index("seed") < remedy.index("reopen") < remedy.index("arm"), (
+            f"the sequence must be seed -> reopen -> arm: {remedy}")
+        assert "--acknowledge-cutover" in remedy
+        # The un-halted population must NOT be told to reopen: a `no_cursor_row`
+        # graph is not halted, and `reopen` would refuse it (`wanted=halted`).
+        assert "reopen" not in rw._remedy_for_reason(
+            "org-14582", "graph-new", "no_cursor_row")
+
+        with caplog.at_level("WARNING", logger="tortoise.record_writer"):
+            rw._warn_uncut_graph("org-14582", "graph-halted", reason="mode_halted")
+        lines = [rec.getMessage() for rec in caplog.records]
+        assert any("reopen" in line for line in lines), (
+            "the emitted warning does not carry the sequence that reaches the "
+            f"state it names: {lines}")
+    finally:
+        rw.reset_uncut_graphs()
+        rw._uncut_warned_at.clear()
 
 
 def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):

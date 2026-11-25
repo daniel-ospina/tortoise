@@ -384,7 +384,43 @@ IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
 #: worker's event loop (including a co-located `/health`). A record outage at
 #: creation must cost the user a bounded pause, not the live path's full budget —
 #: the graph is created either way and `/health` publishes the gap.
+#:
+#: ⛔ THIS BOUNDS THE CONNECT AND NOTHING ELSE — `connect_timeout` is libpq's
+#: connect wait only, and a record whose TCP accepts and whose statement then
+#: never returns is a different failure with a different bound. Until #14587's
+#: review P3-2 this constant was the whole of the hook's budget, so the
+#: "bounded pause" this comment claims was false on exactly that shape: a hung
+#: `SELECT` stalled the (sync, event-loop-blocking) create with NO bound at all.
+#: The statement half is :data:`PROVISION_STATEMENT_TIMEOUT_MS`, applied by
+#: :func:`_bound_provision_statements`.
 PROVISION_CONNECT_TIMEOUT_SECONDS = 3
+
+#: How long ONE statement of the creation hook may run, in milliseconds.
+#: ⛔ THE OTHER HALF OF THE CREATION BUDGET (#14587 review P3-2).
+#: :data:`PROVISION_CONNECT_TIMEOUT_SECONDS` bounds the CONNECT; this bounds each
+#: statement the hook issues over that connection, so a record whose TCP accepts
+#: and then hangs cannot block a create endpoint — and the worker's event loop —
+#: forever. `record_serve.open_record` scopes the same kind of bound for the READ
+#: door; the hook cannot borrow it (`open_record` resolves the DSN and raises
+#: `RecordServeError`, while this path must stay fail-soft and needs the pooled
+#: connect with its own shorter connect bound).
+#:
+#: ⚠️ ONE STATEMENT, NOT ONE CALL. This is Postgres's semantics, and the honest
+#: consequence is that a hung record costs at most ``n x`` this value, where `n`
+#: is the number of statements the hook issues (isolation read, cursor read,
+#: tenant scope, the journal count, the seed and the arm). It is a WORST-CASE
+#: bound on a broken record, not a per-create expectation — a healthy record
+#: spends one round trip per statement. Stated because the unfixed docstring's
+#: failure was a claim stronger than its guard.
+#:
+#: ⛔ THE LIVE BREAKER IS DELIBERATELY **NOT** CONSULTED HERE. `_breaker_open_until`
+#: bounds a CAPTURE loop that emits one record per call (the wedge it exists for);
+#: a create is ONE attempt per graph. Skipping the attempt whenever the breaker is
+#: open would publish a fresh graph as uncut without having tried, when the record
+#: may answer perfectly well — trading a bounded wait for a gap that no retry
+#: closes (`/health` only clears it on a later usable write). The wait is bounded
+#: now, so it is the safer of the two.
+PROVISION_STATEMENT_TIMEOUT_MS = 3000
 
 #: How long the LIVE door stops trying after a connect to the record FAILED, in
 #: seconds. :data:`CONNECT_TIMEOUT_SECONDS` bounds ONE connect; it does not bound
@@ -3193,9 +3229,14 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
 
     The remedy is named, because the two populations have different ones: a graph
     created before the hook landed (or whose hook failed) needs `seed` + `arm` for
-    THAT graph; a graph an operator halted needs its halt respected. Saying
-    "check the cursor" without the verb is how an operator re-runs the wrong
-    thing.
+    THAT graph; a graph an operator HALTED needs `seed` -> **`reopen`** -> `arm`,
+    because `arm` moves `seeded -> active` only and a halted row is neither
+    (`ARM_SQL` is scoped `WHERE mode='seeded'`; `_transition` refuses with "its
+    mode is 'halted', not 'seeded'"). Printing the un-halted sequence at a halted
+    graph was #14587 review P3: the operator ran the two printed verbs, `arm`
+    refused, and the remedy in the message could not reach the state the message
+    was about. Saying "check the cursor" without the verb is how an operator
+    re-runs the wrong thing.
 
     ⛔ `backfill` IS NOT THE REMEDY HERE, and printing it first was the #14587
     review's P1-2. `backfill` seeds `sweep`'s population, and `sweep` reads
@@ -3204,8 +3245,9 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     writes NO `journal_event` row (`ALLOCATION_SQL` is scoped to `mode='active'`,
     so the door refuses and the line stays in the JSONL file), which means the
     graph this warning is about is permanently absent from `backfill`. The
-    per-graph `seed` + `arm` is the command that works, so it is printed first
-    and the discovery verbs are described as what they are.
+    per-graph sequence is the command that works, so it is printed first and the
+    discovery verbs are described as what they are — with `reopen` included when
+    the observed reason IS a halt (:func:`_remedy_for_reason`).
     """
     key = f"{org_id}\u0000{graph_id}"
     now = time.monotonic()
@@ -3223,16 +3265,78 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         "graph writes is REFUSED and its journal lines are the only durable "
         "copy — `/health` reports this under `record.armed_but_uncut` and stops "
         "reporting it on this graph's next usable write or a process restart. "
-        "Remedy, PER GRAPH: `tools/record_allocator_cli.py seed --org-id %s "
-        "--graph-id %s --enumerated-floor 0`, then `arm --org-id %s "
-        "--graph-id %s --acknowledge-cutover`. `sweep`/`backfill` reach only "
+        "%s `sweep`/`backfill` reach only "
         "graphs the RECORD has already seen writing, so a graph whose writes "
         "are being refused is NOT in their population — do not wait for it to "
-        "appear there. A `halted` graph stays halted BY DESIGN until an "
-        "operator reopens it. This line repeats at most once per %.0fs per graph",
-        org_id, graph_id, reason, org_id, graph_id, org_id, graph_id,
+        "appear there. %s This line repeats at most once per %.0fs per graph",
+        org_id, graph_id, reason, _remedy_for_reason(org_id, graph_id, reason),
+        _halted_note_for_reason(reason),
         UNCUT_GRAPH_WARN_SECONDS,
     )
+
+
+def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
+    """The command sequence that actually reaches the state `reason` names.
+
+    ⛔ ONE SEQUENCE PER POPULATION, because the modes are not interchangeable
+    (#14587 review P3): `SEED_SQL`'s `ON CONFLICT` is scoped to
+    `seeded`/`halted` and sets only `seq`, so re-seeding a HALTED row leaves it
+    halted; `ARM_SQL` accepts `seeded` only. `seed` + `arm` therefore cannot arm
+    a halted graph — `reopen` (`halted -> seeded`) is the missing verb, and it is
+    exactly the order `record_allocator`'s own halt message prints
+    (`halt` -> `seed` -> `reopen` -> `arm`).
+    """
+    if reason == f"mode_{record_projection.MODE_HALTED}":
+        return (
+            f"Remedy, PER GRAPH (this one is HALTED — an operator's decision, so "
+            f"the sequence below includes the verb that leaves a halt, which the "
+            f"un-halted sequence does not): "
+            f"`tools/record_allocator_cli.py seed --org-id {org_id} --graph-id "
+            f"{graph_id} --enumerated-floor 0`, then `reopen --org-id {org_id} "
+            f"--graph-id {graph_id}`, then `arm --org-id {org_id} --graph-id "
+            f"{graph_id} --acknowledge-cutover`.")
+    return (
+        f"Remedy, PER GRAPH: `tools/record_allocator_cli.py seed --org-id "
+        f"{org_id} --graph-id {graph_id} --enumerated-floor 0`, then `arm "
+        f"--org-id {org_id} --graph-id {graph_id} --acknowledge-cutover`.")
+
+
+def _halted_note_for_reason(reason: str) -> str:
+    """The closing sentence, which is only TRUE for one of the populations.
+
+    For a halted graph the sequence above already contains `reopen`; for every
+    other reason a halt is not the state at all, so the sentence would be a claim
+    about a mode this graph is not in.
+    """
+    if reason == f"mode_{record_projection.MODE_HALTED}":
+        return ("`reopen` is in the sequence above because a halted graph stays "
+                "halted BY DESIGN until an operator reopens it.")
+    return ("A graph that is later HALTED stays halted BY DESIGN until an "
+            "operator reopens it (`reopen`, then `arm`).")
+
+
+def _bound_provision_statements(connection: Any) -> None:
+    """Scope :data:`PROVISION_STATEMENT_TIMEOUT_MS` on the hook's transaction.
+
+    ⛔ TRANSACTION-LOCAL (``set_config(..., true)``), NEVER a session-level
+    ``SET``: :func:`_default_connect` is POOLED (#9558) and hands out handles
+    other callers borrow, so a session bound would follow the handle into a live
+    write's transaction and impose a creation-sized budget on a record write.
+    ``set_config`` is used rather than ``SET LOCAL`` because it takes a bind
+    parameter (``SET`` does not), which is the same reason
+    :func:`tortoise.record_serve.open_record` uses it.
+
+    ⛔ IT IS SCOPED BY THE CALLER, NOT INSIDE `record_allocator`: that module's
+    contract is "NO GLOBAL ``statement_timeout`` … A caller that wants a bound
+    scopes it locally", and the number here is the CALLER's budget (a
+    graph-creation request, not an allocator operation).
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                       (str(PROVISION_STATEMENT_TIMEOUT_MS),))
+    finally:
+        cursor.close()
 
 
 def provision_graph_record(*, org_id: str, graph_id: str,
@@ -3291,6 +3395,16 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     exist. Either way the number is not trusted: `SEED_SQL` refuses
     (`SeedRefused(reason="divergence")`) when the journal's `MAX(seq)` exceeds the
     enumeration, so a real disagreement is REFUSED rather than silently seeded.
+
+    ⛔ THE WAIT IS BOUNDED ON BOTH HALVES (#14587 review P3-2): the connect by
+    :data:`PROVISION_CONNECT_TIMEOUT_SECONDS` (passed to `_default_connect`) and
+    every statement after it by :data:`PROVISION_STATEMENT_TIMEOUT_MS` (scoped
+    transaction-locally in :func:`_bound_provision_statements`). Bounding only
+    the connect left the shape that matters — a record that ACCEPTS and then
+    hangs — unbounded on a sync call made from an `async` endpoint. Postgres
+    applies the statement bound per STATEMENT, so a hung record costs at most
+    ``n x`` it; the live breaker is not consulted, and the reason is stated on
+    that constant.
     """
     from . import record_allocator as ra
 
@@ -3313,6 +3427,7 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     try:
         connection = _default_connect(
             dsn, connect_timeout=PROVISION_CONNECT_TIMEOUT_SECONDS)
+        _bound_provision_statements(connection)
         outcome = ra.provision_graph_record(
             connection, org_id=org_id, graph_id=graph_id,
             enumerated_floor=enumerated_floor)
