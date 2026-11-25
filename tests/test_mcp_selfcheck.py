@@ -440,6 +440,33 @@ def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
         f"the old wording blamed a missing object it could not be sure of: {result.actions}")
 
 
+def test_the_FALLBACK_re_dump_preserves_CRLF(project):
+    """The re-dump branch has its own line-ending duty — and nothing pinned it.
+
+    Both CRLF config rows above take the SPLICE path; this is the branch that
+    REPLACES the document, where `json.dumps` emits LF by construction. A CRLF
+    file with no `mcpServers` object is the shape that reaches it. Measured by a
+    fresh reviewer at `a5f3b3b9`: reverting the `.replace("\n", nl)` here left the
+    suite green while a CRLF config came back all-LF.
+    """
+    original = ('{\r\n'
+                '  "unrelated": {"a": 1}\r\n'
+                '}\r\n')
+    path = project / ".mcp.json"
+    path.write_bytes(original.encode("utf-8"))
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    after = path.read_bytes().decode("utf-8")
+    assert "\n" not in after.replace("\r\n", ""), (
+        f"the re-dump flattened the file's line endings:\n{after!r}")
+    assert after.count("\r") >= original.count("\r"), (
+        f"a CRLF document lost terminators through the fallback:\n{after!r}")
+    assert json.loads(after)["unrelated"] == {"a": 1}
+    assert "tortoise.mcp_bridge" in after
+
+
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
     """Installing the two sentences must not rewrite the user's own AGENTS.md endings."""
     target = project / "AGENTS.md"
