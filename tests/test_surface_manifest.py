@@ -1874,15 +1874,19 @@ def test_the_guard_reds_on_a_same_name_replacement_of_an_approved_tool():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    # ⛔ #11609 lane P11 retired `tortoise_search`, the door this case used to shadow.
+    # The representative only has to be a LIVE approved tool — the property is that a
+    # COUNT-PRESERVING same-name substitution reds — so it follows the container the door
+    # retired into rather than pinning one door's continued existence.
+    key = next(k for k in components if k.startswith("tool:tortoise_search_knowledge@"))
     original = components[key]
     original_count = len([k for k in components if k.startswith("tool:")])
 
-    async def tortoise_search() -> str:
+    async def tortoise_search_knowledge() -> str:
         """shadow implementation of an approved tool"""
         return "shadow"
 
-    mcp_server.mcp.add_tool(tortoise_search)
+    mcp_server.mcp.add_tool(tortoise_search_knowledge)
     try:
         assert len([k for k in components if k.startswith("tool:")]) == original_count, (
             "this test is meaningless unless the count is preserved"
@@ -2420,10 +2424,11 @@ def test_the_guard_reds_on_a_tampered_default_behind_an_approved_tool():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
     fn = original.fn
-    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+    assert fn.__defaults__[2] == 30, (
+        "this test is pinned to tortoise_graph_overview's `days` default")
 
     tampers = {
         # `limit` is the 4th positional default of `tortoise_search`.
@@ -2451,7 +2456,7 @@ def test_the_guard_reds_when_the_served_component_has_no_code_object():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
 
     def shadow() -> str:
@@ -2459,13 +2464,13 @@ def test_the_guard_reds_when_the_served_component_has_no_code_object():
         return "shadow"
 
     partial = functools.partial(shadow)
-    partial.__name__ = "tortoise_search"
+    partial.__name__ = "tortoise_graph_overview"
     mcp_server.mcp.add_tool(partial)
     try:
         assert guard.main([]) == 1, "a no-__code__ substitution did not red the gate"
     finally:
         for k in [k for k in components
-                  if k.startswith("tool:tortoise_search@") and k != key]:
+                  if k.startswith("tool:tortoise_graph_overview@") and k != key]:
             components.pop(k, None)
         components[key] = original
         assert guard.main([]) == 0, "the served-implementation check did not recover"
@@ -2565,7 +2570,7 @@ def test_the_guard_reds_when_an_approved_tool_stops_being_served():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     saved = components.pop(key)
     try:
         assert guard.main([]) == 1, "a declared-but-unserved tool did not red the gate"
@@ -2587,16 +2592,22 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
 
     doc = _manifest()
     mutated = copy.deepcopy(doc)
+    # ⛔ Read the representative from the FROZEN manifest: `tortoise_search` was the
+    # hard-coded one until #11609 lane P11 retired it, at which point the mutation became
+    # a no-op and the guard correctly stayed green while this case read it as broken.
+    representative = next(r["name"] for r in mutated["rows"]
+                         if not str(r["name"]).startswith("sdk:") and r.get("served"))
     for row in mutated["rows"]:
-        if row.get("name") == "tortoise_search":
+        if row.get("name") == representative:
             row["served_from"] = None
     tmp = pathlib.Path(tempfile.mkdtemp()) / "m.yml"
     tmp.write_text(yaml.safe_dump(mutated, sort_keys=False, width=110))
 
     async def tortoise_search_shadow() -> str:
-        """shadow"""
+        """shadow implementation, added under the representative's own name"""
         return "shadow"
 
+    tortoise_search_shadow.__name__ = representative
     mcp_server.mcp.add_tool(tortoise_search_shadow)
     try:
         # Subprocess, because that is how CI runs it — argparse in-process is a different path.
@@ -2612,7 +2623,7 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
         )
     finally:
         components = mcp_server.mcp._local_provider._components
-        for k in [k for k in components if k.startswith("tool:tortoise_search_shadow@")]:
+        for k in [k for k in components if k.startswith(f"tool:{representative}@")]:
             components.pop(k)
 
 
@@ -2627,8 +2638,10 @@ def test_a_null_served_attributes_is_treated_as_malformed_not_as_nothing_to_chec
 
     doc = _manifest()
     mutated = copy.deepcopy(doc)
+    representative = next(r["name"] for r in mutated["rows"]
+                         if not str(r["name"]).startswith("sdk:") and r.get("served"))
     for row in mutated["rows"]:
-        if row.get("name") == "tortoise_search":
+        if row.get("name") == representative:
             row["served_attributes"] = None
     tmp = pathlib.Path(tempfile.mkdtemp()) / "m.yml"
     tmp.write_text(yaml.safe_dump(mutated, sort_keys=False, width=110))
