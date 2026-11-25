@@ -87,6 +87,14 @@ def _document_text() -> str:
     """The DOCUMENT: the source + THIS run's appendix, rendered from the tree."""
     return census.render(DOC_SRC, census.census(("tortoise",)))
 
+
+# ⛔ THE APPENDIX ARMS SLICE FROM THE TABLE'S OWN HEADER ROW, not from the heading's
+# newline. The tracked source carries a VISIBLE note under that heading (`#14625`
+# review, P2: the served file ended on a heading with nothing rendered under it), so
+# the table no longer starts immediately after the marker and a `+ len(marker) + 1`
+# slice would compare the note against the rows.
+APPENDIX_HEADER = "| file:line | fn | shape | role | verdict | statement |\n"
+
 # --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
 # --------------------------------------------------------------------------- #
@@ -187,7 +195,10 @@ def test_the_doc_appendix_is_the_tools_own_output(tmp_path):
     assert not census.CENSUS_ROW.search(_source_text()), (
         f"{DOC_SRC.relative_to(ROOT)} carries a census row — the appendix is "
         "GENERATED: delete the rows and let `--render` append them")
-    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    assert APPENDIX_HEADER in doc, (
+        "the rendered document no longer carries Appendix A's table header — this\n"
+        "arm slices the rows from it, so re-point it rather than deleting it")
+    appendix = doc[doc.index(APPENDIX_HEADER):]
     result = census.census(("tortoise/",))
     expected = census.markdown_table(result["sites"]) + "\n"
     if appendix == expected:
@@ -236,7 +247,6 @@ def test_the_doc_appendix_row_count_is_the_census_site_count(tmp_path):
     fail however broken the renderer was (the vacuity `#11859` names, caught in
     review of this change rather than by it).
     """
-    marker = "## Appendix A — every statement site, by shape\n"
     out = tmp_path / "CYPHER-INVENTORY.md"
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
@@ -245,13 +255,69 @@ def test_the_doc_appendix_row_count_is_the_census_site_count(tmp_path):
     )
     assert proc.returncode == 0, f"--render refused:\n{proc.stdout}\n{proc.stderr}"
     doc = out.read_text(encoding="utf-8")
-    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    assert APPENDIX_HEADER in doc, (
+        "the rendered document no longer carries Appendix A's table header — this\n"
+        "arm slices the rows from it, so re-point it rather than deleting it")
+    appendix = doc[doc.index(APPENDIX_HEADER):]
     rows = [ln for ln in appendix.splitlines() if ln.startswith("| `")]
     result = census.census(("tortoise/",))
     assert len(rows) == len(result["sites"]), (
         f"the rendered Appendix A carries {len(rows)} site rows, the census "
         f"classifies {len(result['sites'])} — re-render it with "
         "`python tools/cypher_inventory.py --render` rather than hand-editing")
+
+
+def test_the_source_does_not_end_on_an_appendix_heading_with_nothing_visible():
+    """Appendix A is EXPLAINED in the TRACKED file, not only inside an HTML comment.
+
+    ⛔ THE READER HERE IS NOT THE TEST SUITE. `CYPHER-INVENTORY.src.md` is the only
+    TRACKED half of this document — the rendered `CYPHER-INVENTORY.md` is gitignored —
+    so a person opening the path on a forge gets the SOURCE and nothing else. It used
+    to END on the `## Appendix A …` heading with the explanation of the missing rows
+    inside an `<!-- … -->` block, which a forge does not render: the last thing a
+    reader saw was a heading promising rows the file does not carry, with no visible
+    word about where they come from (`#14625` review, P2).
+
+    ⛔ WHY IT IS AN ARM AND NOT THE COMMENT: the note is the only visible statement of
+    the split's own contract in the artifact a reader reads, and prose added for a
+    reviewer is deleted by the next tidy-up precisely because nothing reds. This arm
+    reds on three separate ways to lose it — the note deleted, the note emptied of the
+    command that produces the rows, and the note left where `--render` drops it.
+    """
+    source = _source_text()
+    marker = "## Appendix A — every statement site, by shape\n"
+    assert marker in source, (
+        "the source no longer carries Appendix A's heading — the two appendix arms\n"
+        "and this one all anchor on it; re-point them rather than deleting it")
+    tail = source[source.index(marker) + len(marker):]
+    # ⛔ STRIP THE HTML COMMENTS FIRST: what is left is what a forge renders. Counting
+    # raw characters would pass on the comment block alone, which is the exact state
+    # this arm exists to refuse.
+    visible = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL).strip()
+    assert visible, (
+        f"{DOC_SRC.relative_to(ROOT)} ends on Appendix A's heading with nothing\n"
+        "VISIBLE under it — the note explaining why the rows are absent is inside an\n"
+        "HTML comment, which a forge does not render, so the tracked file reads as a\n"
+        "heading promising rows it does not carry. Put the note in the PROSE.")
+    assert "tools/cypher_inventory.py --render" in visible, (
+        "the visible note under Appendix A must name the COMMAND that produces the\n"
+        "rows (`tools/cypher_inventory.py --render`); a note that says 'generated' —\n"
+        "or only mentions the `--render` flag in some other clause — leaves the\n"
+        "reader with no way to get the rows. MEASURED: the weaker `\"--render\" in\n"
+        "visible` check stayed GREEN when the command was replaced, because the\n"
+        "note's closing sentence names the flag again.")
+    # ⛔ AND THE RENDERER KEEPS IT, above the table: the note is the source's own prose,
+    # so `--render` appends to it rather than replacing the tail. Rendered with an EMPTY
+    # site list on purpose — this arm is ungated (it rides the required gate) and a full
+    # tree walk would be the only cost it adds.
+    first_line = visible.splitlines()[0].strip()
+    rendered = census.render(DOC_SRC, {"sites": []})
+    assert first_line in rendered, (
+        "the note under Appendix A does not survive `--render` — it is the tracked\n"
+        "file's own prose, so the rendered document must carry it too")
+    assert rendered.index(first_line) < rendered.index(APPENDIX_HEADER), (
+        "the note must sit ABOVE the table in the rendered document, not below it —\n"
+        "a note under the rows explains nothing to the reader who is scrolling them")
 
 
 def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsys):
@@ -3022,6 +3088,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # named — measured: deleting its `def` block left the whole file green at
         # `99 passed, 15 skipped`.
         "test_the_source_tables_are_not_broken_across_physical_lines",
+        # ⛔ AND THE READER-FACING HALF OF THE SAME SPLIT (#14625 review, P2): the
+        # tracked file ended on Appendix A's heading with the explanation inside an
+        # HTML comment, which no forge renders, so the served file promised rows it
+        # does not carry. Deleting this arm leaves that state unpinned and silent.
+        "test_the_source_does_not_end_on_an_appendix_heading_with_nothing_visible",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -3032,8 +3103,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 24, (
-        f"expected EXACTLY 24 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 25, (
+        f"expected EXACTLY 25 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3043,7 +3114,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 24` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 25` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -3055,8 +3126,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 83, (
-        f"expected EXACTLY 83 test functions in this module; got "
+    assert len(test_functions) == 84, (
+        f"expected EXACTLY 84 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")

@@ -1096,3 +1096,9 @@ one.
      and `--check` REFUSE a source that carries a census row. -->
 
 ## Appendix A — every statement site, by shape
+
+> **Generated, not committed — and this source carries none of it.** The rows are
+> appended from the live tree by `uv run python tools/cypher_inventory.py --render`,
+> which is why this tracked file stops here: it holds the prose and the 25 pins,
+> never a census row. Both `--render` and `--check` REFUSE a source that carries
+> one, so the table is the generator's output at the tree you render.
