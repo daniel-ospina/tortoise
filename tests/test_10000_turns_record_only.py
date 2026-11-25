@@ -229,7 +229,7 @@ def test_the_graph_store_lane_keeps_the_turn_VECTOR(sdk, monkeypatch):
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     # The record cannot hold these turns: no tenant bound, so `record_holds_turns`
     # answers False and the batch write below IS the store.
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
@@ -259,7 +259,7 @@ def test_a_refused_record_write_falls_back_to_the_graph_WITH_its_vector(
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+                        lambda entity_type, **_kw: False, raising=False)
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
                         _RecordSeam(None))

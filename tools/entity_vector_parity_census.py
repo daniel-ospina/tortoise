@@ -189,14 +189,19 @@ CensusError = census_mod.CensusError
 #: measured predicate the entity labels use — so `#5004`'s "a Point vector is RECORD
 #: TRUTH" is exactly the reason a graph copy the record ALSO holds is a mirror that may go.
 #:
-#: ⛔ BUT THE WRITER HALF DID NOT CLOSE, and review reverted the attempt to close it by
-#: force: the turn capture writes its vector wherever the graph is the SOLE store (no
-#: journal, no tenant, an open connect breaker, or a record write that REFUSED the turn),
-#: and pass-1b restores a snapshot vector only for ids the journal wrote none for. Gating
-#: either on THIS label aggregate put those vectors in NEITHER store, so neither may ask.
-#: The stripper therefore REFUSES `:Point` and names both writers — the row is here so the
-#: population, the per-key parity and the coverage measurement all exist before it can
-#: open. The tool still refuses any label whose record coverage does not
+#: ⛔ AND THE WRITER HALF IS CLOSED (`#14552`), WITHOUT REVERSING THE FINDING THAT CLOSED IT
+#: TWICE: a label aggregate may not gate a writer whose copy is the sole one on its lane. The
+#: turn capture writes its vector wherever the graph is the SOLE store (no journal, no
+#: tenant, an open connect breaker, or a record write that REFUSED the turn) and pass-1b
+#: restores a snapshot vector only for ids the journal wrote none for — so both now ask the
+#: gate per ROW instead of only per LABEL, each in its own shape: the CAPTURE answers the
+#: LABEL predicate on the lane where the record is expected to hold the turns
+#: (`record_writer.record_holds_turns`, a DEPLOYMENT predicate) and re-attaches the vector per
+#: turn for any turn the record then REFUSES, while the PASS-1B restore asks the RECORD per ID
+#: (does it SERVE a vector for THIS id). Their sole-copy branches are stated and tested. The
+#: `:Point` writer census is therefore
+#: EMPTY; an operator's remaining refusal on this label is the coverage arm above. The tool
+#: still refuses any label whose record coverage does not
 #: measure true in its own process (`strip_readiness`), so nothing can delete a
 #: vector the record cannot answer with.
 RETIRED: tuple[tuple[str, str, str], ...] = (
