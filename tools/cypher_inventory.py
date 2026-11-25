@@ -896,8 +896,7 @@ def check(doc: Path, result: dict) -> int:
             print(f"STALE pin {key}={pinned[key]} — the tool no longer computes it",
                   file=sys.stderr)
         return 1
-    print(f"check: {len(actual)} pinned counts match")
-    return 0
+    return emit(f"check: {len(actual)} pinned counts match")
 
 
 def emit(text: str, stream=None) -> int:
@@ -916,6 +915,15 @@ def emit(text: str, stream=None) -> int:
     it the smaller verbs would keep answering something that is not "could not run".
     """
     out = sys.stdout if stream is None else stream
+    # ⛔ `sys.stdout` IS `None` WHEN fd 1 IS CLOSED AT START (`>&-`), and `None.write`
+    # raises AttributeError — which exits **1**, the DRIFT code. Measured: `--markdown >&-`
+    # exited 0 before this writer (bare `print()` with a `None` stream is a documented
+    # no-op) and 1 after it, so the guard would have been the one path that INTRODUCED
+    # the misclassification it exists to remove. "Could not run" is 2, named.
+    if out is None:
+        print("census: could not write to stdout (no stream: fd 1 is closed) — this is "
+              "'could not run', not drift", file=sys.stderr)
+        return 2
     try:
         out.write(text + "\n")
         out.flush()
@@ -1120,8 +1128,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, UnicodeError) as err:
             print(f"render: could not write {out}: {err}", file=sys.stderr)
             return 2
-        print(f"render: wrote {len(text.splitlines())} lines to {out}")
-        return 0
+        return emit(f"render: wrote {len(text.splitlines())} lines to {out}")
     if args.json:
         payload = {
             "prefixes": result["prefixes"],
