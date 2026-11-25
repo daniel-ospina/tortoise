@@ -13468,14 +13468,29 @@ durations:
   # `test_13043_record_allocator_cli.py` row records — a file a PR ADDS can never
   # carry a CI junit reading yet, so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading. What the weight covers, on the
-  # DB-free lane: every creation door calls the hook (AST-pinned for
-  # `hosted_api._provision_graph_record`,
-  # `supabase_control._provision_default_graph_record` and
-  # `sdk._graph_create`); the hook ARMS (the plan's §A7.8 item 8 / M16 falsifier)
-  # and reuses `seed`; the uncut registry's cap, its overflow counter and its
-  # NO-tenant-identifiers rule; `/health` seeding the three keys and folding `ok`
-  # on an armed deployment carrying an uncut graph while leaving `degraded`'s
-  # window meaning alone. The DB-backed legs (a first record write APPLYING after
+  # DB-free lane — ⛔ named by the pin that holds it, because a `durations` row is
+  # read by a verifier INSTEAD of the test, so a paraphrase here is a claim in its
+  # own right (`#14587` review P3-1: this row used to restate the "every creation
+  # door calls the hook, `sdk._graph_create` included" sentence the change retracts,
+  # and a three-key `/health` that is six): the TWO minting doors call the hook,
+  # ONCE for `hosted_api._provision_graph` and THREE times for
+  # `supabase_control.ensure_default_graph_row` (one per id-yielding arm), each
+  # through its helper (`_DOORS`, `_DOOR_HOOK_CALLS`, `_HELPERS`); the seven
+  # DELEGATING creation sites reach a graph-creating door transitively — the HTTP
+  # and default-graph ones at `_provision_graph`/`ensure_default_graph_row`, the SDK
+  # and signup ones at `sdk._graph_create`, whose REGISTRY arm is the hooked one
+  # (`_DELEGATED`, `_same_module_call_graph`);
+  # ⛔ and `sdk._graph_create` is pinned the OPPOSITE way — it must NOT call the
+  # hook (`_UNHOOKED`, F1/F3: its Supabase arm persists no `public.graphs` row and
+  # its registry arm mints one the record's FK refuses, so hooking it manufactures
+  # a permanent false red on `/health`); the hook ARMS (the plan's §A7.8 item 8 /
+  # M16 falsifier) and reuses `seed`; the uncut registry's cap, its overflow counter
+  # and its NO-tenant-identifiers rule; `/health` seeding the SIX `armed_but_*` keys
+  # and folding `ok` on an armed deployment carrying a graph this process has
+  # OBSERVED uncut (`test_health_is_a_window_not_a_census` — the registry is
+  # per-process state with no population source, so it is a WINDOW, not a census)
+  # while leaving `degraded`'s window meaning alone. The DB-backed legs (a first
+  # record write APPLYING after
   # the hook, the divergence refusal, the door helpers against a real
   # `public.graphs` row, and `backfill`'s three counts + `--dry-run`) skip
   # without `TEST_RECORD_DB_URI`. ⛔ The CASE COUNT is deliberately not quoted: it

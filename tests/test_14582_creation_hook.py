@@ -142,6 +142,12 @@ _DELEGATED = (
     # REGISTRY arm is the hooked one (the Supabase arm is `_UNHOOKED`, F1).
     ("tortoise/sdk.py", "_org_create", "_graph_create"),
     ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
+    # C4 — `#14587` review (i), open at every head until now: the signup route is a
+    # graph-creating site the census found and this table did not pin, so an alias
+    # drifting off the route would have been invisible here. Pinned under the SAME
+    # door as C1-C3, because "the census found a seventh site" and "the table holds
+    # six" is a disagreement the next reader cannot resolve.
+    ("tortoise/hosted_api.py", "agent_signup", "_graph_create"),
 )
 
 
@@ -265,6 +271,38 @@ def test_the_door_helpers_reach_the_writers_hook():
     assert not missing, (
         f"these helpers no longer reach `record_writer.provision_graph_record`: "
         f"{missing} — the doors would call a function that provisions nothing")
+
+
+def test_the_hook_matcher_is_not_vacuous():
+    """Non-vacuity for the matcher the absence pin below rests on (`#14587` N1).
+
+    ⛔ An ABSENCE pin is green precisely when its matcher finds nothing, so a
+    matcher that always answers `[]` silences it without reddening a thing —
+    measured at the reviewed head: `return []` at the top of
+    :func:`_hook_call_names` left the whole file `23 passed, 8 skipped`. The pin
+    itself is not a no-op (a real hook call reds it); what was missing is any
+    assertion that the matcher SEES a hook, which is what this is.
+    """
+    node = ast.parse(
+        "def door():\n"
+        "    provision_graph_record(org_id=o, graph_id=g)\n"
+        "    _rw.provision_graph_record_v2(g)\n"
+        "    other_call(g)\n").body[0]
+    found = set(_hook_call_names(node))
+    assert {"provision_graph_record", "provision_graph_record_v2"} <= found, (
+        f"the hook matcher answered {sorted(found)} — it no longer sees the hook in "
+        "either spelling a door's line takes. Every absence pin it backs is then "
+        "green for ANY door, so a door that starts calling the hook sails past it")
+    assert "other_call" not in found, (
+        "an unrelated callee was matched as the hook — the matcher is no longer "
+        "prefix-scoped to the hook's own name")
+    # ⛔ DECLARED over-match, asserted so it cannot drift silently in either
+    # direction: any callee whose name STARTS with the hook's name counts as a call
+    # to it (fail-closed — a renamed hook is caught, at the price of an unrelated
+    # prefix counting).
+    assert _hook_call_names(ast.parse(
+        "def door():\n    provision_graph_recorder_notes(g)\n").body[0]) == [
+            "provision_graph_recorder_notes"]
 
 
 def test_the_doors_that_cannot_be_hooked_stay_unhooked():
@@ -396,6 +434,23 @@ def test_the_delegation_pin_reads_the_route_and_not_the_names():
         "exercised here")
     assert _reaches(graph, "default_graph_id_for_credential",
                     "ensure_default_graph_row")
+
+
+def test_the_delegation_table_cannot_be_emptied():
+    """Non-vacuity for the table the route pin ITERATES (`#14587` review (ii)).
+
+    ⛔ The arm above is green when `_DELEGATED` is empty, because a pin that loops
+    over nothing asserts nothing — measured at the reviewed head: `_DELEGATED = ()`
+    left both delegation tests green (`2 passed, 29 deselected`) while the census's
+    other half silently stopped being checked. The floor is the census this table
+    records, so GROWING it is free and SHRINKING it has to come back here.
+    """
+    assert len(_DELEGATED) >= 7, (
+        f"`_DELEGATED` holds {len(_DELEGATED)} site(s) but the census found 7 — the "
+        "route pin only checks the entries it is given, so a table that lost an "
+        "entry (or was emptied) reports PASS for a site nobody looks at any more. "
+        "Re-census (`rg -n 'create_graph|insert_graph|ensure_default_graph_row|_graph_create' "
+        "tortoise/`) rather than lowering this floor")
 
 
 def test_the_hook_arms_and_does_not_only_seed():
