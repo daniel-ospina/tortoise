@@ -257,11 +257,10 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `_DOC_RETIRED_KEYS` (`projection/entities.py:2379`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
 returns that one line; the sentence has followed the symbol through `2297` → `2313` →
-`2343` → `2363` → `2379`, as `#13971`'s review round corrected the capture path's own
-docstring above and then added the restore-door residual there, `#14560`'s
-residue-ratchet reconciliation (`3bbe5567df24`, +20 lines above the declaration) and
-`#14552`'s per-row writer gate (`939e37f664e5`, +16) each moved it again, and before
-that `2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
+`2343` as `#13971`'s review round corrected the capture path's own docstring above and then
+added the restore-door residual there → `2363` (`#14596`) → `2379` (`#14567`), each of those
+two growing this module above the declaration, and before that
+`2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
