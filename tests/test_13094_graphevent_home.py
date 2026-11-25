@@ -135,12 +135,12 @@ CAPABILITY_CONTROLS = (
     ("re-spaced directed adjacency",
      "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
     # the live EP / belief walk, with its `{label}` placeholder FILLED BY `GraphEvent` — a label
-    # the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
+    # the walk is never swept over (`live.py:801`'s `EPISTEMIC_LABELS` is
     # Point/Subject/Object/Event), so this row pins the SHAPE the capability arms must catch, not a
-    # placement claim. The walk itself is `tortoise/ep.py:1620-1632` (`epistemic_label_queries`); it
+    # placement claim. The walk itself is `tortoise/ep.py:1645-1657` (`epistemic_label_queries`); it
     # used to be quoted through the `#13083` census's `:Point` table, whose document was deleted on
     # 2026-11-23 (`#11081` audit row B2) — read the shape from the source
-    # (`sed -n '1620,1632p' tortoise/ep.py`, or grep for `epistemic_label_queries`), never from a
+    # (`sed -n '1645,1657p' tortoise/ep.py`, or grep for `epistemic_label_queries`), never from a
     # prose document's row address.
     ("EP walk",
      "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",

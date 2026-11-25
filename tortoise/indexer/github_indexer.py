@@ -344,7 +344,7 @@ def _row_is_frozen(status, outdated) -> bool:
     deliberately not passed (position is the axis a diff CAN converge on, so it is
     read separately below). ⛔ It is NOT the shared ``live.is_terminal_status``,
     and the omission is deliberate: that helper spells its word half as
-    ``(status or "") in TERMINAL_EXCLUDED_STATUSES`` (``live.py:404``), a bare
+    ``(status or "") in TERMINAL_EXCLUDED_STATUSES`` (``live.py:229``, in `ending_axes`), a bare
     ``frozenset`` membership that HASHES the value and raises on a stored ARRAY
     ``status`` the fold tolerates (the hashing guard below states that row). The word
     test here is ``sdk._is_lifecycle_word`` instead — the repo's type-first one — and
@@ -1607,7 +1607,7 @@ class GitHubIndexer:
         # `:466`/`:990` were cited here and do not support the sentence),
         # and `_live_holders` uses the same
         # `coalesce(n.isClosed, false) = false` predicate that calls Integer `0`
-        # not-live (`live.py:209-213`). So a falsy-marked row sits in exactly the
+        # not-live (`live.py:325-329`). So a falsy-marked row sits in exactly the
         # predicate state a truthy-marked one does, and a `github.issue.reopened`
         # fold that REACHES it rewrites `isClosed` to a real boolean
         # (`pipeline.py:434`, `"isClosed": target.is_terminal`). What makes the
