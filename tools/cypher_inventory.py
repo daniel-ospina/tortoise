@@ -790,10 +790,12 @@ def render(src: Path, result: dict) -> str:
     verdict — 1, naming the rows — because a committed appendix is a census
     defect, not a tool that could not run.)
 
-    ⛔ THE SEPARATOR IS INSERTED, not assumed: the source ends after the Appendix
-    heading with a SINGLE newline (two would be a markdownlint MD012 finding on
-    the required `docs` check), and this function supplies the blank line that
-    separates the heading from the table.
+    ⛔ THE SEPARATOR IS INSERTED, not assumed: the source ends on the VISIBLE note
+    that sits under the Appendix heading (the tracked file is what a reader sees on
+    a forge, so a heading with nothing under it promises rows the source does not
+    carry — `#14625` review, P2), with a SINGLE trailing newline; two blank lines
+    there would be a markdownlint MD012 finding on the required `docs` check. This
+    function supplies the one blank line that separates that note from the table.
     """
     if not src.exists():
         print(f"render: no source at {src}", file=sys.stderr)
