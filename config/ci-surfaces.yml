@@ -58,14 +58,15 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` `a29b5f24ce95` folded in, which itself
-# carried `#14612`'s, `#14614`'s and `#14606`'s re-writes of this very block — every registration
-# the partition below counts is `main`'s EXCEPT the one row this PR adds: `#14596`'s
+# carried `#14612`'s and `#14606`'s re-writes of this very block — every registration the partition
+# below counts is `main`'s EXCEPT the ONE row this PR adds. `main`'s are `#14596`'s
 # `tests/test_14560_operator_vectors.py` and `#14552`'s
 # `tests/test_record_read_point_vector_keys.py` (both `core`, flat 2.0 s `DEFAULT_FAST_WEIGHT`),
 # `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, that same
 # flat weight), `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row and `#14606`'s
-# `tests/test_14592_operating_model_evidence.py` (`core`, that same flat weight) each landed before
-# this fold. THIS PR adds exactly ONE file, `tests/test_14592_read_parity.py`, and with it the verb
+# `tests/test_14592_operating_model_evidence.py` (`core`, that same flat weight) — each of them
+# landed before this fold, so none is this PR's. THIS PR adds exactly ONE file,
+# `tests/test_14592_read_parity.py`, and with it the verb
 # packs the pool into two bins: one shard at 826.6 s (j) and ten at 826.5 s
 # (a, b, c, d, e, f, g, h, i, k), so `ceil(826.6/60 x 2)` = 28 m governs (a shard's job-level wall
 # clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
