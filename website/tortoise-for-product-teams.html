@@ -712,9 +712,13 @@
       /* ⛔ DO NOT touch `#beat-hero`'s padding-top here. The 5rem is the hero's
          ONLY clearance from the fixed Login pill (`top:0; padding:18px 24px`,
          so the button occupies y 18–54.4). Short viewports (≤820px tall) fire
-         the escape hatch two blocks down, which top-aligns the beat, so the
-         padding IS the clearance at every phone height — reducing it to 2rem
-         put the h1 at y=33 and painted the first line UNDER the button
+         the escape hatch two blocks down, which CENTRES the beats whose copy
+         fits and starts an overflowing one at its own padding-top — so the
+         padding below is the floor at every phone height, and the hero is the
+         beat that always overflows (722.5px of copy in a 700px box at 375x812),
+         which is why its auto margins resolve to zero and its h1 stays at y=80.
+         Reducing it to 2rem put the h1 at y=33 and painted the first line
+         UNDER the button
          (26.7x21.4px overlap at 375x812, and only +1.0px clearance at 390x844
          against +25.0px before). The vertical room this beat needs is taken
          from the video below instead, which is the block that makes the

@@ -5747,7 +5747,7 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
 def _beats_whose_ground(
         selector: str, side: str,
         grounds: dict[str, dict[str, GroundElement | None]]) -> list[str]:
-    """The beats whose GROUND — the DIRECT child of `#beat-x` / `.beat` — is `side`.
+    r"""The beats whose GROUND — the DIRECT child of `#beat-x` / `.beat` — is `side`.
 
     ⛔ The combinator is anchored to the beat's OWN compound selector rather
     than "a `>` somewhere before the pseudo" (#14683 review B2, measured both
@@ -5761,18 +5761,34 @@ def _beats_whose_ground(
             behaviourally identical to the shipped one, with a message saying
             the rule was missing.
 
-    So: the beat's compound must be followed by the child combinator, and the
+    So: the beat's compound must be followed DIRECTLY by the child
+    combinator — no qualifier in between (#14683 review F1, measured) — and the
     simple selector between the combinator and the pseudo must ADDRESS the
     child the markup declares (`_ground_selector_matches`, #14697 residual 2).
     `(?<![-\\w])` keeps `#beat-hero-copy` from satisfying `#beat-hero`.
+
+    ⛔ `[^\s>]*` on the SUBJECT side was a fail-open in the OTHER direction from
+    the one the child check closes: a qualifier there NARROWS the element set,
+    yet was delivered here as though it were the bare beat. Six of this page's
+    seven beats carry `workflow` and the hero does not, so
+
+        `.beat.workflow > :first-child { margin-top: auto }`
+
+    was recorded as a centring home for ALL SEVEN — GREEN while the hero kept
+    the hatch's bare `flex-start` with no auto margins of its own. At any
+    short-and-wide window (height <= 820 with the hero's two-column `.doc-grid`
+    fitting the box — e.g. 1440x800) that is #14677 verbatim, on the one beat
+    whose 5rem is also the owner's recorded pill clearance. A qualified subject
+    is now simply not credited, which is the fail-CLOSED direction: the rule is
+    ignored rather than mis-attributed.
     """
     compact = _compact_selector(selector)
     out: list[str] = []
     for beat, sides in grounds.items():
         for subject in (f"#{beat}", ".beat"):
             match = re.search(
-                rf"(?<![-\w]){re.escape(subject)}(?![-\w])[^\s>]*>"
-                rf"([^\s>]*):{side}\b", compact)
+                rf"(?<![-\w]){re.escape(subject)}(?![-\w])>"
+                rf"([^\s>]*):{side}(?![\w-])", compact)
             if match and _ground_selector_matches(match.group(1),
                                                   sides.get(side)):
                 out.append(beat)
@@ -5902,13 +5918,18 @@ def _beat_ground_margin_candidates(
         if not any(declarations.values()):
             continue
         height = math.inf
-        for block_height, start, end in height_spans:
-            if start <= match.start() < end:
-                height = float(block_height)
-                break
-        else:
-            if any(start <= match.start() < end for start, end in other_media):
-                continue
+        enclosing = [block_height for block_height, start, end in height_spans
+                     if start <= match.start() < end]
+        if enclosing:
+            # ⛔ INNERMOST, not first (#14683 review F1, measured). Nested
+            # at-rules are valid CSS and the effective condition is the
+            # INTERSECTION, so `@media (max-height: 820px) { @media
+            # (max-height: 400px) { … } }` fires at <=400 and must not be
+            # credited with 820 — which the first-match read did, leaving the
+            # guard GREEN over a page top-aligned at 375x812.
+            height = float(min(enclosing))
+        elif any(start <= match.start() < end for start, end in other_media):
+            continue
         for part in (p for p in prelude.split(",") if p.strip()):
             specificity = _css_specificity(part) or (9, 9, 9)
             for side, declaration in declarations.items():
@@ -6410,6 +6431,44 @@ class TestShortViewportCentringIsGradedPerBlock:
                 "    .beat > :last-child { margin-bottom: auto; }"))
         assert _short_viewport_centring_problems(page) == []
 
+    def test_a_qualified_subject_is_not_the_bare_beat(self):
+        """`.beat.workflow > …` NARROWS the set; it is not a home for every beat.
+
+        #14683 review F1, measured: six of the page's seven beats carry
+        `workflow` and the hero does not, so the shorter spelling of the
+        shipped rule credited the hero with centring it never receives — GREEN
+        while the hero, whose 5rem is also a recorded pill clearance, kept the
+        hatch's bare `flex-start` alone. Rejecting a qualified subject is the
+        fail-CLOSED direction: the rule is ignored, not mis-attributed.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      .beat.workflow > :first-child { margin-top: auto; }"
+            + "\n      .beat.workflow > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a `.beat.workflow`-qualified centring rule was credited to a beat "
+            "that does not carry `workflow`")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_a_nested_narrower_block_does_not_credit_the_outer_height(self):
+        """Nested at-rules intersect: a 400px block inside 820 fires at ≤400.
+
+        #14683 review F1, measured: taking the FIRST enclosing `max-height`
+        credited the inner centring with 820, so the page was top-aligned at
+        375x812 with the guard GREEN.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      @media (max-height: 400px) {\n"
+            "        #beat-hero > :first-child { margin-top: auto; }\n"
+            "        #beat-hero > :last-child { margin-bottom: auto; }\n"
+            "      }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a nested `max-height: 400px` block was credited with the outer "
+            "820px hatch's height")
+        assert any("820" in p for p in problems), problems
     def test_selector_spacing_and_a_type_selector_are_accepted(self):
         """`>` spacing and `div:first-child` are the same element, not a miss."""
         page = self._page(hatch=(
