@@ -15717,8 +15717,15 @@ def _layer_payload(entry: dict) -> dict:
     return props
 
 
+#: The labels whose WHOLE property map `/belief` may publish inside
+#: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
+#: ``(:Document:Source)``, or any label this file has never heard of — is filtered
+#: through ``projection.entities.filter_source_props`` (deny by default, #3998).
+_PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
+
+
 def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
-    """Apply #3998 to a `:Source` that appears in the provenance chain.
+    """Apply #3998 to every non-publishable neighbour in the provenance chain.
 
     ⛔ THE CALLEE DOES NOT FILTER, SO THE ROUTE MUST. ``TortoiseSDK._provenance``
     builds its ``delegation`` arm with ``properties(n)`` — the whole node map —
@@ -15735,8 +15742,23 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
     there is a wider behaviour change than this route needs, and is the better
     home only if the surface owner takes it (filed as #14630).
 
-    Only the properties of a ``:Source`` neighbour are touched; every other
-    node's map is returned as stored, so no other arm's payload changes shape.
+    Only the properties of a neighbour that is not one of the four publishable
+    labels are touched; every other node's map is returned as stored, so no other
+    arm's payload changes shape.
+
+    ⛔ DENY BY DEFAULT, and the reason is MEASURED, not stylistic. An earlier
+    revision tested ``entry.get("node_type") == "Source"`` — and that field is
+    ``labels(n)[0]`` from the callee, which FalkorDB returns in LABEL-ALLOCATION
+    order, not by any semantic rank. A legacy ``(:Document:Source)`` node — the
+    exact shape an interrupted ``migrate_kinds.relabel_legacy_documents`` leaves
+    behind — therefore answers ``node_type: "Document"`` and the equality test
+    SKIPPED it: measured at this head, ``/belief`` still published
+    ``text: "RAW DOC BODY MUST NOT LEAK"`` for that shape while the single-label
+    fixture stayed green. A rule that names one spelling of a node it must
+    suppress is only as strong as that spelling, so the allow-list names the
+    labels whose WHOLE map this route may publish and everything else is
+    filtered. ``Document`` is deliberately NOT on it: post-D10 a document IS a
+    ``:Source``.
     """
     if not isinstance(provenance, dict):
         return provenance
@@ -15747,7 +15769,8 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
 
     filtered: list = []
     for entry in delegation:
-        if isinstance(entry, dict) and entry.get("node_type") == "Source":
+        if (isinstance(entry, dict)
+                and entry.get("node_type") not in _PUBLISHABLE_DELEGATION_LABELS):
             props, _denied = filter_source_props(dict(entry.get("props") or {}))
             entry = {**entry, "props": props}
         filtered.append(entry)
@@ -16300,6 +16323,24 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     which is precisely the substituted-number class this route's neighbour
     paragraph forbids. An earlier revision of this handler DID return that value
     (measured: an Object and a Subject both answered 200 with Beta(1,1)).
+
+    ⛔ **KNOWN RESIDUAL, disclosed rather than implied (#14633).** Presence and
+    VALUE are decided by different readers, and they disagree in one shape: the
+    mirror. ``ep_state`` is mirror-led (a row holding only ``n.confidence`` is
+    ``baseline``, not ``absent``), while the value comes from
+    ``ep._read_node``, whose coalesce reads ONLY ``posterior_alpha``/``ep_alpha``.
+    So a MIRROR-ONLY row — measured through public doors with
+    ``TORTOISE_EP_REQUIRE_CALIBRATION=0``: ``POST /v1/points`` with
+    ``confidence: 0.9`` and no α/β — is answered ``ep_state: "baseline"`` with
+    ``current.mean: 0.5``, i.e. the Beta(1,1) paragraph above, while the store
+    holds 0.9. That is NOT a fabrication this handler introduced (the coalesce is
+    pre-existing, and ``check_confidence``'s own ``EpBreakdown`` note records the
+    same divergence), and it is not fixed here because the repair is a
+    belief-semantics decision — publish the mirror when it leads ``ep_state``, or
+    report ``current: null`` with ``NO_EP_POSTERIOR`` — spanning ``_read_node``,
+    ``ep_state``, ``ranking.py`` and ``why.py``. Tracked as #14633; until it lands,
+    treat ``current`` as an α/β posterior and read ``ep_state`` as the word that
+    says whether it is a measurement.
 
     ⛔ **``ep_state`` IS PUBLISHED BESIDE ``current``, and the two KINDS of
     belief are never merged into one.** ``search_engine.ep_state`` (#11702) is

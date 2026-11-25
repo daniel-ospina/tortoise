@@ -275,6 +275,18 @@ def list_layer(
     # free of `GRAPH.QUERY`, so a reader must not take the seven resolutions above
     # as the whole story: "the new GETs cannot mint a graph" is true of the Cypher
     # in THIS MODULE and of those resolutions only.
+    #
+    # ⛔ AND THE HANDLE OPEN IS NOT FREE EITHER, measured rather than assumed
+    # (review at 6c6b0f88): an instrumented census of `_GuardedGraph.query` shows
+    # FOUR statements issued by the projection open on EVERY one of the eight
+    # routes, before the route's own read — `FalkorProjection._probe_ok` (×2),
+    # `_schema_is_current` and `_array_valued_fts_prop_exists` — all through
+    # `query`, the minting verb. So this paragraph's "seven resolutions" is a
+    # census of ROUTE-LEVEL reads, NOT of every GRAPH.QUERY a request can emit:
+    # the open is shared, pre-existing machinery (`_data_sdk_offloaded(
+    # attach_projection=True)`), it fires whether or not the schema is current,
+    # and fixing the seven does not make these GETs non-minting. Anyone auditing
+    # write-verb exposure must count the open too.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set

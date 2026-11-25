@@ -759,6 +759,50 @@ def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
         assert secret not in repr(body), body
 
 
+def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
+    """#14593 review P1 (the fix's OWN hole): the filter keyed on ONE spelling.
+
+    ``_provenance`` fills ``node_type`` with ``labels(n)[0]``, and FalkorDB returns
+    labels in ALLOCATION order — so a legacy ``(:Document:Source)`` (the shape an
+    interrupted ``migrate_kinds.relabel_legacy_documents`` leaves behind) answers
+    ``"Document"``, and an equality test against ``"Source"`` SKIPPED it. Measured
+    at ``6c6b0f88``: ``/belief`` still published the raw ``text`` for that shape
+    while the single-label fixture stayed green — the guard was only as strong as
+    the spelling it named.
+
+    ⛔ The unit under test is the DECISION, so this pins the decision in both
+    directions: every label outside the publishable set is filtered (including one
+    this file has never heard of), and a publishable label's map is returned
+    untouched — otherwise "deny by default" would quietly become "filter
+    everything" and strip a legitimate neighbour's properties.
+    """
+    from tortoise.hosted_api import _filter_delegation_payloads
+
+    secret = "RAW DOC BODY THAT MUST NOT RIDE THIS ROUTE"
+    url = "https://example.test/legacy-document-14593"
+    provenance = {"delegation": [
+        # the legacy multi-label shape: `labels(n)[0]` is `Document`, not `Source`
+        {"via": "references", "node_type": "Document",
+         "props": {"url": url, "id": url, "text": secret}},
+        # a label the route has never heard of: deny-by-default must cover it
+        {"via": "references", "node_type": "Gadget", "props": {"text": secret}},
+        # a publishable neighbour is returned AS STORED
+        {"via": "dependsOn", "node_type": "Object",
+         "props": {"name": "BETA", "objectKind": "goal"}},
+    ]}
+    out = _filter_delegation_payloads(provenance)
+    assert [d["node_type"] for d in out["delegation"]] == [
+        "Document", "Gadget", "Object"], out
+    assert out["delegation"][0]["props"] == {"url": url, "id": url}, out
+    assert "text" not in out["delegation"][1]["props"], out
+    assert out["delegation"][2]["props"] == {
+        "name": "BETA", "objectKind": "goal"}, out
+    assert secret not in repr(out), out
+    # …and the input is not mutated in place: the route publishes what this
+    # returns, so a caller holding the callee's dict must not lose the payload.
+    assert provenance["delegation"][0]["props"]["text"] == secret
+
+
 # ── GET /v1/entities/{id}/relations ────────────────────────────────────────
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
