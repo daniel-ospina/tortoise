@@ -1161,28 +1161,50 @@ def test_an_unclosed_fence_is_REFUSED_not_read_as_fenced_to_eof():
     # it is pinned here rather than dropped.
     assert "half-written example" not in harness_onboard._strip_block(text), (
         "`_strip_block` is destructive on this shape — that is WHY the caller must "
-        "refuse first; if this ever starts passing, the refusal stopped being the "
-        "only guard and something else is protecting the user's text")
+        "refuse first. If this ever starts FAILING, something else began protecting "
+        "the user's text, so re-derive whether the refusal is still the only guard "
+        "rather than deleting the assertion.")
 
 
-def test_a_marker_line_preceded_by_a_BOM_is_still_the_marker():
+def test_a_marker_line_preceded_by_a_BOM_is_still_the_marker(tmp_path):
     """⛔ A BYTE-ORDER MARK IS NOT PART OF THE MARKER — and dropping that strip is
     silent and destructive.
 
     `_is_marker_line` strips `\ufeff` before the anchored compare, matching the
-    sibling installer. Without that strip a BOM-prefixed BEGIN is not a marker, so
-    `_marker_pair` reads (0, 0) on a file that already carries the block and
-    `write_instructions` APPENDS a second copy instead of replacing the first — the
-    same "one more copy per run" failure the unclosed-fence refusal exists to stop.
-    The arm was unpinned (measured: the strip could be deleted with the suite green).
+    sibling installer. Without that strip a BOM-prefixed marker is not a marker, and
+    WHICH counterexample you get depends on how many lines carry the BOM (measured
+    with the strip removed):
+
+    * BOM on the BEGIN line only → `_marker_pair` reads `(0, 1)` and the installer
+      REFUSES ("start markers: 0 / end markers: 1 — the marked block is malformed");
+    * BOM on BOTH marker lines → `(0, 0)`, so `write_instructions` APPENDS a second
+      copy of the block instead of replacing the first — the "one more copy per run"
+      failure the unclosed-fence refusal exists to stop.
+
+    Both are pinned below; the second is the one that silently corrupts a file.
+    The arm was unpinned (the strip could be deleted with the suite green).
     """
-    text = ("# House\n\n\ufeff" + harness_onboard.BEGIN_MARK + "\nbody\n" +
-            harness_onboard.END_MARK + "\n\nkeep.\n")
-    assert harness_onboard._marker_pair(text) == (1, 1), (
+    beg = "\ufeff" + harness_onboard.BEGIN_MARK
+    end = "\ufeff" + harness_onboard.END_MARK
+
+    # BOM on the BEGIN line only — still the marker, and the pair is FOUND.
+    one = "# House\n\n" + beg + "\nbody\n" + harness_onboard.END_MARK + "\n\nkeep.\n"
+    assert harness_onboard._marker_pair(one) == (1, 1), (
         "a marker line carrying a byte-order mark is still the marker — the "
         "compare anchors the whole line after the BOM strip")
-    # ...and the consequence that makes it matter: ONE block, not two.
-    assert text.count(harness_onboard.BEGIN_MARK) == 1
+
+    # BOM on BOTH lines — the shape that duplicates the block when the strip is gone.
+    both = "# House\n\n" + beg + "\nbody\n" + end + "\n\nkeep.\n"
+    assert harness_onboard._marker_pair(both) == (1, 1), (
+        "a fully BOM-prefixed block must still read as the block; read as (0, 0) "
+        "the installer APPENDS a second copy on every run")
+    path = tmp_path / "AGENTS.md"
+    path.write_text(both, encoding="utf-8")
+    harness_onboard.write_instructions("pi", tmp_path, dry_run=False)
+    written = path.read_text(encoding="utf-8")
+    assert written.count(harness_onboard.BEGIN_MARK) == 1, (
+        "install over a BOM-prefixed block duplicated it: " +
+        repr(written.count(harness_onboard.BEGIN_MARK)))
 
 
 def test_a_closer_carrying_an_INFO_STRING_does_not_close_the_fence(tmp_path):
