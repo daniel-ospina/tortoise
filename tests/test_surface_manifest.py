@@ -2643,7 +2643,11 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
         # popping alone is what left the tool unserved.
         for k in [k for k in components if k.startswith(prefix)]:
             components.pop(k)
-        components.update(original)
+        # A plain loop, not `components.update(...)`: the privatisation ratchet
+        # (`tools/sdk_privatise.py --check`) counts untyped `.update(` receivers and
+        # reds when that count RISES, so this restore must not add one.
+        for k, v in original.items():
+            components[k] = v
 
     restored = [v for k, v in components.items() if k.startswith(prefix)]
     assert restored and all(v.fn is not tortoise_search_shadow for v in restored), (
