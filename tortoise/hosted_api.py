@@ -16299,10 +16299,28 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                                "`dream`/`compute_confidence` on a calibrated "
                                "graph"),
                 }) from e
-    proj = sdk._get_proj()
+    # ⛔ `sdk._get_proj()` IS A GRAPH SEAM and must be evaluated INSIDE the
+    # offloaded callable, never on the loop (#10602/#3718). It is the COLD
+    # projection open — connect + version probe (`hosted_api.py`'s
+    # `_GRAPH_SEAM_CALLEES` names it) — so calling it before the `await` put
+    # synchronous FalkorDB I/O back on the single event loop this route family
+    # exists to keep free. Measured: it reds the REQUIRED
+    # `tests/test_read_routes_loop_responsiveness.py::test_graph_io_is_offloaded`
+    # (`async body/bodies [('get_entity_belief', [n])] run synchronous
+    # FalkorDB I/O … on the event loop`).
+    #
+    # The seam sits in a NESTED function handed to the boundary as a callable
+    # REFERENCE, which is the shape that pin recognises: a name bound from an
+    # expression that CONTAINS `_get_proj` is treated as a graph handle
+    # (`_graph_bound_names`), so the inline-lambda spelling makes every later
+    # `last.get(...)` read as an inline graph call. Both spellings run the open
+    # in the worker; this one also states which statement does the graph work.
+    def _latest_belief_write():
+        return event_store.latest_for_node(
+            sdk._get_proj(), "ConfidenceChanged", entity_id)
+
     last = await _read_offload(
-        lambda: event_store.latest_for_node(proj, "ConfidenceChanged", entity_id),
-        op="get_entity_belief.last")
+        _latest_belief_write, op="get_entity_belief.last")
     # Provenance is a :Point read (`TortoiseSDK._provenance` calls `_get_point`),
     # so it is asked only for a Point — asking it of an Object would return the
     # callee's own "Point … not found" error INSIDE a successful response, which
