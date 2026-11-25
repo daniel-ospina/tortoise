@@ -16001,14 +16001,20 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     THIS node (so *when* it last moved is answered from the store's own record
     rather than inferred), and the evidence chain behind the claim.
 
-    ⚠️ **THIS GET CAN WRITE, exactly as the MCP door it delegates to does.**
+    ⚠️ **THIS GET CAN WRITE — but only for a node that HAS a persisted belief.**
     ``TortoiseSDK.check_confidence(claim_id=…)`` reaches ``get_confidence``,
     whose lazy-consistency pass dreams a DIRTY root; that is why the
     ``tortoise_check_confidence`` MCP tool is tiered ``maintenance`` and not
     ``read``. A ``graphs:read`` scope is deliberately sufficient (the same
     posture that door states), and ``GET /v1/packs`` (#9583) is the existing
-    precedent for a REST GET that can write. Stated and not hidden: a client
-    must not treat this route as one that cannot.
+    precedent for a REST GET that can write.
+
+    ⛔ The qualification is not a hedge — it is the behaviour. The gate below
+    asks the NODE first and returns ``current: null`` without calling EP at all
+    when there is no belief to report, so the write arm is reachable only for a
+    node carrying a stored posterior/prior/baseline. An earlier revision stated
+    the capability unconditionally, which over-claimed a write on the request
+    shape this route most commonly serves.
 
     ⛔ **A NODE WITH NO PERSISTED BELIEF ANSWERS ``current: null``, not a
     Beta(1,1).** EP's ``_read_node`` coalesces absent params to ``(1.0, 1.0)``,
@@ -16017,10 +16023,22 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     2.0}`` — a plausible-looking posterior for a node that carries no evidence,
     which is precisely the substituted-number class this route's neighbour
     paragraph forbids. An earlier revision of this handler DID return that value
-    (measured: an Object and a Subject both answered 200 with Beta(1,1)). The
-    gate is the node's own persisted belief state — ``posterior_alpha`` /
-    ``ep_alpha`` / ``confidence`` / ``baseline_set`` present — read off the node
-    the handler already resolved, so no second query and no second predicate.
+    (measured: an Object and a Subject both answered 200 with Beta(1,1)).
+
+    ⛔ **``ep_state`` IS PUBLISHED BESIDE ``current``, and the two KINDS of
+    belief are never merged into one.** ``search_engine.ep_state`` (#11702) is
+    the repo's ONE three-valued answer — ``measured`` | ``baseline`` |
+    ``absent`` — and it is called here rather than re-deciding presence from a
+    key tuple: a node a write merely STAMPED with a declared prior
+    (``set_point_baseline``) would otherwise answer ``current`` with
+    ``{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n: 2.0}``, byte-identical to
+    the fabricated payload the paragraph above removes, with nothing to tell a
+    reader that no evidence was consumed. #11702's rule is that a measured 0.5
+    and an absent-or-declared 0.5 must never be the same answer again, and
+    #3415's rule is that a prior-only baseline's variance is the WIDTH OF THE
+    DECLARED PRIOR, not a measured contention — so ``ep_state: "baseline"``
+    says which reading ``current`` carries. ``/v1/search`` publishes the same
+    word for the same reason (``ranking.py``).
 
     ⛔ An UNCALIBRATED graph REFUSES the confidence read (``CalibrationError``,
     fail-closed since #344) — answered here as **409** with the SDK's own
@@ -16065,21 +16083,28 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     # out of that call would win over the honest `current: null`. Asking the node
     # first means a no-belief request performs no EP work at all.
     #
-    # The keys are exactly the ones a belief write stamps: EP's `_flush_cache`
-    # SET (`confidence`, `posterior_alpha`, `posterior_beta`, `ep_alpha`,
-    # `ep_beta` — `tortoise/ep.py`) and `set_point_baseline` (`ep_alpha`,
-    # `ep_beta`, `baseline_set` — `sdk._set_point_baseline`). ⛔ `baseline_alpha`/
-    # `baseline_beta` were listed here and are NOT graph properties (they are
-    # record COLUMN names in `cache_projection`), so they are gone: a key no
-    # writer stamps can only ever fail to broaden the gate while its presence in
-    # this tuple claims it is a stamp.
-    measured = any(
-        entity.get(k) is not None
-        for k in ("posterior_alpha", "posterior_beta", "ep_alpha", "ep_beta",
-                  "confidence")) \
-        or entity.get("baseline_set") is True
+    # ⛔ WHICH STATE, asked of the ONE home that decides it (#11702). A
+    # hand-rolled key tuple used to answer this, and it was wrong in the way
+    # that matters: `ep_alpha`/`ep_beta`/`baseline_set` are exactly what a
+    # DECLARED PRIOR stamps, so a prior with no evidence consumed passed the
+    # gate and published as a measurement. `ep_state` answers the same question
+    # with the three names every other belief surface uses, and with #11702's
+    # totality rules (a non-numeric operand is `absent`, a half pair is
+    # `absent`, the `confidence` mirror leads) rather than a second vocabulary
+    # that could drift from `ranking.py`/`why.py`.
+    from .search_engine import EP_STATE_ABSENT, ep_state
+
+    belief_state = ep_state(
+        confidence=entity.get("confidence"),
+        posterior_alpha=entity.get("posterior_alpha"),
+        ep_alpha=entity.get("ep_alpha"),
+        posterior_beta=entity.get("posterior_beta"),
+        ep_beta=entity.get("ep_beta"),
+        baseline_set=entity.get("baseline_set") is True,
+    )
+    has_belief = belief_state != EP_STATE_ABSENT
     view = None
-    if measured:
+    if has_belief:
         try:
             view = await _read_offload(
                 lambda: sdk.check_confidence(claim_id=entity_id),
@@ -16113,10 +16138,15 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             "name": (entity.get("name") or entity.get("content")
                      or entity.get("url") or entity.get("eventId")),
         },
+        # ⛔ `measured` | `baseline` | `absent` (#11702) — the word that makes
+        # `current` readable: `measured` is evidence-derived, `baseline` is a
+        # DECLARED PRIOR (a `set_point_baseline` stamp whose variance is the
+        # prior's own width, #3415), and `absent` comes with `current: null`.
+        "ep_state": belief_state,
         # `null` + a named reason, never a fabricated Beta(1,1): a node with no
         # persisted belief has no posterior, and the neutral mean is not one.
-        "current": view if measured else None,
-        "currentUnavailable": (None if measured else {
+        "current": view if has_belief else None,
+        "currentUnavailable": (None if has_belief else {
             "error_code": "NO_PERSISTED_BELIEF",
             "message": (
                 "this entity carries no persisted EP belief — no posterior, "

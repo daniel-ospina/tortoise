@@ -178,6 +178,16 @@ def list_layer(
     # repo's privatisation ratchet counts as residue on an untyped receiver. A
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
+    #
+    # ⚠️ INHERITED RESIDUE, stated rather than implied: this module's OWN calls
+    # hold the rule, but two helpers it DELEGATES to still resolve through
+    # GRAPH.QUERY — `projection._resolve_entity` (behind every by-id route and
+    # `/belief`) and `navigation._resolve_root` (behind `entity_relations`). So
+    # "the new GETs cannot mint a graph" is true of the Cypher below and NOT yet
+    # of the two identity resolutions; fixing those is pre-existing debt in
+    # their own homes, not a guarantee this module's comment can confer. A
+    # reviewer read the sentence above as covering them, which is why the
+    # residue is named here.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
@@ -307,8 +317,16 @@ def entity_relations(
         # returned TWICE — two rows, one edge, and `count` double-counts it.
         # Excluded on the reverse branch only, so a self-edge is reported once,
         # as outgoing (it is both; there is no third value that would be true).
-        "WHERE coalesce(m.id, m.eventId, m.url) "
-        "      <> coalesce(n.id, n.eventId, n.url) "
+        #
+        # ⛔ THE GUARD IS `id(m) <> id(n)`, NOT the coalesced identity. The
+        # coalesce form (`coalesce(m.id, m.eventId, m.url) <> coalesce(n.id,
+        # n.eventId, n.url)`) answers NULL for a neighbour that carries NO
+        # identity property, and a NULL WHERE drops the row — so every INBOUND
+        # edge from an identity-less node silently vanished from the answer,
+        # which is the "read as isolated" defect this read exists to avoid.
+        # `id()` is total (every node has one), so the self-loop test is exact
+        # and no neighbour is filtered out for lacking a name.
+        "WHERE id(m) <> id(n) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
         "       coalesce(m.name, m.content, m.url) AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "

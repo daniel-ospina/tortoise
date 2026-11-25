@@ -591,6 +591,9 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         assert body["current"]["alpha"] == 8.0, body
         assert body["current"]["beta"] == 2.0, body
         assert body["current"]["mean"] == pytest.approx(0.8), body
+        # ⛔ `ep_state` rides every belief answer (#11702): a baseline-stamped
+        # prior is `baseline`, never silently reported as a measurement.
+        assert body["ep_state"] == "baseline", body
         assert body["lastBeliefWrite"]["seq"] == seq, body
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
@@ -697,6 +700,102 @@ def test_belief_reports_a_node_with_no_persisted_belief_as_null(tmp_path):
         assert body["currentUnavailable"]["error_code"] == "NO_PERSISTED_BELIEF", body
         # It NAMES the labels that can carry one, so the answer is diagnosable.
         assert "Object" in body["currentUnavailable"]["beliefCarriedBy"], body
+        # …and the state vocabulary says the same thing in #11702's own word.
+        assert body["ep_state"] == "absent", body
+
+
+def test_belief_distinguishes_a_declared_prior_from_a_measurement(tmp_path):
+    """⛔ P2 (review cycle 4): a DECLARED PRIOR must not answer as a measurement.
+
+    The handler used to decide "is there a belief?" from its own key tuple, and
+    `ep_alpha`/`ep_beta`/`baseline_set` are exactly what `set_point_baseline`
+    stamps — so a prior with no evidence consumed published as `current` with
+    `currentUnavailable: null`, and a declared **Beta(1,1)** reproduced
+    byte-for-byte the `{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n: 2.0}`
+    payload the absent arm above removes as fabricated. Nothing in the response
+    told the two apart.
+
+    #11702 is the recorded rule — a *measured* 0.5 and an *absent/declared* 0.5
+    "must never be" the same answer — and #3415 is the second: a prior-only
+    baseline's variance is the WIDTH OF THE DECLARED PRIOR, not a measured
+    contention. So the route publishes `ep_state` beside `current`, and this
+    test pins BOTH arms against each other on the same graph.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        declared = client.post("/v1/points", json={
+            "content": "a prior with no evidence",
+            "kind": "statement"}).json()
+        measured = client.post("/v1/points", json={
+            "content": "a claim EP actually measured",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            # Declared Beta(1,1) — the shape whose payload is indistinguishable
+            # from the fabricated one if the state is not published.
+            sdk._set_point_baseline(declared["id"], 1.0, 1.0)
+            sdk._set_point_baseline(measured["id"], 8.0, 2.0)
+            # A posterior written beside the prior is what EP's own
+            # `_flush_cache` commits, so `posterior_alpha` present is the
+            # measured arm (#3276's predicate) — no EP pass needed to pin it.
+            sdk._get_proj().g._query(
+                "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+                "n.posterior_beta = 1.0, n.confidence = 0.9",
+                params={"id": measured["id"]}, read_only=False)
+        finally:
+            sdk.close()
+
+        d = client.get(f"/v1/entities/{declared['id']}/belief").json()
+        m = client.get(f"/v1/entities/{measured['id']}/belief").json()
+
+        # ⛔ The declared prior is REPORTED (it is a real stored belief) …
+        assert d["ep_state"] == "baseline", d
+        assert d["current"]["alpha"] == 1.0 and d["current"]["beta"] == 1.0, d
+        # …and the measured claim is distinguishable from it by the same word.
+        assert m["ep_state"] == "measured", m
+        assert m["current"]["mean"] == pytest.approx(0.9), m
+        # The two facts a client needs are in the payload, not implied:
+        assert d["ep_state"] != m["ep_state"], (d, m)
+
+
+def test_relations_keeps_an_inbound_neighbour_that_carries_no_identity(tmp_path):
+    """⛔ P3 (review cycle 4): the self-loop guard must not drop identity-less
+    neighbours.
+
+    The reverse branch excluded the self-loop with a COALESCED comparison
+    (`coalesce(m.id, m.eventId, m.url) <> coalesce(n.id, n.eventId, n.url)`).
+    For a neighbour carrying none of those properties both sides are NULL and
+    `NULL <> NULL` is NULL, so the WHERE dropped the row — every INBOUND edge
+    from an identity-less node silently vanished, which is the “read as
+    isolated” defect this read exists to avoid (`#6976`). `id(m) <> id(n)` is
+    total, so the self-loop is still excluded exactly once and no neighbour is
+    lost for lacking a name.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        a = client.post("/v1/objects", json={
+            "name": "GAMMA", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            # No public door mints a node without an identity property, which is
+            # why the shape is written directly (and stated, not hidden).
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) "
+                "CREATE (anon:Object {name:'NO-IDENTITY'})-[:addresses]->(n)",
+                params={"id": a["id"]}, read_only=False)
+            # A self-loop in the SAME graph proves the guard still fires once.
+            assert sdk._create_edge("related", a["id"], a["id"])
+        finally:
+            sdk.close()
+        body = client.get(f"/v1/entities/{a['id']}/relations").json()
+        inbound = [r for r in body["relations"] if r["direction"] == "in"]
+        assert len(inbound) == 1, body
+        assert inbound[0]["predicate"] == "addresses", inbound
+        # Honest about what it could not name: the id is null, not invented.
+        assert inbound[0]["other"]["id"] is None, inbound
+        assert inbound[0]["other"]["name"] == "NO-IDENTITY", inbound
+        # The self-loop is still reported exactly once, as outgoing.
+        loops = [r for r in body["relations"]
+                 if r["predicate"] == "related"]
+        assert [r["direction"] for r in loops] == ["out"], loops
 
 
 # ── the two readers that carry a three-valued / family-specific answer ──────
@@ -750,16 +849,20 @@ def test_declared_relation_packs_reports_an_unreadable_row_set_as_none(monkeypat
     assert pack_registry.declared_relation_packs() is None
 
 
-def test_layer_lists_use_the_layers_own_terminal_vocabulary():
-    """The Object/Subject lists must not be handed the POINT status family.
+def test_layer_lists_call_the_layers_own_terminal_vocabulary(monkeypatch):
+    """`list_layer` must ASK for the layer's own terminal family, per layer.
 
     `live._terminal_excluded`'s default is the Point family ANDed with the legacy
     `outdated` flag, and its docstring says the entity read surfaces "must pass
     `commit_ops.OBJECT_TERMINAL_STATUSES` … and `include_outdated_flag=False`".
-    The two families are identical SETS today (which is why a revert would be
-    invisible in behaviour), so the discrimination is made on the PREDICATE, not
-    on a row: this is drift protection, and it fails if the family seam is
-    dropped.
+    The two families are identical SETS today — which is exactly why a revert is
+    invisible in behaviour, and why the seam has to be graded where it is USED.
+
+    ⛔ This test grades the CALL SITE, not the helper. The first version of it
+    called `_layer_terminal_predicate` directly, so replacing `list_layer`'s
+    `conditions = [_layer_terminal_predicate(label)]` with the pre-fix
+    `conditions = [_terminal_excluded("n.status")]` left the whole suite green
+    (measured). The spy below reds on exactly that mutant.
     """
     from tortoise import entity_reads
     from tortoise.commit_ops import (
@@ -768,20 +871,53 @@ def test_layer_lists_use_the_layers_own_terminal_vocabulary():
     )
     from tortoise.live import _terminal_excluded
 
-    point_default = _terminal_excluded("n.status")
+    # Shape first: the helper answers each layer's own family, without the
+    # Point-only `outdated` conjunct.
     obj = entity_reads._layer_terminal_predicate("Object")
     subj = entity_reads._layer_terminal_predicate("Subject")
-    # The predicate must DIFFER from the Point default (the `outdated` conjunct
-    # and/or the vocabulary), and the two layers must be told apart.
-    assert obj != point_default, obj
-    assert "n.outdated" not in obj, obj
-    assert "n.outdated" not in subj, subj
-    # …and each layer's own family is the one that reached the predicate.
-    for word in OBJECT_TERMINAL_STATUSES:
-        assert f"'{word}'" in obj, (word, obj)
-    for word in SUBJECT_TERMINAL_STATUSES:
-        assert f"'{word}'" in subj, (word, subj)
+    assert obj != _terminal_excluded("n.status"), obj
+    assert "n.outdated" not in obj and "n.outdated" not in subj
     assert obj == _terminal_excluded(
         "n.status", OBJECT_TERMINAL_STATUSES, include_outdated_flag=False)
     assert subj == _terminal_excluded(
         "n.status", SUBJECT_TERMINAL_STATUSES, include_outdated_flag=False)
+
+    # …and the CALL SITE goes through it, for the label it was handed.
+    calls: list[str] = []
+    real = entity_reads._layer_terminal_predicate
+
+    def _spy(label):
+        calls.append(label)
+        return real(label)
+
+    monkeypatch.setattr(entity_reads, "_layer_terminal_predicate", _spy)
+
+    class _Graph:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def ro_query(self, cypher, params=None):
+            self.queries.append(cypher)
+            # The COUNT answers one row; the page answers none (the assertions are
+            # about the WHERE, so the rows are irrelevant and must be dict-shaped
+            # or the `dict(r[0])` projection would be what fails).
+            result = [[0]] if "count(n)" in cypher else []
+
+            class _R:
+                def __init__(self):
+                    self.result_set = result
+
+            return _R()
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    proj = _Proj()
+    for label in ("Object", "Subject"):
+        entity_reads.list_layer(proj, label, limit=5)
+    assert calls == ["Object", "Subject"], calls
+    # The predicate it produced is the one that reached the WHERE — not the
+    # Point default.
+    for query in proj.g.queries:
+        assert "n.outdated" not in query, query
