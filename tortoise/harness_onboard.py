@@ -660,20 +660,34 @@ def _strip_block(text: str) -> str:
     dangling BEGIN and some later END. A fenced EXAMPLE of the block is left alone
     — it is documentation, not ours to remove — and a marker must be ALONE on its
     line (`_is_marker_line`) rather than mentioned in prose.
+
+    ⛔ DECIDED BY OFFSET, NOT BY A PARALLEL LINE LIST. This used to walk `text`'s
+    lines and compare each against the SAME INDEX of
+    `_outside_fences(text).splitlines()` — two decompositions assumed to be the same
+    length. `_outside_fences` blanks a fenced span character by character, keeping
+    only `\n`, but `str.splitlines()` also breaks on `\v`, `\f`, `\x1c`-`\x1e`,
+    `\x85`, `\u2028` and `\u2029`. So ONE such character INSIDE a fence removes a
+    line from the blanked view, every index after it shifts by one, and the marker
+    test then fires on the WRONG line: measured on the pre-fix code, `--uninstall`
+    over a file whose fenced example carried a `\u2028` DELETED the user's own
+    "never delete this" line, kept the block's body, and left the block's END
+    behind — user text destroyed outside the block, and the residue makes every
+    later run REFUSE. A fenced span is a character range, so the fence question is
+    asked about the line's OFFSET and the two decompositions can never disagree.
     """
-    scan_lines = _outside_fences(text).splitlines(keepends=True)
+    spans = _fence_spans(text)
     out: list[str] = []
     inside = False
-    for index, line in enumerate(text.splitlines(keepends=True)):
-        outside = scan_lines[index] if index < len(scan_lines) else line
-        if _is_marker_line(outside, BEGIN_MARK):
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        fenced = any(start <= offset < end for start, end in spans)
+        if not fenced and _is_marker_line(line, BEGIN_MARK):
             inside = True
-            continue
-        if _is_marker_line(outside, END_MARK):
+        elif not fenced and _is_marker_line(line, END_MARK):
             inside = False
-            continue
-        if not inside:
+        elif not inside:
             out.append(line)
+        offset += len(line)
     # Collapse the blank run the removal may leave at the tail.
     return "".join(out).rstrip("\n") + "\n" if out else ""
 

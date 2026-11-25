@@ -1091,6 +1091,43 @@ def test_a_four_space_indented_example_is_not_ours_either():
         "a 4-space-indented example was deleted")
 
 
+def test_a_fenced_example_carrying_a_line_separator_cannot_shift_the_removal():
+    """⛔ TWO LINE DECOMPOSITIONS, ONE INDEX — the user's own text paid for it.
+
+    `_strip_block` walked `text`'s lines and compared each against the SAME INDEX
+    of `_outside_fences(text).splitlines()`. Blanking keeps only `\n`, but
+    `str.splitlines()` ALSO breaks on `\u2028` (and `\v`, `\f`, `\x85`, …), so one
+    such character INSIDE the fenced example drops a line from the blanked view and
+    shifts every later index by one — the marker test then fires on the WRONG line.
+
+    Measured on the pre-fix code, this exact shape (docs fence on top, the
+    installer-appended block at the bottom) lost `My own notes: never delete this.`,
+    KEPT the block's body, and left the block's END behind — the file's contract is
+    "removes exactly the marked block (never a user's own text)", and the leftover
+    END makes every later run REFUSE. The character is invisible in most editors,
+    so nothing warns the user.
+    """
+    text = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
+            "\nexample\u2028body\n" + harness_onboard.END_MARK + "\n```\n\n"
+            "My own notes: never delete this.\n"
+            + harness_onboard.INSTRUCTIONS)
+    assert harness_onboard._markers_well_formed(text) == (True, ""), (
+        "the fixture must be a WELL-FORMED file — that is the state `--uninstall` "
+        "is reached in")
+    assert harness_onboard._marker_pair(text) == (1, 1), (
+        "one real block; the fenced copy is documentation")
+    stripped = harness_onboard._strip_block(text)
+    assert "My own notes: never delete this." in stripped, (
+        "the user's own line was destroyed by an index shift: " + repr(stripped))
+    assert "Reads go through the Tortoise MCP" not in stripped, (
+        "the real block's body must still be removed")
+    assert stripped.count(harness_onboard.END_MARK) == 1, (
+        "the block's END must go with it — a leftover one makes every later run "
+        "REFUSE: " + repr(stripped))
+    assert stripped.count(harness_onboard.BEGIN_MARK) == 1, (
+        "only the fenced example's BEGIN may remain: " + repr(stripped))
+
+
 def test_a_prose_mention_of_a_marker_is_not_the_block():
     """The marker must be ALONE on its line — a substring match ate the prose.
 
