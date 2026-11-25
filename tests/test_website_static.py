@@ -5752,6 +5752,22 @@ def _base_beat_justify_values(html: str) -> list[str] | None:
     return [value] if value is not None else []
 
 
+def _beats_addressed(selector: str, beat_ids: list[str]) -> list[str]:
+    """The beats a rule ADDRESSES: by id, or all of them through `.beat`.
+
+    ⛔ The class spelling is not a different rule (#14683 review cycle 2, P3):
+    `.beat { justify-content: flex-start }` inside the hatch aligns every beat
+    exactly as the seven-id list does — the base rule it overrides is
+    `.beat`-scoped — and a reader that only collected ids reported "no
+    `max-height` rule sets its `justify-content`, so the hatch never reaches
+    it" over a rule that was right there.
+    """
+    named = set(re.findall(r"#(beat-[a-z-]+)", selector))
+    if re.search(r"(?<![\w-])\.beat(?![\w-])", selector):
+        named |= set(beat_ids)
+    return [beat for beat in beat_ids if beat in named]
+
+
 def _short_viewport_centring_problems(html: str) -> list[str]:
     """Beats whose auto-margin centring does not fire where the hatch top-aligns.
 
@@ -5770,10 +5786,12 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
     against the one committed page.
     """
     arms: dict[str, set[int]] = {}
+    beat_ids = _beat_section_ids(html)
     for height, body in _max_height_media_blocks(html):
         for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body):
             prelude = " ".join(rule.group(1).split())
-            if "#beat-" not in prelude:
+            if "#beat-" not in prelude and not re.search(
+                    r"(?<![\w-])\.beat(?![\w-])", prelude):
                 continue
             values = [" ".join(v.split()) for v in re.findall(
                 r"justify-content\s*:\s*([^;}]+)", rule.group(2))]
@@ -5782,12 +5800,12 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             # one's.
             if not values or values[-1] != "flex-start":
                 continue
-            for beat in re.findall(r"#(beat-[a-z-]+)", prelude):
+            for beat in _beats_addressed(prelude, beat_ids):
                 arms.setdefault(beat, set()).add(height)
 
     homes = _beat_auto_margin_homes(html)
     problems: list[str] = []
-    for beat in _beat_section_ids(html):
+    for beat in beat_ids:
         if beat not in arms:
             problems.append(
                 f"{beat}: no `@media (max-height: …)` rule sets its "
@@ -6104,10 +6122,10 @@ class TestShortViewportCentringIsGradedPerBlock:
 
     ALIGNED_HATCH = (
         "      #beat-hero { justify-content: flex-start; overflow-y: auto; }")
-    CENTRED_HATCH = (
-        ALIGNED_HATCH
-        + "\n      #beat-hero > :first-child { margin-top: auto; }"
-        + "\n      #beat-hero > :last-child { margin-bottom: auto; }")
+    AUTO_MARGINS_HATCH = (
+        "      #beat-hero > :first-child { margin-top: auto; }\n"
+        "      #beat-hero > :last-child { margin-bottom: auto; }")
+    CENTRED_HATCH = ALIGNED_HATCH + "\n" + AUTO_MARGINS_HATCH
 
     @staticmethod
     def _page(*, hatch: str, base: str = "", extra: str = "") -> str:
@@ -6200,6 +6218,21 @@ class TestShortViewportCentringIsGradedPerBlock:
             "#beat-hero-copy > :first-child", "first-child",
             ["beat-hero"]) == []
 
+    def test_a_class_scoped_alignment_arm_reaches_every_beat(self):
+        """`.beat { justify-content: flex-start }` IS a hatch arm for every beat.
+
+        The base rule it overrides is `.beat`-scoped, so the class spelling is
+        behaviourally identical to the seven-id list. The pre-fix reader only
+        collected ids and reported "no `max-height` rule sets its
+        `justify-content`, so the hatch never reaches it" — asserting the
+        absence of a rule that is right there (#14683 review cycle 2, P3).
+        """
+        page = self._page(hatch=(
+            "      .beat { justify-content: flex-start; overflow-y: auto; }\n"
+            + self.AUTO_MARGINS_HATCH))
+        assert _short_viewport_centring_problems(page) == []
+
+    def test_a_wider_alignment_arm_needs_centring_too(self):
         """Centring at 820 does not cover a hatch arm that fires at 1200."""
         page = self._page(
             hatch=self.CENTRED_HATCH,
