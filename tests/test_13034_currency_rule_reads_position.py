@@ -771,9 +771,15 @@ class TestNoReaderRespellsThePredicate:
             "tortoise/topic_summarization.py": "_terminal_excluded",
             "tortoise/sdk.py": "_terminal_excluded",
             "tortoise/derived_invalidation.py": "is_position_ended",
-            # #13450: the participation test answers from the ONE declaration
-            # (both axes) and keeps its names for the diagnostic.
-            "tortoise/ep.py": "ending_axes",
+            # ⛔ `tortoise/ep.py` is deliberately NOT an entry here. The assertion below is a
+            # plain substring test, and `ep.py` names `ending_axes` in its IMPORT (:32), in
+            # `_input_status_label`'s DOCSTRING (:231/:235/:238) and in a COMMENT (:2295), so a
+            # row here stays green over a mutant that deletes the CALL and restores the
+            # two-column test — the #14600 P2 vacuity class, measured. Its real pin is the
+            # comment-immune AST arm `test_13450_ep_position_axis_participation.py::
+            # test_ep_imports_the_shared_answer_and_spells_no_filter`, which asserts an
+            # `ast.Call` to `ending_axes` and no terminal-word vocabulary reference at all; a
+            # substring row beside it would advertise coverage this test cannot give.
         }
         for module, symbol in expected.items():
             src = Path(module).read_text(encoding="utf-8")
