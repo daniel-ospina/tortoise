@@ -383,6 +383,109 @@ def test_the_renderer_refuses_to_write_over_a_tracked_path(monkeypatch):
         "path is the artifact this split exists to prevent")
 
 
+def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
+    """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
+
+    ⛔ `--render` HAS NO DRIFT VERDICT AT ALL, so ANY exit 1 from it is a
+    misclassification by construction: 1 is what `--check` reserves for "the pins
+    drifted". The write path this split adds was unwrapped, so an OSError
+    (`IsADirectoryError`, a read-only mount, ENOSPC) terminated the interpreter with
+    status 1 — and §7 tells every lane to run `--render`, so a lane that happened to
+    render into a path it cannot write read "the census drifted" and re-cut 25 pins
+    that were correct (#13098 review, P2).
+
+    The failure is reached without a tree walk: `census()` is replaced, because the
+    subject here is the WRITE's status, not the enumeration. The parent is a regular
+    FILE, so `mkdir(parents=True, exist_ok=True)` answers `NotADirectoryError`.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    out = blocker / "CYPHER-INVENTORY.md"
+    monkeypatch.setattr(census, "census", lambda *a, **k: {"sites": []})
+    rc = census.main(["--render", str(out)])
+    assert rc == 2, (
+        f"a write failure must exit 2 (could not run), got {rc} — 1 is the DRIFT "
+        "verdict this verb never reports")
+    err = capsys.readouterr().err
+    assert "could not write" in err, f"the refusal must say what failed; stderr:\n{err}"
+    assert str(out) in err, f"the refusal must name the path; stderr:\n{err}"
+
+
+def test_the_renderer_reports_a_probe_failure_as_could_not_run(monkeypatch, capsys):
+    """…and neither does the `git ls-files` probe that guards a tracked target.
+
+    An absent `git` binary raises `FileNotFoundError` out of `subprocess.run`; left
+    uncaught it exits 1, which is indistinguishable from "the census drifted" — the
+    same misclassification as the write path, one call over (#13098 review, P2).
+    Refused BEFORE the census runs, so this arm costs no tree walk.
+    """
+    target = ROOT / "docs" / "architecture" / "probe-failure-me.md"
+    assert not target.exists(), "a real file sits at the probe path — pick another"
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(ROOT).as_posix()])
+    assert rc == 2, (
+        f"a failed tracking probe must exit 2 (could not run), got {rc} — 1 is the "
+        "DRIFT verdict this verb never reports")
+    err = capsys.readouterr().err
+    assert "could not probe" in err, f"the refusal must say what failed; stderr:\n{err}"
+    assert not target.exists(), "the refusal must happen before anything is written"
+
+
+def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys):
+    r"""The guard matches the GENERATED row, not any table starting with `file:line`.
+
+    ⛔ THE BROAD PATTERN REFUSED CORRECT PROSE AND PRESCRIBED DELETING IT. A two-cell
+    prose row (`| `file:line` | what it is |`) matched `^\| `file:line` \|` exactly as
+    a six-cell generated row did, so a source that put a site address in a table's
+    first column was refused by `--render` (exit 2, "Delete the rows") and read by
+    `--check` as DRIFT (exit 1) — on a source whose 25 pins were all correct — and
+    `cypher-diff.yml` reads that 1 as "the doc's numbers are wrong" (#13098 review,
+    P2). Narrowing cannot blind the guard: the pattern still matches every row the
+    generator emits, graded here against `markdown_table`'s OWN output so a column
+    change reds instead of silently detaching the guard.
+    """
+    prose_row = "| `tortoise/sdk.py:1234` | the only place the ontology label is written |\n"
+    assert not census.CENSUS_ROW.search(prose_row), (
+        "a two-cell hand-authored row is not a census row — the appendix has SIX cells")
+    generated = census.markdown_table([
+        census.Site("tortoise/sdk.py", 1234, "f", "query", "plain", "read", "RETURN 1"),
+        # `unresolved` is the one row whose cells are not read/write — the shape and
+        # role of a statement the AST could not resolve. It must match too.
+        census.Site("tortoise/sdk.py", 1235, "g", "query", "unresolved", "unresolved",
+                    "<unresolved>"),
+    ])
+    assert census.CENSUS_ROW.search(generated), (
+        "the guard no longer matches the generator's own rows — a pasted appendix "
+        "would now pass; re-cut CENSUS_ROW with `markdown_table`")
+    assert len(census.CENSUS_ROW.findall(generated)) == 2, (
+        "every generated data row must match, not only the first")
+    # …and both consumers must now treat a prose-carrying source as CLEAN. The pins
+    # below are exactly what an empty census computes, so 0 means "no row refused and
+    # no pin drifted" — the pre-fix code answered 1 here, for the prose row.
+    src = tmp_path / "prose.src.md"
+    pins = "".join(
+        f"<!-- cypher-inventory:{key} = 0 -->\n"
+        for key in ("sites", "files", "files_scanned", "unresolved", "candidates",
+                    "non_cypher_door_calls", "ast_door_calls", "partial"))
+    src.write_text(pins + "\n" + prose_row, encoding="utf-8")
+    empty = {"sites": [], "files_with_sites": 0, "files_scanned": 0,
+             "non_cypher_door_calls": 0, "partial": 0}
+    assert census.check(src, empty) == 0, (
+        "`--check` refused a source whose only 'row' is hand-authored prose — the "
+        "guard must match the GENERATED shape")
+    assert "census row" not in capsys.readouterr().err
+    rendered = census.render(src, {"sites": []})
+    assert prose_row in rendered, (
+        "`--render` must append the appendix to a prose-carrying source unchanged")
+
+
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 
 # ⛔ EVERY `_exactly_one` ARM `_grade_doc_text` MAKES, one row each, as
@@ -2037,8 +2140,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # anywhere — the invisible-deletion class this pin exists for, one set over.
     # Pinned by NAME, because each name states the invariant it protects: the document
     # is untracked, the appendix cannot be pasted back into the source, the render
-    # target cannot be the source or any other tracked path, and a rendered document
-    # cannot contradict its own pins.
+    # target cannot be the source or any other tracked path, a rendered document
+    # cannot contradict its own pins, a run that cannot read/probe/write answers 2
+    # rather than the DRIFT code 1, and the row guard matches the GENERATOR's shape
+    # rather than any table whose first cell is a `file:line`.
     defined = {
         node.name
         for node in ast.walk(tree)
@@ -2050,6 +2155,9 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_refuses_to_write_over_the_source",
         "test_the_renderer_refuses_to_write_over_a_tracked_path",
         "test_the_renderer_refuses_the_all_surface_combination",
+        "test_the_renderer_reports_a_probe_failure_as_could_not_run",
+        "test_the_renderer_reports_a_write_failure_as_could_not_run",
+        "test_a_hand_authored_prose_row_is_not_read_as_a_census_row",
     }
     missing = sorted(split_arms - defined)
     assert not missing, (
