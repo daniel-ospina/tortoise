@@ -416,11 +416,13 @@ export function NotificationBell({
                   {alerts.length ? LEDGER_ALL_CLEAR : LEDGER_EMPTY}
                 </p>
               ) : null}
-              {saveFailed || !ledger.persisted ? (
-                <p className="dim small notif-note" role="status">{STORAGE_UNAVAILABLE}</p>
-              ) : null}
+              {/* Two different failures, two different sentences: the store is
+                  unavailable (nothing can ever be remembered here), or this one
+                  write failed. Saying both at once would be the same fact twice. */}
               {saveFailed ? (
                 <p className="error small notif-note" role="alert">{SAVE_FAILED}</p>
+              ) : !ledger.persisted ? (
+                <p className="dim small notif-note" role="status">{STORAGE_UNAVAILABLE}</p>
               ) : null}
 
               {entries.length ? (

@@ -40,6 +40,7 @@ import './index.css'
 import { NotificationBell } from './notificationPanel.jsx'
 import {
   DETAIL_NO_DETAIL,
+  SAVE_FAILED,
   SNOOZE_PERIODS,
   STORAGE_UNAVAILABLE,
   entryKeyOf,
@@ -83,7 +84,10 @@ function alert(over = {}) {
 }
 
 function renderBell(props = {}) {
-  const storage = props.storage || fakeStorage()
+  // `'storage' in props`: an explicit `null` means "this browser has no store",
+  // which is a case worth testing — `props.storage || fakeStorage()` would
+  // silently substitute a working one and the arm would prove nothing.
+  const storage = 'storage' in props ? props.storage : fakeStorage()
   return {
     storage,
     ...render(
@@ -306,7 +310,20 @@ test('#14686: a store that cannot be written says so instead of pretending', () 
   fireEvent.click(bell(container))
   fireEvent.click([...container.querySelectorAll('.notif-actions button')]
     .find((b) => /Dismiss/.test(b.textContent)))
-  assert.match(container.textContent, new RegExp(STORAGE_UNAVAILABLE.slice(0, 40)))
+  // A failed WRITE is its own fact, not the "this browser cannot store
+  // anything" sentence — and it says what the consequence is.
+  assert.ok(container.textContent.includes(SAVE_FAILED))
+  assert.ok(!container.textContent.includes(STORAGE_UNAVAILABLE))
+})
+
+test('#14686: no usable store at all is reported as its own fact, before any action', () => {
+  const { container } = renderBell({ alerts: [alert()], storage: null })
+  fireEvent.click(bell(container))
+  assert.ok(container.textContent.includes(STORAGE_UNAVAILABLE))
+  assert.ok(!container.textContent.includes(SAVE_FAILED), 'nothing was attempted yet')
+  // The ledger still WORKS for this session — it just cannot be remembered — so
+  // the control is not dead and the row is not pretending to be gone.
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
 // ── 5. The detail view ─────────────────────────────────────────────────────
