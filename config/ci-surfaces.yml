@@ -11528,13 +11528,8 @@ surfaces:
   # a `SOURCE_PATTERNS` entry — selects surfaces `['core']` and DOES collect this file, and
   # `core` is the only row that does that; a doors diff (`tortoise/sdk.py`) is a
   # `SHARED_MODULES` entry and answers `test_files: ALL` whatever rows sit on `sdk`. So this
-  # `sdk` row is insurance and the `core` row above is the load-bearing one — the first cut of
-  # this PR shipped the file in NO surface at all, which is the defect `core` closes.
-  # ⛔ The first cut of this PR shipped
-  # reads the SLICE rather than the whole `:Point` label. `core` because its subjects
-  # (`tortoise/record_vector.py`, `tortoise/projection/`) have no `SOURCE_PATTERNS`
-  # entry, so a diff to the seam collects nowhere else. ⛔ The first cut of this PR shipped
-  # the file in NO surface at all: `--integrity` redded the required
+  # `sdk` row is insurance and the `core` row above is the load-bearing one. ⛔ The first cut
+  # of this PR shipped the file in NO surface at all: `--integrity` redded the required
   # `manifest-integrity` leg with `['test_14560_operator_vectors.py']`, and — the
   # expensive half — `select()` computes `test_files` FROM the surfaces, so the whole
   # "measured on a real engine" evidence this change rests on ran in no CI leg

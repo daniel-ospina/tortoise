@@ -288,11 +288,15 @@ def graph_kind_filter(entity_type: str) -> str:
 
     ``""`` for the entity types that ARE their own label (`point`, `object`, `subject`,
     `event`) — a whole-label count is the right population there, so the caller splices
-    nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason:
-    :data:`tortoise.security.ENTITY_TYPE_LABELS` maps BOTH to the one `Source` label, so their
-    labels are one-sided and there is no declared graph discriminator to narrow them by yet —
-    a stated GAP, not a population claim. Reading ``""`` as "the whole label is this type's
-    population" is exactly the inversion this note exists to prevent (see :data:`Coverage`).
+    nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason: they
+    are not their own population, they are an UNDECLARED SLICE. :data:`tortoise.security.ENTITY_TYPE_LABELS`
+    maps BOTH to the one `Source` label, and the discriminator that WOULD narrow them —
+    `documentKind` — is deliberately absent from :data:`GRAPH_KIND_FILTER` (see the note
+    above that dict: the pair is not measured as blocking anything, `#14552` read `:Source`
+    at 0 vector-bearing nodes, and adding them is one line when a measurement asks). So
+    ``""`` here is a stated GAP, not a population claim — reading it as "the whole label is
+    this type's population" is the inversion these notes exist to prevent (see
+    :data:`Coverage`).
 
     ⛔ THE RETURNED STRING IS CYPHER SPLICED INTO A STATEMENT, so it must only ever
     come from :data:`GRAPH_KIND_FILTER` — a closed dict keyed by a validated entity

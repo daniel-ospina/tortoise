@@ -47,6 +47,7 @@ Run (docker lane — provides `TORTOISE_DB_URI`)::
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -75,6 +76,48 @@ def sdk():
         s.close()
 
 
+@pytest.fixture()
+def journalled_sdk(tmp_path):
+    """The same fresh graph, but with a REAL journal configured.
+
+    ⛔ THIS FIXTURE EXISTS BECAUSE `_Journal` CANNOT ANSWER THE RECORD'S SHAPE. That hook
+    reads `kw["point"]` — the dict `_emit_event` RECEIVED — and `_emit_event` then COPIES
+    it and forces `embedding` present before journalling. So an arm that reads the INSERT
+    off `_Journal` grades the caller's argument, and a MUTANT that deletes the forcing
+    (`tortoise/sdk.py` → `clean.setdefault("embedding", None)`) leaves it green. The
+    default `sdk` fixture has NO journal (`event_log_path=None`), which is exactly why
+    that chokepoint is unreachable there — so the arm that makes a claim about the RECORD
+    runs here instead, against the JSONL the production write actually appends.
+    """
+    _skip_unless_live_uri()
+    reset_circuit_breakers()
+    s = TortoiseSDK(graph_name=f"test_14560_operator_{uuid.uuid4().hex[:8]}",
+                    event_log_path=str(tmp_path / "events.jsonl"))
+    try:
+        yield s, tmp_path / "events.jsonl"
+    finally:
+        reset_circuit_breakers()
+        s.close()
+
+
+def _journalled_record(path, type_: str) -> dict:
+    """The LAST record of ``type_`` in the JSONL the SDK actually appended.
+
+    Read back off disk rather than reconstructed: the point of the arm that calls this is
+    to grade what the production write JOURNALLED, so anything assembled in the test would
+    certify itself.
+    """
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("type") == type_:
+            return record
+    raise AssertionError(
+        f"no `{type_}` record was journalled to {path} — the journal is not being written, "
+        "so this arm would otherwise assert against nothing")
+
+
 def _vector(hot: int = 3) -> list[float]:
     """A unit-basis vector: a value nobody could confuse for a computed one."""
     values = [0.0] * _DIM
@@ -95,8 +138,10 @@ class _Journal:
     (`sdk.py` → `clean.setdefault("embedding", None)`, `#5004` "presence is
     ownership"). So an arm that reads the INSERT off this dict measures the argument,
     not the production row: the record the journal holds carries `embedding: None` on
-    a pure operator. Any arm about the RECORD's shape must force that key itself
-    rather than assert its absence here.
+    a pure operator. ⛔ ANY ARM ABOUT THE RECORD'S SHAPE BELONGS ON `journalled_sdk`
+    INSTEAD — that fixture configures a real `event_log_path`, so the assertion can be
+    made against the JSONL the production write appended (and can RED if the forcing is
+    deleted). Forcing the key here in the test instead would certify itself.
     """
 
     def __init__(self, sdk):
@@ -188,20 +233,27 @@ def test_the_point_table_CAN_hold_a_vector_so_the_absence_below_means_something(
     # id), so it was dead weight rather than a third grade — #14560 review, advisory 2.
 
 
-def test_a_pure_operator_carries_no_vector_in_either_store(sdk):
+def test_a_pure_operator_carries_no_vector_in_either_store(journalled_sdk):
     """THE MEASURED FACT the diagnosis rests on: nothing is lost, because nothing exists.
 
     A `create_operator` Point lands on the graph with NO `embedding` (operators store
-    no content, `#548`), its read-back carries none, and the vector the journal
-    snapshot carries is `None` — `embedding` present on the key (`#5004`'s presence
-    contract) and bound to NULL, never a vector the write dropped. That is the whole
-    of the "17,899 operator rows with 0 vectors": there is no vector in either store
-    to lose, and `mirror_required('operator')` therefore cannot be protecting one.
+    no content, `#548`), its read-back carries none, and the record the journal holds
+    carries `embedding: None` — the column present (`#5004`'s presence contract) and
+    bound to NULL, never a vector the write dropped. That is the whole of the "17,899
+    operator rows with 0 vectors": there is no vector in either store to lose, and
+    `mirror_required('operator')` therefore cannot be protecting one.
+
+    ⛔ BOTH HALVES ARE GRADED ON THE OBJECT THEY ARE ABOUT, which is why this arm takes
+    the JOURNALLED fixture rather than `_Journal`: the graph read-back is asserted off
+    `_get_point`, and the record's shape off the JSONL the production write appended. An
+    arm that read the INSERT off `_Journal`'s captured argument would assert about a dict
+    the journal never holds, and would stay GREEN if the `setdefault` that forces the key
+    were deleted — a false grade over the exact mechanism this whole diagnosis rests on.
     """
+    sdk, journal_path = journalled_sdk
     a = sdk._create_point("statement", "anchor one", embedding=_vector(1))
     b = sdk._create_point("statement", "anchor two", embedding=_vector(2))
-    with _Journal(sdk) as journal:
-        operator = sdk._create_operator("IMPL", a["id"], [b["id"]], label="supports")
+    operator = sdk._create_operator("IMPL", a["id"], [b["id"]], label="supports")
 
     whole, kinded = _graph_vector_counts(sdk)
     assert (whole, kinded) == (2, 0), (
@@ -212,23 +264,25 @@ def test_a_pure_operator_carries_no_vector_in_either_store(sdk):
     assert "embedding" not in readback, sorted(readback)
     assert readback.get("is_operator") is True, readback
 
-    record = journal.record("OperatorAdded")
+    # ── the RECORD's row, read off the journal the write actually appended ──
+    record = _journalled_record(journal_path, "OperatorAdded")
     snapshot = record.get("point") or {}
-    # ⛔ NO VECTOR IS PRODUCED FOR THIS SHAPE: the caller's snapshot carries no
-    # `embedding` key at all (`_get_point` omits a NULL property), so there is nothing
-    # for a write to drop (operators store no content, `#548`).
-    assert "embedding" not in snapshot, sorted(snapshot)
-    # ⛔ AND THE RECORD ROW IS NOT COLUMN-LESS (#14572 review). `_emit_event` forces
-    # the key present on every snapshot it journals — `embedding: None` — so the INSERT
-    # HAS the column and binds it to NULL. The arm asserts THAT shape: the column is
-    # present, the value is None. The earlier cut asserted the column was ABSENT, which
-    # is false about the production row and graded a dict the journal never holds.
-    journalled = {**snapshot, "embedding": None}
-    columns = _point_insert_columns({"type": "OperatorAdded", "point": journalled}).split(", ")
+    # ⛔ NO VECTOR IS PRODUCED FOR THIS SHAPE (operators store no content, `#548`), and
+    # `_get_point` omits a NULL property — so the CALLER's dict carries no `embedding`
+    # key at all. That is asserted on the read-back above, where it is true.
+    assert snapshot.get("embedding", "<absent>") is None, (
+        "the operator's JOURNALLED record does not carry `embedding: None` — `#5004`'s "
+        "presence contract (`clean.setdefault(\"embedding\", None)` in `_emit_event`) is "
+        f"not in force, so a replay would read this record as legacy and INVENT a vector: "
+        f"{sorted(snapshot)}")
+    # ⛔ AND THE RECORD'S ROW IS NOT COLUMN-LESS. `embedding` is present on the journalled
+    # snapshot and bound to NULL, so the INSERT HAS the column. The earlier cut asserted
+    # the column was ABSENT — false about the production row — because it graded
+    # `_Journal`'s captured argument, a dict the journal never holds.
+    columns = _point_insert_columns(record).split(", ")
     assert "embedding" in columns, (
-        "the operator's record row carries no `embedding` column even with the `#5004` "
-        f"key forced present, so this arm is not measuring the production row: {columns}")
-    assert journalled["embedding"] is None, journalled["embedding"]
+        "the operator's record row carries no `embedding` column even though the "
+        f"journalled snapshot binds it to NULL: {columns}")
 
 
 def test_a_hybrid_operator_carries_its_vector_in_BOTH_stores(sdk):
