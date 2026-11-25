@@ -92,6 +92,7 @@ _INDEX = "docs/00_index.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 _SDK = "tortoise/sdk.py"
+_LIVE = "tortoise/live.py"
 #: `#14087` review round 7: `00_index.md`'s entity-verdict row points at this file's `:43` in the
 #: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
 _EV = "tortoise/entity_verdict.py"
@@ -119,6 +120,26 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     (_SUBSTRATE, 'tortoise/sdk.py:37983', _SDK, 37983, "``:Document`` node)."),
     (_SUBSTRATE, '`:38025` in `_file_human_approval`', _SDK, 38025, "``:Document`` node)."),
+    # ⛔ The SAME sentence pair carries a SECOND number that nothing graded: §5's `:38024` (since fixed
+    # to `:38025`) was the `:Source` line above the second `:Document` line, so the pair was one high on
+    # one side while every neighbouring row stayed green — the file's own "green pins over a wrong
+    # sentence" shape. The row below grades the pair AS A PAIR (its token spans both the owner and the
+    # number), because two unpinned mentions in one sentence is how the first one survived review.
+    (_SUBSTRATE, "`_file_human_approval`'s `:38025`", _SDK, 38025, "``:Document`` node)."),
+    # ⛔ And §5's #11928 move names `tortoise/live.py` with NO row at all, which is how the cites drifted
+    # +58 past a re-point that was correct when it was written (`:1313,1323` -> `:1371,1381`).
+    (_SUBSTRATE, 'tortoise/live.py:1371', _LIVE, 1371, "``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through"),
+    # ⚠️ AND THE SECOND HALF NEEDS ITS OWN ROW: `_token_spans` only accepts a COMMA form's first number
+    # as an address span (the shipped `:36687,36718`-style token yields `(first, first)`), so ONE
+    # comma-form row would leave `:1381` graded by nothing — the pair half-covered, which is how the
+    # `:38024` defect survived. The document therefore names the two lines separately and each has a row.
+    (_SUBSTRATE, '`:1381`', _LIVE, 1381, ":data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/"),
+    # ⛔ The same parenthesis makes a NEGATIVE claim about two `sdk.py` addresses ("neither naming
+    # `:Document`") and both were stale by +357 / +148 while the sentence asserted they had been
+    # "re-measured at this head" (`:37126` -> `:37483`, `:37366` -> `:37514`). A negative claim is not
+    # weaker than a positive one: a reader sent to the wrong line cannot check it at all.
+    (_SUBSTRATE, '`sdk.py:37483` is a', _SDK, 37483, "`[a, a, b]` was answered with the `[a, b, b]` operator"),
+    (_SUBSTRATE, '`:37514`', _SDK, 37514, 'conds.append("o.label IS NULL")'),
     # ⛔ Review cycle 2 (P1): these were RE-POINTED and left with no content pin, so a one-line
     # regression shipped green — MEASURED by mutating each destination by one line and watching the
     # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
@@ -276,8 +297,13 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # Two of the eighteen are re-worded at the rebase (`(opening `:37815`` -> `opening `:37815``, and
     # likewise `:37855`) with STRICTER fragments, so their coverage grew and none was dropped.
     # Add a row when a real correction touches an unpinned site, and update this count in the same commit.
-    assert len(_PINS) == 21, (
-        f"_PINS carries {len(_PINS)} rows, not 21 — a re-pointed cite was added or dropped without "
+    # 21 -> 26 on #14671: five corrections landed on cites that had NO row at all — §5's
+    # `tortoise/live.py:1371,1381` (the #11928 move), §5's second `:Document` number in the same
+    # sentence pair (`:38024` -> `:38025`), and the pair of negative-claim addresses in the same
+    # parenthesis (`:37126` -> `:37483`, `:37366` -> `:37514`). All four were green-by-absence; a
+    # re-point that touched them could not red anything, which is the uncovered-claim class this file refuses.
+    assert len(_PINS) == 26, (
+        f"_PINS carries {len(_PINS)} rows, not 26 — a re-pointed cite was added or dropped without "
         "this count. Every re-point a branch writes must carry a content pin."
     )
 
@@ -435,8 +461,8 @@ def test_every_pinned_token_occurs_exactly_once_in_its_document() -> None:
     This is the surviving half of `_TOKEN_OCCURRENCES` (round 4, P1). That table carried per-token
     counts AND a `declared == pinned` set equality; the set equality is subsumed by `_PINS`, but the
     COUNT was not, and the anti-shrink arm cannot express it: a row deleted and another added inside
-    the same document set satisfies both `docs == {six}` and `len(_PINS) == 21`. Measured at this head:
-    all 21 tokens occur exactly once, so the invariant is green and load-bearing rather than
+    the same document set satisfies both `docs == {six}` and `len(_PINS) == 26`. Measured at this head:
+    all 26 tokens occur exactly once, so the invariant is green and load-bearing rather than
     aspirational.
 
     ⛔ DERIVED, not transcribed: no count is written down here, because a transcribed count is the

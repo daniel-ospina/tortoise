@@ -593,7 +593,7 @@ class TestTheWriteDoorsStateTheirPosture:
                 # ⛔ It does NOT assert the read side, and it used to claim to:
                 # `_compute_confidence(factors=[...])` prices OPERATOR ids
                 # (`operator_ids = [f if isinstance(f, str) else f[0] …]`,
-                # `sdk.py:41760-41762`), so handing it the two POINT ids this
+                # `sdk.py:41822`), so handing it the two POINT ids this
                 # test creates priced NO factor and left
                 # `belief[1] == belief[2]` true whatever the edge did — a
                 # consequent that could not fail (#14600 review N1). Removed

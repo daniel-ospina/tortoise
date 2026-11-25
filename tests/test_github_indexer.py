@@ -465,7 +465,7 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
     ⛔ AND THE ORDER IS THE FIX (#13288 F1/F3, the marker-carrying subset below).
     A guard with the right answer in the wrong place only holds for the rows that
     reach it: `is_position_ended` answers TRUE on `bool(is_closed)` alone
-    (`live.py:192`, the `isClosed` arm of `ending_axes`) — a slot cannot unseat
+    (`live.py:233`, the `isClosed` arm of `ending_axes`) — a slot cannot unseat
     it — so while this guard sat BELOW the
     polarity arms a row carrying a truthy `isClosed` *and* a broken position
     answered `"closed"` — and against an OPEN issue that mints `-reopened`,
