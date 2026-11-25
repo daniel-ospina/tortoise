@@ -440,8 +440,11 @@ to assume) — a Postgres statement named by a module constant, exactly the shap
 `partial` **321**, `plain` **875** (read **589** / write **286**) and every other shape are unchanged —
 the new call is not a statement site, so the migration metric §0 is about does not move. ⛔
 `files_scanned` reads **314** here only because this merge carries `main`'s `#14344` file (313→**314**);
-this branch adds NO scanned module (`git diff --name-status c3dca699..HEAD -- tortoise/` has no `A`
-row), so that move is `main`'s and is narrated at the `#14344` paragraph below, not re-narrated here.
+this branch adds NO scanned module (`git diff --name-status origin/main...HEAD -- tortoise/` has no
+`A` row; ⛔ the THREE-dot form is load-bearing — a two-dot range from the `#14582` fold base
+(`c3dca699..HEAD`) spans `main`'s own `#14344` landing and prints its `A tortoise/expansion_merge.py`,
+which is the very file this sentence says is not this branch's), so that move is `main`'s and is
+narrated at the `#14344` paragraph below, not re-narrated here.
 §1's door
 predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
 **1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
