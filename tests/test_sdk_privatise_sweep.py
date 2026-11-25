@@ -264,7 +264,6 @@ def _residue_block() -> str:
     `e627ca89375c` fold, each the tree that measured it, neither is this head's; ⛔ AND RE-WALKED on
     the EARLIER fold of `origin/main` `2cccf90f4dd4`, where both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
-    kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
     the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
     `2cccf90` walked 1930, each measured by THIS function on its own file, and the resolved run is
@@ -296,14 +295,15 @@ def _residue_block() -> str:
     own walk rather than carrying either side's number, because that fold kept both blocks too —
     and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2350 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `e627ca89375` merged into the branch,
-    which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch and
-    `main` each published their OWN tree's reading, so the figure is re-derived here rather
-    than carried from either side — and GRADED, see
-    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that moves the run REDS naming
-    both numbers instead of quietly publishing a stale figure, which is
-    what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
+    what the sentence this one replaces asked a reader to do by hand. ⛔ THE `e627ca89375` FOLD of
+    `origin/main` kept both sides' prose blocks as every fold before it did, and its own tree walked
+    2350 while `main`'s `2cccf90f4dd4` walked 2294 — each the tree that measured it, neither this
+    head's. ⛔ THE GRADED PHRASE IS STATED ONCE, at the head of this docstring, and that is the
+    repair rather than a style note: a `merge=union` fold spliced a SECOND copy of it here (which
+    is what the paragraph this sentence replaces had become), and `re.search` reads only the first
+    match, so the second figure would have been graded by nothing while claiming to be this
+    head's — the same splice class the round-14 fix collapsed once already.
+    `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 while this sentence still said 985, which was true at
     `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of #14258, P3), and this re-cut's

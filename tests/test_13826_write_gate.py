@@ -310,8 +310,8 @@ def test_the_source_fold_asks_the_gate(proj, monkeypatch):
 
 
 def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch):
-    """`:Point`'s four declared writers: two ask the gate, two deliberately must not — and
-    the journal fold does not ask either, on purpose.
+    """`:Point`'s four declared writers ALL ask the gate since `#14552` — each on the branch
+    where its copy is a mirror — and the journal fold does not ask, on purpose.
 
     ⛔ THIS TEST PINS AN EXCEPTION, and the exception is a RECORDED DECISION rather than a
     gap. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own record
@@ -331,15 +331,15 @@ def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch)
     consequence is stated rather than hidden: a `rebuild_all` re-materialises the journal's
     vectors, so the strip is an operator action to re-run after a rebuild.
     `tools/strip_graph_entity_vectors.py` names that consequence in its own output and
-    leaves `:Point` out of `FOLD_WRITERS`. ⛔ AND TWO MORE `:Point` WRITERS DELIBERATELY DO
-    NOT ASK (`#13971` review, P1): `sdk::_write_capture_turns` (the graph batch runs exactly
-    where the record cannot hold the turn, so the copy there is the SOLE store) and
+    leaves `:Point` out of `FOLD_WRITERS`. ⛔ AND THE OTHER TWO `:Point` WRITERS ASK SINCE
+    `#14552`, EACH ON THE BRANCH WHERE ITS COPY IS A MIRROR (`#13971` review, P1):
+    `sdk::_write_capture_turns` (the graph batch runs exactly where the record cannot hold
+    the turn, so the copy there is the SOLE store — the vector is asked about only on the
+    record-first arm, and re-attached per rescued turn) and
     `projection::_rebuild_all_replay` (pass-1b restores a snapshot vector only for ids the
-    journal wrote none for). The census therefore REFUSES `:Point`, naming both once the
-    coverage verdict verifies (today the coverage arm answers first and names the two
-    counts) — the
-    strip stays unavailable until the capture path can answer per-turn, which is cheaper
-    than a capture that writes a turn's vector to neither store.
+    journal wrote none for — the gate is asked about an id the record ANSWERS, and the
+    sole-copy arm writes whatever it says). The census therefore no longer refuses
+    `:Point` on its writers; `tests/test_13629_entity_vector_retire.py` carries the pins.
     """
     from tortoise import embeddings
 
@@ -988,7 +988,8 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     # (`#14560` review F5). `:Point`'s restore drop is HELD (`hosted_backup._RESTORE_DROP_HELD`,
     # `#13971`'s per-ID ask is outstanding), so with the real set every arm below would keep
     # the vector for the WRONG reason and the two `keep=` arms would stop discriminating at
-    # all. The hold itself is asserted at the end of this arm, on the real set.
+    # all. The hold itself is asserted on the real set by
+    # `test_the_Point_restore_drop_is_HELD`.
     import tortoise.hosted_backup as _hb
     monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     _gate_map(monkeypatch, keep={"point"})
