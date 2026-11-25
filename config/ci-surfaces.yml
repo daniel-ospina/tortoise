@@ -79,7 +79,9 @@ version: 1
 # default — a `core` file whose weight is not flat, so do not read that list as "all default".
 # ⛔ NO PER-FILE WEIGHT IS QUOTED HERE, on purpose: a weight beside a file re-stales against the
 # run it came from, `--refresh-durations` rewrites it with no human decision, and a small move does
-# not even shift the graded emission — so no arm would see the sentence go false.
+# not even shift the graded emission — so no arm would see the sentence go false. ⛔ The
+# `DEFAULT_FAST_WEIGHT` spellings above are the map's CONSTANT, not a reading of any file, and the
+# `#14544` paragraph below names a row WITHOUT quoting its weight for the same reason.
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` — among the files named above, `#14597`'s
 # `tests/test_expansion_fusion_14344.py` row, `#14560`'s
@@ -146,7 +148,7 @@ version: 1
 # re-pointed.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
-# well, so `fast_pool()` still carries it (measured at this head, weight 90.0), and dropping the `core`
+# well, so `fast_pool()` still carries it (it has its own `durations` row, and no quoted weight), and dropping the `core`
 # REGISTRATION cannot move a bin — the weight comes from the file's own `durations` row, not from
 # either registration.
 #
