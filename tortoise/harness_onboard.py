@@ -335,13 +335,17 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     from `_read_text`) and every line this function INSERTS uses the terminator the
     document already uses, so a CRLF config stays CRLF.
 
-    Returns the edited text, or "" when there is no `mcpServers` OBJECT to edit: the
-    object is absent, `mcpServers` is not a JSON object, or the text does not parse
-    as the document the caller built. ⛔ NO member/brace LAYOUT is refused — the
-    closing brace sharing the last member's line is spliced like any other (an
-    earlier cut of this docstring listed it as a bail-out, which sent that common
-    hand-written shape through a whole-document dump). The caller then falls back
-    to a full dump, and SAYS so.
+    Returns the edited text, or "" when there is no spliceable **TOP-LEVEL**
+    `mcpServers` object: the key is absent, it exists only NESTED inside another
+    object (`~/.claude.json`'s `projects.<path>.mcpServers` is the real shape), or
+    its FIRST occurrence is not a JSON object (`json.loads` keeps the LAST duplicate,
+    this walker reads the FIRST). ⛔ It does NOT police the round trip — `write_config`
+    re-parses what will be written and refuses there; this function never sees the
+    caller's intended document. ⛔ NO member/brace LAYOUT is refused — the closing
+    brace sharing the last member's line is spliced like any other (an earlier cut
+    of this docstring listed it as a bail-out, which sent that common hand-written
+    shape through a whole-document dump). The caller then falls back to a full dump,
+    and SAYS so.
     """
     servers = _member_span(text, "mcpServers")
     if servers is None:
@@ -520,23 +524,24 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     if spliced:
         after = spliced
     else:
-        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has no such key,
-        # or the FIRST one is not a JSON object. Dump, and SAY that the whole file was
-        # written rather than implying a one-entry merge. ⛔ A file that merely LACKS
-        # the entry is NOT this branch — `_splice_entry` inserts into an existing
-        # object — and ⛔ neither is a LAYOUT: every member/brace shape, including the
-        # closing brace sharing the last member's line, is spliced. ⛔ The parenthetical
-        # says FIRST because `json.loads` keeps the LAST duplicate key while
-        # `_member_span` reads the FIRST: a duplicate-`mcpServers` file whose first
-        # occurrence is a list resolves to an OBJECT under `json.loads` yet cannot be
-        # spliced, so "the file has none" would be false over it.
+        # No spliceable TOP-LEVEL `mcpServers` object: the key is absent, it exists
+        # only NESTED (the `~/.claude.json` shape, whose servers live under
+        # `projects.<path>.mcpServers`), or its FIRST occurrence is not a JSON object.
+        # Dump, and SAY that the whole file was written rather than implying a
+        # one-entry merge. ⛔ A file that merely LACKS the entry is NOT this branch —
+        # `_splice_entry` inserts into an existing object — and ⛔ neither is a LAYOUT:
+        # every member/brace shape, including the closing brace sharing the last
+        # member's line, is spliced. ⛔ The parenthetical says TOP-LEVEL and FIRST
+        # because the walker starts at the document root and `json.loads` keeps the
+        # LAST duplicate: neither "the file has none" nor a bare "`mcpServers` is not
+        # an object" is true of every shape that lands here.
         nl = _newline_of(before)
         after = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", nl) + nl
         if before:
             out.actions.append(
                 f"{path}: no `mcpServers` object this installer can splice "
-                f"(the file has no `mcpServers` key, or its first one is not an "
-                f"object) — the whole document was re-written")
+                f"(the file has no TOP-LEVEL `mcpServers` key, or its first one is "
+                f"not an object) — the whole document was re-written")
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose

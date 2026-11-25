@@ -422,8 +422,11 @@ def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
 
     The shared-closing-brace layout used to land here too and the message was false
     over it (the object was present), so the layout is now spliced instead (see the
-    row above). What still falls back is a file with no `mcpServers` object at all,
-    and that is what the sentence must say.
+    row above). What still falls back is a file with no spliceable TOP-LEVEL
+    `mcpServers` object — absent, nested only (`~/.claude.json`'s
+    `projects.<path>.mcpServers`), or its FIRST duplicate is not an object — and
+    that is what the sentence must say. See the two rows below for the duplicates
+    and the nested shape.
     """
     original = '{\n  "unrelated": {"a": 1}\n}\n'
     path = project / ".mcp.json"
@@ -490,10 +493,44 @@ def test_the_fallback_message_is_TRUE_for_a_duplicate_mcpservers_key(project):
 
     assert result.wrote, result.refusals
     said = " ".join(result.actions)
-    assert "the file has no `mcpServers` key, or its first one is not an object" in said, (
+    assert ("the file has no TOP-LEVEL `mcpServers` key, or its first one is "
+            "not an object") in said, (
         f"the fallback's stated reason is not true of a duplicate-key file: {said}")
     assert "the file has none" not in said, (
         f"the message denies a key `json.loads` proves is present: {said}")
+
+
+def test_a_NESTED_mcpservers_cannot_be_spliced_and_the_message_says_TOP_LEVEL(project):
+    """`~/.claude.json` keeps its servers under `projects.<path>.mcpServers`.
+
+    The walker starts at the document ROOT, so a file whose only `mcpServers` is
+    nested reaches the fallback — while the file demonstrably HAS an `mcpServers`
+    key. The message therefore says TOP-LEVEL; without that word it denied a key the
+    user can see, on a multi-MB config where "the whole document was re-written" is
+    the expensive half. ⛔ `claude` user scope targets exactly this file
+    (`mcp_selfcheck.HARNESS_CONFIG_PATHS`), so the shape is reachable, not invented.
+    """
+    original = ('{\n'
+                '  "numStartups": 42,\n'
+                '  "projects": {"/home/u/repo": {\n'
+                '    "mcpServers": {"fs": {"command": "npx"}}\n'
+                '  }}\n'
+                '}\n')
+    path = project / ".mcp.json"
+    path.write_text(original, encoding="utf-8")
+    assert original.count('"mcpServers"') == 1, "the fixture must NEST the only occurrence"
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    said = " ".join(result.actions)
+    assert "no TOP-LEVEL `mcpServers` key" in said, (
+        f"the message must not deny a key the file visibly carries: {said}")
+    assert "the file has none" not in said, said
+    after = path.read_text(encoding="utf-8")
+    assert json.loads(after)["projects"]["/home/u/repo"]["mcpServers"] == {
+        "fs": {"command": "npx"}}, "the nested member's bytes changed"
+    assert "tortoise.mcp_bridge" in after
 
 
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
