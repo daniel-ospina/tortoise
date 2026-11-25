@@ -476,15 +476,33 @@ def test_the_probe_grades_the_endpoint_the_entry_names(
         f"about an unnamed host: {verdict.line()!r}")
 
 
-def test_declared_endpoint_prefers_the_entry_env_over_the_top_level_url(project):
-    """`onboard` writes `env.TORTOISE_MCP_URL`; that is the bridge's real target."""
+def test_declared_endpoint_follows_the_DISPATCHED_transport(project):
+    """An http entry is contacted over `url`; `env` is read only by the stdio branch.
+
+    ⛔ The previous version of this arm pinned `env` winning for an http entry,
+    which is the opposite of what the harness does (`connectServer` reads
+    `url`/`headers`/`oauth`; `env` belongs to `buildMcpServerEnv`). That order made
+    `--live` grade a host the entry never contacts.
+    """
     _write_config(project, {
         "type": "http",
-        "url": "https://top-level-14607.invalid/mcp",
-        "env": {"TORTOISE_MCP_URL": "https://env-wins-14607.invalid/mcp"},
+        "url": "https://url-wins-14607.invalid/mcp",
+        "env": {"TORTOISE_MCP_URL": "https://env-ignored-14607.invalid/mcp"},
     })
     assert (mcp_selfcheck.declared_endpoint("pi", project_dir=project)
-            == "https://env-wins-14607.invalid/mcp")
+            == "https://url-wins-14607.invalid/mcp")
+
+
+def test_declared_endpoint_reads_env_for_a_stdio_entry(project):
+    """The bridge is a stdio shim: its target IS `env.TORTOISE_MCP_URL`."""
+    _write_config(project, {
+        "type": "stdio",
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": "http://127.0.0.1:9999/mcp"},
+    })
+    assert (mcp_selfcheck.declared_endpoint("pi", project_dir=project)
+            == "http://127.0.0.1:9999/mcp")
 
 
 def test_declared_endpoint_is_none_for_a_bare_stdio_entry(project):
@@ -1576,9 +1594,11 @@ def test_check_refuses_to_probe_an_http_entry_with_no_readable_endpoint(
 
     verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
     assert not probed, "the probe must not run without a readable endpoint"
-    assert verdict.status != mcp_selfcheck.OK
-    assert verdict.status in mcp_selfcheck.ABSTENTION_CLASSES or \
-        verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    # ⛔ The CLASS, not "not OK": with the guard deleted the next branch returns
+    # RESOLVES_UNPROBED, which is also "not OK" and also an abstention — so the old
+    # assertion could not red on the guard it named.
+    assert verdict.status == mcp_selfcheck.PROBE_UNKNOWN, verdict.line()
+    assert "no readable endpoint" in verdict.detail, verdict.detail
 
 
 def test_a_kept_repo_only_entry_survives_a_DROPPED_base(tmp_path, monkeypatch):
@@ -1603,3 +1623,46 @@ def test_a_kept_repo_only_entry_survives_a_DROPPED_base(tmp_path, monkeypatch):
     verdict = mcp_selfcheck.classify("pi", project_dir=repo)
     assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
     assert verdict.transport == "http", verdict.line()
+
+
+def test_a_changed_destination_drops_the_inherited_credential(tmp_path, monkeypatch):
+    """The harness drops `headers`/`oauth` when the projected `url` moves.
+
+    Measured before this arm: the self-host override to `http://localhost:8000/mcp`
+    inherited the base's `Authorization: Bearer ${TORTOISE_API_MCP_KEY}` and the
+    verdict read `env-unset` — "the request would carry an empty bearer" — for an
+    effective entry that has no headers at all, naming the repo file as the source.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp/",
+                     "headers": {"Authorization": "Bearer ${TORTOISE_MCP_API_KEY}"}}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "http://localhost:8000/mcp"}}}), encoding="utf-8")
+
+    _source, entry, _read, _status = mcp_selfcheck.read_entry("pi", project_dir=repo)
+    assert "headers" not in entry, entry
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status != mcp_selfcheck.ENV_UNSET, verdict.line()
+
+
+def test_a_loopback_endpoint_without_a_credential_is_not_called_down(project, monkeypatch):
+    """The shipped compose default is `auth_mode=none` with an empty key."""
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    _write_config(project, {"type": "http", "url": "http://localhost:8000/mcp"})
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status != mcp_selfcheck.NO_CREDENTIAL, verdict.line()
+    assert verdict.status in mcp_selfcheck.ABSTENTION_CLASSES, verdict.line()
+
+    _write_config(project, {"type": "http",
+                            "url": "https://api.premiselabs.co/mcp/"})
+    hosted = mcp_selfcheck.classify("pi", project_dir=project)
+    assert hosted.status == mcp_selfcheck.NO_CREDENTIAL, (
+        "the hosted endpoint DOES require a credential — that must stay a DOWN")

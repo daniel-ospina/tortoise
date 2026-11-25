@@ -294,6 +294,36 @@ def _read_json(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _is_loopback_endpoint(url: object) -> bool:
+    """True for `localhost` / `127.0.0.0/8` / `[::1]` — where auth may be disabled."""
+    if not isinstance(url, str):
+        return False
+    host = url.strip().partition("://")[2].partition("/")[0].rpartition("@")[2]
+    host = host.partition(":")[0].strip("[]").lower()
+    return host in ("localhost", "::1", "0.0.0.0") or host.startswith("127.")
+
+
+def same_destination(a: object, b: object) -> bool:
+    """True when two endpoint strings name the same destination.
+
+    Used exactly where the harness uses it: a changed destination invalidates an
+    inherited CREDENTIAL (`headers`/`oauth`), because the key was minted for the
+    other host. Approximate but conservative: a difference we cannot normalise away
+    counts as a change, which can only make the verifier DROP an inherited
+    credential — never keep one the harness would drop.
+    """
+    if not isinstance(a, str) or not isinstance(b, str):
+        return a == b
+
+    def parts(value: str) -> tuple[str, str, str]:
+        text = value.strip().rstrip("/")
+        scheme, _, rest = text.partition("://")
+        host, _, path = rest.partition("/")
+        return scheme.lower(), host.lower(), path
+
+    return parts(a) == parts(b)
+
+
 def _js_falsy(value: object) -> bool:
     """JS truthiness for the values a JSON config can carry.
 
@@ -382,6 +412,7 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # and, with the variable set, `resolves-unprobed` for a `stdio` entry, so the
     # stdio checks never ran and `check(live=True)` could green it.
     HTTP_TRANSPORT_FIELDS = ("url", "headers", "oauth")
+    HTTP_CREDENTIAL_FIELDS = ("headers", "oauth")
     STDIO_TRANSPORT_FIELDS = ("command", "args", "env", "cwd")
     def _unloadable(entry: dict) -> bool:
         """True when a transport field is present but not a usable STRING.
@@ -432,7 +463,8 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
     # and each more specific layer is applied as a DELTA over what is accumulated.
     _base_source, base_entry = layers[-1]
-    if _unloadable(base_entry):
+    base_survives = not _unloadable(base_entry)
+    if not base_survives:
         base_entry = {}          # the harness DROPS an entry with a bad transport
     merged: dict = _sanitized(base_entry)
     # ⛔ "There is no inherited entry" is a FACT that must survive: when the base
@@ -446,7 +478,13 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # declaring both transports is an ambiguous DELTA and is ignored. Keying on a
     # transport instead let that case fail OPEN: the repo entry was kept, resolved
     # over `url`, and a dead config reported `resolves-unprobed`.
-    has_base = bool(merged)
+    # ⛔ OBJECT presence, including an EMPTY one: `Object.hasOwn(merged, name)` is
+    # true for `{}`, and `{}` is truthy in JS, so the harness takes the DELTA
+    # branch there. `bool(merged)` is non-emptiness, not presence — a hand-written
+    # placeholder base `{}` then let a repo entry declaring both transports be
+    # KEPT and resolve over `url`, while the harness ignores it and the effective
+    # entry is `{}` (`has neither 'command' nor 'url'`).
+    has_base = base_survives
     for _source, delta in reversed(layers[:-1]):
         if _unloadable(delta):
             continue             # a dropped delta leaves the base standing
@@ -460,6 +498,18 @@ def read_entry(harness: str, *, project_dir: Path | None = None
             # working server) — that is the single-layer case, handled by the base
             # copy above, and skipping it here was a false `command-missing`.
             continue
+        # ⛔ The harness ALSO drops inherited SECRETS when the destination or the
+        # launch changes (`HTTP_CREDENTIAL_FIELDS` on a changed `url`; `env` on a
+        # changed `command`/`args`/`cwd`). Modelling only the transport fields left
+        # the base's `Authorization: Bearer ${VAR}` on a self-host override to
+        # `http://localhost:8000/mcp`, and the verdict reported `env-unset` — "the
+        # request would carry an empty bearer" — for an effective entry that has NO
+        # headers at all, while naming the repo file as the source.
+        if "url" in delta and not same_destination(merged.get("url"), delta.get("url")):
+            for field in HTTP_CREDENTIAL_FIELDS:
+                merged.pop(field, None)
+        if any(field in delta for field in ("command", "args", "cwd")):
+            merged.pop("env", None)
         merged.update(delta)
         # ⛔ Only when the layer declares EXACTLY ONE transport. A kept repo-only
         # entry declaring both must stay whole — the harness runs it over `url`, and
@@ -795,6 +845,21 @@ def classify(harness: str, *, project_dir: Path | None = None
 
     # http
     if not _header_carries_credential(entry) and not credentials_present(project_dir):
+        # ⛔ A loopback daemon may not WANT a credential: the shipped compose default
+        # is `auth_mode=none` with an empty key ("optional while the daemon stays
+        # loopback-bound"), so asserting DOWN here reported a working self-hosted
+        # install as broken and blocked `onboard`'s instruction write. Abstain
+        # instead — and note the class's own justification ("the server can only
+        # answer -32001") is simply false for that daemon.
+        if _is_loopback_endpoint(entry.get("url")):
+            return Verdict(
+                status=RESOLVES_UNPROBED,
+                detail=("the entry names a LOOPBACK endpoint and carries no "
+                        "credential — a local daemon may not require one "
+                        "(auth_mode=none), so this cannot be called down; the "
+                        "static pass cannot prove it either"),
+                fix="prove it: `tortoise mcp-status --live`",
+                source=source, transport=transport, configs_read=read)
         return Verdict(
             status=NO_CREDENTIAL,
             detail=("the entry carries no credential and no credential resolves "
@@ -939,14 +1004,19 @@ def declared_endpoint(harness: str, *, project_dir: Path | None = None
     if not entry:
         return None
     candidates: list[str] = []
+    # ⛔ BY TRANSPORT. For an `http` entry the harness reads only `url`, `headers`
+    # and `oauth` — `env` is consumed by the STDIO branch alone. Preferring
+    # `env.TORTOISE_MCP_URL` regardless made `--live` grade a host the entry never
+    # contacts (`OK` from a live local bridge while the entry's `url` is dead).
+    if entry.get("url"):
+        value = entry.get("url")
+        if isinstance(value, str):
+            candidates.append(value)
     env = entry.get("env")
     if isinstance(env, dict):
         value = env.get("TORTOISE_MCP_URL")
         if isinstance(value, str):
             candidates.append(value)
-    value = entry.get("url")
-    if isinstance(value, str):
-        candidates.append(value)
     for raw in candidates:
         expanded, _unset = _expand(raw)
         if expanded.strip():
@@ -1056,7 +1126,7 @@ def probe(*, project_dir: Path | None = None, url: str | None = None,
         other path must keep `_BearerProvider`'s per-request resolution.
         """
 
-        def auth_flow(self, request):  # noqa: D401 - httpx protocol
+        def auth_flow(self, request):
             request.headers["Authorization"] = f"Bearer {token}"
             yield request
 
