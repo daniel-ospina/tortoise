@@ -54,54 +54,29 @@ version: 1
 # direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
 # 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
-# parents: keeping two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs ten shards at 826.7 s (a, b, d, e, f, g, h, i, j, k) and
-# one at 826.6 s (c), so `ceil(826.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1335 files at this head against 1334 on `main`, and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own. ⛔ The rows `main` already carries at this head
-# (`tests/test_14559_reaper_schedule.py`, `tests/test_14560_operator_vectors.py`,
-# `tests/test_fly_secret_declaration_report.py`, `tests/test_record_read_point_vector_keys.py` and
-# `tests/test_14592_operating_model_evidence.py`) are `main`'s at this head, NOT this lane's: each
-# landed before this merge, and reading one of them as this lane's delta would attribute a partition
-# move to a row that did not cause it. The name lists above are what the guard COMPARES against the
-# live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
-# graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
-# `#14597`'s `tests/test_expansion_fusion_14344.py`, `#14415`'s two batch rows, `#14548`'s residue
-# RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py`, `#14565`'s reaper-schedule row,
-# `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`) and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (all `core`; every one of them at the flat 2.0 s
-# weight EXCEPT `#14548`'s residue RATCHET, which is `tests/test_sdk_privatise_sweep.py` at
-# **28.0 s** — a `core` file whose weight is not flat, so do not read this list as "all 2.0 s")
-# — plus `#14607`'s two new `core` rows (`tests/test_mcp_selfcheck.py`,
-# `tests/test_recall_neighborhood.py`), the verb
-# packs the pool into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s
-# (c, d, h), so `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 826.9 = 2.0317), so the two agree by construction rather than
+# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
+# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs six shards at 827.1 s (a, b, g, i, j, k) and five at
+# 827.0 s (c, d, e, f, h), so `ceil(827.1/60 x 2)` = 28 m governs (a shard's job-level wall clock
+# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 827.1 = 2.0317), so the two agree by construction rather than
 # by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1337 files at this head against 1335 on `main`, and
-# the TWO entries this branch adds are `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py` — re-derived by running the verb on BOTH manifests
-# (`origin/main`'s and this tree's), not carried from either parent's paragraph, and `main` carries
-# nothing this tree lacks. ⛔ Every row named above is `main`'s at this head, NOT this branch's:
-# counting one as this branch's would make the list disagree with the paragraph's own
-# 1337 − 1335 = 2. The name lists are what the guard COMPARES against the live emission
+# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
+# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
+# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
+# holds 1338 files at this head against 1337 on `main`, read by running the verb on one manifest per
+# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
+# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
+# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
+# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
+# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
+# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
+# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
+# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
+# name lists above are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
