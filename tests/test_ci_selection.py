@@ -9200,7 +9200,8 @@ _DERIVATION_LOOKAHEAD = 60
 #: `tests/test_14407_alert_delivery.py`'s `core` row while the map carries NO `durations` row for
 #: that file, and this matcher required `row` ADJACENT to the path — so `'s `core` ` between them
 #: hid a live, false row claim. MEASURED before the fix: `_row_claims` on that very sentence
-#: returned `[]`, and all five header-block arms stayed GREEN over the block that contained it.
+#: returned `[]`, and every header-block arm that existed at that head stayed GREEN over the block
+#: that contained it (six such arms now; the count is not restated because it moves with the block).
 #: The optional middle group now admits it, and the fixture drives the shape so a re-narrowing
 #: reds.
 #: ⛔ THE CARRY SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
