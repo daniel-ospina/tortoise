@@ -2196,17 +2196,71 @@ def test_a_blank_transport_in_the_base_is_attributed_to_the_base(tmp_path, monke
 
 
 def test_a_transport_supplied_by_the_REPO_is_attributed_to_the_repo(tmp_path, monkeypatch):
-    """The converse: provenance must follow the field, not always the base."""
+    """The converse, on an input where provenance and the fallback DISAGREE.
+
+    ⛔ `{timeoutMs}` over a base `{url}` cannot discriminate: `layers[0][0]` (the
+    fallback) returns the same repo path, so this arm stayed green even with the
+    delta→origin line deleted. A TRANSPORT SWITCH does discriminate — base supplies
+    `url`, the repo supplies `command`, so the surviving transport is the repo's
+    while the fallback would name… the repo too; what it actually pins is the
+    `origin.pop` in the stdio branch, without which the verdict would name the
+    base's dropped `url`.
+    """
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     (home / ".pi/agent").mkdir(parents=True)
-    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
-        "tortoise": {"timeoutMs": 90000}}}), encoding="utf-8")
+    base_path = home / ".pi/agent/.mcp.json"
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp/"}}}), encoding="utf-8")
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     repo_cfg = repo / ".mcp.json"
     repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
-        "url": "https://api.premiselabs.co/mcp/"}}}), encoding="utf-8")
+        "command": "/nope-14617/python3",
+        "args": ["-m", "tortoise.mcp_bridge"]}}}), encoding="utf-8")
+
     verdict = mcp_selfcheck.classify("pi", project_dir=repo)
-    assert verdict.source == str(repo_cfg), verdict.source
+    assert verdict.transport == "stdio", verdict.line()
+    assert verdict.source == str(repo_cfg), (
+        "the surviving transport is the REPO's `command`; naming the base's dropped "
+        f"`url` layer is the wrong-file defect — got {verdict.source}")
+    assert verdict.source != str(base_path)
+
+
+def test_a_field_detail_names_the_layer_that_supplied_that_FIELD(tmp_path, monkeypatch):
+    """`cwd` and an inherited `env` must name their own layer, not the transport's."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    (home / ".pi/agent").mkdir(parents=True)
+    base_path = home / ".pi/agent/.mcp.json"
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    repo_cfg = repo / ".mcp.json"
+
+    # repo supplies the cwd; the base supplies everything else
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": sys.executable, "args": ["-m", "tortoise.mcp_bridge"]}}}),
+        encoding="utf-8")
+    repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "cwd": "/nope-14617"}}}), encoding="utf-8")
+    cwd_verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert cwd_verdict.status == mcp_selfcheck.CWD_MISSING, cwd_verdict.line()
+    assert cwd_verdict.source == str(repo_cfg), cwd_verdict.source
+
+    # the base supplies the `env` that carries the unset name; the repo restates
+    # the launch identically, so the inherited `env` SURVIVES and is the base's
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": sys.executable, "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": "${PROBE_UNSET_14607}"}}}}), encoding="utf-8")
+    repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": sys.executable, "args": ["-m", "tortoise.mcp_bridge"]}}}),
+        encoding="utf-8")
+    env_verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert env_verdict.status == mcp_selfcheck.ENV_UNSET, env_verdict.line()
+    assert env_verdict.source == str(base_path), (
+        "the `${VAR}` is in the BASE's inherited `env`; the repo file has no env "
+        f"at all — got {env_verdict.source}")

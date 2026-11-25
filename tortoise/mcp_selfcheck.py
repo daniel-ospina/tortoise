@@ -649,6 +649,15 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if dropped_base is not None:
             return _base_source, dropped_base, read, ENTRY_ABSENT
         return (_base_source if base_survives else layers[0][0]), merged, read, ENTRY_ABSENT
+    # ⛔ THE ORIGIN MAP TRAVELS WITH THE ENTRY. `source` is ONE file, but a merged
+    # entry's fields come from DIFFERENT files, and several verdicts describe a field
+    # that is not the transport (`cwd-missing`, `python-lacks-tortoise`, an unset
+    # `${VAR}` in an inherited `env`/`headers`). Collapsing the map to the transport's
+    # origin made a repo-supplied `cwd` name the base, and a base-supplied `env` name
+    # the repo — so each verdict resolves the origin of the FIELD it talks about.
+    # The key is underscore-prefixed because `_walk_strings` skips those (it is not
+    # config content and must never reach the interpolation scan).
+    merged["_origin"] = dict(origin)
     transport_origin = origin.get("url") or origin.get("command")
     return (transport_origin or layers[0][0]), merged, read, OK
 
@@ -884,8 +893,13 @@ def classify(harness: str, *, project_dir: Path | None = None
 
     leaves = _walk_strings(entry)
     unset: list[str] = []
+    unset_field: str | None = None
     for _path, value in leaves:
         _, missing = _expand(value)
+        if missing and unset_field is None:
+            # Which FIELD carried the unset name — so the verdict can name the layer
+            # that supplied it, not the layer that supplied the transport.
+            unset_field = _path.split(".")[0].split("[")[0] or None
         unset.extend(m for m in missing if m not in unset)
     # ⛔ `type` IS NOT A TRANSPORT SELECTOR, and must not be read here at all. The
     # harness states it as an invariant: `type` is OPTIONAL and an AGREEMENT
@@ -950,6 +964,15 @@ def classify(harness: str, *, project_dir: Path | None = None
                    "(stdio), so the harness cannot load it",
             fix=f"re-register it: `tortoise onboard --harness {harness}`",
             source=source, transport="stdio", configs_read=read)
+    def _origin_of(*fields: str) -> str | None:
+        """The cover file that supplied the first of `fields`, or None."""
+        origins = entry.get("_origin") if isinstance(entry, dict) else None
+        if isinstance(origins, dict):
+            for field in fields:
+                if origins.get(field):
+                    return origins[field]
+        return None
+
     if unset:
         names = ", ".join(f"${n}" for n in unset)
         # ⛔ THE EMPTY-BEARER SENTENCE IS ABOUT A HEADER, and about THIS unset
@@ -973,10 +996,11 @@ def classify(harness: str, *, project_dir: Path | None = None
                        "credential's VALUE while the fault is the CAPTURE")
         return Verdict(
             status=ENV_UNSET, detail=detail + _also_consulted(source, read),
+            source=(_origin_of(unset_field) if unset_field else None) or source,
             fix=("replace the entry with the credential-free bridge — no "
                  "`${VAR}` in the config at all: "
                  f"`tortoise onboard --harness {harness}`"),
-            source=source, transport=transport, configs_read=read)
+            transport=transport, configs_read=read)
 
     if transport == "stdio":
         # ⛔ EXPAND before the existence checks. A command or cwd may interpolate
@@ -994,7 +1018,8 @@ def classify(harness: str, *, project_dir: Path | None = None
                 detail=f"the entry's command `{cmd}` does not exist on this machine",
                 fix=("point the entry at a real interpreter, or re-register it: "
                      f"`tortoise onboard --harness {harness}`"),
-                source=source, transport=transport, configs_read=read)
+                source=_origin_of("command") or source, transport=transport,
+                configs_read=read)
         if not cmd:
             return Verdict(
                 status=COMMAND_MISSING,
@@ -1016,7 +1041,8 @@ def classify(harness: str, *, project_dir: Path | None = None
                 detail=f"the entry's cwd `{cwd}` does not exist, so the "
                        f"command cannot be spawned there",
                 fix=f"re-register it: `tortoise onboard --harness {harness}`",
-                source=source, transport=transport, configs_read=read)
+                source=_origin_of("cwd") or source, transport=transport,
+                configs_read=read)
         args = entry.get("args")
         if isinstance(args, list) and "-m" in args:
             module = args[args.index("-m") + 1:] if len(args) > args.index("-m") + 1 else []
@@ -1038,7 +1064,8 @@ def classify(harness: str, *, project_dir: Path | None = None
                         fix=(f"install tortoise for `{cmd}`, or pin this box's "
                              f"interpreter: `tortoise onboard --harness "
                              f"{harness}` from the environment that has it"),
-                        source=source, transport=transport, configs_read=read)
+                        source=_origin_of("command", "args") or source,
+                        transport=transport, configs_read=read)
                 if missing:
                     # ⛔ NOT EVERY IMPORT FAILURE IS A MISSING MODULE. `python -c
                     # "import tortoise.mcp_server"` on an interpreter that HAS
