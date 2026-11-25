@@ -943,3 +943,18 @@ uv run python tools/test_lane.py run -- tests/test_directional_impl_fix.py -v
 ### Documentation Filing
 
 For topic-to-file routing, see `docs/00_index.md`. When in doubt, open `docs/00_index.md`.
+
+<!-- tortoise:mcp-first:begin v1 -->
+## Tortoise: reads go through the MCP
+
+Reads go through the Tortoise MCP (`tortoise_*` tools). Never hand-roll HTTP to
+`/v1/…` and never query the graph directly.
+
+If the `tortoise_*` tools are absent, or the server reports not-loaded, that is a
+**product defect**: stop, report it, and fix the MCP — do not silently work around
+it. One command names the reason:
+
+```bash
+tortoise mcp-status
+```
+<!-- tortoise:mcp-first:end -->

@@ -163,6 +163,44 @@ mode → teach-human fallback).
 > fallback, never a setup you present as durable. **Hosted? Skip to §3b**
 > (the dashboard universal command + per-harness rows).
 
+### One command first (preferred — #14607)
+
+Before any of the hand-written steps below, try the installer. It does what the
+comparables do (installer + hooks + skill, with the MCP as the *deep* surface)
+and it **verifies with a live call** instead of leaving the agent to discover a
+broken config by failing to use it:
+
+```bash
+tortoise onboard --harness pi        # claude | codex | cursor | pi
+```
+
+It registers the MCP as the **credential-free bridge**
+(`python3 -m tortoise.mcp_bridge`), so the config carries no `${VAR}` to expand
+and nothing to go stale; it installs the capture + per-turn recall seam; and it
+writes the two MCP-first sentences into `AGENTS.md`/`CLAUDE.md` — **as a diff you
+can see, idempotently, reversible with `--uninstall`**. It refuses to write those
+sentences while the MCP does not verify, because instructing an agent to use a
+door that does not open is the silent fallback they exist to end.
+
+Useful flags: `--verify` (change nothing, print the verdict), `--dry-run` (show
+every planned write), `--scope user` (the harness's global catalog instead of the
+repo's), `--no-hooks`, `--no-instructions`.
+
+**When the MCP does not load, ask the product why — not a search engine:**
+
+```bash
+tortoise mcp-status          # ONE line: the class, the layer, and the fix
+tortoise mcp-status --json   # {status, detail, fix, source, exit_code}
+```
+
+Exit `0` = proven loadable · `1` = down (the class names the layer) · `3` =
+abstention (unprobed, or the config format cannot be read — never a pass). The
+classes are closed and not collapsible: `entry-absent`, `env-unset`,
+`command-missing`, `cwd-missing`, `python-lacks-tortoise`, `no-credential`,
+`endpoint-unreachable`, `auth-rejected`, `server-error`, `resolves-unprobed`,
+`probe-unknown`. `endpoint-unreachable` is a TRANSPORT failure and must never be
+read as a credential problem.
+
 ### 3a. Self-hosted install: Docker Compose + FalkorDB first (the supported path)
 
 The supported self-hosted path is **Docker Compose with the real FalkorDB
