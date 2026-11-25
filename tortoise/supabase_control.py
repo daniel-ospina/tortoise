@@ -4338,8 +4338,10 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     authenticated request. Its remedy is `tools/record_allocator_cli.py
     backfill` (or `sweep`), which is what that CLI's own cutover text says and
     what `/health`'s `record.armed_but_uncut` entry names. The population this
-    arm DOES cover is a re-provision (the replay lanes call
-    :func:`_mint_default_graph_row_best_effort` unconditionally) and the race in
+    arm DOES cover is a re-provision (every provisioning wrapper —
+    :func:`provision_org`, :func:`provision_org_with_token`, agent signup, the
+    onboarding sub-org and the checkout replay — calls
+    :func:`_mint_default_graph_row_best_effort`) and the race in
     which the row appears after the credential path's miss read.
 
     ⛔ WHEN IT DOES RUN OVER A PRE-EXISTING GRAPH — the re-provision and the race
@@ -4456,9 +4458,15 @@ def ensure_default_graph_row(cp, org_id: str,
         # IS an active row, while any OTHER value leaves the org unnamed, which
         # is exactly how the migration's `status = 'active'` guard reads it.
         if (row.get("status") or "active") == "active" and row.get("id"):
-            # #14582: the self-heal arm — an EXISTING default row whose record
-            # cursor is missing gets one on this org's next credential
-            # resolution. Idempotent when it is already `active`.
+            # #14582: the short-circuit arm — a PRESENT default row returns here
+            # without re-running the creation door, because the credential
+            # resolvers reach this function only on their MISS path (see the
+            # docstring: a graph that predates the hook is NOT healed by its next
+            # authenticated request, and `record_allocator_cli.py backfill` is its
+            # remedy). The hook call below therefore fires on the two routes the
+            # docstring names — a re-provision of the default row, and the race in
+            # which the row appears after the credential path's miss read — and it
+            # is idempotent when the record is already `active`.
             _provision_default_graph_record(org_id, row["id"])
             return row["id"]
     if cp.query("graphs", select=["id"],

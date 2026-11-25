@@ -582,8 +582,8 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
       it is :data:`JOURNAL_COUNT_SQL` for this graph, which is the seed's own
       quantity ("how many positions already exist"), read in the same
       tenant-scoped transaction. A door must not have to know it: a brand-new
-      graph enumerates 0, and a graph that PREDATES the hook (the default row's
-      credential self-heal, a graph whose hook failed) enumerates N — and a
+      graph enumerates 0, and a graph that PREDATES the hook (a re-provision of
+      the default row, or a graph whose hook failed) enumerates N — and a
       hard-coded `0` would refuse that second population as `divergence` with
       text that is false ("the record claims positions this journal cannot
       reproduce") when the journal holds exactly those positions. Deriving it is
@@ -607,7 +607,7 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
     (the guard's own condition), so on a graph that is ALREADY `active` and has
     position rows, a `floor = 0` call reports `reason="divergence"` — a healthy
     cut-over graph accused of holding unreproducible positions. A re-entered hook
-    (a retry, the default row's credential self-heal) would then publish a
+    (a retry, a re-provision of the default row) would then publish a
     healthy graph as uncut and red `/health` for nothing. So the `active` case is
     decided by the ROW, before any seed runs.
 
@@ -643,8 +643,8 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
         if exc.reason != "armed":
             raise
         # The row is already `active`: the graph IS cut over, and a re-entered
-        # hook (a retry after a partial commit, the credential self-heal on the
-        # default row) is a no-op rather than a refusal.
+        # hook (a retry after a partial commit, a re-provision of the default
+        # row) is a no-op rather than a refusal.
         existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
         if existing is None:  # pragma: no cover - `armed` implies the row exists
             raise

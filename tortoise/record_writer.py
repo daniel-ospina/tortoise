@@ -3316,9 +3316,10 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     reads `JOURNAL_COUNT_SQL` for this graph in the same tenant-scoped
     transaction, which is the seed's own quantity ("how many positions already
     exist"). ⛔ A door must NOT have to know it, and a hard-coded `0` would be
-    WRONG for a graph that is older than the call site assuming it is new — the
-    default row's credential self-heal reaches a graph that may predate this hook,
-    and its journal holds exactly the positions a floor of `0` claims cannot
+    WRONG for a graph that is older than the call site assuming it is new — a
+    RE-PROVISION of the default row (or the race where the row appears after a
+    credential path's miss read) reaches a graph that may predate this hook, and
+    its journal holds exactly the positions a floor of `0` claims cannot
     exist. Either way the number is not trusted: `SEED_SQL` refuses
     (`SeedRefused(reason="divergence")`) when the journal's `MAX(seq)` exceeds the
     enumeration, so a real disagreement is REFUSED rather than silently seeded.

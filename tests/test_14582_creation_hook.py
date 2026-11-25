@@ -897,11 +897,17 @@ def test_a_credential_resolution_over_an_existing_row_never_enters_the_mint(
     monkeypatch.setattr(
         supabase_control, "_provision_default_graph_record", fake_hook)
 
-    cp = _RowOnlyControlPlane([{"id": "g_default", "namespace": "org_ns"}])
+    cp = _RowOnlyControlPlane([{"id": "g_default", "namespace": "org_ns_row"}])
     namespace, graph_id = supabase_control.default_graph_for_credential(
         cp, "org-14582", "org_ns", context="test")
 
-    assert (namespace, graph_id) == ("org_ns", "g_default"), (
+    # ⛔ THE FIXTURE'S NAMESPACE DIFFERS FROM THE `graph_name` ARGUMENT (#14624
+    # review P3-2). They used to be the SAME string, which made the pair
+    # assertion below unfalsifiable: `return (graph_name, row["id"])` — the exact
+    # regression the pair exists to prevent (#10452 F2) — produced the same
+    # tuple, so mutating the return left the row GREEN. With them distinct, a
+    # value taken from the argument instead of the one row read is visible.
+    assert (namespace, graph_id) == ("org_ns_row", "g_default"), (
         "the pair must come off the one row read, unchanged")
     assert cp.queries == [("graphs", ("id", "namespace"))], (
         f"the credential path is ONE read and nothing else: {cp.queries}")
