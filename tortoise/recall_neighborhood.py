@@ -268,12 +268,20 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
             # business logic — so it rides the relation to the renderer instead of
             # being dropped between assembly and render.
             mitigation = one_line(rel.get("mitigation"))
+            # ⛔ The PREDICATE is stored content too: it is `op.label` from the graph
+            # (`why.py` selects `op.label`), accepted verbatim by `create_operator`
+            # with only a warn-not-block violation. A newline in it closed and
+            # re-forged the envelope exactly as a peer label did — the one field the
+            # previous pass left raw.
+            predicate = one_line(rel.get("predicate") or "IMPL", max_chars=64) or "IMPL"
             rendered.append(
-                f"{rel.get('predicate', 'IMPL')} {arrow} "
+                f"{predicate} {arrow} "
                 f"\"{detail}\"{suffix}"
                 + (f" — rejected: {mitigation}" if mitigation else ""))
         lines.append(RELATIONS_PREFIX + "; ".join(rendered))
-    source = hood.get("source") or ""
+    # Normalised HERE as well as in `excerpt_from_hit` (its only producer today), so
+    # the guarantee lives at the choke point rather than at one caller.
+    source = one_line(hood.get("source"))
     if source:
         lines.append(f'{SOURCE_PREFIX}"{source}"')
     return lines

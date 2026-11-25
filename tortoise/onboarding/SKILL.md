@@ -473,7 +473,9 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > repo that declares its own `tortoise` transport field — write the PROJECT
 > file; (b) declaring a transport drops the other transport's fields (a repo
 > entry with `command` deletes the base's `url`/`headers`/`oauth`), and an
-> entry that declares BOTH `url` and `command` is ignored whole. `tortoise
+> entry that declares BOTH `url` and `command` is ignored whole **when it is a
+> delta over an existing entry; a repo-only entry is KEPT and runs over `url`**
+> (dropping it would zero a working server). `tortoise
 > mcp-status` grades exactly this merge.
 >
 > ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
@@ -486,12 +488,12 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > through these five steps before writing — step 1 can stop you early if the
 > entry is already correct:
 >
-> 1. **Detect** — resolve which `.mcp.json` is EFFECTIVE first (the first one
->    found walking up from cwd, else `~/.pi/agent/.mcp.json` — a project file
->    shadows the home config), then read that file's `tortoise` entry before
->    writing. Never write blind. An entry that looks right in a SHADOWED file
->    does not count: if the effective file has no `tortoise`, the connection
->    is absent. If the effective entry already matches the intended shape
+> 1. **Detect** — resolve the EFFECTIVE entry first: walk up from cwd to the git
+>    top-level for the repo's `.mcp.json` AND read `~/.pi/agent/.mcp.json` as the
+>    base, then MERGE them per field (the repo wins each field it sets, inherits
+>    each field it omits — see the resolution-order note). Never write blind. A
+>    field inherited from the base DOES count: an entry that looks empty in the
+>    repo file may still be complete once merged. If the effective entry already matches the intended shape
 >    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
@@ -510,8 +512,9 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    and 401s (#5153), so report which of the two states you found. Only a
 >    genuinely BROKEN entry (wrong `url`, missing or headerless
 >    `Authorization`) is yours to correct — and only after the confirm gate.
->    A home/base entry is left untouched and merely shadowed, so nothing is
->    overwritten and there is no preserve step.
+>    A home/base entry is left untouched and its FIELDS are inherited where the
+>    repo entry omits them, so nothing is overwritten and there is no preserve
+>    step.
 > 2. **Report** — tell the human the existing entry's backend (its `url`, or
 >    the local stdio `command`) and its graph size when that backend is
 >    reachable (local/self-hosted: query the node count). If it is
@@ -544,8 +547,9 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    entry.
 > 5. **Write** — only now add the hosted `tortoise` entry above. Prefer the
 >    PROJECT `.mcp.json`; write the home/base config only when no project file
->    is in play, since a project file always shadows it and a home write is
->    then a silent no-op (see the resolution-order note).
+>    is in play, since a repo entry declaring a transport field wins it over the
+>    base and a home-only write is then inert for that field (see the
+>    resolution-order note).
 >
 > Preserving the prior entry does **not** certify it: a preserved local stdio
 > entry can be broken in more than one way — a wrong port or password, and the

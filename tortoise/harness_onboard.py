@@ -174,6 +174,12 @@ def _config_path(harness: str, project_dir: Path, *,
     asked about. `project` (the default) always resolves inside `project_dir`;
     `user` always resolves under `~`.
     """
+    # ⛔ RESOLVE FIRST: the CLI's default is the RELATIVE `Path(".")`, and
+    # `Path(".").parents == []`, so every walk below stayed in the cwd and the
+    # installer wrote `<cwd>/.mcp.json` — a nested file that SHADOWS the repo root
+    # for every session started below it. `read_entry` resolves, so installer and
+    # verifier disagreed about which file is the repo layer.
+    project_dir = Path(project_dir).resolve()
     rels = mcp_selfcheck.HARNESS_CONFIG_PATHS.get(harness)
     if not rels:
         return None
@@ -517,6 +523,7 @@ def _instruction_path(project_dir: Path, name: str) -> Path:
     "nothing to remove". The agent in that subdirectory reads the new file; the one
     at the root never sees the sentences.
     """
+    project_dir = Path(project_dir).resolve()   # see `_config_path`
     return (mcp_selfcheck._project_layer(project_dir, name)
             or (mcp_selfcheck._repo_root(project_dir) or project_dir) / name)
 
@@ -618,7 +625,7 @@ def onboard(harness: str = "pi", *, project_dir: Path | None = None,
     would instruct the agent to use a door that does not open — the exact silent
     fallback the sentences exist to end.
     """
-    project_dir = Path(project_dir or Path.cwd())
+    project_dir = Path(project_dir or Path.cwd()).resolve()
     out = InstallResult(harness=harness)
 
     if uninstall:

@@ -363,21 +363,45 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # stdio checks never ran and `check(live=True)` could green it.
     HTTP_TRANSPORT_FIELDS = ("url", "headers", "oauth")
     STDIO_TRANSPORT_FIELDS = ("command", "args", "env", "cwd")
-    merged: dict = {}
-    for _source, entry in reversed(layers):
-        declares_http = bool(entry.get("url"))
-        declares_stdio = bool(entry.get("command"))
+    def _sanitized(entry: dict) -> dict:
+        """A present-but-FALSY transport is ABSENCE, not a delta value.
+
+        `{"url": ""}` / `{"command": ""}` are stripped by the harness (added for
+        `#3628` rounds 3-4) so the base's working transport stands; copying the
+        empty value over the base instead made a working config read as
+        `command-missing`.
+        """
+        clean = dict(entry)
+        for field in ("url", "command"):
+            if field in clean and not clean[field]:
+                clean.pop(field)
+        return clean
+
+    # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
+    # and each more specific layer is applied as a DELTA over what is accumulated.
+    _base_source, base_entry = layers[-1]
+    merged: dict = _sanitized(base_entry)
+    for _source, delta in reversed(layers[:-1]):
+        delta = _sanitized(delta)
+        declares_http = bool(delta.get("url"))
+        declares_stdio = bool(delta.get("command"))
         if declares_http and declares_stdio:
-            # Ambiguous delta: the harness ignores it whole rather than guessing.
+            # Ambiguous DELTA over an existing entry: ignored whole, as the harness
+            # does. ⛔ NOT the same case as a repo-only entry declaring both, which
+            # the harness KEEPS and runs over `url` (dropping it would zero a
+            # working server) — that is the single-layer case, handled by the base
+            # copy above, and skipping it here was a false `command-missing`.
             continue
-        carry = dict(entry)
+        merged.update(delta)
         if declares_stdio:
             for field in HTTP_TRANSPORT_FIELDS:
                 merged.pop(field, None)
         elif declares_http:
             for field in STDIO_TRANSPORT_FIELDS:
                 merged.pop(field, None)
-        merged.update(carry)
+    if not merged.get("url") and not merged.get("command"):
+        # Nothing that can start: the miss class, never `("ok", {})`.
+        return layers[0][0], merged, read, ENTRY_ABSENT
     return layers[0][0], merged, read, OK
 
 
@@ -527,16 +551,26 @@ def classify(harness: str, *, project_dir: Path | None = None
     for _path, value in leaves:
         _, missing = _expand(value)
         unset.extend(m for m in missing if m not in unset)
-    # ⛔ PRESENCE, not `type or url`: an inherited `url` must not beat an explicit
-    # `type: stdio`, and after the merge the transport is decided by what the
-    # effective entry can actually spawn or dial.
-    if entry.get("command"):
-        transport = "stdio"
-    elif entry.get("url"):
+    # ⛔ `type` IS NOT A TRANSPORT SELECTOR, and must not be read here at all. The
+    # harness states it as an invariant: `type` is OPTIONAL and an AGREEMENT
+    # constraint; `connectServer` dispatches on `url`/`command` and an entry with
+    # NEITHER throws "has neither 'command' nor 'url'" and never loads. Falling back
+    # to `type` made such an entry take the http branch, so `declared_endpoint()`
+    # returned None, the probe graded the CLIENT-resolved endpoint and reported
+    # `OK — live call succeeded` (exit 0) for a config the harness cannot load: the
+    # fail-open this module exists to remove, through a "last resort" branch.
+    if entry.get("url"):
         transport = "http"
+    elif entry.get("command"):
+        transport = "stdio"
     else:
-        transport = ("http" if entry.get("type") in ("http", "streamable-http")
-                     else "stdio")
+        return Verdict(
+            status=COMMAND_MISSING,
+            detail="the entry declares neither a `url` (http) nor a `command` "
+                   "(stdio), so the harness cannot load it — its `type` does not "
+                   "select a transport",
+            fix=f"re-register it: `tortoise onboard --harness {harness}`",
+            source=source, transport="stdio", configs_read=read)
     if unset:
         names = ", ".join(f"${n}" for n in unset)
         blank_credential = any(

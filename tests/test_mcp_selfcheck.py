@@ -1169,3 +1169,89 @@ def test_the_instruction_block_lands_at_the_repo_root(tmp_path):
     assert result.wrote == [str(root / "AGENTS.md")], result.wrote
     assert not (nested / "AGENTS.md").exists()
     assert harness_onboard.BEGIN_MARK in (root / "AGENTS.md").read_text()
+
+
+# ── `type` is not a transport selector: no url and no command cannot load ─
+
+def test_an_entry_with_neither_url_nor_command_is_never_ok(project, monkeypatch):
+    """Measured before this arm: `{"type": "http", "headers": {...}}` probed the
+    CLIENT-resolved endpoint and returned `OK — live call succeeded`, exit 0, for a
+    config the harness cannot load (`has neither 'command' nor 'url'`)."""
+    _write_config(project, {"type": "http",
+                            "headers": {"Authorization": "Bearer tt_whatever"}})
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_whatever")
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert "its `type` does not" in verdict.detail
+    assert not verdict.ok and verdict.exit_code != 0
+
+
+# ── the two merge shapes the harness documents ──────────────────────────
+
+def _layers(tmp_path, monkeypatch, *, base, repo_entry):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(
+        json.dumps({"mcpServers": {"tortoise": base}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"tortoise": repo_entry}}), encoding="utf-8")
+    return repo
+
+
+def test_an_ambiguous_BASE_still_loads_behind_a_field_delta(tmp_path, monkeypatch):
+    """A base declaring BOTH transports is copied verbatim; only a DELTA is ignored."""
+    repo = _layers(tmp_path, monkeypatch,
+                   base={"type": "http", "url": "https://api.premiselabs.co/mcp/",
+                         "command": "python3"},
+                   repo_entry={"timeoutMs": 40000})
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status != mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert verdict.status != mcp_selfcheck.ENTRY_ABSENT, verdict.line()
+
+
+def test_a_falsy_transport_is_ABSENCE_not_a_delta_value(tmp_path, monkeypatch):
+    """`{"command": ""}` must not erase the base's working transport."""
+    repo = _layers(tmp_path, monkeypatch,
+                   base={"type": "stdio", "command": "python3",
+                         "args": ["-m", "tortoise.mcp_bridge"],
+                         "env": {"TORTOISE_MCP_URL": "http://127.0.0.1:9999/mcp"}},
+                   repo_entry={"command": ""})
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.transport == "stdio", verdict.line()
+    assert verdict.status != mcp_selfcheck.COMMAND_MISSING, verdict.line()
+
+
+def test_a_repo_only_entry_declaring_both_transports_is_kept_over_url(
+        tmp_path, monkeypatch):
+    """Dropping it would zero a working server; the harness keeps and runs over `url`."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)          # no base entry at all
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "type": "http", "url": "https://api.premiselabs.co/mcp/",
+        "command": "python3"}}}), encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
+    assert verdict.transport == "http"
+
+
+def test_the_default_relative_dir_still_writes_the_repo_root_config(tmp_path, monkeypatch):
+    """The CLI's `--dir` default is `Path(".")`; `Path(".").parents == []`."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    sub = root / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    result = harness_onboard.write_config("pi", Path("."))
+    assert result.wrote == [str(root / ".mcp.json")], result.wrote
+    assert not (sub / ".mcp.json").exists()
