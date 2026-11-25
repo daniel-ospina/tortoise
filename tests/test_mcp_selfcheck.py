@@ -2142,3 +2142,71 @@ def test_a_base_without_a_transport_names_the_layer_it_came_from(tmp_path, monke
     assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
     assert verdict.source == str(base_path), verdict.source
     assert str(repo / ".mcp.json") in verdict.detail, verdict.detail
+
+
+def test_a_MERGED_entry_attributes_the_transport_field_to_its_own_layer(
+        tmp_path, monkeypatch):
+    """`source` is per-field after a merge, not "the most specific file present".
+
+    Measured before per-field provenance: a base carrying `url` + an
+    `Authorization: Bearer ${VAR}` header, with a `{timeoutMs}` delta in the repo
+    (the harness's own documented delta recipe), produced `env-unset` naming the
+    REPO file — which contains no header and no `${…}` at all.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    (home / ".pi/agent").mkdir(parents=True)
+    base_path = home / ".pi/agent/.mcp.json"
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp/",
+        "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "timeoutMs": 90000}}}), encoding="utf-8")
+
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.ENV_UNSET, verdict.line()
+    assert verdict.source == str(base_path), (
+        f"the header lives in the BASE; the verdict named {verdict.source}")
+    assert str(repo / ".mcp.json") in verdict.detail, verdict.detail
+
+
+def test_a_blank_transport_in_the_base_is_attributed_to_the_base(tmp_path, monkeypatch):
+    """Same class, blank-transport branch: the `url` is the base's, not the repo's."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    base_path = home / ".pi/agent/.mcp.json"
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "   "}}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "timeoutMs": 90000}}}), encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert verdict.source == str(base_path), verdict.source
+    assert "BLANK" in verdict.detail and str(repo / ".mcp.json") in verdict.detail
+
+
+def test_a_transport_supplied_by_the_REPO_is_attributed_to_the_repo(tmp_path, monkeypatch):
+    """The converse: provenance must follow the field, not always the base."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"timeoutMs": 90000}}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    repo_cfg = repo / ".mcp.json"
+    repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp/"}}}), encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.source == str(repo_cfg), verdict.source

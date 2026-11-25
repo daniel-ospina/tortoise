@@ -370,6 +370,17 @@ def same_destination(a: object, b: object) -> bool:
     return parts(a) == parts(b)
 
 
+def _also_consulted(source: str | None, read: list[str]) -> str:
+    """A clause naming the OTHER layers, for a detail about a merged entry.
+
+    The effective entry can come from the base while a more specific file was
+    consulted and contributed nothing to the field being described — so a line that
+    names only `source` reads as if that file held the fault.
+    """
+    others = [pth for pth in read if pth != source]
+    return f" (also consulted: {', '.join(others)})" if others else ""
+
+
 def _js_falsy(value: object) -> bool:
     """JS truthiness for the values a JSON config can carry.
 
@@ -521,6 +532,14 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         dropped_base = base_entry
         base_entry = {}
     merged: dict = _sanitized(base_entry)
+    # ⛔ PER-FIELD PROVENANCE: `Verdict.source` is documented as "the config file
+    # the entry came from", and after a merge that is a PER-FIELD answer. Returning
+    # the most specific file PRESENT named a file that need not contain the field the
+    # detail talks about — measured: base `{url, headers.{Authorization: Bearer
+    # ${VAR}}}` + repo `{timeoutMs}` reported `env-unset` about a REPO file carrying
+    # no header at all. Tracking the origin lets the verdict name the layer that
+    # actually supplied the transport (and `read` still lists every file consulted).
+    origin: dict[str, str] = {k: _base_source for k in merged}
     # The harness ALSO drops a base entry left with no transport after the falsy
     # strip (`deadTransports` → delete → `continue` when neither key remains). `{}`
     # is NOT that case: `Object.hasOwn` is true and `{}` is truthy in JS, so an
@@ -581,6 +600,7 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if "url" in delta and not same_destination(merged.get("url"), delta.get("url")):
             for field in HTTP_CREDENTIAL_FIELDS:
                 merged.pop(field, None)
+                origin.pop(field, None)
         # ⛔ Only when the launch actually CHANGES (`sameLaunch` compares command,
         # cwd and args), and only when the projected entry has a command. Firing on
         # mere MENTION dropped `env` on an identical restatement, so a repo entry
@@ -598,7 +618,10 @@ def read_entry(harness: str, *, project_dir: Path | None = None
 
         if "command" in projected and not _same_launch(merged, projected):
             merged.pop("env", None)
+            origin.pop("env", None)
         merged.update(delta)
+        for field in delta:
+            origin[field] = _source
         # ⛔ Only when the layer declares EXACTLY ONE transport. A kept repo-only
         # entry declaring both must stay whole — the harness runs it over `url`, and
         # popping `url` here because `command` is also present turned that documented
@@ -606,9 +629,11 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if declares_stdio and not declares_http:
             for field in HTTP_TRANSPORT_FIELDS:
                 merged.pop(field, None)
+                origin.pop(field, None)
         elif declares_http and not declares_stdio:
             for field in STDIO_TRANSPORT_FIELDS:
                 merged.pop(field, None)
+                origin.pop(field, None)
     if not merged.get("url") and not merged.get("command"):
         # Nothing that can start: the miss class, never `("ok", {})`. When the
         # reason is a DROPPED entry, hand that entry back so the class can name it
@@ -624,7 +649,8 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         if dropped_base is not None:
             return _base_source, dropped_base, read, ENTRY_ABSENT
         return (_base_source if base_survives else layers[0][0]), merged, read, ENTRY_ABSENT
-    return layers[0][0], merged, read, OK
+    transport_origin = origin.get("url") or origin.get("command")
+    return (transport_origin or layers[0][0]), merged, read, OK
 
 
 def _repo_root(project_dir: Path) -> Path | None:
@@ -880,8 +906,9 @@ def classify(harness: str, *, project_dir: Path | None = None
             # exactly what is wrong, which is what a reader acts on.
             return Verdict(
                 status=COMMAND_MISSING,
-                detail="the entry's `url` is BLANK, so the harness cannot build a "
-                       "transport from it — the entry cannot load",
+                detail=("the entry's `url` is BLANK, so the harness cannot build a "
+                        "transport from it — the entry cannot load"
+                        + _also_consulted(source, read)),
                 fix=f"re-register it: `tortoise onboard --harness {harness}`",
                 source=source, transport="http", configs_read=read)
     elif isinstance(command_value, str) and command_value:
@@ -889,8 +916,9 @@ def classify(harness: str, *, project_dir: Path | None = None
         if not command_value.strip():
             return Verdict(
                 status=COMMAND_MISSING,
-                detail="the entry's `command` is BLANK, so the harness cannot spawn "
-                       "it — the entry cannot load",
+                detail=("the entry's `command` is BLANK, so the harness cannot spawn "
+                        "it — the entry cannot load"
+                        + _also_consulted(source, read)),
                 fix=f"re-register it: `tortoise onboard --harness {harness}`",
                 source=source, transport="stdio", configs_read=read)
     else:
@@ -944,7 +972,7 @@ def classify(harness: str, *, project_dir: Path | None = None
                        "or missing Bearer token` — the message names the "
                        "credential's VALUE while the fault is the CAPTURE")
         return Verdict(
-            status=ENV_UNSET, detail=detail,
+            status=ENV_UNSET, detail=detail + _also_consulted(source, read),
             fix=("replace the entry with the credential-free bridge — no "
                  "`${VAR}` in the config at all: "
                  f"`tortoise onboard --harness {harness}`"),
