@@ -2282,6 +2282,12 @@ class AbuseEngine:
         flapping (a state that outlives the instant the condition was met); the
         syntax is not: we have no Alertmanager layer to rate-limit notifications
         for us, so the state has to live in this engine.
+
+        Applied to BOTH flagging rules by ``_evaluate``, so R2's 10 keys/24h
+        clears at 5 rather than 10. Stated because it is a real behaviour change
+        for a rule this issue did not set out to recalibrate: it is the same
+        latch, and a key-creation burst that halves is not the burst that was
+        reported. The absolute levels are untouched.
         """
         return _ratio_env("TORTOISE_ABUSE_CLEAR_RATIO", 0.5)
 
