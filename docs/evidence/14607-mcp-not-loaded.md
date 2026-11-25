@@ -2,15 +2,32 @@
 
 **Measured** on the `cmux` cell, 2026-11-25, at `feat/14607-agent-onboarding`
 (worktree `.worktrees/14607-onboard`). Every fact below is a command's output, not
-an inference.
+an inference — **and where a block is quoted from issue #14607's own report rather
+than measured here, it says so**. The distinction matters on this box: it has
+GitHub-only egress, so the hosted endpoint cannot be reached from it at all
+(§"The cell-specific third fact"), and a block that shows the endpoint answering
+is a block from somewhere else.
 
 ## 1. The symptom, as the agent sees it
 
 ```bash
 $ mcp_catalog
 tortoise [core, not-loaded]
+```
 
-$ mcp_load tortoise
+(measured on this cell, 2026-11-25T04:28Z — the catalog is local state, so it
+reproduces here.)
+
+A `core` server — meant to be always-on — is down, and the only surface that says
+so is a status string in a catalog listing. Nothing puts the failure into the
+agent's turn.
+
+**What `mcp_load` then returns depends on the box, and the difference is the whole
+point of this document.** On a box that can reach the endpoint, it is an auth
+rejection — this is issue #14607's own report, and the same `-32001` body is
+recorded in `tortoise/mcp_bridge.py`'s #10605 post-mortem:
+
+```text
 Streamable HTTP error: Error POSTing to endpoint:
 {"jsonrpc":"2.0","error":{"code":-32001,
   "message":"Unauthorized: invalid or missing Bearer token.
@@ -18,13 +35,22 @@ Streamable HTTP error: Error POSTing to endpoint:
              (or an OAuth access token for #524 OAuth clients)"}}
 ```
 
-A `core` server — meant to be always-on — is down, and the only surface that says
-so is a status string in a catalog listing. Nothing puts the failure into the
-agent's turn.
+On **this** cell the same verb fails one layer earlier, at transport — measured
+here, 2026-11-25T04:28Z:
+
+```bash
+$ mcp_load tortoise
+MCP error -32603: MCP transport failure talking to https://api.premiselabs.co/mcp/:
+  [Errno -3] Temporary failure in name resolution
+```
+
+One verb, two different classes, and an agent that reads either as "the key is
+bad" is sent to the wrong layer. That is R2's defect stated as a measurement.
 
 ## 2. What the harness is actually configured with
 
-The **tracked** harness config in this repo (`.mcp.json` at the worktree root):
+The **tracked** harness config in this repo, as shipped **before this change**
+(`.mcp.json` at the worktree root — the entry §5 installs replaces it):
 
 ```json
 "tortoise": {
@@ -52,18 +78,22 @@ Two entries, same name, **different transports**, and neither is verified.
 
 | # | probe | result |
 |---|---|---|
-| 1 | `TORTOISE_API_KEY` | **unset** |
+| 1 | `TORTOISE_API_KEY` | **set** — `len 35`, prefix `tt_`. (An earlier revision of this file recorded this as *unset* and pasted a `tortoise config show` block saying `not set` / `Identity: none resolved`. **That was wrong, and it is corrected here**: the variable is present in this cell's ambient environment — measured in this shell and in the long-lived controller process that started the previous day — so the §4 conclusion it supported is restated below.) |
 | 2 | `~/.pi/agent/tortoise-config.json` (the harness credential store) | **absent** |
 | 3 | `~/.tortoise/credentials.json`, `./.tortoise` (the CLI stores) | **absent, absent** |
 | 4 | `$TORTOISE_HOME` (the user-scope stdio entry's root) | **unset** → defaults to `$HOME/Documents/GitHub/tortoise`, which **does not exist** on this box |
 
-`tortoise config show` — the product's own credential resolver — agrees:
+`tortoise config show` — the product's own credential resolver — agrees, and it
+agrees with row 1, not with the revision it replaced:
 
 ```bash
-  TORTOISE_API_KEY (env)                      not set
-  ./.tortoise                                 absent
-  ~/.tortoise/credentials.json                absent
-Identity: none resolved.
+  TORTOISE_API_KEY (env)                                 set        ←  USED
+  ./.tortoise                                            absent
+  ~/.tortoise/credentials.json                           absent
+
+Identity
+  api_url       https://api.premiselabs.co   (masked)
+  api_key       tt_…d14a  (sha256:6c404ea36be4)
 ```
 
 ## 4. Root cause — TWO defects, one shape
@@ -71,25 +101,39 @@ Identity: none resolved.
 ### R1 · The harness config is a **CAPTURE**, not a lookup
 
 `"Authorization": "Bearer ${TORTOISE_API_KEY}"` is an expansion of an environment
-variable that the harness read **once, at process start**. With the variable
-unset, the expansion is the empty string, so the request goes out as:
+variable performed **once, at the harness's process start** — the value is frozen
+into the request from then on, and the config can never say whether it was
+resolved at all. Two consequences, and only one of them is observable on this
+box:
 
-```text
-Authorization: Bearer 
-```
-
-`tortoise/mcp_auth.py` can only answer that one way
-(`OrgResolutionMiddleware.dispatch`, `:1547`): `-32001 Unauthorized: invalid or
-missing Bearer token`. **The message names the credential's VALUE. The fault is
-that the client never had one, and the config cannot say so.** A message that
-points at the wrong layer is why this survived: every reader chased a key instead
-of the capture.
+- **The empty-bearer shape (documented, not measured here).** With the variable
+  unset the expansion is the empty string, so the request goes out carrying an
+  `Authorization: Bearer` header and an EMPTY token — and `tortoise/mcp_auth.py`
+  can only answer that one way (`OrgResolutionMiddleware.dispatch`, `:1547`):
+  `-32001 Unauthorized: invalid or missing Bearer token`. **The message names the
+  credential's VALUE; the fault is that the client never had one.** This is the
+  shape #14607 reports, and it is the class `tortoise/mcp_bridge.py`'s docstring
+  already documents as #10605's post-mortem.
+  ⛔ **It is NOT what this box measured.** Here `TORTOISE_API_KEY` is **set**
+  (§3 row 1), so the shipped entry sends a REAL bearer, and this cell's own
+  failure is transport (§"the cell-specific third fact") — an earlier revision of
+  this document claimed the unset case as measured here, which was false.
+- **The captured-value shape (structural).** Whatever the variable held when the
+  harness started is what it keeps sending — so re-minting or rotating the key
+  changes nothing until the harness restarts, and no surface can report that the
+  value it holds is stale.
 
 This class is **already documented and already fixed** in
 `tortoise/mcp_bridge.py` (its docstring is #10605's post-mortem) — but the fix was
 never *applied to the config*, so the defect is live in the tracked `.mcp.json`
 and in the user-scope file. The bridge and the config disagree, and nothing
 notices.
+
+⚠️ **What the config change is therefore worth — stated plainly.** It removes a
+defect *class* and makes the credential path resolvable per request and
+verifiable; it is **not** shown here to fix this cell's outage, which is
+transport. The one command still owed a box with egress is `tortoise mcp-status`
+(expect `OK`) after `tortoise onboard --harness pi`.
 
 ### R2 · Nothing verifies the harness config
 

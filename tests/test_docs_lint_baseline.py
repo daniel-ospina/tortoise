@@ -1878,9 +1878,12 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # finding, same line). The deficit was repaired at the SOURCE and the row burnt
     # down with it: `AGENTS.md:4` now carries a bare `>` (the blockquote's own
     # continuation marker), where the pinned linter reports `0 issues` on the file
-    # and the changed-set differ reports `0 new, 0 known`. The rendered page is
-    # unchanged; the two blockquotes were always one blockquote with a blank line
-    # in it, which is exactly what MD028 names.
+    # and the changed-set differ reports `0 new, 0 known`. No WORD changed — but the
+    # HTML does: two adjacent `<blockquote>` elements become ONE blockquote holding
+    # two paragraphs (measured with `markdown_it`: base 2 blockquotes, head 1;
+    # `identical html: False`), which renders as the continuous quote it always read
+    # as. An earlier revision of this comment and the commit message said "the
+    # rendered page is unchanged", which was wrong.
     assert _canonical_digest(baseline["markdownlint"]) == (
         "df12d1b614112e91d2e3fdbe1665aacc7d79a57f360da730cb8bbb670bbdb67c"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"

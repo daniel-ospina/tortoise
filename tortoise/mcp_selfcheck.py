@@ -630,7 +630,16 @@ def _classify_probe_failure(exc: BaseException) -> str:
             "temporary failure in name resolution", "could not resolve",
             "connection refused", "connect error", "timed out", "timeout",
             "ssl", "network is unreachable", "no route to host",
-            "all connection attempts failed", "unavailable")):
+            "all connection attempts failed")):
+        # ⛔ NO BARE `"unavailable"` TOKEN HERE. It matched httpx's
+        # `Client error '503 Service Unavailable'` — a host that ANSWERED — and
+        # classified it `endpoint-unreachable`, whose fix line then sends the
+        # reader to check egress/DNS for a machine that just replied. That is the
+        # same layer collapse this module exists to prevent, mirrored: the table
+        # says an answer with neither transport nor auth semantics is
+        # `server-error`, and a 5xx is an answer. Each token above names a
+        # TRANSPORT event; "service unavailable" names a response, so it stays
+        # out.
         return UNREACHABLE
     if any(tok in lowered for tok in (
             "401", "403", "unauthorized", "forbidden", "invalid or missing bearer",
@@ -643,6 +652,9 @@ _FIX_BY_CLASS = {
     UNREACHABLE: ("the endpoint cannot be reached from this machine — a "
                   "TRANSPORT failure, not a credential one; check egress/DNS for "
                   "the configured host, or point the entry at a reachable target"),
+    NO_CREDENTIAL: ("no credential resolved on the client, so the request went out "
+                    "with none — supply one (`tortoise signup`, or "
+                    "`tortoise init --api-key tt_…`) and re-verify"),
     AUTH_REJECTED: ("the endpoint answered and REFUSED the credential — the key "
                     "is present but invalid, revoked, or for another "
                     "organization; re-mint it and re-verify"),
@@ -737,6 +749,27 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
         return Verdict(status=status, detail=f"{_first_line(exc)} (graded {graded})",
                        fix=_fix_for(exc, status),
                        transport="http")
+    if not tools:
+        # ⛔ A HANDSHAKE IS NOT A TOOL SURFACE. The endpoint answered `initialize`
+        # and `tools/list` correctly and returned ZERO tools — the harness then
+        # loads a server that exposes no `tortoise_*` tool at all, which is the
+        # #14607 symptom (`the tortoise_* tools are absent`) reached through a
+        # HEALTHY transport. Grading that `OK` would be the fail-open this module
+        # exists to remove, one layer further down than the empty-bearer capture:
+        # every earlier layer passed truthfully and the outcome is still a door
+        # that does not open. `server-error` is the class because the endpoint
+        # answered (not transport, not auth) and its answer is unusable; the fix
+        # is stated here rather than taken from `_FIX_BY_CLASS`, whose generic
+        # "read its body" has no body to read.
+        return Verdict(
+            status=SERVER_ERROR,
+            detail=(f"the endpoint answered a valid MCP handshake and advertised "
+                    f"0 tools (graded {graded}) — the harness would load no "
+                    f"tortoise_* tool from it"),
+            fix=("the server registered NO tools — check that the endpoint is "
+                 "Tortoise's MCP (not another MCP server on that URL) and that "
+                 "the credential's organization can see the tool registry"),
+            transport="http")
     return Verdict(
         status=OK,
         detail=f"live call succeeded — {len(tools)} tools registered (graded {graded})",

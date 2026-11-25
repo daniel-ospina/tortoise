@@ -552,6 +552,67 @@ def auth_endpoint():
         server.server_close()
 
 
+class _NoTools(BaseHTTPRequestHandler):
+    """An endpoint that completes the MCP handshake and advertises ZERO tools."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        method = payload.get("method")
+        if method == "initialize":
+            result = {"protocolVersion": "2024-11-05",
+                      "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "tortoise", "version": "test"}}
+        elif method == "tools/list":
+            result = {"tools": []}
+        else:
+            result = {}
+        body = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"),
+                           "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture()
+def tool_less_endpoint():
+    server = HTTPServer(("127.0.0.1", 0), _NoTools)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_handshake_with_zero_tools_is_a_failure_not_a_pass(
+        tool_less_endpoint, monkeypatch):
+    """⛔ THE SYMPTOM ARRIVING THROUGH A HEALTHY TRANSPORT.
+
+    `initialize` and `tools/list` both succeed; the list is EMPTY. The harness
+    then loads a server exposing no `tortoise_*` tool — issue #14607's own
+    symptom — while every earlier layer (transport, credential, handshake) tells
+    the truth. Grading that `OK` is the fail-open this module exists to remove, so
+    the verdict is a DOWN with a non-zero exit, and its class is `server-error`:
+    the endpoint ANSWERED, with something unusable.
+    """
+    monkeypatch.setenv("TORTOISE_MCP_URL", tool_less_endpoint)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_present-but-useless-14607")
+    verdict = mcp_selfcheck.probe()
+    assert verdict.status == mcp_selfcheck.SERVER_ERROR, verdict.line()
+    assert not verdict.ok
+    assert verdict.exit_code == 1
+    assert "0 tools" in verdict.line(), (
+        "the verdict must name what was found, not just which class it is")
+    assert "DOWN [server-error]" in verdict.line()
+
+
 def test_the_default_install_verifies_although_the_shell_declares_no_endpoint(
         project, auth_endpoint, monkeypatch):
     """⛔ THE SHAPE THE PR IS FOR: entry names a live endpoint, shell names none.
@@ -807,6 +868,58 @@ def test_a_withheld_credential_is_not_classified_as_a_server_error():
         f"only its host disagrees: {fix!r}")
     assert "re-mint" not in fix.lower(), (
         f"re-minting a valid key does not fix a host mismatch: {fix!r}")
+
+
+def test_a_missing_credential_still_carries_a_remedy():
+    """Every DOWN line owes the reader a fix — including the credential classes.
+
+    `no-credential` arrived on the PROBE path (`MCPKeyEmptyError`, or the
+    `MCP-KEY-EMPTY` marker) and had no `_FIX_BY_CLASS` entry, so a probe that
+    resolved nothing rendered `DOWN [no-credential]: …` with an EMPTY remedy —
+    the dead end the module's own docstring says it exists to remove. The class
+    names the layer; the fix has to say what to do about it.
+    """
+    class _KCEmpty(Exception):
+        pass
+
+    status = mcp_selfcheck._classify_probe_failure(_KCEmpty(
+        "MCP-KEY-EMPTY: no credential resolved from TORTOISE_API_KEY, ./.tortoise, "
+        "~/.tortoise/credentials.json"))
+    assert status == mcp_selfcheck.NO_CREDENTIAL, status
+    fix = mcp_selfcheck._fix_for(_KCEmpty("MCP-KEY-EMPTY"), status)
+    assert fix.strip(), (
+        "a no-credential verdict rendered no remedy at all — the DOWN line ends "
+        "at the class name and the reader has nowhere to go")
+    assert "key" in fix.lower(), f"the remedy must be about the key: {fix!r}"
+
+
+def test_a_5xx_answer_is_a_server_error_not_a_transport_failure():
+    """A host that ANSWERS has not become unreachable — the mirror of the
+    auth-vs-transport collapse this module exists to prevent.
+
+    The transport token list carried a bare `"unavailable"`, which matched
+    httpx's `Client error '503 Service Unavailable'` and classified an ANSWERING
+    host as `endpoint-unreachable` — whose fix sends the operator to check
+    egress/DNS for a machine that just replied. `server-error` is the class the
+    module's own table assigns to a 5xx; a genuine transport phrase must still
+    reach `endpoint-unreachable`.
+    """
+    class _Http(Exception):
+        pass
+
+    for text in ("Client error '503 Service Unavailable' for url 'http://h/mcp'",
+                 "Client error '502 Bad Gateway' for url 'http://h/mcp'",
+                 "500 Internal Server Error"):
+        status = mcp_selfcheck._classify_probe_failure(_Http(text))
+        assert status == mcp_selfcheck.SERVER_ERROR, (
+            f"{text!r} was classified {status!r} — the host answered, so this is "
+            "not a transport failure")
+    for text in ("All connection attempts failed",
+                 "[Errno -3] Temporary failure in name resolution"):
+        status = mcp_selfcheck._classify_probe_failure(_Http(text))
+        assert status == mcp_selfcheck.UNREACHABLE, (
+            f"{text!r} was classified {status!r} — a real transport failure must "
+            "still say so")
 
 
 # ── the entry is resolved the way the harness resolves it (walk UP) ───────

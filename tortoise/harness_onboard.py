@@ -445,8 +445,13 @@ def write_instructions(harness: str, project_dir: Path, *,
     path = project_dir / name
     before = path.read_text(encoding="utf-8") if path.exists() else ""
     if BEGIN_MARK in before and END_MARK in before:
-        # Idempotent: replace the block in place, preserving everything around it
-        # (including edits the user made inside it — those are theirs).
+        # Idempotent: replace the block in place, preserving everything AROUND it
+        # byte for byte. The block itself is OURS, and a re-run replaces it
+        # wholesale — an edit a user makes INSIDE the marks is not merged, it is
+        # overwritten (measured; this comment used to claim the opposite). The `v1`
+        # tag in `BEGIN_MARK` is the seam for changing what we own: bump it and the
+        # old block is no longer matched, so both blocks are visible in the diff
+        # rather than one silently rewriting the other.
         after_body = _strip_block(before)
         after = (after_body.rstrip("\n") + "\n\n" + INSTRUCTIONS
                  if after_body.strip() else INSTRUCTIONS)
