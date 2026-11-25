@@ -640,22 +640,37 @@ _CENSUS_MODULES = (
     # #13450: EP's operator-input participation test was the consumer that read
     # only two of the four conditions (`status in TERMINAL_EXCLUDED_STATUSES or
     # bool(outdated)`), so a position-axis-ended input still voted.
-    # ⛔ What this row DOES and DOES NOT guard, stated because the first cut of
-    # this comment claimed the row meant "the same re-spelling cannot come back"
-    # and that was FALSE for the exact defect it was written for (PR #14600's
-    # review, P2). `_currency_comparisons` inspects `ast.Eq`/`ast.NotEq` against a
-    # terminal WORD LITERAL and `status <> '<word>'` Cypher literals; the live
-    # spelling was an `ast.In` MEMBERSHIP against an IDENTIFIER
-    # (`TERMINAL_EXCLUDED_STATUSES`), which the detector never looks at — MEASURED
-    # over a mutant restoring that arm: zero hits, i.e. this row is detector-wise
-    # a no-op for this defect. What it DOES catch is a future hand-written
-    # `status == "retracted"`-shaped test in `ep.py` (verified by AST: the real
-    # module has zero hits today).
+    # ⛔ What this row DOES and DOES NOT guard, stated because TWO earlier cuts of
+    # this comment were FALSE about it (PR #14600's review, P2). The first said
+    # the row meant "the same re-spelling cannot come back"; the second said the
+    # row catches a future hand-written `status == "retracted"`-shaped test in
+    # `ep.py`. The second was false at that head for the spelling a hand-written
+    # test there actually reaches for: Batch 2's row is unpacked into LOCALS
+    # (`ep.py` has no Python attribute `.status` — AST: zero
+    # `ast.Attribute(attr='status')` nodes), and `_name()` returned "" for an
+    # `ast.Name`, so a comparison against the local `status` was dropped by the
+    # `"status" not in (left + right)` guard below and the row could not fire on
+    # it — coverage advertised for the shape the issue's own loop produces.
+    # MEASURED then (three spellings injected into `ep.py` one at a time,
+    # detector run over each):
+    # bare `status == "retracted"` 0 hits, `.get("status")` 1 hit,
+    # `props.status` 1 hit — the row WAS live for the attribute spellings.
+    # `_name()` now HAS the bare-`ast.Name` arm, so the local is seen alongside
+    # the attribute/`.get()` spellings, and
+    # `test_the_census_sees_the_bare_local_spelling` pins that the arm exists.
+    # What it still does NOT catch: the detector keys on the operand's NAME, so
+    # an operand it resolves to no name is invisible — an `ast.Subscript` such as
+    # `op_input_status[op_id] == "retracted"`, or a bare `Name` other than
+    # `status` — and so is an `ast.In` MEMBERSHIP against an IDENTIFIER
+    # (`status in TERMINAL_EXCLUDED_STATUSES`), the spelling #13450 itself used
+    # (MEASURED over a mutant restoring that arm: zero hits). The row is
+    # therefore a second line of defence, not the pin on this defect: the
+    # structural pin below is what trips a reversion.
     # ⛔ The membership arm is deliberately NOT added here. MEASURED at this head:
     # teaching the detector `ast.In` produces ~10 pre-existing hits across
     # `sdk.py` and `derived_invalidation.py`, and several are currency answers that
     # read the word axis ALONE (`derived_invalidation.py:952`/`:999`,
-    # `sdk.py:27773`, `sdk.py:37107`, `sdk.py:37109`) — the SAME class #13450 fixed,
+    # `sdk.py:27842`, `sdk.py:37176`, `sdk.py:37178`) — the SAME class #13450 fixed,
     # whose widening is the ingest/direct-edge decision this PR states as a
     # residual rather than a tidy-up. Landing the detector without that decision
     # would either red four modules this PR does not own or exempt them by
@@ -722,6 +737,19 @@ def _currency_comparisons(path: str) -> list[str]:
             return f".get({node.args[0].value!r})"
         if isinstance(node, ast.Attribute):
             return node.attr
+        # #13450 (PR #14600 review, P2): the BARE LOCAL. Before this arm `_name`
+        # returned "" for an `ast.Name`, so the `"status" not in (left + right)`
+        # guard below dropped `status == "retracted"` — the spelling a module that
+        # unpacks its rows into locals produces for those rows (other spellings
+        # stay available in such a module: `.get("status")` was already covered,
+        # and the `ast.Subscript` form named above is still not) — and the
+        # `tortoise/ep.py` census row could not fire on the shape its own comment
+        # named. MEASURED: adding it yields NO new hits across the seven
+        # `_CENSUS_MODULES` at this head (every existing hit is one of the three
+        # declared `.get('status')` exceptions), so it widens the census without
+        # reddening a module this PR does not own.
+        if isinstance(node, ast.Name) and node.id == "status":
+            return "status"
         return ""
 
     for node in ast.walk(tree):
@@ -747,6 +775,27 @@ def _currency_comparisons(path: str) -> list[str]:
 
 
 class TestNoReaderRespellsThePredicate:
+    def test_the_census_sees_the_bare_local_spelling(self, tmp_path):
+        """Non-vacuity pin for `_name`'s bare-`ast.Name` arm (#14600 review, P2).
+
+        The `tortoise/ep.py` row exists to catch a hand-written currency test in
+        the module that unpacked its rows into LOCALS. That shape is invisible to
+        `_currency_comparisons` unless `_name` resolves a bare `ast.Name` — the
+        measured dead-weight this arm removed — so the arm is asserted on a
+        scratch module rather than left to the census's own silence.
+        """
+        scratch = tmp_path / "scratch_currency_module.py"
+        scratch.write_text(
+            "def _decide(rows):\n"
+            "    for status in rows:\n"
+            "        if status == 'retracted':\n"
+            "            return True\n"
+            "    return False\n",
+            encoding="utf-8",
+        )
+        hits = _currency_comparisons(str(scratch))
+        assert any("status vs 'retracted'" in hit for hit in hits), hits
+
     def test_no_module_outside_live_spells_a_terminal_currency_filter(self):
         offenders = []
         for module in _CENSUS_MODULES:

@@ -29191,8 +29191,8 @@ class TortoiseSDK:
         source or target that has ENDED — a terminal lifecycle word, the legacy
         ``outdated`` flag, ``isClosed``, or a ``terminal`` pipeline slot — is
         accepted, and the factor's participation is decided on the READ
-        (``TortoiseEP._affected_factors`` Batch 2, which strips it and REPORTS
-        the strip through ``skipped_factors`` naming the axis). Stated here
+        (``TortoiseEP._affected_factors`` Batch 2, which strips it) and the strip
+        is REPORTED, named by axis, only when the factor is DROPPED. Stated here
         because it was previously unstated, and pinned by
         ``tests/test_13450_ep_position_axis_participation.py`` — see the note at
         the existence probe below for why this door does not copy

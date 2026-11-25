@@ -432,8 +432,18 @@ class TestTheWriteDoorsStateTheirPosture:
 
     * ``create_operator`` has no terminal endpoint guard on EITHER axis (it
       accepts ``status='superseded'`` too). It does not need one to keep EP
-      honest: the factor's strip is REPORTED through ``skipped_factors`` (the
-      tests above), which is the diagnostic the read owes the caller.
+      honest: an ended endpoint is stripped on the READ (``_affected_factors``
+      Batch 2), and the diagnostic the read owes is ``skipped_factors`` — a
+      record naming the ended input's axis, emitted only on a DROP, with a
+      ``reason`` from the read's closed set (``source_stripped``,
+      ``degenerate``, ``derived_over_asserted``). A factor that SURVIVES on its
+      remaining inputs is priced without the ended one and reports nothing —
+      the same silence the word axis has had since #2422. WHICH strips drop the
+      factor is Batch 2's guards' call (including whether a directional source
+      is provably the stripped slot, and whether the operator is selected at
+      all), so the guards — not this sentence — are the authority
+      (PR #14600 review, P3: this docstring previously claimed the report
+      unconditionally).
     * ``create_direct_edge`` refuses on the lifecycle word (#2422) and does not
       refuse on the position axis. Widening it means widening
       ``_endpoint_is_terminal``, which is ingest Phase-1's *prediction* of that
