@@ -15751,13 +15751,19 @@ def _layer_payload(entry: dict) -> dict:
     (``_resolve_entity`` now returns ``labels(n)``); an entry carrying only the
     branch label falls back to that one string, which is exactly the previous
     behaviour rather than a widening.
-    """
-    props = dict(entry.get("properties") or {})
-    if not _label_set_publishable(_entry_label_set(entry, fallback_key="label")):
-        from tortoise.projection.entities import filter_source_props
 
-        props, _denied = filter_source_props(props)
-    return props
+    ⛔ The composition itself is ``projection.entities.publishable_payload``, not
+    the two calls written out here. It was spelled out per door, and
+    ``entity_reads.list_layer`` — the read behind ``GET /v1/objects`` and
+    ``GET /v1/subjects`` — spelled out neither, so the LIST routes published a
+    hybrid's stored map while these by-id routes withheld it (#14593 review P1).
+    One call per door is the shape that makes such an omission visible.
+    """
+    from tortoise.projection.entities import publishable_payload
+
+    return publishable_payload(
+        entry.get("properties") or {},
+        _entry_label_set(entry, fallback_key="label"))
 
 
 def _entry_label_set(entry: dict, *, fallback_key: str) -> list[str]:
@@ -16517,6 +16523,20 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     # session-capture producer writes `:Source {url: "session:<id>"}`, a
     # slash-free identity this route's single path segment ADDRESSES.
     entity = _layer_payload(resolved[0]) or {}
+    # ⛔ THE PRESENCE DECISION READS THE RAW MAP, THE PUBLISHED PAYLOAD DOES NOT
+    # (#14593 review P2, measured). Ordering is load-bearing in BOTH directions:
+    # redacting BEFORE the gate hid a stored posterior — for a hybrid
+    # ``(:Object:Source)`` / ``(:Subject:Source)``, ``filter_source_props`` drops
+    # ``posterior_alpha``/``posterior_beta``/``confidence`` (declared for a
+    # ``:Source``? no — a Source has no EP fields), so ``ep_state`` saw none of
+    # them and answered ``absent`` with ``current: null`` +
+    # ``NO_PERSISTED_BELIEF`` over a node that HOLDS a belief. That is this
+    # route's own forbidden class — an absence read as an answer — arriving
+    # through the filter instead of through EP's Beta(1,1) coalesce.
+    # Publishing the raw map instead would be the opposite defect (the ``#3998``
+    # disclosure the filter above exists to stop), so the two uses are split: the
+    # GATE grades the stored facts, the RESPONSE publishes the graded map.
+    raw = dict(resolved[0].get("properties") or {})
     # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE first, and only then ask EP.
     # EP's `_read_node` coalesces ABSENT params to Beta(1,1), so an Object, a
     # Subject, or a Point EP never consumed comes back as a perfectly-shaped
@@ -16558,23 +16578,23 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
 
     belief_state = ep_state_resolve(
         ep_state(
-            confidence=entity.get("confidence"),
-            posterior_alpha=entity.get("posterior_alpha"),
-            ep_alpha=entity.get("ep_alpha"),
-            posterior_beta=entity.get("posterior_beta"),
-            ep_beta=entity.get("ep_beta"),
-            baseline_set=entity.get("baseline_set") is True,
+            confidence=raw.get("confidence"),
+            posterior_alpha=raw.get("posterior_alpha"),
+            ep_alpha=raw.get("ep_alpha"),
+            posterior_beta=raw.get("posterior_beta"),
+            ep_beta=raw.get("ep_beta"),
+            baseline_set=raw.get("baseline_set") is True,
         ),
         measured=not is_terminal_status(
-            entity.get("status"), bool(entity.get("outdated")),
+            raw.get("status"), bool(raw.get("outdated")),
             # ⛔ the POSITION axis too (#13034): `_resolve_entity` hands back
             # `properties(n)`, so `isClosed`/`pipelineSlot` are already in hand,
             # and `is_terminal_status`'s docstring says a caller that fetched
             # them must pass them. Without this an Object closed on that axis
             # with a stored posterior still answered `ep_state: "measured"` —
             # measured: isClosed=true / pipelineSlot='terminal' both did.
-            is_closed=entity.get("isClosed"),
-            stage_slot=entity.get("pipelineSlot")),
+            is_closed=raw.get("isClosed"),
+            stage_slot=raw.get("pipelineSlot")),
     )
     has_belief = belief_state != EP_STATE_ABSENT
     view = None

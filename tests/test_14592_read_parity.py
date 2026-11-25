@@ -1027,6 +1027,53 @@ def test_by_id_route_filters_a_hybrid_that_carries_a_Source_half(
         assert secret not in out.text, out.text
 
 
+@pytest.mark.parametrize("route_label,label", [
+    ("objects", "Object"), ("subjects", "Subject")])
+def test_layer_LIST_route_filters_a_hybrid_that_carries_a_Source_half(
+        tmp_path, route_label, label):
+    """#14593 review P1: the LIST routes published what the by-id routes withhold.
+
+    ``GET /v1/objects`` / ``GET /v1/subjects`` page with
+    ``MATCH (n:{label}) … RETURN properties(n)`` — which matches a hybrid
+    ``(:Object:Source)`` / ``(:Subject:Source)`` because it carries ``{label}`` —
+    and NOTHING in that pipeline graded the label set. The page query did not even
+    return ``labels(n)``, so a row could not have been graded if someone had
+    wanted to. MEASURED pre-fix: ``GET /v1/objects`` answered 200 with the
+    hybrid's stored ``text`` in the row, while ``GET /v1/objects/{id}``
+    (``_layer_payload``) withheld the same value — one read path guaranteeing what
+    another does not, which is #3998's own argument.
+
+    ⛔ The row is asserted PRESENT with its non-Source half, so the disclosure
+    assertion cannot pass vacuously by the row being dropped from the page — the
+    rule redacts, it does not hide the node from the layer it belongs to.
+    """
+    secret = f"HYBRID {label.upper()} BODY THAT MUST NOT RIDE THE LIST ROUTE"
+    hybrid_id = f"hybrid-list-{label.lower()}-14593"
+    url = f"https://example.test/hybrid-list-{label.lower()}-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                f"CREATE (n:{label}:Source {{id:$i, name:'HYBRID', url:$u, "
+                f"text:$t, objectKind:'goal', subjectKind:'person'}})",
+                params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/{route_label}")
+        assert out.status_code == 200, out.text
+        rows = out.json()[route_label]
+        row = next((r for r in rows if r.get("id") == hybrid_id), None)
+        assert row is not None, rows
+        # The layer still lists it, with its non-Source properties intact…
+        assert row.get("name") == "HYBRID", row
+        assert row.get("url") == url, row
+        # …and the denied payload is on neither the row nor the wire.
+        assert "text" not in row, row
+        assert secret not in out.text, out.text
+
+
 def test_belief_never_puts_a_hybrid_sources_body_in_entity_name(tmp_path):
     """#14593 review P1: ``/belief`` grades the same label SET as its siblings.
 
@@ -1062,6 +1109,66 @@ def test_belief_never_puts_a_hybrid_sources_body_in_entity_name(tmp_path):
         # …and the name fell through to the identity, not to the body.
         assert body["entity"]["name"] == url, body
         assert secret not in out.text, out.text
+
+
+def test_belief_gates_PRESENCE_on_the_stored_map_not_the_redacted_one(tmp_path):
+    """#14593 review P2: redaction ran BEFORE the presence gate, hiding a belief.
+
+    ``entity = _layer_payload(resolved[0])`` was computed first and then used for
+    ``ep_state``'s inputs. For a hybrid ``(:Point:Source)`` (and the
+    ``:Object:Source`` / ``:Subject:Source`` shapes the review names),
+    ``filter_source_props`` drops ``posterior_alpha``/``posterior_beta`` /
+    ``confidence`` — they are not declared on a ``:Source`` — so the gate saw none
+    of them and answered ``ep_state: "absent"`` + ``current: null`` +
+    ``NO_PERSISTED_BELIEF`` over a node that HOLDS a measured posterior. That is
+    this route's own forbidden class (an absence published as an answer), reached
+    through the filter rather than through EP's Beta(1,1) coalesce.
+
+    ⛔ Both halves are asserted: the belief is now REPORTED (non-vacuity — a
+    handler that never gated at all would also fail the pre-fix arm), and the
+    ``:Source`` half stays withheld, so the fix did not trade one disclosure for
+    the opposite defect.
+    """
+    hybrid_id = "hybrid-belief-presence-14593"
+    url = "https://example.test/hybrid-belief-presence-14593"
+    secret = "HYBRID PRESENCE BODY THAT MUST STAY WITHHELD"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # `:Point` FIRST: the branch that resolves is `Point`, which is
+            # PUBLISHABLE, so pre-fix `_layer_payload` filtered this node only
+            # because the *label-set* fix had already landed — and that filter is
+            # exactly what erased the posterior before the gate looked.
+            sdk._get_proj().g._query(
+                "CREATE (n:Point:Source {id:$i, url:$u, content:$c})",
+                params={"i": hybrid_id, "u": url, "c": secret},
+                read_only=False)
+            sdk._set_point_baseline(hybrid_id, 8.0, 2.0)
+            sdk._get_proj().g._query(
+                "MATCH (n:Point {id:$i}) SET n.posterior_alpha = 9.0, "
+                "n.posterior_beta = 1.0, n.confidence = 0.9",
+                params={"i": hybrid_id}, read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{hybrid_id}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The stored posterior is REPORTED rather than called absent…
+        assert body["ep_state"] == "measured", body
+        assert body["currentUnavailable"] is None, body
+        assert body["current"]["mean"] == pytest.approx(0.9), body
+        # …and the `content` did not become the published name.
+        # ⚠️ NOT a wire-wide ``secret not in out.text`` here, and the reason is a
+        # DIFFERENT rule: this fixture is a ``:Point:Source``, and a ``:Point``'s
+        # ``content`` is its OWN published body — the provenance arm
+        # (``sdk._provenance`` → ``_get_point``) returns it by contract, so a
+        # substring assertion would be measuring the Point rule, not this one.
+        # What this test pins is that the PRESENCE gate no longer reads the
+        # redacted map; the ``:Source``-half disclosure is pinned by the
+        # ``:Object:Source`` / ``:Subject:Source`` arms above, where ``content``
+        # is denied under every label the node carries.
+        assert body["entity"]["name"] == url, body
 
 
 def test_layer_payload_grades_the_whole_label_set_not_the_branch_label():
@@ -1228,6 +1335,51 @@ def test_relations_never_puts_a_Sources_payload_in_the_name_field(tmp_path):
         other = r.json()["relations"][0]["other"]
         assert other["label"] == "Source", other
         assert other["name"] == url, other
+
+
+def test_relations_never_puts_a_hybrid_ROOTS_content_in_entity_name(tmp_path):
+    """#14593 review P2: the ROOT preview graded the RESOLUTION BRANCH label.
+
+    ``navigation._resolve_root`` filtered a root on ``label == "Source"`` — the
+    branch it MATCHED (``RETURN 'Object' AS label``) — so a hybrid
+    ``(:Object:Source)`` root resolved through ``Object``, skipped the ``#3998``
+    filter, and ``_root_preview``'s ``name -> content -> url`` chain handed back
+    the stored ``content`` as ``entity.name``. ``entity_reads._root_preview``
+    justified itself by claiming the filter happened upstream; the claim was true
+    of a plain ``:Source`` and false of exactly this shape.
+
+    Fixed at BOTH ends, so either alone closes it: ``_resolve_root`` grades
+    ``labels(n)``, and ``_root_preview`` grades the propagated set again before
+    the coalesce.
+    """
+    hybrid_id = "hybrid-root-relations-14593"
+    url = "https://example.test/hybrid-root-relations-14593"
+    secret = "HYBRID ROOT BODY THAT MUST NOT BECOME A NAME"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # NO `name` on purpose: that is what makes the `content` coalesce the
+            # live path. `id` + `url` keep the root addressable and give the
+            # preview a legitimate fallback to answer with instead.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, content:$c, "
+                "objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url, "c": secret},
+                read_only=False)
+            other = sdk._create_point("statement", "a neighbour")["id"]
+            assert sdk._create_edge("related", hybrid_id, other)["created"] is True
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{hybrid_id}/relations")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # The root really resolved (otherwise a 404/other-node answer would pass
+        # the disclosure assertion vacuously)…
+        assert body["entity"]["id"] == hybrid_id, body
+        # …and its name fell through to the identity, never to the body.
+        assert body["entity"]["name"] == url, body
+        assert secret not in r.text, r.text
 
 
 def test_relations_never_publishes_a_legacy_Documents_stored_body(tmp_path):

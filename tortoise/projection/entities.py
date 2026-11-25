@@ -7962,3 +7962,36 @@ def label_set_publishable(labels) -> bool:
     if not kept:
         return False
     return all(lbl in PUBLISHABLE_PAYLOAD_LABELS for lbl in kept)
+
+
+def publishable_payload(props: dict, labels) -> dict:
+    """One property map under the ``#3998`` disclosure rule, graded as a SET.
+
+    The COMPOSITION of the two halves that live here — the decision
+    (:func:`label_set_publishable`) and the filter (:func:`filter_source_props`) —
+    so a read surface that publishes a resolved node's map has ONE call to make
+    and cannot get the pair wrong.
+
+    ⛔ THIS EXISTS BECAUSE THE PAIR WAS RE-ASSEMBLED PER DOOR AND ONE DOOR WAS
+    MISSED (#14593 review P1). By the time of that finding, four surfaces already
+    spelled out the same two lines (the REST by-id routes via
+    ``hosted_api._layer_payload``, the ``/belief`` provenance arm, the SDK entity
+    accessor, the MCP auto-detect arm) — and ``entity_reads.list_layer``, the
+    read behind ``GET /v1/objects`` and ``GET /v1/subjects``, spelled out neither,
+    so a hybrid ``(:Object:Source)`` / ``(:Subject:Source)`` published its stored
+    ``text``/``content`` on the LIST routes while the by-id routes withheld it.
+    A door that has to remember two calls is a door that can forget both; a door
+    that has to remember one is the shape this function makes possible.
+
+    ``labels`` is the label SET (``labels(n)``), never a single branch label — the
+    resolution's ``label`` field is the branch that MATCHED, which is only as
+    strong as that branch's position in the union. Callers holding solely the
+    older single spelling pass a one-element list and keep exactly the previous
+    behaviour.
+
+    Returns a NEW dict in both arms: a caller must not be able to mutate the
+    resolved entry's own map through this.
+    """
+    if label_set_publishable(labels):
+        return dict(props)
+    return filter_source_props(props)[0]

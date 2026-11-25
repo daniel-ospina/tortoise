@@ -147,6 +147,26 @@ def list_layer(
     the SAME shared predicate (``live._terminal_excluded``) so the vocabulary and
     the position axis cannot drift between the two list routes — with the layer's
     OWN status family (see ``_layer_terminal_predicate``), never the Point one.
+
+    ⛔ AND EVERY ROW IS GRADED BY ITS LABEL SET (#14593 review P1, measured).
+    ``MATCH (n:Object)`` matches a hybrid ``(:Object:Source)`` — the shape
+    ``mcp_server``'s #4649 blast-radius case and ``tool_registry``'s #13114 note
+    both name as real — so ``RETURN properties(n)`` published that node's stored
+    ``text``/``content`` here while the BY-ID route withheld it through the same
+    ``#3998`` rule (``hosted_api._layer_payload``). A disclosure guarantee that
+    holds on one read path and not another is not a guarantee, which is #3998's
+    own argument one route over. The page query therefore returns ``labels(n)``
+    with each row — a row carrying only ``properties(n)`` CANNOT be graded, and
+    an ungraded row is what the finding measured — and each map goes through
+    ``projection.entities.publishable_payload``, the one composition of the
+    shared decision and the shared filter.
+
+    ⛔ The row is REDACTED, never DROPPED. A hybrid node genuinely IS this layer
+    — ``POST /v1/objects`` can reach it, its by-id route answers it — so hiding
+    it from the list would make ``total`` disagree with what a by-id walk can
+    reach and would answer "this layer holds N" over N rows of which one is
+    unreachable. Withholding the denied properties is the same answer the by-id
+    route gives for the same node.
     """
     label = _safe_label(label)
     order_prop = LAYER_ORDER_PROP.get(label)
@@ -291,12 +311,25 @@ def list_layer(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
     total = int(total_rows[0][0]) if total_rows else 0
+    # ``labels(n)`` rides the page so each row can be graded; without it a row's
+    # label set is unknowable here and the page cannot apply the ``#3998`` rule
+    # at all (see the docstring). ``count(n)`` above is deliberately UNCHANGED by
+    # that rule: the row is redacted, not dropped, so the total still counts the
+    # rows the page can return.
+    from .projection.entities import publishable_payload
+
     rows = proj.g.ro_query(
-        f"MATCH (n:{label}) WHERE {where} RETURN properties(n) "
+        f"MATCH (n:{label}) WHERE {where} RETURN properties(n), labels(n) "
         f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit",
         params={**params, "skip": offset, "limit": limit},
     ).result_set
-    return [dict(r[0]) for r in rows], total
+    # A 1-column row is the pre-fix shape (mock fixtures, older drivers): the
+    # label set is then unknowable, and the branch label is the strongest thing
+    # the row states — the same fallback the by-id routes take for an entry that
+    # carries no ``labels``, rather than a silent skip of the rule.
+    return [publishable_payload(dict(r[0]),
+                                r[1] if len(r) > 1 else [label])
+            for r in rows], total
 
 
 def kind_equivalents(kind: str) -> list[str]:
@@ -394,7 +427,8 @@ _RELATION_ENDPOINT_NAME = (
 )
 
 
-def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
+def _root_preview(entity_id: str, root_label: str, root: dict,
+                  labels: list[str] | None = None) -> dict:
     """The entity the caller ASKED for — same BOUND, same FLAG, not same coalesce.
 
     ⛔ THE PARITY IS CAP + FLAG, AND ONLY THAT (#14593 review, four rounds). The
@@ -425,12 +459,24 @@ def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
     reachable at its own route (``/v1/points/{id}`` and siblings), and this route
     answers "what is this entity connected to", not "give me its text".
 
-    ``:Source`` cannot reach ``content`` here: ``navigation._resolve_root``
-    filters a Source root before this point, which is why the ``#3998`` payload
-    rule for that layer is satisfied upstream of this helper.
+    ``:Source`` cannot reach ``content`` here, and the reason is a GRADED LABEL
+    SET rather than the resolution branch. ⛔ An earlier revision said
+    ``navigation._resolve_root`` "filters a Source root before this point" — true
+    of a plain ``:Source``, FALSE of a hybrid, because that helper tested the
+    branch label it matched (``label == "Source"``) and a ``(:Object:Source)``
+    root resolves through the ``Object`` branch (#14593 review P2, measured: the
+    hybrid's stored ``content`` came back as ``entity.name`` here). Both halves
+    are fixed: ``_resolve_root`` now grades ``labels(n)``, AND this helper grades
+    the propagated label set through the same shared
+    ``projection.entities.publishable_payload`` before the coalesce runs — so a
+    caller that ever hands this function an unfiltered map cannot re-open the
+    disclosure through the name field.
     """
-    raw = (root.get("name") or root.get("content")
-           or root.get("url") or root.get("eventId"))
+    from .projection.entities import publishable_payload
+
+    published = publishable_payload(root, labels if labels else [root_label])
+    raw = (published.get("name") or published.get("content")
+           or published.get("url") or published.get("eventId"))
     name = None if raw is None else str(raw)
     return {
         "id": entity_id,
@@ -546,7 +592,7 @@ def entity_relations(
     # document read is `/v1/sources/{url}` (which uses the `:path` converter).
     # Stated rather than implied, because the alternative — a `:path` converter
     # here — would greedily swallow the trailing `/relations`.
-    root_label, root, root_key = _resolve_root(proj.g, entity_id)
+    root_label, root, root_key, root_labels = _resolve_root(proj.g, entity_id)
     if root_label is None:
         return ({"entity": None, "relations": [], "count": 0,
                  "declarationsReadable": True}, 0)
@@ -629,7 +675,7 @@ def entity_relations(
                            else list(declared.get(predicate, ()))),
         })
     return {
-        "entity": _root_preview(entity_id, root_label, root),
+        "entity": _root_preview(entity_id, root_label, root, root_labels),
         "relations": relations,
         "count": len(relations),
         "declarationsReadable": declared is not None,
