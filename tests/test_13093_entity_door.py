@@ -1483,9 +1483,9 @@ def test_an_EVENT_is_addressable_by_the_bare_id_that_IS_its_eventId():
     ⛔ `Event.id` is NOT that identity and nothing here rests on it (PR #13358 review §3.2, the
     comment cited above): `projection/entities.py::_event_guarded_merge`'s SUFFIX branch
     MERGEs on a suffixed `eventId` while `id` keeps the candidate, so two Events
-    can share one `id` — and `live.py:1194-1197` says exactly that about that
+    can share one `id` — and `live.py:1270-1273` says exactly that about that
     shared value: *"The coalesced value is NOT a unique identity, and must not be
-    used as one"* (`EPISTEMIC_ID_KEYS` at `live.py:1204` still lists `id` FIRST,
+    used as one"* (`EPISTEMIC_ID_KEYS` at `live.py:1280` still lists `id` FIRST,
     deliberately, for DISPLAY and hand-back — the prohibition is on COMPARISON
     and DEDUPE, not on mentioning the value).
     The value this door is handed for an Event is the one the cache RESOLVER
