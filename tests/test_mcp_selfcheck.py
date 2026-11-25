@@ -2216,15 +2216,22 @@ def test_a_transport_supplied_by_the_REPO_is_attributed_to_the_repo(tmp_path, mo
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     repo_cfg = repo / ".mcp.json"
+    # ⛔ A command that EXISTS. With a non-existent one `classify` returns from the
+    # command-missing arm, whose own `_origin_of("command")` masks the `source` the
+    # merge produced — so the arm stayed green with the load-bearing `origin.pop` in
+    # the stdio branch deleted (verified by mutation). A command that exists reaches
+    # the `resolves-unprobed` return and exposes that `source` directly.
     repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
-        "command": "/nope-14617/python3",
+        "command": sys.executable,
         "args": ["-m", "tortoise.mcp_bridge"]}}}), encoding="utf-8")
 
     verdict = mcp_selfcheck.classify("pi", project_dir=repo)
     assert verdict.transport == "stdio", verdict.line()
+    assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
     assert verdict.source == str(repo_cfg), (
-        "the surviving transport is the REPO's `command`; naming the base's dropped "
-        f"`url` layer is the wrong-file defect — got {verdict.source}")
+        "the surviving transport is the REPO's `command` (the base's `url` was "
+        f"dropped by the switch); naming the base is the wrong-file defect — got "
+        f"{verdict.source}")
     assert verdict.source != str(base_path)
 
 
@@ -2264,3 +2271,44 @@ def test_a_field_detail_names_the_layer_that_supplied_that_FIELD(tmp_path, monke
     assert env_verdict.source == str(base_path), (
         "the `${VAR}` is in the BASE's inherited `env`; the repo file has no env "
         f"at all — got {env_verdict.source}")
+
+
+def test_the_command_arms_attribute_a_REPO_supplied_command(tmp_path, monkeypatch):
+    """Both command-arm provenance resolutions need a MERGED two-layer input.
+
+    Mutation-checked: deleting `_origin_of("command")` from the command-missing arm,
+    or `_origin_of("command", "args")` from the python-lacks-tortoise arm, left every
+    other arm green — a single-layer config returns the same `source` either way, so
+    only a merge can discriminate.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"url": "https://api.premiselabs.co/mcp/"}}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    repo_cfg = repo / ".mcp.json"
+
+    # command supplied by the REPO, missing on disk -> command-missing arm
+    repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": "/nope-14617/python3",
+        "args": ["-m", "tortoise.mcp_bridge"]}}}), encoding="utf-8")
+    missing = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert missing.status == mcp_selfcheck.COMMAND_MISSING, missing.line()
+    assert missing.source == str(repo_cfg), missing.source
+
+    # command supplied by the REPO, exists but cannot import -> python-lacks arm
+    fake = tmp_path / "python3"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "ModuleNotFoundError: No module named \'tortoise\'" >&2\n'
+        "exit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    repo_cfg.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "command": str(fake),
+        "args": ["-m", "tortoise.mcp_bridge"]}}}), encoding="utf-8")
+    lacks = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert lacks.status == mcp_selfcheck.PYTHON_LACKS_TORTOISE, lacks.line()
+    assert lacks.source == str(repo_cfg), lacks.source
