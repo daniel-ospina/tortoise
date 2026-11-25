@@ -268,6 +268,7 @@ citation behind, so `main` was RED on
 until this
 re-measure — the pointer follows the SYMBOL, so a fold that moves the symbol owes this line) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
+
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
 heading down to `### The one interface that must not be broken` — the
 interface-map table AND the prose under it — are as-of the frontmatter's

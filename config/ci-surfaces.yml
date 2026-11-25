@@ -65,7 +65,7 @@ version: 1
 # `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, that same
 # flat weight), `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row and `#14606`'s
 # `tests/test_14592_operating_model_evidence.py` (`core`, that same flat weight) each landed before
-# this fold. THIS PR adds exactly ONE file, `tests/test_expansion_fusion_14344.py`, and with it the
+# this fold. THIS PR adds exactly ONE file TO THE FAST POOL, `tests/test_expansion_fusion_14344.py`, and with it the
 # verb packs the pool into two bins: one shard at 826.6 s (j) and ten at 826.5 s
 # (a, b, c, d, e, f, g, h, i, k), so `ceil(826.6/60 x 2)` = 28 m governs (a shard's job-level wall
 # clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
