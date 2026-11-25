@@ -1961,8 +1961,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     The doc-vs-tree arms above skip unless `TORTOISE_CYPHER_DOC_PIN=1`, and the ONE
     place that sets it is a step of `cypher-diff.yml` — a workflow this module does
     not control. Delete, rename or detach that `env:` entry and every gated arm — each
-    single one plus the 7 parametrized duplicate-arm cases; ⛔ no typed arm count,
-    which rotted here twice — goes back to SKIPPING in
+    single one plus the 7 parametrized duplicate-arm cases — goes back to SKIPPING in
     every job in the repo, with no red anywhere to notice: a pin that appears to
     protect the census and enforces nothing, which is the INERT-ENFORCER class the
     decoupling was allowed to create only because this pin closes it.
