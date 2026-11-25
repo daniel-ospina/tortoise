@@ -2667,3 +2667,90 @@ def test_the_command_arms_attribute_a_REPO_supplied_command(tmp_path, monkeypatc
     lacks = mcp_selfcheck.classify("pi", project_dir=repo)
     assert lacks.status == mcp_selfcheck.PYTHON_LACKS_TORTOISE, lacks.line()
     assert lacks.source == str(repo_cfg), lacks.source
+
+
+def test_the_closer_ceiling_is_measured_from_the_CONTAINER_not_the_opener():
+    """⛔ THE LENIENT ALLOWANCE MUST BE MEASURED FROM THE CONTAINING BLOCK.
+
+    CommonMark: *"the closing code fence may be preceded by up to three spaces of
+    indentation"* and *"this is not a closing fence, because it is indented 4 spaces"* —
+    three spaces relative to the CONTAINER, not to the opener. Computing it as
+    `open_indent + 3` let an opener at 2 accept a closer at 5, so a 4-space CONTENT fence
+    of a documentation example became the "closer", the example's markers fell OUTSIDE a
+    fence, `_markers_well_formed` flipped to `(True, "")`, and `--uninstall` DELETED the
+    example's body with exit 0 and NO refusal. Measured on the previous revision:
+
+        A' opener@2 content@4 close@3   unclosed=None  wf=(True,'')  body_kept=False
+
+    `markdown-it-py`'s CommonMark parser reads this input as ONE fenced block whose
+    content is the example. The pre-lenient code REFUSED it (fail-closed), so this was a
+    regression, not a pre-existing hole.
+    """
+    text = ("# H\n\n  ```md\nEx:\n\n    ```\n    " + harness_onboard.BEGIN_MARK +
+            "\n    never delete this body\n    " + harness_onboard.END_MARK +
+            "\n    ```\n   ```\n\nmy notes.\n")
+    _spans, unclosed = harness_onboard._fence_scan(text)
+    assert unclosed is None, (
+        "the real closer at column 3 closes the opener at column 2 — this file closes, "
+        f"it is not unclosed on line {unclosed}")
+    stripped = harness_onboard._strip_block(text)
+    assert "never delete this body" in stripped, (
+        "the 4-space CONTENT fence became the closer, so the example's markers read as "
+        "the real block and its body was DELETED: " + repr(stripped))
+
+    # The same root in the other direction: the ceiling must not ACCEPT a fence that is
+    # genuinely unclosed (opener at 1 → ceiling 3, content fence at 4, then EOF).
+    _spans, unclosed = harness_onboard._fence_scan(
+        "# H\n\n ```md\nx\n    ```\nstill inside\n")
+    assert unclosed is not None, (
+        "4 > the ceiling of 3 for an opener at column 1, so this fence is UNCLOSED")
+
+
+def test_a_LEGAL_closer_does_not_refuse_the_file_the_installer_wrote_into():
+    """⛔ STRICT "CLOSING" IS NOT EVIDENCE THAT STRICT IS RIGHT.
+
+    On a bare `+2`-closer file the scan closes correctly, so the earlier fallback — which
+    was consulted only when strict left a fence OPEN — never ran. After `install` appends
+    the block, strict skips the legal closer and pairs the ```md opener with the BLOCK's
+    own closing fence, swallowing the block: `start markers: 0 / end markers: 1`, so
+    `--uninstall` refused a file the installer itself had just written.
+
+    The trigger is therefore `strict left the marker pair MALFORMED`, not `strict left a
+    fence open`.
+    """
+    text = ("# H\n\n```md\nexample\n  ```\n\n" + harness_onboard.INSTRUCTIONS.rstrip("\n") + "\n")
+    assert harness_onboard._markers_well_formed(text) == (True, ""), (
+        "a legal `+2` closer plus the installer's own block must be well-formed: "
+        + repr(harness_onboard._markers_well_formed(text)))
+    assert harness_onboard._marker_pair(text) == (1, 1), (
+        "the installed block must be OUTSIDE a fence — a pair of (0, 1) means strict "
+        "swallowed it: " + repr(harness_onboard._marker_pair(text)))
+    stripped = harness_onboard._strip_block(text)
+    assert harness_onboard.BEGIN_MARK not in stripped and "example" in stripped, (
+        "the block must be removable while the documentation example survives: "
+        + repr(stripped))
+
+
+def test_the_well_formed_reading_a_nested_example_yields_is_SYMMETRIC():
+    """⛔ WHY THE TRIGGER IS "MALFORMED", NOT "LENIENT LOOKS BETTER".
+
+    A documentation example indented `+1..+4` inside an outer fence leaves the STRICT
+    counts symmetric (`0 BEGIN / 0 END` — the markers are fenced, i.e. documentation), so
+    strict is kept. Choosing the reading that makes the pair WELL-FORMED instead would
+    pick the lenient one here and DELETE the example's body. This test pins the property
+    the trigger depends on, so a future "simplification" to "pick the well-formed
+    reading" reddens instead of silently eating documentation.
+    """
+    for pad in (1, 2, 3, 4):
+        space = " " * pad
+        text = ("# H\n\n```md\nlist:\n" + space + "```\n" + space +
+                harness_onboard.BEGIN_MARK + "\n" + space + "never delete this body\n" +
+                space + harness_onboard.END_MARK + "\n" + space + "```\n```\n\nmy notes.\n")
+        strict_spans, strict_open = harness_onboard._fence_scan_pass(text, allowance=0)
+        assert strict_open is None, f"+{pad}: fixture check — strict must close"
+        assert harness_onboard._marker_counts_balanced(text, strict_spans), (
+            f"+{pad}: the strict counts must be SYMMETRIC (0/0) — that is what keeps "
+            "strict selected and the example's body alive")
+        assert "never delete this body" in harness_onboard._strip_block(text), (
+            f"+{pad}: the example's body was deleted: " +
+            repr(harness_onboard._strip_block(text)))

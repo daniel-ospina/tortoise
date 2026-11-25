@@ -560,34 +560,79 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     unreversible file. The returned line number is what the refusal names.
     """
     spans, open_line = _fence_scan_pass(text, allowance=0)
+    # ⛔ STRICT IS PREFERRED, BUT ITS "CLOSING" IS NOT EVIDENCE THAT IT IS RIGHT.
+    # Two independent ways strict goes wrong, and each is measured:
+    #
+    #   * it leaves a fence OPEN, because a closer indented +1/+2/+3 beyond a TOP-LEVEL
+    #     opener is LEGAL (`_closer_ceiling`) and strict refuses it. Then both writers
+    #     hard-refused a file they had handled correctly — `onboard` and `--uninstall`
+    #     each printed `an unclosed code fence opened on line N` on a file whose only
+    #     fault was a legal `+2` closer;
+    #   * it CLOSES, wrongly: given a ```md fence whose legal closer is at `+2` and the
+    #     installer-appended block below it, strict skips the legal closer and pairs the
+    #     opener with the BLOCK's own closing fence, swallowing the block — `start
+    #     markers: 0 / end markers: 1`, so `--uninstall` refused a file it had written.
+    #     That is the asymmetry test below: the fence reader consults the LENIENT reading
+    #     when the strict one leaves the marker pair MALFORMED.
+    #
+    # ⛔ WHAT MUST NOT MOVE: the nested-example decision. A documentation example whose
+    # fence is indented +1..+4 inside an outer one leaves strict's counts SYMMETRIC
+    # (`0 BEGIN / 0 END` — the markers are fenced, i.e. documentation), so strict is kept
+    # and `--uninstall` never reads the example as the real block. Choosing by "which
+    # reading is well-formed" instead would pick the lenient one there and DELETE the
+    # example's body, which is why the trigger is `strict left it MALFORMED`, not
+    # `lenient looks better`.
+    if open_line is None and _marker_counts_balanced(text, spans):
+        return spans, None
+    lenient_spans, lenient_open = _fence_scan_pass(text, allowance=CLOSER_ALLOWANCE_COLUMNS)
+    if lenient_open is None and (open_line is not None
+                                 or _marker_counts_balanced(text, lenient_spans)):
+        return lenient_spans, None
     if open_line is None:
         return spans, None
-    # ⛔ TWO PASSES, because the two harms are not symmetric and one rule cannot
-    # serve both. STRICT is tried first: a closer may not be indented beyond its
-    # opener, which is what keeps a fence nested inside an outer one from closing
-    # the OUTER one early — the shape where the markers SHOWN IN THE EXAMPLE read as
-    # the real block and `--uninstall` deletes the example's body (measured, exit 0,
-    # no refusal). STRICT is only given up when it produces an IMPOSSIBLE diagnosis.
-    #
-    # ⛔ AND STRICT ALONE WAS WRONG, in the other direction, on a legal file. A
-    # closing fence may be indented up to three columns beyond its opener
-    # (CommonMark), so `indent <= open_indent` refused every such closer, the scan
-    # ended open, and BOTH writers hard-refused a file they had handled correctly —
-    # measured: `onboard` and `--uninstall` each refused
-    # `an unclosed code fence opened on line N` on a file whose only fault was a
-    # legal `+2` closer, with a remedy that named the wrong object. Fail-closed, so
-    # no text was lost, but the reversibility promise ("`--uninstall` removes exactly
-    # the marked block") was broken for that file.
-    #
-    # The fallback is principled rather than a loosening: STRICT failing to close
-    # PROVES the file's closers are all deeper than its openers, and in that case the
-    # deeper one IS the closer by CommonMark. When BOTH readings leave a fence open
-    # the fence really is unclosed, and the caller still refuses by line number — the
-    # strict pass's line, because that is the reading the file was rejected under.
-    lenient_spans, lenient_open = _fence_scan_pass(text, allowance=CLOSER_ALLOWANCE_COLUMNS)
-    if lenient_open is None:
-        return lenient_spans, None
     return spans, open_line
+
+
+def _marker_counts_balanced(text: str, spans: list[tuple[int, int]]) -> bool:
+    """Do BEGIN and END markers occur equally often OUTSIDE ``spans``?
+
+    The signals `_fence_scan` uses to decide whether the STRICT reading is trustworthy:
+    a reading that leaves 0 BEGIN / 1 END has demonstrably paired the opener with the
+    wrong fence (see `_fence_scan`). A reading that leaves 0/0 is the nested-example
+    case and is deliberately NOT treated as evidence against strict.
+    """
+    begins = ends = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if not any(start <= offset < end for start, end in spans):
+            if _is_marker_line(line, BEGIN_MARK):
+                begins += 1
+            elif _is_marker_line(line, END_MARK):
+                ends += 1
+        offset += len(line)
+    return begins == ends
+
+
+def _closer_ceiling(open_indent: int, allowance: int) -> int:
+    """The deepest indent a CLOSING fence may carry — measured from its CONTAINER.
+
+    ⛔ NOT `open_indent + allowance` for every opener, which was a text-destruction
+    regression on the first attempt at the lenient reading. CommonMark: *"the closing
+    code fence may be preceded by up to three spaces of indentation"* and *"this is not
+    a closing fence, because it is indented 4 spaces"* — the three spaces are relative to
+    the CONTAINING BLOCK, not to the opener. So a TOP-level fence (opener at 0..3) closes
+    at most at column `allowance`, and only a deeper opener — a fence inside a list item,
+    where the container itself is indented — gets `open_indent + allowance`.
+
+    Measured cost of getting it wrong: an opener at 2 accepted a closer at 5, so a
+    4-space CONTENT fence of a documentation example became the "closer", the example's
+    markers fell OUTSIDE a fence, `_markers_well_formed` flipped to `(True, "")`, and
+    `--uninstall` deleted the example's body with exit 0 and NO refusal — on a shape the
+    pre-change code refused.
+    """
+    if open_indent <= allowance:
+        return allowance
+    return open_indent + allowance
 
 
 def _fence_scan_pass(
@@ -618,7 +663,7 @@ def _fence_scan_pass(
                 open_char, open_len, open_at, open_line = candidate, run, offset, number
                 open_indent = indent
         elif (is_fence and candidate == open_char and run >= open_len
-              and indent <= open_indent + allowance
+              and indent <= _closer_ceiling(open_indent, allowance)
               # ⛔ A CLOSER CARRIES NO INFO STRING (CommonMark). Without this clause
               # ` ```bash ` closes a backtick fence, so every marker below it reads as
               # OUTSIDE the fence and `--uninstall` deletes the user's own text with
