@@ -169,11 +169,13 @@ def list_layer(
     if kind:
         # ⛔ THE TWO SPELLINGS OF ONE KIND ARE THE SAME KIND, so the filter is an
         # equivalence set, not equality. `core:team` and `team` are both admitted
-        # by the route's validator and BOTH are storable: the write doors reject
-        # only a BLANK kind (`kind_fallbacks.named_kind`) and persist the
-        # caller's spelling VERBATIM — measured, one graph holds `team` and
-        # `core:team` side by side (`kind_is_known` is a bucket VALIDATOR, not a
-        # rewriter, and is not on that path at all) — and an
+        # by the route's validator and BOTH are storable: a BLANK kind is
+        # DROPPED by `kind_fallbacks.named_kind` (not refused), an uninstalled
+        # NAMESPACE is refused by `hosted_api._require_approved_kind` — a check
+        # on the namespace, never on the spelling — and the caller's spelling is
+        # persisted VERBATIM. Measured: one graph holds `team` and `core:team`
+        # side by side, and `kind_is_known` (a bucket validator, on no create
+        # path) rewrites nothing. So an
         # equality filter answered `200 count: 0, truncated: false` for the
         # spelling that happened not to be the stored one — the "byte-identical
         # to *this graph names no such thing*" page this read exists not to

@@ -457,7 +457,10 @@ def test_layer_lists_treat_the_two_spellings_of_one_kind_as_one_kind(tmp_path):
         # exercises the vocabulary arm the bare-form rule lives in.
         for k in ("team", "role"):
             r = client.get("/v1/subjects", params={"kind": k})
-            assert (r.status_code, r.json()["count"]) == (200, 0), (k, r.text)
+            # `.get`: on the UNFIXED validator the body is a 400 with no
+            # `count`, and subscripting it raised KeyError instead of reporting
+            # the state this assertion exists to catch.
+            assert (r.status_code, r.json().get("count")) == (200, 0), (k, r.text)
         client.post("/v1/subjects", json={"name": "Ops", "subjectKind": "team"})
         client.post("/v1/subjects", json={"name": "QA", "subjectKind": "core:team"})
         client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
