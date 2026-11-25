@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 69397cd3b15b5813321a9b71d3fa1c2c4a937e3b
+cut_at_commit: a29b5f24ce95b852c84243dadb022a1dc857d853
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1355,7 +1355,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_list_namespaces
-  use_instead: tortoise_graph_overview(section="namespaces")
+  use_instead: tortoise_list_knowledge(kind="namespace")
   sdk_method: null
   http_policy: true
   approval: null

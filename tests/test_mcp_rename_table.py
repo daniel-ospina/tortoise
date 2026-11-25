@@ -268,6 +268,33 @@ RETIRED_LITERAL: dict[str, str] = {
         'direction=..., semantics=...)'
     ),
     "tortoise_list_graphs": 'tortoise_graph_overview(section="graphs")',
+    # #11609 lane P11 — the nine envelope doors retired forward once the containers
+    # carried the list envelope at the handler (`_row_section_envelope`). The pointers
+    # name the container's discriminator, and the container's OWN renamed arguments
+    # (`agent_name` -> `agent` / `last_n` -> `limit`, `kind_filter` -> `kind`,
+    # `point_id` -> `node_id`), so a migrating caller keeps the whole call.
+    "tortoise_search": (
+        'tortoise_search_knowledge(query=..., kind=..., limit=..., entity_type=..., '
+        'order_by=..., min_confidence=..., threshold=..., relationship_filter=..., '
+        'traversal_path=...)'
+    ),
+    "tortoise_search_sessions": (
+        'tortoise_search_knowledge(mode="sessions", query=..., agent=..., topics=..., '
+        'after=..., before=..., limit=..., offset=...)'
+    ),
+    "tortoise_suggest_entry_points": (
+        'tortoise_search_knowledge(mode="entry_points", query=..., limit=..., kind=...)'
+    ),
+    "tortoise_list_batches": 'tortoise_list_knowledge(kind="batch", limit=...)',
+    "tortoise_list_namespaces": 'tortoise_list_knowledge(kind="namespace")',
+    "tortoise_diary_read": (
+        'tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)'
+    ),
+    "tortoise_expand_relationships": (
+        'tortoise_explore_connections(node_id, include_content=True, hops=...)'
+    ),
+    "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',
+    "tortoise_calibrate_summary": 'tortoise_check_confidence(calibrate=True)',
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -698,8 +725,12 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # `events_poll`, `delete`, `list_graphs`): four container rows ARRIVE and five doors
     # join this map, which is the first wave since lane C to do both. 68 + 5 = 73, matching
     # `counts.retired` in `config/surface-manifest.yml` at this head.
-    assert len(RETIRED_LITERAL) == 73, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 73"
+    # 73 -> 82 at #11609 lane P11: the NINE envelope doors retire forward once the
+    # read/query containers carry the list envelope at the handler
+    # (`_row_section_envelope`). No container row arrives, so this map gains nine names
+    # and `counts.retired` in `config/surface-manifest.yml` gains the same nine.
+    assert len(RETIRED_LITERAL) == 82, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 82"
     )
 
 

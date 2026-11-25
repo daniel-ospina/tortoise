@@ -3228,7 +3228,15 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_suggest_entry_points":
         'tortoise_search_knowledge(mode="entry_points", query=..., limit=..., kind=...)',
     "tortoise_list_batches": 'tortoise_list_knowledge(kind="batch", limit=...)',
-    "tortoise_list_namespaces": 'tortoise_graph_overview(section="namespaces")',
+    # ⛔ `list_knowledge(kind="namespace")`, NOT `graph_overview(section="namespaces")`,
+    # although the door's own handler reaches `sdk.graph_overview("namespaces")` and that
+    # section ALSO wraps its list today. Two reasons, both recorded artifacts: the authored
+    # Phase-0.1 destination in `tools/bridge_table.py` `DESTINATION` names
+    # `list_knowledge`, and `tools/mcp_rename_table.py` treats a pointer that disagrees with
+    # it as a FINDING (`DISAGREEMENTS`), which the pinned empty set would red on. Reaching
+    # the same body is not the test — agreeing with the map that decides where the
+    # capability lands is.
+    "tortoise_list_namespaces": 'tortoise_list_knowledge(kind="namespace")',
     "tortoise_diary_read":
         'tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)',
     "tortoise_expand_relationships":

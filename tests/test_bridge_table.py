@@ -837,7 +837,10 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # `create_operator`, `events_poll`, `delete`, `list_graphs`), so five more rows gain
     # a `use_instead` and four container rows arrive: 68 + 5 = 73 retired, and the
     # registry total moves 108 -> 112.
-    assert len(retired) == 73, f"expected 73 retired rows, got {len(retired)}"
+    # 73 -> 82: #11609 lane P11 retired the NINE envelope doors forward once the
+    # read/query containers carried the list envelope at the handler
+    # (`_row_section_envelope`), with no container row arriving.
+    assert len(retired) == 82, f"expected 82 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "
