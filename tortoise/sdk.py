@@ -235,6 +235,7 @@ from .projection.entities import (  # #3998: the declared :Source surface
     _SERVER_MANAGED_PROPS_BY_LABEL,
     _SOURCE_NODE_PROP_NAMES,
     filter_source_props,
+    label_set_publishable,
 )
 # #13626: the ONE write-gate ask for the DERIVED entity vectors. It is the same helper
 # the folds use, imported rather than re-spelled: `#13610` says there is exactly one
@@ -53952,8 +53953,18 @@ class TortoiseSDK:
         # same leak, one function away, which is why the filter now lives in one
         # place (`projection.entities.filter_source_props`) instead of being
         # re-stated per read path.
-        if resolved[0].get("label") == "Source":
-            _raw = resolved[0]["properties"]
+        # ⛔ Grade the WHOLE label SET, not the resolution branch's single label
+        # (#14593 review P2, measured): ``_resolve_entity`` emits one entry per
+        # branch and a hybrid ``(:Object:Source)`` resolves through ``Object``,
+        # so a ``label == "Source"`` test SKIPPED it and this door —
+        # ``tortoise_get_entity`` — published the stored map, ``text`` included,
+        # while ``GET /v1/objects/{id}`` withheld it after the same fix landed
+        # there. The predicate is the shared one (``projection.entities``), so the
+        # two doors cannot disagree again.
+        _raw = resolved[0]["properties"]
+        _labs = resolved[0].get("labels")
+        if not label_set_publishable(
+                _labs if _labs else (resolved[0].get("label") or None)):
             _props, _denied = filter_source_props(_props)
             if _echo_written:
                 # #5196 review round 3, P1: echoing the NODE's value for any key

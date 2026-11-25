@@ -699,6 +699,38 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
         assert "RAW BODY THAT MUST NOT LEAK" not in repr(body), body
 
 
+def test_the_MCP_entity_door_grades_the_label_SET_too(tmp_path):
+    """#14593 review P2: the same hybrid leak, one DOOR away.
+
+    ``TortoiseSDK._get_entity`` (the ``tortoise_get_entity`` MCP tool) tested the
+    resolution BRANCH label for equality against ``"Source"``. A hybrid
+    ``(:Object:Source)`` resolves through ``Object``, so the filter was skipped
+    and the door published the stored map — ``text`` included — while
+    ``GET /v1/objects/{id}`` withheld it after this PR's by-id fix. MEASURED at
+    the pre-fix head: ``keys: ['id', 'name', 'objectKind', 'text', 'url']``.
+
+    ⛔ Both doors now call ``projection.entities.label_set_publishable``, so they
+    cannot disagree again, and ``mcp_server.tortoise_get``'s auto-detect arm —
+    which applied NO filter at all, not even for a plain ``:Source`` — grades the
+    set as well. This arm asserts on the SDK door, which is what that tool runs.
+    """
+    secret = "HYBRID BODY THAT MUST NOT REACH THE MCP ENTITY DOOR"
+    hybrid_id = "hybrid-mcp-door-14593"
+    with _graph(str(tmp_path / "g.db")) as ha:
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', url:$u, text:$t})",
+                params={"i": hybrid_id, "u": "https://example.test/mcp-door-14593",
+                        "t": secret}, read_only=False)
+            got = sdk._get_entity(hybrid_id)
+        finally:
+            sdk.close()
+    assert got, "the fixture did not resolve — this row would grade nothing"
+    assert secret not in repr(got), "a hybrid's payload reached the MCP entity door"
+    assert "text" not in got, got
+
+
 def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
         tmp_path):
     """#14593 review P1 (data disclosure, #3998): the SAME rule, a FOURTH door.

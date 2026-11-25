@@ -15704,9 +15704,17 @@ def _layer_payload(entry: dict) -> dict:
     """One resolved node's properties, under its layer's own disclosure rule.
 
     A node whose label SET is not entirely publishable goes through
-    ``projection.entities.filter_source_props`` — the ONE home of the #3998 rule
-    (the graph indexes the raw; it is not the raw store) that ``get_entity``
-    itself applies, so this route cannot re-open a disclosure that door closed.
+    ``projection.entities.filter_source_props``, and the DECISION is the shared
+    ``projection.entities.label_set_publishable`` — the one home of both halves of
+    the rule, called by this route, by ``/belief``'s delegation arm, and by the
+    SDK/MCP entity door (``TortoiseSDK._get_entity`` / ``tortoise_get_entity``), so
+    no two doors can grade the same node differently.
+    ⚠️ That parity was a P2 finding, not a given: an earlier revision of this very
+    docstring asserted ``get_entity`` already applied the rule, while ``sdk.py``
+    still tested ``label == "Source"`` and ``mcp_server.tortoise_get`` applied no
+    filter at all — measured, a hybrid ``(:Object:Source)`` returned its ``text``
+    through ``tortoise_get_entity`` while this route withheld it. The sentence is
+    true now because both doors were changed to use the shared predicate.
 
     ⛔ THE WHOLE LABEL SET DECIDES, never the single resolution BRANCH label
     (#14593 review P1). ``_resolve_entity`` emits one entry per BRANCH
@@ -15747,11 +15755,11 @@ def _layer_payload(entry: dict) -> dict:
 #: — a ``:Source``, a legacy ``(:Document:Source)``, or any label this file has
 #: never heard of — is filtered through ``projection.entities.filter_source_props``
 #: (deny by default, #3998). Every label on the node must be in this set — the
-#: WHOLE set, never the first one (``_label_set_publishable``), because a hybrid
-#: ``(:Object:Source)`` answers an allowed first label while carrying a
-#: ``:Source`` half. Used by BOTH the by-id ``_layer_payload`` routes and
-#: ``/belief``'s ``evidence.provenance.delegation`` arm — one rule, two doors.
-_PUBLISHABLE_PAYLOAD_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
+#: WHOLE set, never the first one, because a hybrid ``(:Object:Source)`` answers
+#: an allowed first label while carrying a ``:Source`` half. The RULE lives in
+#: ``projection.entities.label_set_publishable`` — the home every door shares
+#: (these by-id routes, ``/belief``'s delegation arm, and the SDK/MCP
+#: ``get_entity`` door) — so this module holds no second copy of it.
 
 
 def _entry_label_set(entry: dict, *, fallback_key: str) -> list[str]:
@@ -15771,16 +15779,15 @@ def _entry_label_set(entry: dict, *, fallback_key: str) -> list[str]:
 
 
 def _label_set_publishable(labels: list[str]) -> bool:
-    """Is EVERY label in this set one a read route may publish its map under?
+    """Thin delegate to the shared rule in ``projection.entities``.
 
-    ⛔ DENY BY DEFAULT includes ABSENCE: an empty set is not publishable.
-    ``all(... for lbl in [])`` is vacuously True, which would let a label-less
-    node through — the mutant a review measured passing this rule before the
-    absence arm was pinned.
+    ⛔ NOT a re-implementation: the same predicate grades these routes, the
+    ``/belief`` delegation arm and the SDK/MCP entity door. Two copies is two
+    rules, and the copy that drifts is always the one nobody re-read.
     """
-    if not labels:
-        return False
-    return all(lbl in _PUBLISHABLE_PAYLOAD_LABELS for lbl in labels)
+    from tortoise.projection.entities import label_set_publishable
+
+    return label_set_publishable(labels)
 
 
 def _filter_delegation_payloads(provenance: dict | None) -> dict | None:

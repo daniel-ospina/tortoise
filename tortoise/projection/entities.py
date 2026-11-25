@@ -7924,3 +7924,36 @@ def filter_source_props(props: dict) -> tuple[dict, list[str]]:
     denied = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
     kept = {k: v for k, v in props.items() if k in _SOURCE_NODE_PROP_NAMES}
     return kept, denied
+
+#: Which labels' WHOLE property map a read surface may publish. ⛔ Graded as a
+#: SET, never as a node's first label: a node may carry several
+#: (``(:Object:Source)``, ``(:Subject:Source)``, ``(:Object:Event)`` are named
+#: production shapes elsewhere in this tree), and the read side sees only the
+#: branch it resolved through — so a rule keyed on one label is only as strong as
+#: that label's position. Lives HERE, not in a route module, because the decision
+#: is shared by the REST by-id routes, the ``/belief`` provenance arm, and the
+#: SDK/MCP entity door (``TortoiseSDK._get_entity`` / ``tortoise_get_entity``);
+#: a second copy is a second rule.
+PUBLISHABLE_PAYLOAD_LABELS: frozenset = frozenset(
+    {"Point", "Object", "Subject", "Event"})
+
+
+def label_set_publishable(labels) -> bool:
+    """May a read surface publish this node's whole property map?
+
+    ⛔ DENY BY DEFAULT INCLUDES ABSENCE. An empty set is NOT publishable:
+    ``all(... for lbl in [])`` is vacuously True, which would let a label-less
+    node through — a mutant measured passing an earlier version of this rule.
+
+    Accepts the label list the resolution returns additively (``labels``), and
+    callers that only have the older single spelling pass a one-element list; the
+    pair is deliberately the same decision either way.
+    """
+    if not labels:
+        return False
+    if isinstance(labels, str):
+        labels = [labels]
+    kept = [lbl for lbl in labels if lbl]
+    if not kept:
+        return False
+    return all(lbl in PUBLISHABLE_PAYLOAD_LABELS for lbl in kept)

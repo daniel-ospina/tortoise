@@ -9373,7 +9373,21 @@ def _get_auto_detect(id: str) -> dict:
     except Exception:
         resolved = []
     if resolved:
-        return dict(resolved[0]["properties"])
+        # ⛔ THIS ARM APPLIED NO FILTER AT ALL (#14593 review P2, measured), so a
+        # plain `:Source` — not only a hybrid — returned its stored map through
+        # `tortoise_get(id)` while the typed doors withheld it. It now grades the
+        # label SET with the shared rule and filters through the one `#3998`
+        # home, so all of `tortoise_get*` answer the same way for the same node.
+        entry = resolved[0]
+        props = dict(entry["properties"])
+        from tortoise.projection.entities import filter_source_props, label_set_publishable
+
+        _labs = entry.get("labels")
+        _publishable = label_set_publishable(
+            _labs if _labs else (entry.get("label") or None))
+        if not _publishable:
+            props, _denied = filter_source_props(props)
+        return props
     session = _safe(sdk._get_session, id)
     if isinstance(session, dict) and session:
         return session
