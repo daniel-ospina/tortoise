@@ -103,9 +103,9 @@ def _derived_mirror_required(entity_type: str, *,
     in-graph `:Point` index) and re-writing it would undo a strip (`#13610` option 2's
     "write it back on the next call" race).
 
-    ⚠️ AND WHY THE LABEL AGGREGATE IS STILL THE TEST FOR THESE TWO, WHEN IT IS EXACTLY THE
-    TEST THAT IS WRONG FOR THE TWO THAT DO NOT ASK (#13971 review, P2) — the answer is
-    per-door, not a blanket claim that the record holds the row:
+    ⚠️ AND WHY THE LABEL AGGREGATE IS STILL THE TEST FOR THESE TWO DOORS, WHEN IT IS
+    EXACTLY THE TEST THAT WAS WRONG FOR THE TWO WRITERS `#14552` TOOK OFF IT (#13971 review,
+    P2) — the answer is per-door, not a blanket claim that the record holds the row:
 
       * `sdk::_update_entity` is a caller-prop write on the ENTITY path (not a capture
         lane), the record leg answers for that row, and it sets the property with
@@ -131,23 +131,39 @@ def _derived_mirror_required(entity_type: str, *,
         than inheriting a blocked comparison. ⚠️ That inheritance was an ACCIDENT, not a
         rule: it protected `:Point` only because a different population was mis-counted.
 
-    The correct fix is a PER-ID ask (does the
-    record hold THIS row), which is `#13971`'s remaining work,
-    recorded there with the measured shape; the gate stays where it is until it lands,
-    because the restore is the one writer whose mistake cannot be repaired afterwards.
+    The per-id ask this paragraph used to leave as `#13971`'s remaining work LANDED in
+    `#14552` (`record_read.point_vector_keys`, read by
+    `projection::_rebuild_all_replay`), so the restore door no longer has to choose between
+    the aggregate and the sole copy: it asks whether the record holds THIS id and keeps the
+    vector when it does not.
 
-    ⛔ TWO `:Point` DECLARED WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the
-    reason is the same test read honestly: on their lanes the copy is NOT redundant.
+    ⛔ TWO `:Point` DECLARED WRITERS ASK PER ROW RATHER THAN ONLY PER LABEL (`#14552`, on
+    `#13971` review P1's finding), IN TWO DIFFERENT SHAPES — and conflating them is how a lane
+    concludes the CAPTURE is protected by a per-turn record read, which it is NOT. On their
+    lanes the copy is NOT redundant unless the record holds that specific row:
     `sdk::_write_capture_turns` writes the graph batch on exactly the lanes where the record
     cannot hold the turn (no journal, no tenant, an open connect breaker, or a record write
     that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot vector only
-    for ids the journal wrote none for — gating either on the label aggregate put those
-    vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both in its
-    census arm, so its plan refuses `:Point` rather than stripping into them — on the
-    coverage verdict today, on those two writers once coverage verifies.
+    for ids the journal wrote none for. Gating either on the label aggregate ALONE put those
+    vectors in NEITHER store, so neither does — but each asks in its own shape:
 
-    ⛔ AND THE JOURNAL FOLD IS A THIRD THAT DOES NOT ASK, outside that declared population:
-    `_upsert_point_props` is the journal's own record truth — its vector is what makes
+      * the PASS-1B SNAPSHOT RESTORE asks the RECORD per id — `record_read.point_vector_keys`,
+        "do you SERVE a vector for THIS id" — and only when it answers yes,
+        `mirror_required("point")` (a LABEL predicate, asked about the id the record
+        answered);
+      * the CAPTURE asks the LABEL predicate per ROW, on the lane where
+        `record_writer.record_holds_turns(...)` (a DEPLOYMENT predicate, not a per-turn one)
+        says the record is expected to hold the turns, and RE-ATTACHES the vector per turn
+        for any turn the record then REFUSES. It has NO per-turn record read, and does not
+        need one: on that lane the graph batch does not run, so the blank is only observable
+        through the rescue — which re-attaches.
+
+    `tools/strip_graph_entity_vectors.py`'s census is therefore EMPTY for `:Point` — the
+    writer arm no longer refuses it.
+
+    ⛔ AND THE JOURNAL FOLD IS THE ONE `:Point` WRITER THAT DOES NOT ASK, and it is OUTSIDE that
+    declared population, and still must not ask: `_upsert_point_props`
+    is the journal's own record truth — its vector is what makes
     `derived == replay(journal)` hold, and `MIRROR_RETIRED_LABELS` must not contain `point`
     so that fold keeps writing the dense leg a named fallback.
 
@@ -3054,7 +3070,14 @@ class _EntityHandlers:
         # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Two OTHER
         # `:Point` writers also keep their copy on lanes where it is the sole carrier — the
         # capture turn write, the pass-1b snapshot restore in `projection::_rebuild_all_replay`
-        # (`#13971` review P1) — while the SDK door and `restore_graph` DO ask.
+        # (`#13971` review P1) — and since `#14552` each asks the gate PER ROW rather than only
+        # per label, in two DIFFERENT shapes (conflating them is how a lane concludes the
+        # capture is protected by a per-turn record read, which it is NOT): the capture asks the
+        # LABEL predicate on the lane where `record_writer.record_holds_turns(...)` says the
+        # record is expected to hold the turns and re-attaches the vector per turn for any turn
+        # the record then REFUSES; the pass-1b restore asks the RECORD per ID (does the record
+        # SERVE a vector for THIS id). The SDK door and `restore_graph` keep asking about the
+        # label.
         elif not op and p.get("content"):
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
