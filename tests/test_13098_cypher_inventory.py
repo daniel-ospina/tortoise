@@ -32,6 +32,7 @@ than report agreement.
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
 import io
 import os
@@ -505,14 +506,9 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     """
     doc = tmp_path / "src.md"
     doc.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
-    doc.chmod(0o000)
-    try:
-        _skip_if_chmod_does_not_deny(doc)
-        rc = census.check(doc, {"sites": []})
-    finally:
-        doc.chmod(0o600)
-    assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
-
+    # ⛔ THE DECODE HALF COMES FIRST, because the `chmod(0o000)` half can SKIP on a root
+    # runner and `pytest.skip` aborts the whole function — placed after it, this
+    # assertion would lose its only coverage exactly where the premise above fails.
     # ⛔ AND NOT JUST AN `OSError`: `UnicodeDecodeError` is a ValueError, so it slipped
     # past an `except OSError` in this very guard and exited 1 (measured on a latin-1
     # byte). Same verb, same reserve of the DRIFT code.
@@ -520,6 +516,14 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     latin1.write_bytes(b"<!-- cypher-inventory:sites = 1327 -->\n" + b"\xff\xfe\n")
     assert census.check(latin1, {"sites": []}) == 2, (
         "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
+
+    doc.chmod(0o000)
+    try:
+        _skip_if_chmod_does_not_deny(doc)
+        rc = census.check(doc, {"sites": []})
+    finally:
+        doc.chmod(0o600)
+    assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
 
 
 def test_an_unresolvable_render_target_is_could_not_run(tmp_path):
@@ -548,6 +552,14 @@ def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
     """
     unreadable = tmp_path / "src.md"
     unreadable.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
+    # ⛔ THE DIRECTORY HALF COMES FIRST: the `chmod(0o000)` half can SKIP on a root runner
+    # and `pytest.skip` aborts the whole function, so an assertion placed after it would
+    # lose its only coverage exactly where that premise fails.
+    with pytest.raises(SystemExit) as refused_dir:
+        census.render(tmp_path, {"sites": []})   # exists, and is a directory
+    assert refused_dir.value.code == 2, (
+        f"a directory as the source must refuse with 2, got {refused_dir.value.code!r}")
+
     unreadable.chmod(0o000)
     try:
         _skip_if_chmod_does_not_deny(unreadable)
@@ -558,11 +570,6 @@ def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
             f"{refused.value.code!r}")
     finally:
         unreadable.chmod(0o600)
-
-    with pytest.raises(SystemExit) as refused_dir:
-        census.render(tmp_path, {"sites": []})   # exists, and is a directory
-    assert refused_dir.value.code == 2, (
-        f"a directory as the source must refuse with 2, got {refused_dir.value.code!r}")
 
 
 def test_the_renderer_refuses_to_write_over_the_source(capsys):
@@ -608,7 +615,7 @@ def test_the_renderer_refuses_to_write_over_a_tracked_path(tmp_path, monkeypatch
     the guard is present, nothing is written and the target stays absent; if it
     regressed, this reds on the assertion below.
     """
-    repo = _scratch_repo(tmp_path)
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
     monkeypatch.setattr(census, "ROOT", repo)
     src = repo / "CYPHER-INVENTORY.src.md"
     src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
@@ -777,25 +784,35 @@ def _skip_if_chmod_does_not_deny(path: Path) -> None:
         " a READABLE file")
 
 
-def _scratch_repo(tmp_path: Path) -> Path:
+def _scratch_repo(tmp_path: Path, *, needs_non_utf8: bool = True) -> Path:
     """A throwaway git work tree that can hold a non-UTF-8 filename.
 
     `core.quotePath=false` is what puts RAW byte `0xe9` on the probe's stderr; with
     git's default the path is quoted into ASCII and the decode arm would prove nothing.
+
+    ⛔ `needs_non_utf8=False` FOR THE ARMS THAT NEED A SCRATCH TREE BUT NOT A NON-UTF-8
+    NAME. Without it such an arm would inherit the premise skip below, and on a
+    filesystem that refuses those names it would lose its only coverage for an
+    unrelated reason (the tracked-path guard is graded by no other arm).
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    # ⛔ THE PREMISE, ASSERTED WHERE THE PREMISE IS CONSTRUCTED: a name that is not
-    # valid UTF-8 is not accepted by every filesystem (macOS validates filenames as
-    # UTF-8). Without this probe the non-UTF-8 arms fail inside `write_text`/`git add`
-    # with an unrelated error instead of skipping, which is a red nobody can act on.
-    probe = repo / os.fsdecode(b"caf\xe9.probe")
-    try:
-        probe.write_bytes(b"x")
-        probe.unlink()
-    except OSError:
-        pytest.skip("this filesystem rejects a non-UTF-8 filename — the premise the"
-                    " non-UTF-8 arms rest on cannot be constructed here")
+    if needs_non_utf8:
+        # ⛔ THE PREMISE, ASSERTED WHERE THE PREMISE IS CONSTRUCTED: a name that is not
+        # valid UTF-8 is not accepted by every filesystem (macOS validates filenames as
+        # UTF-8). Without this probe the non-UTF-8 arms fail inside `write_text`/`git
+        # add` with an unrelated error instead of skipping, which is a red nobody can
+        # act on. Only EILSEQ means "this filesystem rejects the name" — anything else
+        # (ENOSPC, EROFS, EACCES) is a real failure of the fixture and must propagate.
+        probe = repo / os.fsdecode(b"caf\xe9.probe")
+        try:
+            probe.write_bytes(b"x")
+            probe.unlink()
+        except OSError as err:
+            if err.errno != errno.EILSEQ:
+                raise
+            pytest.skip("this filesystem rejects a non-UTF-8 filename (EILSEQ) — the"
+                        " premise these arms rest on cannot be constructed here")
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "core.quotePath", "false"],
                    check=True)
