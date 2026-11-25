@@ -56,19 +56,23 @@ def fuse_expansion_pass(
     + 1)`` over a 0-BASED rank, ``k=60`` for equal-weighted legs — so
 
       * an id both passes carry earns both terms, and that is an ADVANTAGE, not
-        dominance. The condition is a PAIR of ranks, never a bound on one:
-        ``1/(61+h1) + 1/(61+h2)`` beats a single-list candidate at 0-based rank
-        ``r`` only while ``r < (h1 + h2 - 61) / 2``. Two consequences, and the
-        second is the one this bullet used to omit: (a) the SYMMETRIC case
-        ``h1 == h2 == h`` — the only one a same-rank fixture can build — beats a
-        lone rank-1 while the shared id sits at 1-based rank <= 61 in BOTH
-        lists, TIES it at 62 (``2/122 == 1/61``, ``rrf_fusion``'s ``(-score,
-        id)`` then deciding by spelling rather than evidence) and loses past
-        that; (b) a shared id holding the TOP slot in EITHER list beats EVERY
-        single-list term outright — ``1/61 + 1/(61+h2) > 1/(61+r)`` for every
-        ``h2`` and ``r`` — so membership is not confined to the <= 61 case.
-        Behind either, the entity context AGREES with the query, which is
-        exactly the signal the expansion exists to supply — and
+        dominance. The condition is an INEQUALITY in the SINGLE-LIST candidate's
+        rank, never a bound on the shared id's own two ranks:
+        ``1/(61+h1) + 1/(61+h2) > 1/(61+r)`` reduces exactly — every denominator
+        is positive — to ``r > (h1*h2 - 3721) / (122 + h1 + h2)``, where 3721 is
+        ``61**2``. So the two terms beat a single-list candidate at 0-based rank
+        ``r`` exactly while ``r`` CLEARS that ratio: the WORSE the single-list
+        rank (the larger ``r``), the easier they clear it, and a TOP slot in
+        either list (``h1 == 0``) makes the ratio negative, so they beat EVERY
+        single-list term outright. Two consequences, and the second is the one
+        this bullet used to omit: (a) against a lone rank-1 (``r == 0``) the
+        requirement is just ``h1*h2 < 3721``, which in the SYMMETRIC case
+        ``h1 == h2 == h`` — the only one a same-rank fixture can build — is
+        "wins while both 1-based ranks are <= 61, TIES at 62 (``2/122 == 1/61``,
+        ``rrf_fusion``'s ``(-score, id)`` then deciding by spelling rather than
+        evidence) and loses past that"; (b) membership is therefore NOT confined
+        to that <= 61 reading. Behind either, the entity context AGREES with the
+        query, which is exactly the signal the expansion exists to supply — and
         ``DEFAULT_POOL_SIZE`` is 120, so ranks past 61 are ordinary in the
         shipping default, not a corner;
       * an id only one pass carries is ranked by its own reciprocal rank, so a
@@ -83,17 +87,22 @@ def fuse_expansion_pass(
     candidate in both passes still lands below it. What changes is the
     BOUND: pass-1 evidence can no longer be displaced by the expansion's
     LENGTH — only by a candidate that out-ranks it in the expanded run, or by
-    an id BOTH passes carry, whose PAIR of terms can pass an incumbent that
+    an id BOTH passes carry, whose two terms can pass an incumbent that
     out-ranks it in the expanded run: against an incumbent at 0-based rank
-    ``r`` that is ``r < (h1 + h2 - 61) / 2`` — in the symmetric case
-    (``h1 == h2 == h``) the <= 61-in-both reading, a tie at 62 and the
-    incumbent ahead past it, and UNCONFINED when the shared id holds a top slot
-    in either list, where its two terms beat every single-list term. Both
-    halves are stated because the two earlier cuts of this sentence each got one
-    wrong: the first published the claim that BOTH terms outrank either pass on
-    its own (false), the second that the advantage holds only inside the
-    <= 61-in-both reading (false whenever either rank is 1 — that reading is the
-    symmetric case, never a necessary condition).
+    ``r`` that is ``r > (h1*h2 - 3721) / (122 + h1 + h2)`` — the symmetric case
+    (``h1 == h2 == h``) is the <= 61-in-both reading against a lone rank-1, a
+    tie at 62 and the incumbent ahead past it, and the condition is UNCONFINED
+    when the shared id holds a top slot in either list, where its two terms beat
+    every single-list term. All three cuts are stated because each earlier one
+    got it wrong in a different direction: the first published the claim that
+    BOTH terms outrank either pass on its own (false), the second that the
+    advantage holds only inside the <= 61-in-both reading (false whenever either
+    rank is 1 — that reading is the symmetric case, never a necessary
+    condition), and the third turned the pair into a bound that HALVES THE SUM
+    of the two ranks, which is the same false necessity with the inequality
+    inverted: it forbids the winning pair ``h1 == h2 == 0`` at ``r == 13``,
+    where ``2/61`` beats ``1/74``, and it permits ``h1 == h2 == 64`` at
+    ``r == 0``, where ``2/125`` loses to ``1/61``.
 
     Scores are carried from the pass that produced the id (``second_pass``
     wins a collision, the order the previous concatenation used), NOT the RRF

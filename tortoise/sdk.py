@@ -49864,13 +49864,13 @@ class TortoiseSDK:
         (`expanded + pass-1-only`) it used to be. An id BOTH passes carry earns both
         terms — the entity context AGREEING with the query is the signal the expansion
         exists to supply — but that is an ADVANTAGE, not a dominance guarantee: it is a
-        PAIR condition, `1/(61+h1) + 1/(61+h2)` vs a single-list rank `r`, beaten only
-        while `r < (h1 + h2 - 61) / 2`. The SYMMETRIC case (both ranks at <= 61) wins,
-        ties a lone rank-1 at 62 (`2/122 == 1/61`, `(-score, id)` decides by spelling)
-        and loses past it — while a top slot in EITHER list beats every single-list term
-        outright. A pass-1 id can move down only when a candidate out-ranks it in the
-        composed run, when one ties it and wins the id tiebreak (#2952), or by a shared
-        id under that pair condition — never because the expansion had more rows. Order is NOT preserved: a re-ranked dense
+        PAIR condition, `1/(61+h1) + 1/(61+h2)` vs a single-list rank `r`, i.e. exactly
+        `r > (h1*h2 - 3721) / (122 + h1 + h2)` (3721 is `61**2`): a WORSE single-list rank
+        is cleared more easily, a top slot in either list makes that ratio negative (so
+        they beat EVERY single-list term), and against a lone rank-1 it is `h1*h2 < 3721`
+        — the symmetric `<= 61` win and the tie at 62 in `fuse_expansion_pass`'s own terms.
+        A pass-1 id can move down only when a candidate out-ranks it in the composed run,
+        when one ties it and wins the id tiebreak (#2952), or by a shared id under that pair condition — never because the expansion had more rows. Order is NOT preserved: a re-ranked dense
         leg is the mechanism, not a side effect, and on a lever that ships OFF it stays
         a decision to be measured, not asserted.
 

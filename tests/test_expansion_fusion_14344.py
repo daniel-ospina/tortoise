@@ -265,10 +265,11 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
 
     ``rrf_fusion`` scores a shared id ``1/(61+h1) + 1/(61+h2)`` (0-based ranks)
     against a single-list candidate at 0-based rank ``r``'s ``1/(61+r)``, so the
-    condition is a PAIR of ranks, ``r < (h1 + h2 - 61) / 2`` — never a bound on
-    one rank. Its SYMMETRIC case (``h1 == h2 == h``, the only one a same-rank
-    fixture builds) wins while both 1-based ranks are <= 61, TIES a lone rank-1
-    at 62 and loses past it; its TOP-SLOT case is unconfined. ``DEFAULT_POOL_SIZE``
+    condition is an INEQUALITY in ``r`` — ``r > (h1*h2 - 3721) / (122 + h1 + h2)``
+    (3721 is ``61**2``) — never a bound on one rank of the shared id. Its
+    SYMMETRIC case against a lone rank-1 (``h1 == h2 == h``, the only one a
+    same-rank fixture builds) wins while both 1-based ranks are <= 61, TIES at 62
+    and loses past it; its TOP-SLOT case is unconfined. ``DEFAULT_POOL_SIZE``
     is 120 (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the
     shipping default — not a corner.
 
@@ -283,6 +284,15 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     case, and a sentence that published it as a necessary condition was false in
     the other direction. The arithmetic row below carries the asymmetric
     (``h1 != h2``) case that falsifies it; this row carries the wording.
+
+    ⛔ AND THE PAIR FORM ITSELF IS GRADED AGAINST THE ENGINE, because the FIRST
+    fix for round 18 published ``r < (h1 + h2 - 61) / 2`` — the same false
+    necessity with the inequality inverted. It forbade a winning pair
+    (``h1 == h2 == 0`` at ``r == 13``: ``2/61`` beats ``1/74``) and permitted a
+    losing one (``h1 == h2 == 64`` at ``r == 0``: ``2/125`` loses to ``1/61``),
+    i.e. it was wrong on 21 769 of 28 420 sampled (h1, h2, r) triples. The
+    carriers now state the exact reduction, and this row REJECTS the inverted
+    form so a re-cut cannot quietly restore it.
     """
     import re
 
@@ -298,24 +308,34 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     unbounded = "outranks either pass alone"
     bound = re.compile(r"(<=|\u2264)\s*61")
     # ⛔ The POSITIVE half round 18 found missing from every carrier: the condition
-    # is a pair of ranks (`r < (h1 + h2 - 61) / 2`), so a carrier that states only
-    # the symmetric `<= 61` case publishes it as a NECESSARY condition and is false
-    # whenever either rank is 1. Graded positively because enumerating the false
-    # phrasings is what let the mirror error through twice; both the ASCII and the
-    # typographic minus are accepted, since the README uses U+2212.
-    pair_condition = re.compile(r"\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)")
+    # is an INEQUALITY in the single-list rank, `r > (h1*h2 - 3721) / (122 + h1 +
+    # h2)`, so a carrier that states only the symmetric `<= 61` case publishes it
+    # as a NECESSARY condition and is false whenever either rank is 1. Graded
+    # positively because enumerating the false phrasings is what let the mirror
+    # error through twice; both the ASCII and the typographic minus are accepted,
+    # since the README uses U+2212, and so is the `61**2` / `61\u00b2` spelling of 3721.
+    pair_condition = re.compile(r"h1\s*[*\u00b7]\s*h2\s*[-\u2212]\s*(?:3721|61\s*(?:\*\*|\u00b2|\^)\s*2?)")
+    # ⛔ The INVERTED form the first round-18 fix published. It is a false
+    # necessity (see the docstring), so its presence is a regression, not a
+    # stylistic difference.
+    inverted = re.compile(r"\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)\s*/\s*2")
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
-            "rank only under the pair condition r < (h1 + h2 - 61) / 2")
+            "rank only under the pair condition r > (h1*h2 - 3721) / (122 + h1 + h2)")
         assert bound.search(text), (
             f"{where} states the two-term advantage without its bound — the "
             "`<= 61` clause is what makes the SYMMETRIC half of the claim true")
         assert pair_condition.search(text), (
             f"{where} publishes the `<= 61` case without the PAIR condition "
-            "`r < (h1 + h2 - 61) / 2` — the `<= 61` reading is the symmetric "
-            "case only, and a shared id holding the TOP slot in either list "
-            "beats every single-list term whatever its other rank (round 18, P2-1)")
+            "`r > (h1*h2 - 3721) / (122 + h1 + h2)` — the `<= 61` reading is the "
+            "symmetric case only, and a shared id holding the TOP slot in either "
+            "list beats every single-list term whatever its other rank (round 18, P2-1)")
+        assert not inverted.search(text), (
+            f"{where} publishes the INVERTED pair condition `r < (h1 + h2 - 61) / 2`, "
+            "which is false in both directions: `h1 == h2 == 0` at `r == 13` WINS "
+            "(2/61 > 1/74) and `h1 == h2 == 64` at `r == 0` LOSES (2/125 < 1/61). "
+            "The exact reduction is `r > (h1*h2 - 3721) / (122 + h1 + h2)`")
 
 
 def test_the_two_term_advantage_is_bounded_at_1based_61():
@@ -411,6 +431,92 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
     assert ids.index("newcomer") < ids.index("shared"), (
         f"at 1-based 65 in both lists the single-term rank-0 candidate must "
         f"lead — got {ids}")
+
+
+def test_the_published_pair_condition_is_the_engines_own_inequality():
+    """The pair condition, swept against ``rrf_fusion`` over a grid — not sampled.
+
+    ⛔ THIS IS THE ROW THE ROUND-18 FIX NEEDED AND DID NOT HAVE. Round 18 was
+    right that ``<= 61 in BOTH lists`` is not a necessary condition, and its fix
+    published the replacement ``r < (h1 + h2 - 61) / 2`` — which is the SAME
+    false necessity with the inequality INVERTED. Checked against this module's
+    own ``rrf_fusion`` (``w / (k + rank + 1)``, ``k = 60``, 0-based rank,
+    ``search_engine.py``) it is wrong on 21 769 of 28 420 sampled ``(h1, h2, r)``
+    triples. Two hand-checkable extremes:
+
+      * ``h1 == h2 == 0``, ``r == 13`` — the two terms score ``2/61 == 0.032787``
+        against ``1/74 == 0.013514`` and WIN, yet the inverted form predicts a
+        loss (``13 < -30.5`` is false);
+      * ``h1 == h2 == 64``, ``r == 0`` — they score ``2/125 == 0.016000``
+        against ``1/61 == 0.016393`` and LOSE, yet the inverted form predicts a
+        win (``0 < 33.5`` is true).
+
+    The exact reduction of ``1/(61+h1) + 1/(61+h2) > 1/(61+r)`` is
+    ``r > (h1*h2 - 3721) / (122 + h1 + h2)`` (3721 is ``61**2``; every
+    denominator is positive, so the step is an equivalence). This row asserts
+    the published closed form against the engine on a grid, so a re-cut that
+    republishes either false reading — necessity on the shared ranks, or the
+    inverted inequality — reds HERE, on the arithmetic, not only in the prose.
+
+    Non-vacuity (measured, then reverted): with the carriers' OLD
+    ``r < (h1 + h2 - 61) / 2`` substituted for the published form below, this
+    row fails on the very first grid cell ``(0, 0, 7)``; with the exact form it
+    passes over the whole grid. It also reds on any engine whose membership is
+    counted once rather than once per list, since the grid includes pairs where
+    only the second term flips the outcome.
+    """
+    def _published(h1, h2, r):
+        # The carriers' condition, transcribed from `fuse_expansion_pass`'s
+        # docstring. Kept as arithmetic so the docstring and the engine are
+        # compared on the same footing — a prose edit alone cannot move it.
+        return r > (h1 * h2 - 3721) / (122 + h1 + h2)
+
+    def _build(h1, h2, r):
+        """``shared`` at 0-based h1 in pass 1 and h2 in the expansion;
+        ``newcomer`` at 0-based r in pass 1 only, so it earns exactly ONE term."""
+        width = max(h1, r) + 1
+        first = [f"p{i}" for i in range(width)]
+        first[h1] = "shared"
+        first[r] = "newcomer"
+        second = [f"e{i}" for i in range(h2 + 1)]
+        second[h2] = "shared"
+        return [(x, 1.0) for x in first], [(x, 1.0) for x in second]
+
+    checked = 0
+    for h1 in range(0, 141, 7):
+        for h2 in range(0, 141, 11):
+            for r in range(0, 141, 9):
+                if r == h1:
+                    continue  # one row cannot hold both ids at one index
+                fused = rrf_fusion(list(_build(h1, h2, r)), 60)
+                actual = fused["shared"] > fused["newcomer"]
+                assert fused["shared"] == 1 / (61 + h1) + 1 / (61 + h2), (
+                    f"the shared id must earn BOTH terms at (h1, h2) = ({h1}, "
+                    f"{h2}) — got {fused['shared']!r}")
+                assert fused["newcomer"] == 1 / (61 + r), (
+                    f"the newcomer must earn exactly ONE term at r = {r} — got "
+                    f"{fused['newcomer']!r}")
+                assert actual == _published(h1, h2, r), (
+                    f"the published pair condition disagrees with the engine at "
+                    f"(h1, h2, r) = ({h1}, {h2}, {r}): shared={fused['shared']!r} "
+                    f"newcomer={fused['newcomer']!r} says {actual}, the carriers' "
+                    f"`r > (h1*h2 - 3721) / (122 + h1 + h2)` says "
+                    f"{_published(h1, h2, r)} — re-derive the carriers, do not "
+                    "re-word them")
+                checked += 1
+    assert checked > 200, f"the sweep must actually sweep — only {checked} cells"
+
+    # The two cells that separate the exact form from the inverted one, asserted
+    # directly so the failure names a reader-checkable example rather than a grid
+    # coordinate.
+    fused = rrf_fusion(list(_build(0, 0, 13)), 60)
+    assert fused["shared"] > fused["newcomer"], (
+        "h1 == h2 == 0 at r == 13 must WIN for the two terms (2/61 > 1/74) — the "
+        "inverted `r < (h1 + h2 - 61) / 2` forbids this winning pair")
+    fused = rrf_fusion(list(_build(64, 64, 0)), 60)
+    assert fused["newcomer"] > fused["shared"], (
+        "h1 == h2 == 64 at r == 0 must LOSE for the two terms (2/125 < 1/61) — "
+        "the inverted `r < (h1 + h2 - 61) / 2` permits this losing pair")
 
 
 def test_the_dense_fixture_pin_does_not_restate_the_symmetric_case_as_necessary():
