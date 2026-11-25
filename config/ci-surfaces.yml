@@ -79,10 +79,14 @@ version: 1
 # `tests/test_14219_batches_api.py` row, plus the RATCHET's own
 # `tests/test_sdk_privatise_sweep.py` row. ⛔ THAT ENUMERATION IS COMPLETE, and it is a
 # completeness claim about the files this paragraph names BY PATH, not a count of anything: those are
-# the named files that carry a `durations` entry, and `#14574`'s file plus `#14607`'s are the named
-# ones that do not. ⛔ `#14415`'s files are named BY PATH here on purpose: the earlier
-# "`#14415`'s batch rows" named them by ISSUE only, so no matcher could reach them and deleting
-# either `durations` row left this block's arm GREEN over a row claim it makes.
+# the named files that carry a `durations` entry. ⛔ It does NOT claim that `#14574`'s file or
+# `#14607`'s carry no row, and it must not: `tools/ci_timing.py --refresh-durations` ADDS a row the
+# first time a sweep measures a `fast_pool()` member, so an absence claim here would be false one
+# sweep later with no arm able to see it. What the block asserts about them is the WORD
+# REGISTRATION, which stays true whether or not a row lands beside it. ⛔ `#14415`'s files are named
+# BY PATH here on purpose: the earlier "`#14415`'s batch rows" named them by ISSUE only, so no
+# matcher could reach them and deleting either `durations` row left this block's arm GREEN over a
+# row claim it makes.
 # Spelling it without a numeral is deliberate — the doctrine sentence below says
 # no pool size and no row count is stated here, and a spelled-out "two" is still a count (measured
 # 2026-11-25: an earlier revision said "`#14415`'s two batch rows" and "`#14607`'s two
