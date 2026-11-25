@@ -957,6 +957,7 @@ def test_a_dispatched_dry_run_files_nothing(tmp_path):
     assert "ALPHA_SECRET" in out, "a dry run must still show the finding"
 
 
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
 def test_a_dispatched_dry_run_resolves_nothing(tmp_path):
     """A dry run must be dry on BOTH mutating arms, not only on the filing one.
 
@@ -1042,6 +1043,36 @@ def _report_step_env() -> str:
             if str(step.get("name", "")).startswith("Report —"):
                 return json.dumps(step.get("env") or {})
     raise AssertionError("the report step is gone")
+
+
+def test_the_resolve_gate_is_supplied_a_default_branch_on_every_event():
+    """The CLEAN sweep's guards are pinned; their `env:` INPUTS were pinned by nothing.
+
+    `_Harness.run()` supplies `REF`/`DEFAULT_BRANCH` itself, so no row can see the
+    workflow's own wiring: delete either expression (or mis-wire it — `github.ref_name`
+    for `REF`, the raw `github.ref` for `DEFAULT_BRANCH`) and every test stays green
+    while the sweep takes its skip arm on every tick, forever. That is the `#8841`
+    defect this sweep closes, reintroduced with a green suite — the silent-disable
+    shape `_report_step_env()` exists to prevent for the read step's outputs.
+
+    The FALLBACK is asserted as part of the wiring because it is the difference between
+    a working sweep and a permanently parked one: `schedule` is the only event that
+    resolves in production, and a scheduled payload carries no `repository` object, so
+    the bare payload field is EMPTY on every tick that matters.
+    """
+    env = json.loads(_report_step_env())
+    assert env.get("REF") == "${{ github.ref }}", (
+        "the sweep's ref must be the ref `checkout` read — the tree the reading describes; "
+        f"`github.ref_name` here would be `main` on a branch dispatch. Got {env.get('REF')!r}"
+    )
+    assert env.get("DEFAULT_BRANCH") == (
+        "${{ github.event.repository.default_branch || github.ref_name }}"
+    ), (
+        "DEFAULT_BRANCH must carry a fallback: a `schedule` payload has no `repository` "
+        "object, so the bare payload field is empty on every tick that resolves and the "
+        "sweep parks on its skip arm forever. Got "
+        f"{env.get('DEFAULT_BRANCH')!r}"
+    )
 
 
 def test_the_read_step_publishes_a_fresh_reading_identity_every_tick():
@@ -1161,6 +1192,7 @@ def test_an_unknown_verdict_never_reads_as_no_drift(tmp_path):
     assert "--method PATCH" not in h.calls()
 
 
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
 def test_a_zero_count_drift_reading_never_exits_green(tmp_path):
     """rc=1 with an empty `.remainder` is a CONTRADICTION, not a finding-free run.
 
