@@ -320,6 +320,28 @@ UNCUT_GRAPHS_SQL = (
     "WHERE j.org_id = %s AND c.graph_id IS NULL ORDER BY j.graph_id"
 )
 
+#: Graphs this ORG that already HAVE a counter row in :data:`MODE_SEEDED` — i.e.
+#: seeded, and therefore allocating NOTHING until an operator arms them.
+#:
+#: ⛔ ITS OWN QUERY, AND ITS OWN POPULATION (#14587 review P2). `backfill --arm`
+#: used :data:`UNCUT_GRAPHS_SQL` alone, which is scoped `c.graph_id IS NULL` — so
+#: the operator sequence this module documents and the PR body prints
+#: (`backfill`, then `backfill --arm`) could not work: the first run CREATES the
+#: cursor row, which removes every graph it healed from the second run's
+#: population, so the arm pass reported `considered: 0` / exit 0 over graphs that
+#: still allocated nothing. A seeded row is the ONE state the arm pass exists to
+#: fix, and it was the one state the pass could not see.
+#:
+#: It reads `record_cursor`, not `journal_event`: the row IS the state being
+#: selected on, and it filters `org_id` explicitly, so the tenancy GUC is not
+#: what makes the read correct (it is still scoped by the caller, as every other
+#: statement here is).
+SEEDED_GRAPHS_SQL = (
+    f"SELECT c.graph_id FROM public.{RECORD_CURSOR_TABLE} c "
+    f"WHERE c.org_id = %s AND c.mode = '{MODE_SEEDED}' "
+    "ORDER BY c.graph_id"
+)
+
 ARM_SQL = (
     f"UPDATE public.{RECORD_CURSOR_TABLE} SET mode = '{MODE_ACTIVE}', "
     "updated_at = now() WHERE org_id = %s AND graph_id = %s "

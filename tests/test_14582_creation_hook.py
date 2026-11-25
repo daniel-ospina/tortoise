@@ -2412,6 +2412,116 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
 
 
 @pytestmark_live
+def test_the_arm_pass_reaches_what_a_seed_only_run_left_seeded(
+        armed, record_schema):
+    """⛔ `backfill` THEN `backfill --arm` MUST ARM (#14587 review P2).
+
+    The operator sequence this module's own docstring and the PR body print is
+    `backfill --dry-run`, then `backfill`, then optionally `backfill --arm` —
+    seed-only first, so the operator sees the counts before making the cutover
+    decision. That sequence COULD NOT WORK: `UNCUT_GRAPHS_SQL` is scoped
+    `c.graph_id IS NULL`, so the first run CREATES the row whose absence the
+    second run selects on. The arm pass then reported `considered: 0`, exited 0,
+    and left every graph it had just healed in `seeded` — allocating nothing, its
+    record writes still refused `cursor_not_active`.
+
+    Mutant: drop the `SEEDED_GRAPHS_SQL` union in `_cmd_backfill` and
+    `considered` falls to 0 and the mode stays `seeded`; both assertions below
+    go red. Delete the `arm_them` guard and the seed-only test above goes red.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = _uncut_graph(record_schema, "arm-pass", positions=(1, 2, 3))
+    seeded_payload = cli._cmd_backfill(_conn(), _backfill_args(org))
+    assert (seeded_payload["considered"], seeded_payload["seeded"]) == (1, 1), (
+        seeded_payload)
+    assert _counter(record_schema, org, graph) == (3, "seeded"), (
+        "the first run must leave the row SEEDED — that is precisely the state "
+        "the arm pass exists to leave")
+
+    armed_payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
+    assert armed_payload["considered"] == 1, (
+        "the arm pass cannot see the graph its own seed run created: "
+        f"{armed_payload}")
+    assert armed_payload["armed"] == 1, armed_payload
+    assert _counter(record_schema, org, graph) == (3, "active"), (
+        "after `backfill` then `backfill --arm` the graph must ALLOCATE — a "
+        "`seeded` row refuses every record write (`cursor_not_active`)")
+
+    # Idempotent from the armed side: nothing left to do, and no counter move
+    # (arming is a MODE change; the journal's positions remain the floor).
+    again = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
+    assert (again["considered"], again["armed"]) == (0, 0), again
+
+
+@pytestmark_live
+def test_the_arm_pass_does_not_re_seed_a_graph_the_operator_already_floored(
+        armed, record_schema):
+    """⛔ ARM-ONLY: a seeded row is ARMED, never re-seeded (#14587 review P2).
+
+    `SEED_SQL`'s guard compares the JOURNAL's `MAX(seq)` with the floor, not the
+    cursor's `seq`. So re-seeding in the arm pass would put a graph back through
+    the divergence guard — and a graph an operator seeded from the record's own
+    `MAX(seq)` (the remedy `backfill` prints for `divergence`) has, by
+    construction, `MAX(seq) > COUNT(*)`. Re-seeding refuses it, and the arm pass
+    would then abandon the one verb the state actually needs.
+
+    Built directly: a gapped journal whose row is already `seeded` at the record's
+    max — the state `seed --enumerated-floor <MAX>` leaves behind.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = _uncut_graph(record_schema, "arm-gap", positions=(1, 2, 4))
+    with record_schema.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.record_cursor "
+            "(org_id, graph_id, seq, mode) VALUES (%s, %s, %s, 'seeded')",
+            (org, graph, 4))
+    record_schema.commit()
+
+    payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
+    assert payload["refused"] == 0, (
+        "the arm pass must not re-run the divergence guard over a floor the "
+        f"operator already chose: {payload['refusals']}")
+    assert payload["armed"] == 1, payload
+    assert _counter(record_schema, org, graph) == (4, "active"), (
+        "the counter is the floor the operator set — arming changes the MODE "
+        "only")
+
+
+@pytestmark_live
+def test_backfill_does_not_swallow_a_run_level_refusal(
+        armed, record_schema, monkeypatch):
+    """⛔ A CONNECTION-LEVEL REFUSAL IS NOT A PER-GRAPH RESULT.
+
+    `seed` and `arm` both call `require_read_committed`, which raises
+    `IsolationRefused` — a `RecordAllocatorError`. `_cmd_backfill` tolerates a
+    `RecordAllocatorError` per graph, because a graph whose mode moved under a
+    concurrent actor must not abort the run. Catching the shared base class
+    without a re-raise therefore downgraded this one too: a `serializable` or
+    otherwise misconfigured record DSN produced `considered: N, seeded: 0,
+    refused: 0` and exited **0** over a run that wrote nothing — silently, since
+    `refusals` stays empty. That is the same `exit 0` over graphs that allocate
+    nothing that this PR exists to remove, so the run-level classes re-raise and
+    reach `main()`'s handler (`REFUSED (…)`, EXIT_REFUSED).
+
+    Mutant: delete the `isinstance(exc, run_level_refusals): raise` guard in
+    `_cmd_backfill` and this test receives a payload instead of the exception.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
+
+    org, _graph = _uncut_graph(record_schema, "isolation", positions=(1,))
+
+    def _not_read_committed(*_args, **_kwargs):
+        raise ra.IsolationRefused("the transaction is not READ COMMITTED")
+
+    monkeypatch.setattr(ra, "seed", _not_read_committed)
+    with pytest.raises(ra.IsolationRefused):
+        cli._cmd_backfill(_conn(), _backfill_args(org))
+
+
+@pytestmark_live
 def test_the_backfill_heals_every_graph_of_an_org_not_just_the_first(
         armed, record_schema):
     """⛔ ONE ORG, THREE UNCUT GRAPHS — ONE RUN HEALS ALL THREE (#14582 review P1-1).
@@ -2525,11 +2635,11 @@ def _uncut_graph(conn, label: str, *, positions=()):
     return org, graph
 
 
-def _backfill_args(org: str, *, dry_run: bool = False):
+def _backfill_args(org: str, *, dry_run: bool = False, arm: bool = False):
     return SimpleNamespace(org_id=org, command="backfill", graph_id=None,
                            dsn=_app_dsn(), floor=None, journal=None,
-                           dry_run=dry_run, arm_graphs=False,
-                           acknowledge_cutover=False, as_json=False)
+                           dry_run=dry_run, arm_graphs=arm,
+                           acknowledge_cutover=arm, as_json=False)
 
 
 def _conn():

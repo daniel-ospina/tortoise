@@ -567,11 +567,41 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     leaves a graph allocating nothing, so a backfill that stops there fixes the
     row and not the leg — but arming is the same per-graph cutover decision that
     `arm` is, with the same acknowledgement.
+
+    ⛔ AND `--arm` READS A SECOND POPULATION (#14587 review P2). The seed pass and
+    the arm pass are not the same set: :data:`ra.UNCUT_GRAPHS_SQL` is scoped
+    `c.graph_id IS NULL`, so a graph the SEED-ONLY run healed has LEFT it by
+    construction. Arming only the uncut set therefore made the sequence this
+    verb documents — `backfill`, then `backfill --arm` — a no-op on the second
+    run: `considered: 0`, exit 0, every graph still allocating nothing. So when
+    `--arm` is given the population is the UNION of the uncut graphs and the
+    graphs already in :data:`ra.MODE_SEEDED` (:data:`ra.SEEDED_GRAPHS_SQL`).
+
+    ⛔ THOSE ROWS ARE ARMED, NOT RE-SEEDED, and that is a correctness point, not
+    an optimisation. `SEED_SQL`'s guard compares the JOURNAL's `MAX(seq)` with
+    the floor — not the cursor's `seq` — so re-seeding an already-seeded graph
+    would re-run the divergence guard over a floor decision the operator already
+    made, and a graph seeded from the record's own `MAX(seq)` (the remedy
+    `backfill` prints for `divergence`) would be REFUSED on a run whose whole
+    job was to arm it. `arm` is the only verb the missing half of the state
+    needs (`seeded -> active`).
     """
     from tortoise import record_allocator as ra
 
     dry_run = bool(getattr(args, "dry_run", False))
     arm_them = bool(getattr(args, "arm_graphs", False))
+    #: ⛔ RUN-LEVEL REFUSALS, AND THEY ARE NOT THIS LOOP'S TO SWALLOW. Both are
+    #: `RecordAllocatorError`s raised by `require_read_committed` inside `seed`
+    #: and `arm`/`_transition`, i.e. they describe the CONNECTION, not this graph:
+    #: every remaining graph would fail identically. The per-graph tolerance below
+    #: exists for a graph whose mode moved under a concurrent actor, and catching
+    #: the shared base class without this guard downgraded `IsolationRefused` to
+    #: `outcome: unchanged` — so a `serializable`/misconfigured record DSN reported
+    #: `considered: N, seeded: 0, refused: 0` and exited **0** over a run that
+    #: wrote nothing. That is the same fail-open shape (`exit 0` over graphs that
+    #: allocate nothing) this verb exists to remove, and it is why these re-raise:
+    #: `main()`'s own handler prints `REFUSED (…)` and returns EXIT_REFUSED.
+    run_level_refusals = (ra.IsolationRefused, ra.RetryableAllocationFailure)
     # ⛔ NO ROLLBACK BETWEEN THE SCOPE AND THE PER-GRAPH READS (#13043 review
     # finding B): `scope_tenant` sets a TRANSACTION-LOCAL GUC, and a rollback
     # ends the transaction it lives in — after which every scoped read answers
@@ -579,7 +609,20 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     ra.scope_tenant(conn, args.org_id)
     with conn.cursor() as cur:
         cur.execute(ra.UNCUT_GRAPHS_SQL, (args.org_id,))
-        graphs = [row[0] for row in cur.fetchall()]
+        uncut = [row[0] for row in cur.fetchall()]
+    already_seeded: set[str] = set()
+    if arm_them:
+        # ⛔ THE ARM PASS NEEDS THE GRAPHS THE SEED PASS CANNOT SEE (#14587 review
+        # P2): a row that EXISTS is no longer `c.graph_id IS NULL`, so the
+        # seed-only run's own output is invisible to `UNCUT_GRAPHS_SQL`. Read
+        # them in the SAME scoped transaction (no rollback in between: the
+        # tenancy GUC is transaction-local).
+        with conn.cursor() as cur:
+            cur.execute(ra.SEEDED_GRAPHS_SQL, (args.org_id,))
+            already_seeded = {row[0] for row in cur.fetchall()}
+    # Sorted so the two ordered sources merge into one deterministic walk (both
+    # are `ORDER BY graph_id`, and this report is read by an operator).
+    graphs = sorted(set(uncut) | already_seeded)
 
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
@@ -616,11 +659,19 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # graph's work.
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT backfill_graph")
+        rearm_only = graph_id in already_seeded
         try:
-            result = ra.seed(conn, org_id=args.org_id, graph_id=graph_id,
-                             enumerated_floor=journal_count)
-            if arm_them:
-                ra.arm(conn, org_id=args.org_id, graph_id=graph_id)
+            if rearm_only:
+                # ⛔ ARM-ONLY, NOT A SECOND SEED — see the docstring. The row
+                # exists in `seeded`, which is the one state `arm` exists to
+                # leave; re-seeding would put this graph back through the
+                # divergence guard over a floor the operator already chose.
+                armed_seq = ra.arm(conn, org_id=args.org_id, graph_id=graph_id)
+            else:
+                result = ra.seed(conn, org_id=args.org_id, graph_id=graph_id,
+                                 enumerated_floor=journal_count)
+                if arm_them:
+                    ra.arm(conn, org_id=args.org_id, graph_id=graph_id)
         except ra.SeedRefused as exc:
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
@@ -648,12 +699,37 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             }
             entries.append(entry)
             continue
+        except ra.RecordAllocatorError as exc:
+            if isinstance(exc, run_level_refusals):
+                # Not this graph's problem — abort the run so `main()` reports it
+                # as a refusal instead of a clean exit over unwritten graphs.
+                raise
+            # `arm` refuses a row that is no longer `seeded` — a concurrent actor
+            # moved it between the population read above and this transition.
+            # NOT a failure of the run: undo exactly this graph and report it
+            # untouched, so the remaining graphs still heal (the per-graph
+            # SAVEPOINT contract this verb documents).
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
+            entry |= {"outcome": "unchanged", "reason": str(exc)}
+            entries.append(entry)
+            continue
         if dry_run:
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
-            entry["outcome"] = "would_seed"
+            entry["outcome"] = "would_arm" if rearm_only else "would_seed"
+            if rearm_only:
+                entry["seq"] = armed_seq
+            else:
+                entry |= {"seq": result.seq, "mode": result.mode,
+                          "healed_tail": result.healed_tail,
+                          "burned": result.burned}
             if arm_them:
                 entry["would_arm"] = True
+        elif rearm_only:
+            conn.commit()
+            entry |= {"outcome": "armed", "seq": armed_seq,
+                      "mode": ra.MODE_ACTIVE, "armed": True}
         else:
             conn.commit()
             entry["outcome"] = "seeded"
@@ -662,9 +738,15 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
                       "burned": result.burned}
             if arm_them:
                 entry["armed"] = True
-        seeded += 1
-        if arm_them:
+        if rearm_only:
+            # Counted as CONSIDERED and ARMED, never as SEEDED: this run wrote no
+            # row for it, and a `seeded` count that included it would report a
+            # write that did not happen.
             armed += 1
+        else:
+            seeded += 1
+            if arm_them:
+                armed += 1
         entries.append(entry)
     if dry_run:
         # Nothing this run wrote survives. Every savepoint was rolled back; this
