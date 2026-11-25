@@ -353,6 +353,71 @@ class TestAnEndedInputStopsVoting:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 2b. A SURVIVING factor's strip is silent — and the door says so
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@_needs_db
+class TestAPartialStripIsNotReported:
+    """The MEASUREMENT behind the docstrings' qualified claim (PR #14600, P3).
+
+    ``skipped_factors`` names the axis only when the strip DROPS the factor
+    (``source_stripped`` / ``degenerate`` / ``derived_over_asserted``). A factor
+    with THREE OR MORE inputs that keeps two or more participating inputs still
+    prices WITHOUT the ended input, and reports nothing at all — no record, no
+    warning. ``create_operator``'s docstring and
+    ``TestTheWriteDoorsStateTheirPosture`` say exactly that; this arm is what
+    makes the sentence measurable instead of asserted, so a later change that
+    starts reporting the partial strip has to move the prose with it.
+
+    The SECOND half below is also the non-vacuity proof for the participation
+    fix: pre-#13450 the closed input contributed, so the surviving pair priced
+    differently from the same pair without it.
+    """
+
+    def test_a_three_input_factor_keeping_two_prices_as_if_the_ended_one_were_absent(self):
+        sdk = _fresh_sdk()
+        try:
+            sfx = uuid.uuid4().hex[:8]
+            src = sdk._create_point(
+                "statement", f"c7-{sfx}", status="live")["id"]
+            _q(sdk, "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 8.0, "
+                    "n.posterior_beta = 2.0", {"id": src})
+            # CONTROL: the same source wired to a SINGLE fresh live target, so
+            # the number the three-input factor must reproduce is the pair's own.
+            _ctl_tgt, control_belief, ctl_skipped = _wire_and_run(sdk, src)
+            assert ctl_skipped == [], (
+                f"the control must price cleanly, got skipped={ctl_skipped}")
+
+            t1 = sdk._create_point("statement", f"c7a-{sfx}", status="live")["id"]
+            t2 = sdk._create_point("statement", f"c7b-{sfx}", status="live")["id"]
+            _q(sdk, "MATCH (n:Point {id:$id}) SET n.isClosed = true", {"id": t2})
+            op_id = sdk._create_operator(
+                "IMPL", src, [t1, t2], direction="unidirectional")["id"]
+            run = sdk._compute_confidence(
+                factors=[op_id], require_calibration=False) or {}
+            belief = _belief(sdk, t1)
+
+            # (1) the ended input is EXCLUDED: the surviving pair prices exactly
+            #     as the two-input control (pre-#13450 the closed t2 voted and
+            #     moved this number — that is what makes this arm bite).
+            assert belief[1] == pytest.approx(control_belief[1]) and \
+                belief[2] == pytest.approx(control_belief[2]), (
+                    f"the 3-input factor priced {belief[1:]}, the same pair "
+                    f"without the closed input prices {control_belief[1:]} — the "
+                    "ended input still contributed")
+            # (2) ...and NOTHING is reported about it, which is why the docstring
+            #     must qualify the claim instead of promising a record.
+            assert not run.get("skipped_factors"), (
+                "this shape now DOES report the partial strip — good, but the "
+                "`create_operator` docstring states the silence and must be "
+                "updated with it: "
+                f"skipped_factors={run.get('skipped_factors')!r}")
+        finally:
+            sdk.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 3. The diagnostics NAME the axis that stripped the input
 # ══════════════════════════════════════════════════════════════════════════
 
