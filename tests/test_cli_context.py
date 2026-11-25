@@ -364,6 +364,57 @@ class TestCliOnboardDbTarget:
             rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
         return rc, seen["idx"]
 
+    def test_a_mock_shaped_args_object_never_takes_the_harness_branch(
+            self, tmp_path, monkeypatch):
+        """#14607: `--harness` presence must NOT be inferred from a duck-typed args
+        object.
+
+        `argparse` always SETS `harness` (its default is `None`), but `mock.Mock()`
+        FABRICATES every attribute it is asked for — so a bare truthiness test on
+        `getattr(args, "harness", None)` is TRUE for an args object that never
+        asked for the harness branch. Pre-fix that routed the graph-first flow into
+        `_cmd_onboard_harness`, where `args.dir` was a Mock and `_Path(...)` raised
+        `TypeError: argument should be a str or an os.PathLike object … not 'Mock'`
+        — the 14 red arms in this class. This arm pins the ROUTING decision itself,
+        so a re-introduced truthiness test reds here with a named cause instead of
+        surfacing as a TypeError three calls deeper.
+        """
+        from tortoise import __main__ as m
+
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch.object(m, "_cmd_onboard_harness") as harness_branch, \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github", return_value=0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        harness_branch.assert_not_called()
+
+    def test_a_real_harness_string_takes_the_harness_branch(self):
+        """The other half of the pin: a REAL `--harness` string still routes.
+
+        Without this, tightening the predicate to `False` would satisfy the arm
+        above while silently dropping the #14607 feature.
+        """
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_onboard_harness", return_value=7) \
+                as harness_branch:
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard", harness="pi"))
+
+        assert rc == 7
+        harness_branch.assert_called_once()
+
     def test_index_receives_resolved_embedded_path(self, tmp_path, monkeypatch):
         """Embedded-only mode: index gets the TORTOISE_DB_PATH target — not the
         canonical ~/.tortoise default (#705 regression guard)."""

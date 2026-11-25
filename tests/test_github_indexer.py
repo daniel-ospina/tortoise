@@ -921,7 +921,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
             # ⚠️ NOT a fold REFUSAL: `outdated` is absent from the fold's set
             # (`commit_ops.OBJECT_TERMINAL_STATUSES`), so the fold does not refuse
             # this row — the CLOSE fold is never DISPATCHED for it (no live holder,
-            # read at `entities.py:6364-6365`). It belongs in this dict because the read must
+            # read at `entities.py:6407-6408`). It belongs in this dict because the read must
             # not call it OPEN, which is the dict's real contract.
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
@@ -978,10 +978,10 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
 
     The mirror of the pin above. `_fold_object_stage` returns BEFORE
     `apply_stage_fold` when the Object's `status` is in the fold's OWN latch set
-    (`entities.py:6458`, `excluded = _terminal_object_statuses()` at `:6124` =
+    (`entities.py:6501`, `excluded = _terminal_object_statuses()` at `:6167` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:56529-56538`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:56598-56607`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,10 +1100,10 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:56529-56538`) — so each poll minted another `-reopened`
+    `sdk.py:56598-56607`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
-    (`entities.py:6458`).
+    (`entities.py:6501`).
 
     A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
@@ -1182,7 +1182,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
     """#13289 round-4 finding 2: the two folds refuse ASYMMETRICALLY on `outdated`.
 
     `_fold_object_stage`'s latch is `commit_ops.OBJECT_TERMINAL_STATUSES`
-    (`projection/entities.py:6458`), which has no `outdated` member — but the two
+    (`projection/entities.py:6501`), which has no `outdated` member — but the two
     folds that consume these transitions are dispatched under DIFFERENT rules, so
     neither single answer serves both directions:
 
@@ -1191,7 +1191,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
       NO live holder and the close fold is NEVER dispatched. Nothing can close it, so
       any state this read answers about it re-fires once per poll, without bound;
-    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6389-6392`), which
+    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6432-6435`), which
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
@@ -1284,7 +1284,7 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
     the read fell through to `_STATUS_TO_STATE` and answered `"open"`, so a GitHub
     close minted `-closed` on every poll against a row whose close fold can never be
     dispatched (no live holder — `resolve_fold_name` → `live._terminal_excluded`,
-    which carries the `outdated` conjunct; `entities.py:6388-6392`).
+    which carries the `outdated` conjunct; `entities.py:6431-6435`).
 
     The rule is per-direction. Withhold ONLY where the word says `open`; any other
     word — including one OUTSIDE `_STATUS_TO_STATE` (`outdated`, or a NULL status
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:56377-56379`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:56446-56448`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3187,30 +3187,30 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    ("entities.py", 5261, 5263): (
+    ("entities.py", 5304, 5306): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
-    ("entities.py", 6124, 6124): ("excluded = _terminal_object_statuses()", None),
-    ("entities.py", 6206, 6207): (
+    ("entities.py", 6167, 6167): ("excluded = _terminal_object_statuses()", None),
+    ("entities.py", 6249, 6250): (
         "pipeline_key=target_kind,", "decl=index.pipeline_for(target_kind),"),
-    ("entities.py", 6364, 6365): (
+    ("entities.py", 6407, 6408): (
         "_live_holders = _live_holders_same_entity(", 'self.g, "Object", name)[0]'),
-    ("entities.py", 6388, 6392): (
+    ("entities.py", 6431, 6435): (
         "_reopen_targets_closed = (", "and isinstance(_held[0], str))"),
-    ("entities.py", 6388, 6393): (
+    ("entities.py", 6431, 6436): (
         "_reopen_targets_closed = (", "if _reopen_targets_closed:"),
-    ("entities.py", 6388, 6394): (
+    ("entities.py", 6431, 6437): (
         "_reopen_targets_closed = (", "object_id = _held[0]"),
-    ("entities.py", 6389, 6392): (
+    ("entities.py", 6432, 6435): (
         "bool(builtin_fold_reopens(event_kind))", "and isinstance(_held[0], str))"),
-    ("entities.py", 6396, 6398): (
+    ("entities.py", 6439, 6441): (
         "object_id = resolve_fold_name(",
         "mention=bool(_held) and not _live_holders)"),
-    ("entities.py", 6417, 6417): ("declared_kinds=sorted(index.kind_forms))", None),
-    ("entities.py", 6449, 6454): ("row = self.g.query(", ").result_set"),
-    ("entities.py", 6458, 6458): (
+    ("entities.py", 6460, 6460): ("declared_kinds=sorted(index.kind_forms))", None),
+    ("entities.py", 6492, 6497): ("row = self.g.query(", ").result_set"),
+    ("entities.py", 6501, 6501): (
         "if status is not None and status in excluded:", None),
-    ("entities.py", 6469, 6471): (
+    ("entities.py", 6512, 6514): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
     ("cache_projection.py", 811, 811): (
@@ -3225,12 +3225,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
     # that was about to be committed. `entities.py` used to keep this branch's values
-    # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
-    # status latch, so the whole block moved together and is re-derived here again
-    # (`+59` against `origin/main`'s numbers — `git diff --numstat origin/main...HEAD --
-    # tortoise/projection/entities.py` -> `61  2` — resolved line by line, never applied as an
-    # offset; the pin TABLE's own keys were only `+30` off, because the last re-derivation of
-    # this block was two commits stale when this PR re-measured it); `sdk.py` moves for both sides each
+    # across both of those merges; it no longer does — `main` grew the module ABOVE every
+    # row of this block, so the whole block moved together and is re-derived here again. It is
+    # MEASURED, never carried: `git diff origin/main...HEAD -- tortoise/projection/entities.py`
+    # is EMPTY (this branch does not touch the file), so the eleven distinct start keys (13
+    # rows) moved by exactly `main`'s own growth above the block since the table's last cut —
+    # `+43` on EVERY one (`5261→5304`, `6124→6167`, `6206→6249`, `6364→6407`, `6388→6431`,
+    # `6389→6432`, `6396→6439`, `6417→6460`, `6449→6492`, `6458→6501`, `6469→6512`), each
+    # address resolved line by line against the tree that carries it, never applied as an
+    # offset; `sdk.py` moves for both sides each
     # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a
@@ -3257,21 +3260,30 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # its own LAST-line text `continue`) at `2c1065a52e`, and the numbers are
     # `55206-55208` (the non-scalar refusal), `55358-55367` (the un-supersede arm),
     # `22518-22693` (`update_knowledge`, its end again located as the function's own
-    # last line `return self._update_entity_any(id, **props)`) and `55912` (the
+    # last line `return self._update_entity_any(id, **props)`) and `55807` (the
     # per-label `SET n += $props`). The two deltas — **+186** for the three later rows
     # and **+15** for `update_knowledge` — are the consistency check, not the input.
     # ⛔ Where a pinned first-line text is NOT itself a unique locator, the search used
     # the longer form of the same line and that is what locates the row: `SET n +=
-    # $props` occurs **40×** in `sdk.py`, so `55912` was found by its per-label write
-    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
+    # $props` occurred **40×** in `sdk.py` at this re-derivation, so `55807` was found
+    # by its per-label write
+    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurred **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
+    # ⛔ These occurrence counts are HISTORICAL MEASUREMENTS at the tree each sentence
+    # names, never present-tense claims about HEAD: the count in prose drifts with every
+    # `sdk.py` commit and then reads as authoritative (#12731, P3 on this repair's
+    # review — `40×` had become stale on `main`). Do not "correct" them to HEAD.
     # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
     # which carried a locator that could not FAIL on the defect it exists to catch:
-    # `55912`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
-    # 25 of them in comments), so a uniform drift landed it on a comment; the
-    # per-label write it was actually found by occurs **once** and is what it now
-    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # the row at `55918` stored the bare `SET n += $props` (occurred **40×** in
+    # `sdk.py` at `c50a03a`, 25 of them in comments), so a uniform drift landed it on
+    # a comment; the per-label write it was actually found by occurred **once** and is
+    # what it now stores. `55918` is that address at BOTH `ef0abcb` (re-derived) and
+    # `c50a03a` (narrowed) — this note previously read `55912`→`55918`, and `55912`
+    # holds `keys = list(props)` at both trees, so no tree named the per-label write
+    # at `55912` (#12731 review). And `22593-22768` recorded `None` for its end — its
+    # START text
     # `def update_knowledge(` is unique and did red, but an end that is never read
     # let an insert INSIDE the function leave the cited end naming nothing while
     # both guards stayed green.
@@ -3308,9 +3320,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # would have re-pinned the wrong function. Each address was found by searching its own
     # pinned FIRST-line text (and, for the arm, its own LAST-line text `continue`) at the
     # tree that carries that row: `55742-55744` (the non-scalar refusal), `55894-55903`
-    # (the un-supersede arm), `56343` (the per-label `SET n += $props`, which occurs once
-    # while bare `SET n += $props` occurs 40×) and `22779-22954` (`update_knowledge`, its
-    # end again located as the function's own last line `return
+    # (the un-supersede arm), `56343` (the per-label `SET n += $props`, which occurred
+    # once while bare `SET n += $props` occurred 41× at that tree) and `22779-22954`
+    # (`update_knowledge`, its end again located as the function's own last line `return
     # self._update_entity_any(id, **props)`, whose other occurrence is a different door's).
     # `if (_np_dead == [_SUPERSEDED_STATUS]` occurs TWICE, so that row is located by its
     # `continue` terminator and not by its start text. The `+150` / `+195` pair is the
@@ -3337,13 +3349,26 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `b2d1e9086a92` and at `bbe54363ad65` is what attributes the move, and the `+53` / `+117`
     # pair is the CONSISTENCY CHECK on that measurement, never its input.
     # ⛔ THIS IS A MAIN-RED INHERITED, NOT ONE THIS CHANGE CAUSED — stated so that nobody hunts
-    # for a branch commit to blame: `git diff HEAD -- tortoise/sdk.py` is EMPTY, and all four
-    # addresses are identical at this head, at `origin/main` `af40c97ca312` and at the pre-fold
-    # branch head `7ce74ac20fc0`. The branch's own `sdk.py` never moved this region; `main` did,
+    # for a branch commit to blame: `git diff origin/main...HEAD -- tortoise/sdk.py` is EMPTY
+    # (the 3-dot form is the one that proves it — a bare `git diff HEAD` compares the WORKING
+    # TREE to HEAD and reads empty on any clean checkout, whatever the branch committed), and all
+    # four addresses were identical at `origin/main` `af40c97ca312`, whose `sdk.py` blob
+    # (`fdedef380b6d`) is also `7ce74ac20fc0`'s — and `7ce74ac20fc0` is a `#14219` lane commit,
+    # NOT this branch's head and an ancestor of neither branch nor `main`, so its identity is a
+    # statement about `main`'s own history and nothing here is a branch commit's doing. No commit
+    # on this branch carries that blob at all: **every** commit this branch AUTHORED, `840b74316332`
+    # and back, carries `c05b92bdc6ac`, i.e. already post-`#14567` (the `remerge-14640` merge head and
+    # every commit authored on top of it carry `main`'s own blob instead, which is the point of the
+    # merge). `main` then grew this module
+    # above all four twice — `#14596` (+29 above all
+    # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
+    # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
+    # `56446` / `56598` / `57113`, and the table below is re-cut to those. The branch's own
+    # `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
     # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
-    # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
-    # by its own `continue` terminator (`56538`) — never by the start text alone, which would
+    # ⛔ The un-supersede arm's start text occurs TWICE (`56598`, `56637`), so its row is located
+    # by its own `continue` terminator (`56607`) — never by the start text alone, which would
     # admit either occurrence.
     # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
     # re-derive every address at the current tree), so the note that "no landing re-derived
@@ -3352,12 +3377,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `git show <sha>:tortoise/sdk.py | grep -n` probes above name. Every row's SPAN is
     # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
     # than being re-pointed at neighbouring code.
-    ("sdk.py", 56377, 56379): (
+    ("sdk.py", 56446, 56448): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 56529, 56538): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 23041, 23216): (
+    ("sdk.py", 56598, 56607): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 23110, 23285): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 57035, 57035): (
+    ("sdk.py", 57113, 57113): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
@@ -3373,7 +3398,7 @@ def _citations_in(module: Path) -> set[tuple[str, int, int]]:
     larger surface (a follow-up), not a claim this pin makes.
 
     A BARE `:NNN` inherits the filename last named on its line — the
-    ``entities.py:6458`` / ``:6124`` shape, which is how one round of this review
+    ``entities.py:6501`` / ``:6167`` shape, which is how one round of this review
     wrote a second address two words after the first.
     """
     found: set[tuple[str, int, int]] = set()
