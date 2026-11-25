@@ -531,6 +531,24 @@ def classify(harness: str, *, project_dir: Path | None = None
 
 # ── The live probe (opt-in) ────────────────────────────────────────────────
 
+_CREDENTIAL_HOST_MISMATCH = "MCP-CREDENTIAL-HOST-MISMATCH"
+
+
+def _fix_for(exc: BaseException, status: str) -> str:
+    """The FIX line for a probe failure — one class, but not one sentence.
+
+    A WITHHELD credential (co-source conflict: the endpoint the entry names and the
+    endpoint the credential belongs to disagree) is a credential class, and its
+    remedy is not any other credential class's: the key is fine, the ENTRY is
+    wrong. Sharing one sentence would send the reader to re-mint a working key.
+    """
+    if _CREDENTIAL_HOST_MISMATCH in str(exc):
+        return ("the credential resolves to a DIFFERENT endpoint than this entry "
+                "names, so it was WITHHELD and nothing was sent — point the "
+                "entry at the credential's host, or supply a key for this one")
+    return _FIX_BY_CLASS.get(status, "")
+
+
 def _classify_probe_failure(exc: BaseException) -> str:
     """Map a probe exception onto the closed set.
 
@@ -549,6 +567,14 @@ def _classify_probe_failure(exc: BaseException) -> str:
     except Exception:
         described = text
     lowered = f"{described} {text}".lower()
+    if _CREDENTIAL_HOST_MISMATCH in str(exc):
+        # ⛔ A WITHHELD credential, checked BEFORE the transport/auth tokens: the
+        # request carried NO credential (that is why it was withheld), so it is
+        # not `server-error` — "the endpoint answered with an error that is
+        # neither transport nor auth" — which is what it used to be classified as.
+        # The detail names both hosts, so the reader gets the cause as well as the
+        # class; `_fix_for` supplies the remedy that matches it.
+        return NO_CREDENTIAL
     if getattr(mcp_client, "MCPKeyEmptyError", None) and \
             isinstance(exc, mcp_client.MCPKeyEmptyError):
         return NO_CREDENTIAL
@@ -664,7 +690,7 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
     except Exception as exc:
         status = _classify_probe_failure(exc)
         return Verdict(status=status, detail=f"{_first_line(exc)} (graded {graded})",
-                       fix=_FIX_BY_CLASS.get(status, ""),
+                       fix=_fix_for(exc, status),
                        transport="http")
     return Verdict(
         status=OK,

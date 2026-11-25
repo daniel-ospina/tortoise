@@ -779,3 +779,31 @@ def test_the_cli_does_not_hardcode_the_hosted_default(project, monkeypatch):
     assert entry["env"]["TORTOISE_MCP_URL"] == self_hosted, (
         "the operator's own endpoint must win at WRITE time — otherwise the entry "
         "and the verification disagree by construction")
+
+
+# ── 14 · a WITHHELD credential is a credential class, not a server error ──
+
+def test_a_withheld_credential_is_not_classified_as_a_server_error():
+    """Co-source conflict: the key belongs to another host, so it was WITHHELD.
+
+    The request carried NO credential, which is why `server-error` ("the endpoint
+    answered with an error that is neither transport nor auth") is the one class
+    that cannot be right. The detail names both hosts, and the FIX must tell the
+    reader to point the ENTRY somewhere else — not to re-mint a working key.
+    """
+    from tortoise import mcp_client
+
+    exc = mcp_client.MCPCredentialHostMismatchError(
+        "MCP-CREDENTIAL-HOST-MISMATCH: the credential supplied by TORTOISE_API_KEY "
+        "belongs to http://store-host-14607/mcp, while this client talks to "
+        "http://entry-host-14607/mcp. Nothing was sent.")
+    status = mcp_selfcheck._classify_probe_failure(exc)
+    assert status == mcp_selfcheck.NO_CREDENTIAL, (
+        f"a withheld credential was classified {status!r} — it is a credential "
+        "class: the request was sent with no credential at all")
+    fix = mcp_selfcheck._fix_for(exc, status)
+    assert "WITHHELD" in fix and "entry" in fix.lower(), (
+        "the remedy must point at the entry, not at the key — the key is fine, "
+        f"only its host disagrees: {fix!r}")
+    assert "re-mint" not in fix.lower(), (
+        f"re-minting a valid key does not fix a host mismatch: {fix!r}")
