@@ -1233,7 +1233,12 @@ def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
     ext_dir.mkdir(parents=True)
     producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
     producer.mkdir(parents=True)
+    # The declared entry must EXIST: Pi's `resolveExtensionEntries` takes the
+    # manifest branch only when it resolves, and otherwise falls back to
+    # `index.ts` (which this installer WOULD retire) — so a manifest naming a
+    # missing file is a retirable shape, not a refusal (#14342 cycle 3).
     (producer / "package.json").write_text('{"pi": {"extensions": ["a.ts"]}}\n')
+    (producer / "a.ts").write_text("// producer\n")
     (producer / "index.ts").write_text("// producer\n")
 
     res = install_capture("pi", home=home)
@@ -1351,6 +1356,65 @@ def test_pi_legacy_obstacle_names_the_second_producers_collision(home):
     # cannot drift apart silently.
     res = install_capture("pi", home=home)
     assert not res.ok and "DIFFERENT bytes" in res.error, res.error
+
+
+def test_pi_install_never_unlinks_a_legacy_symlink_before_the_seam_is_verified(home):
+    """The legacy SYMLINK branch is the one early step that really stops a
+    producer loading (a dot-directory rename stops nothing), so unlinking it
+    before the write left a box with ZERO producers when that write failed —
+    measured on a fresh home with ENOSPC (#14342 review cycle 3).
+
+    Mutation: restore `legacy.unlink()` inside the pre-write block."""
+    checkout = home / "agent-infra" / "extensions" / "tortoise-capture"
+    checkout.mkdir(parents=True)
+    (checkout / "index.ts").write_text("// legacy producer\n")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / "tortoise-capture"
+    legacy.symlink_to(checkout, target_is_directory=True)
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    capture_install._atomic_bytes = _fails
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        capture_install._atomic_bytes = real_atomic
+
+    assert not res.ok
+    assert legacy.is_symlink(), (
+        "a failed install unlinked the only working producer symlink")
+    assert "tortoise-capture/index.ts" in _registered_producers(ext_dir), (
+        f"the box now captures nothing: {_registered_producers(ext_dir)}")
+
+
+def test_pi_install_refuses_to_overwrite_a_preserved_entry_point(home):
+    """`Path.rename` overwrites on POSIX, so retiring `index.ts` over an
+    existing `index.ts.disabled` would destroy preserved bytes inside an
+    install that reports success (#14342 review cycle 3).
+
+    Mutation: drop the `lexists(preserved)` guard."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / "tortoise-capture"
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// the live producer\n")
+    preserved_dir = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    preserved_dir.mkdir(parents=True)
+    (preserved_dir / "index.ts.disabled").write_text("// DO NOT LOSE ME\n")
+    # Move the live dir aside manually so only the retirement step is exercised.
+    (ext_dir / "tortoise-capture").rename(ext_dir / "legacy-live")
+    (preserved_dir / "index.ts").write_text("// the live producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert (preserved_dir / "index.ts.disabled").read_text() == "// DO NOT LOSE ME\n", (
+        "a preserved entry point was overwritten by the retirement")
+    assert (preserved_dir / "index.ts").exists(), (
+        "the retirement half-ran over a preserved copy")
 
 
 def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(

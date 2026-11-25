@@ -1871,7 +1871,10 @@ def _pi_entry_is_loadable(path: Path) -> bool:
             manifest = path / "package.json"
             if manifest.is_file():
                 try:
-                    declared = json.loads(manifest.read_text("utf-8"))
+                    # `utf-8-sig`: Pi's `readPiManifest` strips a BOM, so a
+                    # BOM-ed manifest is READABLE to the loader — failing on it
+                    # here would refuse over a manifest Pi understands.
+                    declared = json.loads(manifest.read_text("utf-8-sig"))
                 except (OSError, ValueError):
                     return True  # may declare entries; never guess it away
                 pi_section = declared.get("pi") if isinstance(declared, dict) else None
@@ -1910,22 +1913,36 @@ def _retire_pi_entry(path: Path) -> str | None:
             manifest = path / "package.json"
             if manifest.is_file():
                 try:
-                    declared = json.loads(manifest.read_text("utf-8"))
+                    declared = json.loads(manifest.read_text("utf-8-sig"))
                 except (OSError, ValueError):
                     return (f"{path} carries an unreadable package.json — its "
                             "declared entries cannot be verified, so it is not "
                             "retired by this installer. Move it aside by hand.")
                 pi_section = declared.get("pi") if isinstance(declared, dict) else None
                 entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
-                if isinstance(entries, list) and entries:
-                    return (f"{path} declares `pi.extensions` in package.json; "
+                declared_present = [
+                    str(name) for name in (entries if isinstance(entries, list)
+                                           else [])
+                    if isinstance(name, str) and (path / name).exists()
+                ]
+                if declared_present:
+                    return (f"{path} declares `pi.extensions` in package.json, "
                             "renaming its files would leave that manifest "
                             "pointing at nothing. Move the directory aside by "
                             "hand.")
             for name in ("index.ts", "index.js"):
                 entry = path / name
                 if entry.is_file() or entry.is_symlink():
-                    entry.rename(path / f"{name}.disabled")
+                    preserved = path / f"{name}.disabled"
+                    if os.path.lexists(preserved):
+                        # `Path.rename` OVERWRITES on POSIX: renaming over a
+                        # preserved copy would destroy it silently, in an
+                        # install that reports success. Refuse instead — the
+                        # same asymmetry the second producer's collision arm
+                        # already has.
+                        return (f"{preserved} already exists — retiring "
+                                f"{entry} would overwrite preserved bytes")
+                    entry.rename(preserved)
             return None
         path.rename(path.with_name(f"{path.name}.disabled"))
         return None
@@ -2149,14 +2166,18 @@ def _install_pi(
     # machine was modified" report the caller now prints actions to prevent.
     try:
         if legacy.is_symlink():
+            # ⛔ DEFERRED TO AFTER THE VERIFICATION (#14342 review cycle 3).
+            # Unlinking this symlink is the step that ACTUALLY stops the legacy
+            # producer loading — unlike the directory rename, which stops
+            # nothing because a dot-prefixed directory is still loaded. Doing
+            # it here, before the seam write, left a box with ZERO capture
+            # producers when that write failed (measured: ENOSPC on a fresh
+            # home). The link is left in place until a verified replacement
+            # exists; `_unlink_pi_legacy_symlink` below runs it.
             if dry_run:
                 actions.append(
                     f"[dry-run] would unlink legacy extension {legacy}")
-            else:
-                legacy.unlink()
-                actions.append(f"disabled legacy capture extension: unlinked "
-                               f"{legacy} (symlink target untouched)")
-            changed = True
+                changed = True
         elif legacy.is_dir():
             if legacy_disabled.exists() or legacy_disabled.is_symlink():
                 return InstallResult(harness, changed=changed,
@@ -2256,6 +2277,24 @@ def _install_pi(
     # safe to do early precisely BECAUSE the dot directory still loads; the
     # step that actually stops capture is this one, so it comes after the
     # proof. It also HEALS a box carrying a dot directory from an older install.
+    # The legacy SYMLINK is retired here for the same reason (and the same
+    # ordering rule): unlinking it is what stops it loading.
+    if not dry_run and legacy.is_symlink():
+        try:
+            legacy.unlink()
+        except OSError as e:
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=(
+                                     f"the capture seam is installed, but the "
+                                     f"legacy extension symlink {legacy} could "
+                                     f"not be removed: {e.__class__.__name__}: "
+                                     f"{e}. Two producers are registered until "
+                                     f"it is."))
+        actions.append(f"disabled legacy capture extension: unlinked {legacy} "
+                       f"(symlink target untouched)")
+        changed = True
+
     legacy_retirable = _pi_entry_is_loadable(legacy_disabled) if (
         os.path.lexists(legacy_disabled)) else False
     if legacy_retirable:
