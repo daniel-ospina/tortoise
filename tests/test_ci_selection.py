@@ -9210,7 +9210,30 @@ def _row_claims(header: str) -> list[str]:
     (`_QUOTED_SPAN_RE`, below): this block legitimately QUOTES dead claims for the record, and
     the record of a dead claim is not a live claim. Without the mask, a quotation would red this
     arm and its "say `registration`" message would be the wrong repair for history.
+
+    ⛔ QUOTE PARITY IS A FAIL-CLOSED PRECONDITION HERE TOO (#14612 review round 3, P2).
+    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `"` re-pairs with the next
+    span's opening quote and swallows the live prose IN BETWEEN. MEASURED on this arm:
+
+        header -> 'a stray " here, then `#1`'s drift-reporter row
+                   (`tests/test_fly_secret_declaration_report.py`), then "a quoted dead claim"'
+        before -> `_row_claims(...)` == []      # GREEN over a reverted `row` claim
+
+    — i.e. the arm answers "no row claim" over the very reversion it exists to catch.
+    `_splice_shingle_positions` already treats this as a precondition and RAISES rather than
+    de-splicing around the mis-pairing, for exactly this reason; a guard that cannot read its
+    subject must not certify it, so the same parity test runs BEFORE the mask. Its sibling also
+    reds the tree, which is why this is defence in depth rather than the only gate — but a
+    fail-open member of a fail-closed family is still a defect, and this one is reachable from a
+    single typo in prose nobody re-reads.
     """
+    quotes = header.count('"')
+    if quotes % 2:
+        raise AssertionError(
+            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}), "
+            "so the quoted-span mask would re-pair across live prose and this arm would grade a "
+            "block it cannot actually read — refusing to answer rather than answering `no row "
+            "claim` over a claim it silently masked")
     unquoted = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
     found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
     for claim in _ROW_CLAIM_BEFORE_LIST_RE.finditer(unquoted):
@@ -9866,7 +9889,7 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     assert claimed, (
         "the `fast_shards` header block names no test file as a `durations` row, so this arm "
         "grades nothing at all — re-point `_ROW_CLAIM_AFTER_FILE_RE` / "
-        "`_ROW_CLAIM_BEFORE_FILE_RE` at the sentence the block actually uses")
+        "`_ROW_CLAIM_BEFORE_LIST_RE` at the sentence the block actually uses")
     missing = [name for name in claimed if name not in rows]
     assert not missing, (
         f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
@@ -9900,6 +9923,24 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "name of a `row (`…`, `…`)` LIST while its siblings go ungraded, or it reads a "
         "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
         f"{_row_claims(fixture)!r}")
+    # ⛔ …and an ODD number of quotes is REFUSED, never read as "no row claim" (#14612 review
+    # round 3, P2). MEASURED before this guard: a stray `"` before a reverted
+    # `drift-reporter row (…)` claim re-paired with the next span's opening quote and swallowed the
+    # claim, so `_row_claims` answered `[]` — a GREEN over the very reversion this arm exists to
+    # catch. The masked-span technique is only sound on a block whose quotes PAIR, so the arm must
+    # fail closed when they do not, exactly as `_splice_shingle_positions` already does.
+    try:
+        _row_claims(
+            'a stray " here, then `#1`\'s drift-reporter row '
+            '(`tests/test_row_claim_before.py`), then "a quoted dead claim"')
+    except AssertionError as exc:
+        assert "ODD number of double quotes" in str(exc), exc
+    else:  # pragma: no cover - the guard regressed
+        raise AssertionError(
+            "an ODD number of double quotes no longer makes `_row_claims` refuse to answer: the "
+            "quoted-span mask re-pairs across live prose and this arm grades a block it cannot "
+            "read — measured, that is how a reverted `drift-reporter row (…)` claim passes it "
+            "GREEN")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
