@@ -613,7 +613,17 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         # Nothing that can start: the miss class, never `("ok", {})`. When the
         # reason is a DROPPED entry, hand that entry back so the class can name it
         # (see `dropped_base` above) instead of describing an empty dict.
-        return layers[0][0], (dropped_base if dropped_base is not None else merged), read, ENTRY_ABSENT
+        #
+        # ⛔ ATTRIBUTE IT TO THE LAYER IT CAME FROM. `layers[0][0]` is the most
+        # specific file PRESENT, but the entry handed back here is the BASE's — so
+        # the verdict named the repo file for a fault that lives in `~/.pi/…`:
+        # measured, with a list-valued `url` in the base and a `{timeoutMs}` delta
+        # in the repo, the line read "`<repo>/.mcp.json` … `url` is list (["…"])"
+        # about a file that contains no `url` at all. That is the one sentence this
+        # module exists to get right, pointing at the file that is fine.
+        if dropped_base is not None:
+            return _base_source, dropped_base, read, ENTRY_ABSENT
+        return (_base_source if base_survives else layers[0][0]), merged, read, ENTRY_ABSENT
     return layers[0][0], merged, read, OK
 
 
@@ -818,18 +828,29 @@ def classify(harness: str, *, project_dir: Path | None = None
         # exactly what the drop exists to close.
         field = next((f for f in ("url", "command") if f in entry), None)
         if field is None:
+            # ⛔ Name the OTHER layers too. The effective entry can be the BASE's
+            # while a more specific file declares a transport that was IGNORED as an
+            # ambiguous delta — so a line that only says "the entry declares no
+            # `url`/`command`" is true of the base and reads as a lie about the repo
+            # file the reader is looking at. `read` already carries every file
+            # consulted, in layer order.
+            others = [pth for pth in read if pth != source]
+            where = (f" (the effective entry; also consulted: "
+                     f"{', '.join(others)})" if others else "")
             return Verdict(
                 status=COMMAND_MISSING,
-                detail=("the entry declares no `url` (http) and no `command` "
-                        "(stdio), so the harness cannot load it"),
+                detail=(f"the entry declares no `url` (http) and no `command` "
+                        f"(stdio), so the harness cannot load it{where}"),
                 fix=f"re-register it: `tortoise onboard --harness {harness}`",
                 source=source, configs_read=read)
+        others = [pth for pth in read if pth != source]
+        also = (f" (also consulted: {', '.join(others)})" if others else "")
         return Verdict(
             status=COMMAND_MISSING,
             detail=(f"the entry's `{field}` is {type(entry[field]).__name__} "
                     f"({entry[field]!r}), not a string — the harness DROPS an "
                     f"entry whose transport is a non-string, so this server "
-                    f"never loads"),
+                    f"never loads{also}"),
             fix=f"re-register it: `tortoise onboard --harness {harness}`",
             source=source,
             transport="http" if field == "url" else "stdio",

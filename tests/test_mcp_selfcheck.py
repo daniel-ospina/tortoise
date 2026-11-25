@@ -2093,3 +2093,52 @@ def test_destination_identity_normalises_a_default_port_for_ipv6_too():
         "a default port is not a destination change — dropping the inherited "
         "credential turned a working entry into `no-credential`")
     assert mcp_selfcheck.same_destination("https://[::1]:443/mcp", "https://[::1]/mcp")
+
+
+def test_the_verdict_names_the_file_that_actually_holds_the_fault(tmp_path, monkeypatch):
+    """A dropped BASE entry must not be attributed to the repo file.
+
+    Measured before this arm: a list-valued `url` in `~/.pi/agent/.mcp.json` plus a
+    `{timeoutMs}` delta in the repo produced "`<repo>/.mcp.json` … `url` is list
+    (["…"])" — about a file that contains no `url` at all, i.e. the one sentence this
+    module exists to get right pointing at the file that is fine.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    base_path = home / ".pi/agent/.mcp.json"
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": ["https://api.premiselabs.co/mcp/"]}}}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "timeoutMs": 90000}}}), encoding="utf-8")
+
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert verdict.source == str(base_path), (
+        f"the handed-back entry came from the BASE; the verdict named {verdict.source}")
+    assert str(repo / ".mcp.json") in verdict.detail, (
+        "the other layer consulted must be named, or the reader thinks the repo "
+        "file declares the bad `url`")
+
+
+def test_a_base_without_a_transport_names_the_layer_it_came_from(tmp_path, monkeypatch):
+    """The effective entry can be the base's while the repo delta was ignored."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    base_path = home / ".pi/agent/.mcp.json"
+    base_path.write_text(json.dumps({"mcpServers": {"tortoise": {"lazy": True}}}),
+                         encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp/", "command": "python3"}}}),
+        encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert verdict.source == str(base_path), verdict.source
+    assert str(repo / ".mcp.json") in verdict.detail, verdict.detail
