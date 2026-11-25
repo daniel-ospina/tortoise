@@ -481,12 +481,27 @@ class TestTheWriteDoorsStateTheirPosture:
                 with pytest.raises(ValueError, match="is terminal"):
                     sdk._create_direct_edge("IMPL", src, tgt)
             else:
-                # ACCEPTED, and inert on the read side (Batch 3's `_live_only`).
+                # ACCEPTED — and the WRITE is what this arm asserts.
+                # ⛔ It does NOT assert the read side, and it used to claim to:
+                # `_compute_confidence(factors=[...])` prices OPERATOR ids
+                # (`operator_ids = [f if isinstance(f, str) else f[0] …]`,
+                # `sdk.py:41760-41762`), so handing it the two POINT ids this
+                # test creates priced NO factor and left
+                # `belief[1] == belief[2]` true whatever the edge did — a
+                # consequent that could not fail (#14600 review N1). Removed
+                # rather than kept as reassurance. The read-side strip IS priced
+                # through a real operator by
+                # `test_create_operator_accepts_every_ending` above, which is why
+                # nothing is lost here.
                 sdk._create_direct_edge("IMPL", src, tgt)
-                sdk._compute_confidence(
-                    factors=[src, tgt], require_calibration=False)
-                belief = _belief(sdk, tgt)
-                assert belief[1] == belief[2], belief
+                edges = _q(
+                    sdk,
+                    "MATCH (a:Point {id:$s})-[r:IMPL]->(b:Point {id:$t}) "
+                    "RETURN count(r)",
+                    {"s": src, "t": tgt})
+                assert edges[0][0] == 1, (
+                    f"the {shape} door ACCEPTED the edge and did not write it: "
+                    f"{edges}")
         finally:
             sdk.close()
 
