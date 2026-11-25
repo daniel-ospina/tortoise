@@ -1333,14 +1333,23 @@ def test_the_uncut_remedy_names_the_whole_arming_chain():
         f"acknowledgement (#13043 review P1-2) — got {remedy!r}")
     assert "org-14610" in remedy, "the org id must be interpolated, not left as <org>"
 
-    # The four operator-facing homes, and how many times each must reach the ONE
+    # The operator-facing homes, and how many times each must reach the ONE
     # builder. `provision_graph_record` has two (the failed provision and the
     # failed commit).
+    #
+    # ⛔ #14610 review F1 moved ONE site behind a helper, and the move is the fix:
+    # the default-row HANDLER cannot name the builder directly, because the
+    # `from … import` that would bind it is the very import that fails on the arm
+    # the handler exists for (a function-local import makes the name LOCAL, so the
+    # unbound name raises `UnboundLocalError` while the message is being built).
+    # So the handler is pinned to its helper (the assertion after this loop) and
+    # the helper is pinned to the ONE builder (the row below) — two hops, both
+    # graded, rather than a site that quietly names no remedy at all.
     sites = (
         ("tortoise/record_writer.py", "_warn_uncut_graph", 1),
         ("tortoise/record_writer.py", "provision_graph_record", 2),
         ("tortoise/hosted_api.py", "_provision_graph_record", 1),
-        ("tortoise/supabase_control.py", "_provision_default_graph_record", 1),
+        ("tortoise/supabase_control.py", "_arming_remedy_for_log", 1),
     )
     missing = []
     for rel, function, want in sites:
@@ -1355,6 +1364,18 @@ def test_the_uncut_remedy_names_the_whole_arming_chain():
         "A log line naming only `backfill` sends an operator to a command that "
         "seeds the row, cuts nothing over, and leaves `/health` red — the defect "
         "the PR fixed elsewhere, applied to the sentence that names the command")
+
+    # The second hop (#14610 review F1): the HANDLER must reach its helper, or the
+    # helper above is a site nothing calls — the same "no call site" shape as a
+    # builder referenced only in comments.
+    handler = _functions("tortoise/supabase_control.py").get(
+        "_provision_default_graph_record")
+    assert handler is not None, (
+        "`supabase_control._provision_default_graph_record` is gone — re-run the "
+        "census")
+    assert _hook_calls(handler, "_arming_remedy_for_log") >= 1, (
+        "the default-row handler no longer names the arming remedy at all, so its "
+        "ERROR tells an operator the row is uncut and not how to cut it over")
 
 
 def test_the_uncut_clear_note_names_the_arm_too():
@@ -1700,3 +1721,141 @@ def test_the_backfill_only_argv_rules_are_enforced(monkeypatch):
         raise AssertionError(
             f"{label} was ACCEPTED (rc={rc}) — the argv rule that forbids it is "
             f"gone, so the verb silently ignored {' '.join(argv)}")
+
+
+# ── the OBSERVER the registry is fed by (DB-free) ───────────────────────────
+#
+# ⛔ #14610 REVIEW FINDING 3 (non-vacuity, agent-infra#3442 rule 3). The whole
+# detection/retraction mechanism below shipped with NO test: every row in this
+# file drove `note_uncut_graph` / `clear_uncut_graph` DIRECTLY (the map), and the
+# three suites that name `record_owns_position` MOCK it. Deleting the six lines
+# that observe and retract left all of them green, so `armed_but_uncut` would
+# never populate from traffic — and `clear_uncut_graph`'s own warning ("WITHOUT
+# THIS THE REGISTRY IS A LATCH") would be back in the code with nothing red.
+# These two rows are the missing pins.
+
+
+class _OwnsPositionConn:
+    """The smallest thing `record_owns_position` accepts as a connection."""
+
+    def __init__(self):
+        self.committed = 0
+        self.closed = 0
+
+    def commit(self):
+        self.committed += 1
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_write_path_observes_and_retracts_an_uncut_graph(monkeypatch):
+    """`record_owns_position` IS the observer — and the repair — not just a gate.
+
+    The read it already makes on every armed write is the only per-write sight of
+    the graph's cursor row, so an absent/`seeded` row must be NOTED and an
+    `active` row must CLEAR the note. A one-directional version is a latch:
+    `/health` stays non-`ok` for the life of the process over a graph an operator
+    already healed.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _OwnsPositionConn()
+    state: dict = {"row": None}
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+    monkeypatch.setattr(ra, "read_cursor",
+                        lambda _conn, *, org_id, graph_id: state["row"])
+    monkeypatch.setattr(rw, "_breaker_open_until", 0.0)
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    rw.reset_uncut_graphs()
+
+    # (1) NO ROW — the population /health could not see: a graph whose record leg
+    # is off while every counter reads healthy. The write still goes to the
+    # journal (fail open to the append), and the graph is now VISIBLE.
+    assert rw.record_owns_position(tenant=("org-observe", "graph-observe")) is False
+    published = rw.armed_but_uncut()
+    assert (published["armed_but_uncut"], published["armed_but_uncut_reasons"]) == (
+        1, {"no_cursor_row": 1}), (
+        "an armed deployment read a graph with NO cursor row and published "
+        f"nothing — the observer is gone: {published!r}")
+
+    # (2) A NON-ACTIVE ROW — `seeded`/`halted` allocate nothing, so the row must
+    # be reported under ITS OWN reason (the remedy differs), not folded into (1).
+    state["row"] = (0, "seeded")
+    assert rw.record_owns_position(tenant=("org-observe", "graph-observe")) is False
+    assert rw.armed_but_uncut()["armed_but_uncut_reasons"] == {"mode_seeded": 1}
+
+    # (3) THE SAME READ THAT OBSERVES THE GAP OBSERVES ITS REPAIR — an `active`
+    # row is the record taking the ordinal, and the entry must be RETRACTED.
+    state["row"] = (0, "active")
+    assert rw.record_owns_position(tenant=("org-observe", "graph-observe")) is True
+    healed = rw.armed_but_uncut()
+    assert (healed["armed_but_uncut"], healed["armed_but_uncut_reasons"]) == (0, {}), (
+        "a HEALED graph is still published as uncut — the registry is a LATCH, "
+        f"and /health cannot go green without a restart: {healed!r}")
+    assert conn.committed and conn.closed, (
+        "the observation's read left its transaction/handle open (#9558's "
+        "lock-leak rule) — the commit/close belong to this path, not the caller")
+    rw.reset_uncut_graphs()
+
+
+def test_the_default_row_handler_survives_an_unimportable_record_seam(
+        monkeypatch, caplog):
+    """The handler cannot name a binding the failing `try` was supposed to make.
+
+    ⛔ #14610 REVIEW FINDING 1 (P1). The remedy formatter lives on the record seam;
+    a `from tortoise.record_writer import …` INSIDE the function makes both names
+    LOCAL, so on the very arm this handler exists for — "the record seam is
+    unimportable" — `uncut_graph_remedy` is unbound and the handler raises
+    `UnboundLocalError` while BUILDING its message.
+
+    The consequence is not cosmetic: the ERROR is never emitted, the exception
+    escapes into `_mint_default_graph_row_best_effort`, which reports "row NOT
+    minted" over a row that exists (all three arms run after the id is durable)
+    and starts that org's `_DEFAULT_ROW_MINT_RETRY_S` suppression window.
+
+    The fallback is asserted to be the seam's OWN text, so the literal cannot
+    drift from `record_writer.uncut_graph_remedy` by an edit to one of them.
+    """
+    import logging
+    import sys
+    from types import ModuleType
+
+    from tortoise import supabase_control
+
+    org, graph = "org-14610-f1", "graph-14610-f1"
+    expected = rw.uncut_graph_remedy(org)
+
+    # The healthy arm first: the helper reads the seam when the seam is readable.
+    assert supabase_control._arming_remedy_for_log(org) == expected, (
+        "the log helper no longer names the seam's own remedy, so the two "
+        "formatters of one command have already drifted")
+
+    # Then the arm this handler exists for: the module is present but a shell (as
+    # it is when ITS import failed — nothing it would have exported is bound).
+    stub = ModuleType("tortoise.record_writer")
+    monkeypatch.setitem(sys.modules, "tortoise.record_writer", stub)
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.supabase_control"):
+        try:
+            supabase_control._provision_default_graph_record(org, graph)
+        except BaseException as exc:  # noqa: BLE001, RUF100
+            raise AssertionError(
+                "the handler raised while BUILDING its message, so the one line "
+                "that makes an uncut row visible was never emitted and the "
+                f"caller sees the opposite fact: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    emitted = [r for r in caplog.records
+               if "record cursor could" in r.getMessage()]
+    assert emitted, (
+        "the unimportable-seam arm logged NOTHING at ERROR — the best-effort "
+        "wrapper's stated compensation is that a record fault is logged and made "
+        f"visible; records: {[r.getMessage()[:80] for r in caplog.records]!r}")
+    message = emitted[0].getMessage()
+    assert graph in message and org in message, (
+        f"the ERROR names neither the graph nor the org: {message!r}")
+    assert expected in message, (
+        "the ERROR does not carry the arming remedy — an operator reading it "
+        f"learns the row is uncut and not how to cut it over: {message!r}")

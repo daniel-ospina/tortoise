@@ -4315,6 +4315,33 @@ def insert_graph(cp, row: dict) -> None:
     cp.query("graphs", method="POST", json_body=row)
 
 
+def _arming_remedy_for_log(org_id: str) -> str:
+    """The arming remedy, for a log line that must NEVER raise (#14610 review F1).
+
+    The ONE home of the command text is
+    :func:`tortoise.record_writer.uncut_graph_remedy`, and this module keeps the
+    record seam LAZY on purpose — so that name cannot be bound by the ``try``
+    whose failure is being reported: a ``from X import Y`` inside a function makes
+    ``Y`` LOCAL, and when ``X`` is the thing that failed to import, ``Y`` is
+    unbound and the handler raises ``UnboundLocalError`` while BUILDING its
+    message. That is the ONE failure this handler exists for, so the fallback
+    below is the difference between a loud uncut row and an exception that
+    :func:`_mint_default_graph_row_best_effort` swallows into a false "row NOT
+    minted" (and a suppression window for the org).
+
+    ⛔ The literal is duplicated only where the seam cannot be read AT ALL, and
+    the duplication cannot drift: `tests/test_14582_creation_hook.py` asserts it
+    is byte-for-byte :func:`record_writer.uncut_graph_remedy`'s own output.
+    """
+    try:
+        from tortoise.record_writer import uncut_graph_remedy
+
+        return uncut_graph_remedy(org_id)
+    except Exception:  # noqa: BLE001, RUF100
+        return (f"`tools/record_allocator_cli.py backfill --org-id {org_id} --arm "
+                f"--acknowledge-cutover`")
+
+
 def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     """#14582 — the CREATION HOOK for the org's `kind='default'` graph row.
 
@@ -4370,16 +4397,22 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     VISIBLE (`/health` `record.armed_but_uncut`, and the arming remedy), never
     raised.
     """
+    # ⛔ THE HANDLER CANNOT NAME A BINDING THIS `try` ESTABLISHES (#14610 review
+    # F1): the import below is the thing that fails on the arm this handler exists
+    # for, so the remedy text comes from `_arming_remedy_for_log`, which re-reads
+    # the seam and falls back to a pinned literal. Both names used by the handler
+    # are defined before it.
     try:
-        from tortoise.record_writer import provision_graph_record, uncut_graph_remedy
+        from tortoise.record_writer import provision_graph_record
 
         provision_graph_record(org_id=org_id, graph_id=graph_id)
     except Exception:
         _logger.error(
             "the default graph row %s (%s) exists but its record cursor could "
-            "NOT be provisioned (the record seam is unimportable) — every "
-            "record this org writes is refused until its row is ARMED: run %s",
-            graph_id, org_id, uncut_graph_remedy(org_id), exc_info=True)
+            "NOT be provisioned (the record seam is unimportable, or the "
+            "provision itself failed) — every record this org writes is refused "
+            "until its row is ARMED: run %s",
+            graph_id, org_id, _arming_remedy_for_log(org_id), exc_info=True)
 
 
 def ensure_default_graph_row(cp, org_id: str,
