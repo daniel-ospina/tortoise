@@ -254,12 +254,16 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2343`, at this head — re-derived by
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2379`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
 returns that one line; the sentence has followed the symbol through `2297` → `2313` →
 `2343` as `#13971`'s review round corrected the capture path's own docstring above and then
 added the restore-door residual there, and before that
-`2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
+`2257`, a comment at that head, and `1584` at `4f68a2aa7` — ⛔ and the `2343` this sentence
+carried until the #14624 lane is RE-DERIVED, not nudged: `grep -nF` returns `2379`, and the `+36`
+is `main`'s own growth in `projection/entities.py` after that cut, not this diff's, which touches
+no line of it (`git diff --name-only origin/main...HEAD -- tortoise/projection/entities.py`
+prints nothing) — which is why the reading is the grep and never the number beside it) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
