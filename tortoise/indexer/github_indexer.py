@@ -1600,7 +1600,10 @@ class GitHubIndexer:
         # incarnation (`projection/entities.py:6431-6437`: `object_id = _held[0]`,
         # reached BEFORE `resolve_fold_name`), `_held` comes from
         # `all_name_holder_ids` (any status — an Integer-`0` row IS held,
-        # `entity_identity.py:466,990`), and `_live_holders` uses the same
+        # `entity_identity.py:1144-1151` — the ANY-status probe itself and its own
+        # *"Every holder of ``name`` for ``label`` — ANY status (raw ids)"*;
+        # `:466`/`:990` were cited here and do not support the sentence),
+        # and `_live_holders` uses the same
         # `coalesce(n.isClosed, false) = false` predicate that calls Integer `0`
         # not-live (`live.py:209-213`). So a falsy-marked row sits in exactly the
         # predicate state a truthy-marked one does, and a `github.issue.reopened`

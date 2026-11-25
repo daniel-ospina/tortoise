@@ -232,6 +232,12 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
 
     from tortoise.allowance_gate import STALE_AFTER_SECONDS
 
+    #: The fixture's own window must stay INSIDE the gate's bound, or a stale
+    #: fixture passes every arm in this file. Asserted, not described: this was
+    #: prose in the comment above `_FRESH_FIXTURE_MAX_AGE_S` and nothing pinned
+    #: it (#14646).
+    assert 0 < _FRESH_FIXTURE_MAX_AGE_S < STALE_AFTER_SECONDS
+
     #: Attribute calls that READ a clock, whichever module carries them. Kept
     #: narrow deliberately: `isoformat`/`fromisoformat`/`strptime`/`strftime` are
     #: FORMATTERS, and a literal formatted at import time must not read as derived.
@@ -476,6 +482,123 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "structural arm above has now been beaten twice, and this one is what "
         "still catches a same-day literal if it is beaten a third time "
         "(#14646)")
+
+
+def test_the_fixture_reading_follows_the_clock(monkeypatch):
+    """The SHAPE-INDEPENDENT half: the reading must MOVE when the clock moves.
+
+    ``test_the_fixture_reading_is_fresh_and_derived_from_the_clock`` above decides
+    by reading the fixture's SOURCE, and source-reading arms have now lost the
+    arms race four times — each time measured open with the file green. Two
+    shapes survive it at the head this test was added to, and they are why it
+    exists:
+
+    * ``datetime.now(UTC).replace(**{"year": 2026, "month": 11})`` — a clock
+      call, so a source arm calls it derived, but the calendar component is
+      PINNED: it reads as ~now for the rest of this month and then ages out,
+      which is the #9127/#14646 bomb with a later fuse;
+    * ``datetime.now(UTC).replace(day=1)`` — the same, one component down.
+
+    So this arm does not look at the source at all. It hands the fixture two
+    clock readings a known distance apart and requires the value that REACHES
+    ``MeterReading`` to move by exactly that distance. A pinned instant does not
+    move; a pinned calendar component fails the year-crossing shift; a derived
+    reading moves through both, by whatever route.
+
+    ⛔ Deliberately FAIL-CLOSED, and it says so in the message: a clock reached
+    through another module (``from tortoise.ids import now_iso``) or a constant
+    computed at IMPORT time does not move under this patch, so it is refused
+    here too, with the inline remedy named. A fail-closed red is defensible; a
+    fail-closed red that asserts a falsehood is not.
+    """
+    import sys
+    import time as _real_time
+
+    from tortoise.allowance_gate import STALE_AFTER_SECONDS
+
+    real_datetime = datetime
+    module = sys.modules[__name__]
+
+    def handed(offset: timedelta) -> datetime:
+        """The reading ``_single_sample_meter`` gives the gate, `offset` from now."""
+
+        class _Shifted(real_datetime):
+            """`datetime`, shifted on EVERY clock read.
+
+            Missing one of these manufactures a false red, not a safety net: a
+            correct fixture using ``utcnow()`` would be told its clock read does
+            not follow the clock.
+            """
+
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + offset
+
+            @classmethod
+            def utcnow(cls):
+                return real_datetime.utcnow() + offset
+
+            @classmethod
+            def today(cls):
+                return real_datetime.today() + offset
+
+        class _Time:
+            """`time`, shifted — so ``time.time()``/``gmtime()`` follow the clock.
+
+            An INSTANCE, not the class: ``__getattr__`` fires only for instance
+            attribute access, so patching the class itself would make
+            ``time.strftime`` an ``AttributeError`` and refuse a correct fixture.
+            """
+
+            def __getattr__(self, attr):
+                return getattr(_real_time, attr)
+
+            @staticmethod
+            def time() -> float:
+                return _real_time.time() + offset.total_seconds()
+
+            @staticmethod
+            def gmtime(secs=None):
+                return _real_time.gmtime(
+                    _real_time.time() + offset.total_seconds() if secs is None else secs)
+
+            @staticmethod
+            def localtime(secs=None):
+                return _real_time.localtime(
+                    _real_time.time() + offset.total_seconds() if secs is None else secs)
+
+        monkeypatch.setattr(module, "datetime", _Shifted)
+        monkeypatch.setattr(module, "time", _Time(), raising=False)
+        try:
+            return real_datetime.fromisoformat(
+                _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at)
+        finally:
+            monkeypatch.setattr(module, "datetime", real_datetime)
+            monkeypatch.setattr(module, "time", _real_time, raising=False)
+
+    base = handed(timedelta())
+    #: TWO shifts, and the second crosses a year ON PURPOSE: a pinned calendar
+    #: component tracks the clock under a six-hour shift and stops tracking it
+    #: under a year-crossing one, which is the only cheap way to tell a pin from
+    #: a read.
+    for shift in (timedelta(hours=6), timedelta(days=405)):
+        moved = (handed(shift) - base).total_seconds()
+        assert abs(moved - shift.total_seconds()) <= 2, (
+            "the fixture hands the gate a reading that does NOT follow the "
+            f"clock: a shift of {shift.total_seconds():.0f}s moved it "
+            f"{moved:.0f}s. Either it is pinned to an absolute instant — however "
+            "it is spelled, and however many clock-named calls sit on the way to "
+            "it — or to a calendar component (a `replace(year=…)`-style pin), "
+            "which is the same bomb with a later fuse. The gate ages that reading "
+            f"by STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s), so 24 h after the "
+            "instant baked into it the dimension goes UNARMED, the write is "
+            "SERVED, and this file reds with no commit in between (#9127, third "
+            "recurrence). Derive it — `datetime.now(UTC) - timedelta(minutes=5)` "
+            "— and hand THAT to `MeterReading`.\n\n"
+            "⛔ This arm cannot shift a clock it cannot see, so a read through a "
+            "helper in ANOTHER module or a constant computed at IMPORT time is "
+            "refused here as well: a false red, with a cheap remedy — read the "
+            "clock inline (#14646).")
 
 
 def test_the_freshness_pin_reads_a_positional_construction():
