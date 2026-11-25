@@ -21758,10 +21758,15 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # path and drops the suite from `test_files` — measured at the reviewed head. The
     # rendered document's re-stage diff is the one where that is most misleading: the
     # path still takes the docs-only early return, so the outcome is `surfaces: []` with
-    # 107 `test_files` remaining — the census suite is ABSENT, the selection is NOT empty
+    # a docs-only remainder — the census suite is ABSENT, the selection is NOT empty
     # (measured WITH THAT ENTRY REMOVED: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)`
-    # -> `surfaces=[]`, `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`;
-    # with the entry in place the same call answers `surfaces=['core']`, `n_test_files=968`).
+    # -> `surfaces=[]` and a `test_files` set that does NOT contain this suite, against a
+    # `core` selection for `STORAGE-ARCHITECTURE.md`; with the entry in place the same
+    # call answers `surfaces=['core']` and INCLUDES the suite).
+    # ⛔ No `test_files` TOTAL is typed on any side: it is a population that moves every
+    # time a `core` test file lands — this comment said `968` until the merge that brought
+    # `tests/test_expansion_fusion_14344.py` took it to `969`, which is the rot this file's
+    # neighbours de-rot for the same reason. Re-derive from `_sel`, never copy.
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
