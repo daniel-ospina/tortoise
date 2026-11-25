@@ -788,7 +788,16 @@ def render(src: Path, result: dict) -> str:
     if not src.exists():
         print(f"render: no source at {src}", file=sys.stderr)
         raise SystemExit(2)
-    text = src.read_text(encoding="utf-8")
+    # ⛔ A SOURCE THAT CANNOT BE READ IS "COULD NOT RUN" (2), NOT A CRASH (1) — the
+    # twin of `check()`'s guard. `--render` has NO drift verdict, so an uncaught
+    # PermissionError / IsADirectoryError / UnicodeDecodeError exits 1, the code
+    # reserved for "the pins drifted", and §7 tells every lane to run this verb: a
+    # lane would re-cut 25 correct pins over a file it never read.
+    try:
+        text = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        print(f"render: could not read {src}: {err}", file=sys.stderr)
+        raise SystemExit(2) from err
     rows = CENSUS_ROW.findall(text)
     if rows:
         print(
@@ -812,7 +821,9 @@ def check(doc: Path, result: dict) -> int:
     # lane would re-cut 25 pins that were correct.
     try:
         text = doc.read_text(encoding="utf-8")
-    except OSError as err:
+    except (OSError, UnicodeDecodeError) as err:
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needed naming:
+        # a present-but-non-UTF-8 source exited 1 through this very guard.
         print(f"check: could not read {doc}: {err}", file=sys.stderr)
         return 2
     rows = CENSUS_ROW.findall(text)
@@ -1038,7 +1049,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown:
         print(markdown_table(result["sites"]))
         return 0
-    print(report(result))
+    # ⛔ AND THE BARE VERB ENUMERATES TWICE TOO: `report()` calls `rg_totals()`, which
+    # re-reads the index — outside the guard above, so a PARTIAL failure exited 1, the
+    # DRIFT code, from the DEFAULT verb (measured with a `git` shim that delegates the
+    # first `ls-files` and refuses the second).
+    try:
+        print(report(result))
+    except (OSError, subprocess.CalledProcessError) as err:
+        print(f"census: could not enumerate: {err} — this is 'could not run', not drift",
+              file=sys.stderr)
+        return 2
     return 0
 
 
