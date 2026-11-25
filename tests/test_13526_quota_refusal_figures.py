@@ -174,9 +174,32 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     the strictest statement the shape allows and it is also the least
     over-strict: an annotated binding and a ``def _now_iso()`` helper are
     ordinary ways to write this correctly, and both are accepted.
+
+    ⛔ Reaching a clock is NOT on its own proof that the VALUE is derived, and the
+    arm checks both halves because two shapes reach one and still hand the gate a
+    literal — measured GREEN on the clock-only version:
+
+    * ``_PINNED or datetime.now()`` (and the ``and`` form) — the literal is
+      truthy, so it is the ``_PINNED`` that reaches the gate and the clock is dead
+      code;
+    * ``datetime.now() if False else "2026-…"`` — the same, on the dead branch.
+
+    Both redden inside this fixture's own 360 s window rather than silently after
+    24 h, so the consequence is BOUNDED, not a new silent class; but this arm's
+    claim is *the value that reaches the gate*, so a resolved expression carrying
+    a hardcoded ISO instant anywhere is rejected even when it also reads a clock.
+    Nothing clock-derived carries one — a ``strftime`` FORMAT string is `%Y-%m-…`,
+    and the scan matches digits.
+
+    ⛔ And a BARE annotation is not a rebind: ``measured_at: str`` on its own
+    leaves the running value untouched, so it must not shadow the binding above
+    it. Treating it as the last binding made the arm store an ``ast`` value of
+    ``None`` and crash on it, reddening a shape that is CORRECT — it now judges
+    the value Python would actually hand over.
     """
     import ast
     import inspect
+    import re
 
     from tortoise.allowance_gate import STALE_AFTER_SECONDS
 
@@ -245,6 +268,19 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
                     for keyword in child.keywords)
             for child in walk_resolved(node, scope))
 
+    #: An ISO-8601 instant written into the source, matched on TEXT because that
+    #: is the shape being banned. Digits, not `%Y`, so a `strftime` format string
+    #: is never a hit.
+    instant_text = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+    def holds_an_instant(node, scope):
+        """True when the resolved expression carries a hardcoded ISO instant."""
+        return any(
+            isinstance(child, ast.Constant)
+            and isinstance(child.value, str)
+            and instant_text.search(child.value) is not None
+            for child in walk_resolved(node, scope))
+
     fn = next(
         node for node in ast.parse(inspect.getsource(_single_sample_meter)).body
         if isinstance(node, ast.FunctionDef))
@@ -260,7 +296,14 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
             if isinstance(stmt, ast.Assign):
                 targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                 value = stmt.value
-            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            elif (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                # A bare `x: str` DECLARES; it does not rebind. Only an
+                # annotation carrying a value is a binding, and only a binding
+                # may shadow the one above it.
+                and stmt.value is not None
+            ):
                 targets, value = [stmt.target.id], stmt.value
             else:
                 continue
@@ -297,6 +340,8 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     pinned = [
         value for value in handed
         if reaches_a_clock(value, scope) and pins_a_calendar(value, scope)]
+    instant_carrying = [
+        value for value in handed if holds_an_instant(value, scope)]
     assert not undated, (
         "the fixture hands the gate a reading that derives from no clock — "
         f"{', '.join(ast.unparse(value) for value in undated)} — so the gate "
@@ -315,6 +360,14 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "between. That is the #9127 bomb wearing the fix's clothes: derive an "
         "OFFSET from now (`datetime.now(UTC) - timedelta(minutes=5)`) instead "
         "of pinning a date with `.replace(...)`.")
+    assert not instant_carrying, (
+        "the fixture hands the gate a reading with a hardcoded ISO instant in it — "
+        f"{', '.join(ast.unparse(value) for value in instant_carrying)} — so the "
+        "instant, not the clock, is what the gate ages. Reaching a clock "
+        "somewhere in the expression is not enough when a literal is what comes "
+        "out of it (a dead `if`/`else` branch, or an `or`/`and` whose other "
+        "operand is the truthy literal). Hand `MeterReading` the clock-derived "
+        "VALUE itself.")
 
     reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
     age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
