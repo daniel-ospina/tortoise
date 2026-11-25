@@ -165,6 +165,18 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
       slice: rows get dropped and repeated while the exact count still reports
       the enumeration complete (``#5346``). With distinct names the mutant was
       indistinguishable, which is why the fixture is not distinct.
+      ⛔ **AND THE PAYLOAD CANNOT GRADE THIS ONE — measured, not assumed.** With
+      ``, id(n)`` deleted from ``list_layer``'s ORDER BY this test is GREEN,
+      including on ``id``; so is an 8-row fixture carrying four same-named
+      carriers paged one row at a time (8 rows, 8 distinct ids, no drop, no
+      repeat). The engine's row order is stable at fixture scale, so the
+      non-adjacent slice #5346 describes never materialises to page over — the
+      mutant is unobservable from the response. The totality claim is therefore
+      graded where it actually lives, in the emitted STATEMENT:
+      ``test_objects_list_orders_by_a_total_key`` below. The identity assertions
+      here still guard the paging itself (a skipped or duplicated row reds them);
+      they just do not guard the tiebreak, and this docstring no longer says
+      they do.
     * **the total is EXACT** — a real ``count()`` under the same WHERE, not a
       lower bound wearing a total's clothes.
 
@@ -186,6 +198,7 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
         finally:
             sdk.close()
         seen: list[str] = []
+        seen_ids: list[str] = []
         # 4 rows, one per page: offsets 0-2 have rows behind them, 3 is the
         # terminal page, 4 is PAST the end and empty.
         expected_truncated = {0: True, 1: True, 2: True, 3: False, 4: False}
@@ -200,9 +213,72 @@ def test_objects_list_pages_over_a_total_order_and_says_it_truncated(tmp_path):
                 # A complete answer must not advertise a total it did not cut to.
                 assert "total_available" not in body, (offset, body)
             seen.extend(o["name"] for o in body["objects"])
+            seen_ids.extend(o["id"] for o in body["objects"])
         # Every row exactly once, none dropped or repeated — over the same-name
         # pair, which a per-page query on a non-total order cannot guarantee.
         assert sorted(seen) == ["B", "C", "SAME", "SAME"], seen
+        # ⛔ THE NAME MULTISET ABOVE IS NOT A DROP/REPEAT FALSIFIER: the pair
+        # shares a name, so a walk that hands page 3 back as page 2 — one row
+        # DROPPED, its twin returned TWICE — still yields exactly
+        # ["B", "C", "SAME", "SAME"], because the dropped row and the repeated
+        # one are indistinguishable by the only column asserted. IDENTITY is the
+        # column that separates them, so the walk is graded on `id` too: four
+        # rows, four DISTINCT nodes. (This does NOT make the total-order mutant
+        # observable — measured green even with `, id(n)` deleted, see the
+        # docstring; the tiebreak is graded in
+        # `test_objects_list_orders_by_a_total_key`.)
+        assert len(seen_ids) == 4, seen_ids
+        assert len(set(seen_ids)) == 4, seen_ids
+
+
+def test_objects_list_orders_by_a_total_key():
+    """The list query's ORDER BY carries a TIEBREAK — the gradeable form of #5346.
+
+    ⛔ WHY THIS GRADES THE STATEMENT AND NOT A PAGE: a payload assertion cannot
+    red for a missing tiebreak at fixture scale. Measured — with ``, id(n)``
+    deleted from ``entity_reads.list_layer``'s ORDER BY the paging test above is
+    green, and so is an 8-row fixture with four same-named carriers paged one row
+    at a time (8 rows, 8 distinct ids): the engine's row order is stable, so the
+    non-adjacent slice never materialises to page over. The defect IS
+    ``ORDER BY name`` being non-total, a property of the statement, so the
+    statement is what gets graded. MUTANT this reds: dropping ``, id(n)`` (or any
+    tiebreak) from the ORDER BY — the exact pre-fix text — while keeping the
+    layer's own sort property first.
+    """
+    from tortoise import entity_reads
+
+    class _Graph:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def ro_query(self, cypher, params=None):
+            self.queries.append(cypher)
+            # The COUNT answers one row; the page answers none — the assertions
+            # are about the ORDER BY, so the rows are irrelevant.
+            result = [[0]] if "count(n)" in cypher else []
+
+            class _R:
+                def __init__(self):
+                    self.result_set = result
+
+            return _R()
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    proj = _Proj()
+    entity_reads.list_layer(proj, "Object", limit=5)
+    page = [q for q in proj.g.queries if "count(n)" not in q]
+    assert len(page) == 1, proj.g.queries
+    order = page[0].split("ORDER BY", 1)[1].split(" SKIP", 1)[0]
+    terms = [t.strip() for t in order.split(",")]
+    # The layer's OWN sort property first, then at least one tiebreak that makes
+    # the order total. `id(n)` is what `list_layer` emits; any total tiebreak
+    # satisfies the rule, and a single-term ORDER BY is the #5346 defect.
+    assert len(terms) >= 2, order
+    assert terms[0] == f"n.{entity_reads.LAYER_ORDER_PROP['Object']}", order
+    assert any(t.startswith("id(") for t in terms[1:]), order
 
 
 def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
@@ -640,9 +716,10 @@ def test_a_hybrid_object_source_cannot_republish_its_denied_payload(tmp_path):
     the node that carries the denied payload, and `GET /v1/objects/{id}` published
     the `content`/`text` that `/v1/sources/{id}` withholds.
 
-    MUTANT: in `hosted_api._layer_payload`, restore
-    `if entry.get("label") == "Source":` (the matched branch) instead of grading
-    `entry["labels"]` — both `content` and the planted raw text come back.
+    MUTANT: in `entity_reads.layer_payload` (the one home of the rule —
+    `hosted_api._layer_payload` delegates to it), restore
+    `is_source = entry.get("label") == "Source"` (the matched branch) instead of
+    grading `labels` — both `content` and the planted raw text come back.
 
     The counter-arm keeps the rule honest in the other direction: a plain
     `:Object` (no Source label) is still served AS STORED, so this is a disclosure
@@ -765,6 +842,53 @@ def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path
         assert [r["direction"] for r in inbound["relations"]] == ["in"], inbound
         assert in_sources[0]["name"] == url, in_sources
         assert raw not in repr(inbound), inbound
+
+
+def test_a_hybrid_neighbour_is_labelled_by_membership_not_position(tmp_path):
+    """A `(:Object:Source)` neighbour answers `label: "Source"` — the rule its NAME uses.
+
+    ⛔ The relation preview's name coalesce already grades MEMBERSHIP
+    (``CASE WHEN 'Source' IN labels(m) THEN coalesce(m.name, m.url)``), so a
+    preview whose ``label`` came from ``labels[0]`` described the same node as an
+    Object while handing back its url-shaped Source name: the first-label-vs-
+    membership defect this PR fixes on four other surfaces, reintroduced on the
+    one field a client FILTERS on — the suite's own discovery idiom
+    (``[o for o in others if o["label"] == "Source"]``) silently finds nothing
+    for a hybrid.
+
+    MUTANT: restore ``"label": (labels[0] if labels else None)`` in
+    ``entity_reads._endpoint_preview`` and this reds with ``label == "Object"``
+    against ``name == <url>``.
+    """
+    url = "https://example.test/hybrid-neighbour-14592"
+    hybrid_id = "hybrid-neighbour-14592"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        carrier = client.post(
+            "/v1/objects", json={"name": "CARRIER", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            # Below the write door (it will not mint a hybrid), and with NO
+            # `name`: the name arm then has to answer the url, which is what makes
+            # label-vs-name agreement observable.
+            sdk._get_proj().g._query(
+                "CREATE (h:Object:Source {id:$i, url:$u, objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url}, read_only=False)
+            sdk._get_proj().g._query(
+                "MATCH (a {id:$a}), (h {id:$i}) MERGE (a)-[:mentions]->(h)",
+                params={"a": carrier["id"], "i": hybrid_id}, read_only=False)
+        finally:
+            sdk.close()
+
+        body = client.get(f"/v1/entities/{carrier['id']}/relations").json()
+        others = [r["other"] for r in body["relations"]]
+        assert len(others) == 1, body
+        other = others[0]
+        assert other["id"] == hybrid_id, other
+        # The name comes from the Source arm, so the label must say Source too.
+        assert other["name"] == url, other
+        assert other["label"] == "Source", other
+        # …and the discovery idiom a client writes actually finds it.
+        assert [o for o in others if o["label"] == "Source"] == [other], others
 
 
 def test_belief_never_republishes_a_source_neighbours_denied_payload(tmp_path):
@@ -1415,6 +1539,33 @@ def _plant_raw_confidence_event(sdk, point_id: str, payload_extra: dict) -> int:
     return seq
 
 
+@contextlib.contextmanager
+def _arm_confidence_changed_type():
+    """Force the emitter's admission gate OPEN for the duration of the block.
+
+    ⛔ WHY A TEST HAS TO ARM IT NOW: the route asks the emitter's own gate BEFORE
+    it scans (so a belief read does not pay an O(store) label scan for a row type
+    no producer can write). This suite's fixtures write `ConfidenceChanged` rows
+    DIRECTLY through `event_store.append_event` — a test graph has no producer to
+    drive — so an unarmed gate would make the route skip the scan, and the
+    payload-shape assertions below would be grading an absence instead of the
+    shape they exist for.
+
+    ⛔ NO SEAM IS FAKED: this rebinds the SAME global the route reads (``
+    _graph_event_types`` imports it per call), so the route takes its production
+    code path and its own filtering still has to work. The alternative — a route
+    knob a test could flip — would be a bypass in the shipped code.
+    """
+    import tortoise.sdk as sdk_module
+
+    original = sdk_module._GRAPH_EVENT_TYPES
+    sdk_module._GRAPH_EVENT_TYPES = original | {"ConfidenceChanged"}
+    try:
+        yield
+    finally:
+        sdk_module._GRAPH_EVENT_TYPES = original
+
+
 def test_belief_skips_a_stamp_that_committed_no_belief(tmp_path):
     """A NEWER `ConfidenceChanged` that moved no belief must not be 'the last write'.
 
@@ -1445,7 +1596,11 @@ def test_belief_skips_a_stamp_that_committed_no_belief(tmp_path):
         finally:
             sdk.close()
 
-        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        # ⛔ ARMED, because the row was planted BELOW the emitter: the route asks
+        # the emitter's gate before it scans, and an unarmed gate is a legitimate
+        # skip — which would leave the shape assertions here grading a null.
+        with _arm_confidence_changed_type():
+            body = client.get(f"/v1/entities/{p['id']}/belief").json()
         assert body["lastBeliefWrite"]["seq"] == real_seq, body
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
@@ -1477,7 +1632,8 @@ def test_belief_reports_a_CLEAR_as_the_last_write(tmp_path):
         finally:
             sdk.close()
 
-        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        with _arm_confidence_changed_type():
+            body = client.get(f"/v1/entities/{p['id']}/belief").json()
         assert body["lastBeliefWrite"]["seq"] == cleared, body
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": None, "posteriorAlpha": None, "posteriorBeta": None,
@@ -1496,7 +1652,8 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         finally:
             sdk.close()
 
-        r = client.get(f"/v1/entities/{p['id']}/belief")
+        with _arm_confidence_changed_type():
+            r = client.get(f"/v1/entities/{p['id']}/belief")
         assert r.status_code == 200, r.text
         body = r.json()
         # EP α/β, not a substituted score: mean = α/(α+β) = 0.8.
@@ -1642,6 +1799,48 @@ def test_belief_names_why_lastBeliefWrite_cannot_be_answered(tmp_path):
             sdk_module._GRAPH_EVENT_TYPES = original
         assert armed["lastBeliefWrite"] is None, armed
         assert armed["lastBeliefWriteUnavailable"] is None, armed
+
+
+def test_belief_does_not_scan_for_a_type_the_emitter_never_writes(
+        tmp_path, monkeypatch):
+    """The O(store) scan is SKIPPED when the emitter cannot write the type.
+
+    ⛔ THE MEASURED PREMISE: `event_store.latest_for_node` plans as *label scan →
+    filter → sort → limit* — `ensure_event_schema` indexes `event_id` and `seq`
+    only, there is no index on `type` (`LATEST_FOR_NODE_SCAN`'s own comment) — so
+    the query costs the store's size on every belief read. With
+    `ConfidenceChanged` in neither admission path of `sdk._emit_event`, its only
+    possible answer on a real graph is `None`, so that scan pays the store to
+    prove an absence the emitter's gate already knows.
+
+    ⛔ WHY THIS IS A SPY AND NOT A PAYLOAD ASSERTION: the payload is IDENTICAL
+    either way (`lastBeliefWrite: null` plus the named reason), which is why the
+    sibling tests cannot see the mutant at all. The falsifier has to be the call.
+    MUTANT: drop the `if _belief_changes_reach_the_graph_store():` guard in
+    `get_entity_belief` and scan unconditionally (the pre-fix shape) — the spy
+    records a call and this reds.
+    """
+    from tortoise import event_store as es
+
+    calls: list[tuple] = []
+    real = es.latest_for_node
+
+    def _spy(*a, **k):
+        calls.append((a, tuple(sorted(k))))
+        return real(*a, **k)
+
+    monkeypatch.setattr(es, "latest_for_node", _spy)
+
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a claim nothing scanned for",
+            "kind": "statement"}).json()
+        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+
+    assert body["lastBeliefWrite"] is None, body
+    assert body["lastBeliefWriteUnavailable"]["error_code"] == (
+        "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE"), body
+    assert calls == [], calls
 
 
 def test_belief_404s_on_an_unknown_entity(tmp_path):

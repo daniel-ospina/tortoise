@@ -3485,7 +3485,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: `REST GET /v1/entities/{entity_id}/relations`), so 44 rows x 16 doors = 704 pairs.
 #: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
 #: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved
-#: (the 45 older rows still account for 27 of the 28). Worst row is UNCHANGED at 3
+#: (the 43 older rows still account for 27 of the 28). Worst row is UNCHANGED at 3
 #: (rows 1, 2, 17, 22, 24, 45 hold the multi-door cells), so the 4-ceiling is untouched.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 28
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
