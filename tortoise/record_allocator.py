@@ -179,6 +179,37 @@ class SeedResult:
 
 
 @dataclass(frozen=True)
+class ProvisionedRecord:
+    """What :func:`provision_graph_record` did for one graph (#14582).
+
+    `mode` is the row's mode AFTER the call, so a caller can tell the FOUR
+    outcomes apart without re-reading: `active` (cut over and allocating — this
+    call, or a previous one), `seeded` (a row an OPERATOR seeded and this call
+    deliberately did NOT arm, #14610 review F5), `halted` (an operator stopped
+    it — the hook never resumes one), and `already_cut_over` (the row was already
+    `active`, so nothing was written).
+
+    ⛔ `active` IS NOT THE SAME AS "THIS CALL CUT IT OVER": only `already_cut_over`
+    distinguishes those, and only a `mode` that is NOT `active` means the graph is
+    still uncut after a successful call — a caller that treats every non-raising
+    return as "provisioned" reports a graph as cut over that allocates nothing
+    (#14610 review F4).
+    """
+
+    org_id: str
+    graph_id: str
+    seq: int
+    mode: str
+    #: The row was ALREADY `active`: this call wrote nothing. The door may be
+    #: re-entered (a retry after a partial commit) and must not be punished for it.
+    already_cut_over: bool
+    #: This call wrote the seed (fresh row, or a monotone re-seed).
+    seeded: bool
+    healed_tail: bool = False
+    burned: bool = False
+
+
+@dataclass(frozen=True)
 class Allocation:
     """A contiguous block of positions, `first_seq .. last_seq`, allocated in ONE
     statement. `seqs` is ascending and contiguous (asserted, not assumed)."""
@@ -269,9 +300,18 @@ JOURNAL_COUNT_SQL = (
 
 #: Graphs this ORG that the RECORD has seen writing, and that have NO counter
 #: row — i.e. "born uncut", the state `#13043` review P1-1 named. The creation
-#: hook that would prevent it (`provision_graph_record`, the plan's §A7.8 item 8)
-#: is not in this tree, so this query is the reconciliation path that makes the
-#: state findable instead of merely documented.
+#: hook that PREVENTS it is :func:`provision_graph_record` (`#14582`, the plan's
+#: `§A7.8` item 8); this query is the RECONCILIATION path for the graphs it did
+#: not reach — the ones created before it landed, and the ones whose hook failed
+#: best-effort (a record outage at creation must not fail a user's graph, so that
+#: case is reported on `/health` as `armed_but_uncut` and healed by
+#: `tools/record_allocator_cli.py backfill --arm` — ⛔ the ARM, not a bare
+#: `backfill`, which only seeds the row and leaves it allocating nothing).
+#: ⛔ AND `backfill --arm` IS STILL NOT THE REMEDY FOR EVERY GRAPH `/health` FILES
+#: (#14610 review, P2): this query keeps `c.graph_id IS NULL`, so a row that
+#: EXISTS in mode `seeded` is outside it — that one takes the single-graph `arm`.
+#: `record_writer.uncut_graph_remedy` is the one home that publishes the right
+#: verb for the observed state.
 #:
 #: ⛔ IT READS `journal_event`, NOT `public.graphs`, and the reason is a GRANT,
 #: not a preference: `tortoise_record_app` has no privilege on `public.graphs`
@@ -503,6 +543,150 @@ def seed(conn: Any, *, org_id: str, graph_id: str,
     return SeedResult(org_id=org_id, graph_id=graph_id, seq=seq, mode=mode,
                       row_max=row_max, enumerated_floor=floor,
                       healed_tail=healed_tail, burned=burned)
+
+
+# ── the creation hook ───────────────────────────────────────────────────────
+
+def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
+                           enumerated_floor: int | None = None
+                           ) -> ProvisionedRecord:
+    """Give a graph that was just CREATED the counter row it needs — the
+    creation hook `#14582` names, and the plan's `§A7.8` item 8. (#14582)
+
+    ⛔ IT **ARMS**, AND THAT IS NOT A DETAIL. The plan is explicit (M16): *"a
+    hook that only seeds writes `DEFAULT 'seeded'`, which allocates nothing, and
+    the test must go red on it"*. A `seeded` row allocates nothing here either —
+    `ALLOCATION_SQL` is scoped to `{MODE_ACTIVE}`, so the graph's first record
+    write would still refuse `cursor_not_active`, which is the exact defect this
+    hook closes. `seeded` exists for the OTHER population: a graph that already
+    has a journal and must be reconciled against it before it may allocate. A
+    graph born NOW has an empty journal, so there is nothing to reconcile and no
+    backfill to wait for — it is born cut over.
+
+    ⛔ IT REUSES :func:`seed`, so there is ONE `SEED_SQL` and one set of seed
+    cases rather than a second copy with a second opinion about divergence. The
+    consequences follow from that function and are not re-implemented here:
+
+    * a fresh graph (`row_max = 0`, `floor = 0`) → `seq = 0`, then `active`;
+    * `row_max > floor` → :class:`SeedRefused` with `reason="divergence"`
+      PROPAGATES: the record holds positions this journal cannot reproduce, so
+      the graph is REFUSED, never silently seeded (#12894's divergence rule);
+    * ⛔ **THE FLOOR IS DERIVED, NOT ASSUMED** when the caller does not pass one:
+      it is :data:`JOURNAL_COUNT_SQL` for this graph, which is the seed's own
+      quantity ("how many positions already exist"), read in the same
+      tenant-scoped transaction. A door must not have to know it: a brand-new
+      graph enumerates 0, and a graph the hook is RE-ENTERED on after a partial
+      commit (or that a concurrent create raced) enumerates N — and a
+      hard-coded `0` would refuse that second population as `divergence` with
+      text that is false ("the record claims positions this journal cannot
+      reproduce") when the journal holds exactly those positions. Deriving it is
+      also what keeps this function honest when it is called on a graph that is
+      older than the call site assuming it is new. ⛔ THE PRE-EXISTING-GRAPH
+      POPULATION IS NOT REACHED BY CREDENTIAL TRAFFIC (#14610 review F3): an org
+      whose default ROW exists never re-enters this function from a credential
+      resolver, so those graphs are healed by an operator verb or by a
+      re-provisioning, not by traffic;
+    * already `{MODE_ACTIVE}` → an idempotent NO-OP (`already_cut_over`), because
+      `seed` refuses to re-base a live allocator and a door that is re-entered
+      must not fail;
+    * a PRE-EXISTING `{MODE_SEEDED}` row → seeded (monotone) and **NOT armed**, the
+      same posture `{MODE_HALTED}` gets. ⛔ THIS IS THE `#14610` REVIEW'S F5: `seed`
+      and `backfill` without `--arm` are what PRODUCE a `seeded` row, and moving
+      it to `active` is the per-graph cutover decision the CLI refuses without
+      `--acknowledge-cutover` (#13043 review P1-2) — arming a graph whose writer
+      flag is not yet rolled turns the record path OFF, so the hook cannot take
+      that transition on an operator's behalf. The rule is the ROW: a graph with
+      NO counter row has no operator statement to respect, and it IS born cut
+      over (that is the population the hook exists for);
+    * `{MODE_HALTED}` → seeded (monotone) but NOT re-armed. A halt is an
+      operator's statement about a graph; a hook that silently resumed one would
+      erase the only record that somebody stopped it.
+
+    ⛔ IT DOES NOT COMMIT. It runs in the caller's transaction — the same
+    contract as every other entry point in this module — so the seed and the arm
+    land together or not at all. A caller that commits between them can leave a
+    `seeded` row behind an arm that never happened, which for a fresh graph is a
+    record leg that silently accumulates nothing.
+
+    ⛔ IT READS THE ROW FIRST, AND THAT IS NOT AN OPTIMISATION — it removes a
+    FALSE DIVERGENCE. `seed()` classifies its refusal by `row_max > floor` FIRST
+    (the guard's own condition), so on a graph that is ALREADY `active` and has
+    position rows, a `floor = 0` call reports `reason="divergence"` — a healthy
+    cut-over graph accused of holding unreproducible positions. A re-entered hook
+    (a retry after a partial commit, a concurrent duplicate create) would then
+    publish a healthy graph as uncut and red `/health` for nothing. So the
+    `active` case is decided by the ROW, before any seed runs.
+
+    ⚠️ `record_cursor` carries `(org_id, graph_id) REFERENCES public.graphs`, so
+    this CANNOT create a row for an id the graphs table does not hold — a foreign
+    key, by design: a counter row for a graph that does not exist is exactly the
+    phantom F1 describes, and the database refuses it before this module has an
+    opinion.
+    """
+    existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
+    # ⛔ ARM ONLY A ROW THIS CALL CREATED (#14610 review F5). A pre-existing row
+    # in `seeded` was put there BY AN OPERATOR (`seed`, or `backfill` without
+    # `--arm`), and moving it `seeded -> active` is exactly the transition the
+    # CLI refuses without `--acknowledge-cutover` (#13043 review P1-2): arming
+    # before the writer flag is rolled in every process turns the record path
+    # OFF, because on a cut-over graph the enumerated replay is refused by name
+    # (`_refuse_an_enumerated_replay`) and the allocator's arm is the flag. A
+    # hook that took that transition silently would make the acknowledgement
+    # gate conditional on which door a re-provisioning happened to enter
+    # through.
+    #
+    # The rule is the ROW, not the mode, for the same reason `halted` is
+    # respected: a row IS an operator's statement. NO row is not one — a graph
+    # with no counter row is the population the hook exists for (it was created
+    # before the hook landed, or its hook failed), so it is still born cut over.
+    created_here = existing is None
+    if existing is not None and existing[1] == MODE_ACTIVE:
+        return ProvisionedRecord(
+            org_id=org_id, graph_id=graph_id, seq=existing[0],
+            mode=existing[1], already_cut_over=True, seeded=False)
+    floor = enumerated_floor
+    if floor is None:
+        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE RECORD'S OWN ENUMERATION.
+        # `scope_tenant` is transaction-local, so the count is read under the
+        # tenant this connection is already bound to — or, on a connection that
+        # has not been scoped yet, under no tenant at all, in which case RLS
+        # yields ZERO rows and the seed below refuses rather than seeding a
+        # number nobody measured (fail-closed: `MAX(seq) <= 0` is false for any
+        # graph that already has journal lines).
+        scope_tenant(conn, org_id)
+        with conn.cursor() as cur:
+            cur.execute(JOURNAL_COUNT_SQL, (org_id, graph_id))
+            count_row = cur.fetchone()
+        floor = int(count_row[0]) if count_row else 0
+    try:
+        result = seed(conn, org_id=org_id, graph_id=graph_id,
+                      enumerated_floor=floor)
+    except SeedRefused as exc:
+        if exc.reason != "armed":
+            raise
+        # The row is already `active`: the graph IS cut over, and a re-entered
+        # hook (a retry after a partial commit, a concurrent duplicate create)
+        # is a no-op rather than a refusal.
+        existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
+        if existing is None:  # pragma: no cover - `armed` implies the row exists
+            raise
+        return ProvisionedRecord(
+            org_id=org_id, graph_id=graph_id, seq=existing[0],
+            mode=existing[1], already_cut_over=True, seeded=False)
+    if result.mode == MODE_SEEDED and created_here:
+        seq = arm(conn, org_id=org_id, graph_id=graph_id)
+        return ProvisionedRecord(
+            org_id=org_id, graph_id=graph_id, seq=seq, mode=MODE_ACTIVE,
+            already_cut_over=False, seeded=True,
+            healed_tail=result.healed_tail, burned=result.burned)
+    # A PRE-EXISTING `seeded`/`halted` row: seeded (monotone) and deliberately NOT
+    # resumed. `seeded` is an operator's unfinished cutover and `halted` is an
+    # operator's stop; the hook does not overturn either. See :attr:`created_here`
+    # and the docstring.
+    return ProvisionedRecord(
+        org_id=org_id, graph_id=graph_id, seq=result.seq, mode=result.mode,
+        already_cut_over=False, seeded=True,
+        healed_tail=result.healed_tail, burned=result.burned)
 
 
 def arm(conn: Any, *, org_id: str, graph_id: str) -> int:

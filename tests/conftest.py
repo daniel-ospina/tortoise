@@ -841,6 +841,63 @@ def _clear_record_refusal_state() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_uncut_graphs():
+    """#14610 review P2: the UNCUT-GRAPH registry is process state, never ambient.
+
+    `_record_health` folds the armed-but-uncut count into `record.ok` —
+    `hosted_api` sets ``block["ok"] = False`` when the record is ``armed`` and
+    that count is ``> 0`` — and `record_writer._UNCUT_GRAPHS` is keyed by
+    ``org\\0graph`` for the life of the PROCESS. `reset_uncut_graphs()` exists for
+    exactly this, but its only callers were inside
+    ``tests/test_14582_creation_hook.py``, so a file that leaves an uncut graph
+    behind hands every later health leg in the same shard a degraded record: an
+    ordering dependency between test FILES, not a property of the health block —
+    the same class `_no_ambient_record_refusal` above exists for.
+
+    MEASURED at ``77c4b4bf`` (one pytest process each, ``TORTOISE_TEST_CARVE_OUT=1``)::
+
+        pytest tests/test_14002_record_only_journal.py tests/test_9548_record_arming_health.py
+
+    **6 failed, 62 passed, 5 skipped** on this branch (first: ``test_9548:142
+    assert record["ok"] is True``, the payload carrying ``armed_but_uncut: 1``),
+    and **68 passed, 5 skipped** on a pristine ``git archive origin/main`` tree,
+    which does not carry the fold. The polluter is `test_14002`'s
+    ``{'o\\0g': 'no_cursor_row'}`` row, still set after every test in that file.
+
+    Both sides, and resolved through ``sys.modules``: this is an AUTouse fixture,
+    so importing `tortoise.record_writer` here would make the whole suite depend
+    on that module importing cleanly, and a process that never loaded it has no
+    registry to clear.
+
+    ⛔ ``record_writer._uncut_warned_at`` — the per-graph WARNING throttle, keyed
+    the same ``org\\0graph`` way and equally process-global (#14610 review cycle
+    2, P3, measured with a teardown-hook probe: it survives setup, teardown and
+    every later test) — used to survive ``reset_uncut_graphs()`` too, and this
+    fixture cleared it from the outside. That was the defect, not the workaround:
+    the production reset seam documented itself as zeroing "the registry" and
+    cleared three of the four maps. #14610 review cycle 3 fixed the seam (it
+    clears the throttle now, so a re-armed process warns again) and the direct
+    clear is DELETED here, so `test_reset_uncut_graphs_also_resets_the_warning_
+    throttle` is the only thing keeping the suite honest about it.
+    """
+    import sys
+
+    record_writer = sys.modules.get("tortoise.record_writer")
+
+    def _reset() -> None:
+        if record_writer is None:
+            return
+        # ⛔ ALL of the registry, including the warning throttle — see this
+        # docstring. Never clear `_uncut_warned_at` here: a fixture that patches
+        # over the production seam cannot red when the seam regresses.
+        record_writer.reset_uncut_graphs()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _no_ambient_dead_heartbeat_ticker():
     """#12666: a CANCELLED heartbeat ticker is process state, never ambient.
 
