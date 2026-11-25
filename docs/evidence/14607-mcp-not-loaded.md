@@ -6,7 +6,7 @@ an inference.
 
 ## 1. The symptom, as the agent sees it
 
-```
+```bash
 $ mcp_catalog
 tortoise [core, not-loaded]
 
@@ -59,7 +59,7 @@ Two entries, same name, **different transports**, and neither is verified.
 
 `tortoise config show` — the product's own credential resolver — agrees:
 
-```
+```bash
   TORTOISE_API_KEY (env)                      not set
   ./.tortoise                                 absent
   ~/.tortoise/credentials.json                absent
@@ -74,7 +74,7 @@ Identity: none resolved.
 variable that the harness read **once, at process start**. With the variable
 unset, the expansion is the empty string, so the request goes out as:
 
-```
+```text
 Authorization: Bearer 
 ```
 
