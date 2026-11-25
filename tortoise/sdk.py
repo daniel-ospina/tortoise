@@ -38312,11 +38312,32 @@ class TortoiseSDK:
                              # review P2).
                              "status": status_as_reported(sub.get("status"))}
         # ponytail: follow outgoing rels for Role → Org delegation
+        # ⛔ ``labels(n)`` — the WHOLE label SET — not ``labels(n)[0]``. A node can
+        # carry several labels, and this repo's own product code treats the hybrid
+        # shapes as real production, not fixtures: ``(:Object:Source)`` is the
+        # blast-radius case ``mcp_server.py``'s #4649 fix exists for, and
+        # ``(:Object:Source)`` / ``(:Subject:Source)`` / ``(:Object:Event)`` are
+        # named as shapes the supersede path meets (#12914 round-4 residual,
+        # ``tool_registry.py`` citing tortoise#13114). With only the FIRST label a
+        # consumer cannot tell ``(:Object:Source)`` from a plain ``:Object``, so a
+        # deny-by-default filter (``hosted_api._filter_delegation_payloads``) that
+        # keys on that single string cannot see the ``:Source`` half at all — a
+        # hybrid node carrying ``text`` rode ``GET /v1/entities/{id}/belief``
+        # through the allowed ``Object`` label (#14593 review P1). ``node_type``
+        # keeps its existing single-string meaning (``labs[0]``) so the wire shape
+        # does not move; ``labels`` is ADDITIVE, and it is the field the route's
+        # filter actually grades.
         rels = proj.g.query(
-            "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
+            "MATCH (s:Subject {id:$sid})-[r]->(n) "
+            "RETURN type(r), labels(n), properties(n)",
             params={"sid": sub["id"]},
         ).result_set
-        chain["delegation"] = [{"via": r[0], "node_type": r[1], "props": r[2]} for r in rels]
+        chain["delegation"] = [
+            {"via": r[0],
+             "node_type": (r[1][0] if r[1] else None),
+             "labels": list(r[1] or []),
+             "props": r[2]}
+            for r in rels]
         return chain
 
     # ── #7045: about edges backfill (Ontology v2.1) ──────────

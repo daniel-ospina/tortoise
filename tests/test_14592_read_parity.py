@@ -719,6 +719,152 @@ def test_belief_never_republishes_a_source_neighbours_denied_payload(tmp_path):
         assert raw not in repr(payload), payload
 
 
+def test_the_belief_provenance_chain_honours_the_source_rule(tmp_path):
+    """#3998 / D30 + #5196 — the FOURTH door on this route, and the one nobody filtered.
+
+    `get_entity_belief` attaches `sdk._provenance(id)` verbatim, and that helper
+    builds its `delegation` arm with `properties(n)` — the WHOLE node map — for
+    whatever the author `:Subject` is connected to. A `references` edge to a
+    `:Source` therefore handed the Source's raw `text` back inside an ordinary
+    `graphs:read` response, on a route that never asked for a document body: the
+    exact disclosure `_layer_payload` (by-id routes) and `_endpoint_preview`
+    (relations) refuse, arriving through the one arm nobody filtered.
+
+    ⛔ THE HYBRID ARM IS THE HARDER HALF, and it is why the filter grades the
+    label SET. `node_type` is the neighbour's FIRST label, so `(:Object:Source)`
+    answered `node_type == "Object"` — an allowed label — and a rule keyed on
+    that single string published the map with the `:Source` half included. Both
+    neighbours ride the SAME response here, so one route call grades the plain and
+    the hybrid shape.
+
+    ⛔ MUTANT: drop `_filter_delegation_payloads` from `get_entity_belief`'s
+    payload (or revert `sdk._provenance` to `labels(n)[0]` + grade on
+    `node_type`) and this reds with the raw body in
+    `evidence.provenance.delegation[].props` — measured in both directions.
+
+    ⛔ The assertion is on the WHOLE response, not on one key: the rule is "a
+    Source's raw payload never rides the route", so a future re-shape of the
+    delegation arm must not re-open it by moving the payload somewhere else.
+    """
+    url = "https://example.test/belief-delegation-14592"
+    raw = "RAW DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
+    hybrid_raw = "HYBRID OBJECT-SOURCE BODY THAT MUST NOT RIDE THIS ROUTE"
+    # `:Object` FIRST on purpose: that is what makes `labels(n)[0]` an ALLOWED
+    # label, i.e. what reproduces the disclosure instead of assuming the
+    # allocation order does not matter.
+    hybrid_id = "hybrid-object-source-14592"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            subj = sdk._create_subject("Reviewer", "person")
+            # `_create_source`, not the `extractedFrom` auto-mint: the auto-minted
+            # node is keyed by `url` with no `id`, so `_create_edge` cannot resolve
+            # it and answers `created: false` (a fixture failure that would look
+            # like a route failure).
+            src = sdk._create_source(url, "web")
+            assert src["id"] == url, src
+            # Below the write door on purpose: `_create_source` refuses a
+            # caller-supplied payload, and the route must not hand back what the
+            # write door would not accept.
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.text = $t",
+                params={"u": url, "t": raw}, read_only=False)
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', "
+                "url:'https://example.test/hybrid-14592', text:$t})",
+                params={"i": hybrid_id, "t": hybrid_raw}, read_only=False)
+            for target in (url, hybrid_id):
+                edge = sdk._create_edge("references", subj["id"], target)
+                assert edge["created"] is True, (
+                    f"the fixture could not write the edge it asserts on: {edge}")
+            point = sdk._create_point(
+                "statement", "a claim with a documented author",
+                authoredBy=subj["id"])
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{point['id']}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # NON-VACUITY: the fixture really did reach the delegation arm, and both
+        # neighbours are there — otherwise this row would pass while grading
+        # nothing.
+        delegation = body["evidence"]["provenance"]["delegation"]
+        by_url = {d["props"].get("url"): d for d in delegation}
+        assert url in by_url, delegation
+        assert by_url[url]["via"] == "references", by_url[url]
+        # The plain `:Source` neighbour is readable for its DECLARED fields…
+        assert by_url[url]["node_type"] == "Source", by_url[url]
+        # …and the `:Source` half of the hybrid is still visible to the filter,
+        # which is the whole point of shipping the label SET.
+        hybrid = by_url["https://example.test/hybrid-14592"]
+        assert hybrid["node_type"] == "Object", hybrid
+        assert set(hybrid["labels"]) == {"Object", "Source"}, hybrid
+        assert "text" not in by_url[url]["props"], by_url[url]["props"]
+        assert "text" not in hybrid["props"], hybrid["props"]
+        assert raw not in repr(body), "a :Source's raw payload rode the route"
+        assert hybrid_raw not in repr(body), "a hybrid node's payload rode the route"
+
+
+def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
+    """#14593 review P1 (the fix's OWN hole): the filter must not key on ONE spelling.
+
+    `_provenance` fills `node_type` with `labels(n)[0]`, and the engine does not
+    guarantee the ORDER of `labels()` (Cypher manual, list functions: *"the order
+    of returned labels is not guaranteed"*). Measured on the sibling branch the
+    two legacy shapes allocate in OPPOSITE directions: `(:Document:Source)`
+    returns `['Source', 'Document']` while `(:Object:Source)` returns
+    `['Object', 'Source']`. An equality test against `"Source"` therefore filters
+    one and skips the other — the same node class, no code difference — so the
+    guard is only as strong as the POSITION of the label it names.
+
+    ⛔ The unit under test is the DECISION, so this pins it in both directions for
+    the labels the fixture actually carries: the out-of-set `Document`, the
+    never-heard-of `Gadget` and the LABEL-LESS entry are filtered, and a
+    publishable `Object`'s map is returned untouched — otherwise "deny by
+    default" would quietly become "filter everything" and strip a legitimate
+    neighbour's properties.
+    """
+    from tortoise.hosted_api import _filter_delegation_payloads
+
+    secret = "RAW DOC BODY THAT MUST NOT RIDE THIS ROUTE"
+    url = "https://example.test/legacy-document-14592"
+    provenance = {"delegation": [
+        # the legacy multi-label shape: `labels(n)[0]` is `Document`, not `Source`
+        {"via": "references", "node_type": "Document",
+         "labels": ["Document", "Source"],
+         "props": {"url": url, "id": url, "text": secret}},
+        # a label the route has never heard of: deny-by-default must cover it
+        {"via": "references", "node_type": "Gadget", "labels": ["Gadget"],
+         "props": {"text": secret}},
+        # ⛔ and the ABSENT arm: no label at all. A filter that denies every KNOWN
+        # non-publishable spelling and lets a missing one through passes the two
+        # arms above — so "deny by default" would be pinned only for
+        # misspellings, never for absence (`all(... for lbl in [])` is vacuously
+        # True).
+        {"via": "references", "props": {"url": url, "text": secret}},
+        # a publishable neighbour is returned AS STORED
+        {"via": "dependsOn", "node_type": "Object", "labels": ["Object"],
+         "props": {"name": "BETA", "objectKind": "goal"}},
+    ]}
+    out = _filter_delegation_payloads(provenance)
+    assert [d.get("node_type") for d in out["delegation"]] == [
+        "Document", "Gadget", None, "Object"], out
+    assert out["delegation"][0]["props"] == {"url": url, "id": url}, out
+    assert "text" not in out["delegation"][1]["props"], out
+    assert out["delegation"][2]["props"] == {"url": url}, out
+    assert out["delegation"][3]["props"] == {
+        "name": "BETA", "objectKind": "goal"}, out
+    assert secret not in repr(out), out
+    # …and the input is not mutated in place: the route publishes what this
+    # returns, so a caller holding the callee's dict must not lose the payload.
+    assert provenance["delegation"][0]["props"]["text"] == secret
+    # A chain that carries NO delegation arm at all is returned as it came — the
+    # filter must not invent one for a `:Source` whose author is unknown.
+    assert _filter_delegation_payloads({"point": {"id": "p"}}) == {"point": {"id": "p"}}
+    assert _filter_delegation_payloads(None) is None
+
+
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         a = client.post("/v1/objects", json={"name": "ALPHA", "objectKind": "goal"}).json()
@@ -1075,7 +1221,15 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # The window is PUBLISHED, not hidden: a null last write means "not in
         # this window", never "it never changed".
         assert body["lastBeliefWriteScan"]["eventType"] == "ConfidenceChanged"
-        assert body["lastBeliefWriteScan"]["eventsScanned"] >= 1
+        # ⛔ `windowRows`, NOT `eventsScanned`: the constant is the window's SIZE,
+        # and a graph holding ONE `ConfidenceChanged` row reported `1000` under a
+        # name that says "scanned" — a count the store does not hold.
+        assert body["lastBeliefWriteScan"]["windowRows"] >= 1
+        assert "eventsScanned" not in body["lastBeliefWriteScan"], (
+            body["lastBeliefWriteScan"])
+        # This row PLANTED a `ConfidenceChanged` row directly, so `last` is not
+        # None and no unavailability reason rides an answer that HAS one.
+        assert body["lastBeliefWriteUnavailable"] is None, body
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
@@ -1128,6 +1282,74 @@ def test_belief_does_not_run_ep_for_a_node_with_no_belief(tmp_path):
         r = client.get(f"/v1/entities/{p['id']}/belief")
         assert r.status_code == 200, r.text
         assert r.json()["current"] is None, r.text
+
+
+def test_belief_names_why_lastBeliefWrite_cannot_be_answered(tmp_path):
+    """A null `lastBeliefWrite` must not be readable as "this belief never moved".
+
+    ⛔ MEASURED: the GRAPH event store only receives the types in
+    `sdk._GRAPH_EVENT_TYPES`, plus `PointRevised` when the #2353 change feed is on
+    — every product `append_event(` call site is `sdk.py::_emit_event`'s gated arm
+    — and `ConfidenceChanged` is in NEITHER. So on a real graph
+    `event_store.latest_for_node(..., "ConfidenceChanged", …)` has nothing to
+    find. This suite could not see the defect because its fixtures write the row
+    through `event_store.append_event` DIRECTLY (see `_plant_confidence_event`: a
+    test graph has no producer to drive), which bypasses the emitter's gate — so
+    every belief row here was green over a field that is null on every production
+    graph, rendered identically to "never moved".
+
+    The route now publishes `lastBeliefWriteUnavailable` with a named reason (the
+    shape it already uses for its other unanswerable half, `currentUnavailable`),
+    and the branch is a RUNTIME read of the emitter's own gate: the day
+    `ConfidenceChanged` joins it, the reason disappears by itself and the existing
+    query starts answering. Both directions are pinned below, the second by
+    ARMING the type rather than by asserting the reason's absence where it could
+    never appear.
+
+    ⛔ MUTANT: delete the `lastBeliefWriteUnavailable` key (the pre-fix payload)
+    and the reason half reds; hardcode the branch to `False` and the armed half
+    reds.
+    """
+    import tortoise.sdk as sdk_module
+    from tortoise.hosted_api import _belief_changes_reach_the_graph_store
+    from tortoise.sdk import _GRAPH_EVENT_TYPES
+
+    # The trigger IS the emitter's gate, read live — not a restated list.
+    assert _belief_changes_reach_the_graph_store() == (
+        "ConfidenceChanged" in _GRAPH_EVENT_TYPES)
+
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a claim with no planted event",
+            "kind": "statement"}).json()
+        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        assert body["lastBeliefWrite"] is None, body
+        assert "lastBeliefWriteUnavailable" in body, body
+        if _belief_changes_reach_the_graph_store():
+            # The emitter admits the type: the null is a real absence and no
+            # reason may ride it.
+            assert body["lastBeliefWriteUnavailable"] is None, body
+        else:
+            reason = body["lastBeliefWriteUnavailable"]
+            assert reason["error_code"] == "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE", reason
+            # The published list agrees with the emitter: everything it admits is
+            # named, and the type this route reads is NOT among them.
+            assert set(_GRAPH_EVENT_TYPES) <= set(reason["recordedEventTypes"]), reason
+            assert "ConfidenceChanged" not in reason["recordedEventTypes"], reason
+            assert reason["message"], reason
+
+        # ── the OTHER direction, by ARMING the type the reason is about ──
+        # A reason that cannot disappear is a hardcoded payload wearing a branch's
+        # clothes, so the SAME route is asked again with the emitter's gate
+        # widened — same graph, same key, only the gate moves.
+        original = sdk_module._GRAPH_EVENT_TYPES
+        sdk_module._GRAPH_EVENT_TYPES = original | {"ConfidenceChanged"}
+        try:
+            armed = client.get(f"/v1/entities/{p['id']}/belief").json()
+        finally:
+            sdk_module._GRAPH_EVENT_TYPES = original
+        assert armed["lastBeliefWrite"] is None, armed
+        assert armed["lastBeliefWriteUnavailable"] is None, armed
 
 
 def test_belief_404s_on_an_unknown_entity(tmp_path):

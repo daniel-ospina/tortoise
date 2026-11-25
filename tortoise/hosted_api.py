@@ -15717,6 +15717,103 @@ def _layer_payload(entry: dict) -> dict:
     return props
 
 
+#: The labels whose WHOLE property map `/belief` may publish inside
+#: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
+#: ``(:Document:Source)``, or any label this file has never heard of — is filtered
+#: through ``projection.entities.filter_source_props`` (deny by default, #3998).
+#: Every label on the neighbour must be in this set — the WHOLE set, not the
+#: first one (``_delegation_entry_publishable``), because a hybrid
+#: ``(:Object:Source)`` answers an allowed first label while carrying a
+#: ``:Source`` half. ``TortoiseSDK._provenance`` ships the label list alongside
+#: the single ``node_type`` the wire shape keeps.
+_PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
+
+
+def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
+    """Apply #3998 to every non-publishable neighbour in the provenance chain.
+
+    ⛔ THE CALLEE DOES NOT FILTER, SO THE ROUTE MUST. ``TortoiseSDK._provenance``
+    builds its ``delegation`` arm with ``properties(n)`` — the whole node map —
+    for whatever the author is connected to (``sdk.py``: *"MATCH (s:Subject
+    {id:$sid})-[r]->(n) RETURN type(r), labels(n), properties(n)"*). A
+    ``references`` edge from the author Subject to a ``:Source`` therefore carried
+    that Source's raw ``text`` back inside an ordinary ``graphs:read`` response —
+    the exact disclosure ``_layer_payload`` (by-id routes) and
+    ``_endpoint_preview`` (relations) refuse on this same PR's other routes,
+    arriving by the one arm nobody filtered.
+
+    The rule is applied HERE rather than at the callee because this route owns the
+    claim ("a ``:Source``'s raw payload never rides the route"), and because
+    ``_provenance`` is reachable through the MCP door and ``get_claim`` as well —
+    filtering there is a wider behaviour change than this route needs and is the
+    surface owner's call (#14630).
+
+    Only the properties of a neighbour that is not one of the four publishable
+    labels are touched; every other node's map is returned as stored, so no other
+    arm's payload changes shape.
+
+    ⛔ DENY BY DEFAULT, and the reason is MEASURED, not stylistic. An earlier
+    revision of the sibling branch tested ``entry.get("node_type") == "Source"``
+    — and that field is ``labels(n)[0]`` from the callee, while the ORDER of
+    ``labels()`` is not guaranteed by the engine (Cypher manual, list functions:
+    *"the order of returned labels is not guaranteed"*). Measured on that tree:
+    ``(:Document:Source)`` returns ``['Source', 'Document']`` while
+    ``(:Object:Source)`` returns ``['Object', 'Source']`` — one node class, two
+    allocations, OPPOSITE outcomes, no code difference. Hence the set grading in
+    ``_delegation_entry_publishable``.
+    """
+    if not isinstance(provenance, dict):
+        return provenance
+    delegation = provenance.get("delegation")
+    if not isinstance(delegation, list):
+        return provenance
+    from tortoise.projection.entities import filter_source_props
+
+    filtered: list = []
+    for entry in delegation:
+        if isinstance(entry, dict) and not _delegation_entry_publishable(entry):
+            props, _denied = filter_source_props(dict(entry.get("props") or {}))
+            entry = {**entry, "props": props}
+        filtered.append(entry)
+    return {**provenance, "delegation": filtered}
+
+
+def _delegation_entry_publishable(entry: dict) -> bool:
+    """Is EVERY label on this delegation neighbour one the route may publish?
+
+    ⛔ THE WHOLE SET, never ``node_type`` alone, and the difference is a measured
+    disclosure (#14593 review P1). ``node_type`` is the neighbour's FIRST label
+    (``labels(n)[0]`` as the callee returned it), so a node carrying
+    ``[:Object, :Source]`` presented as ``node_type == "Object"`` — an allowed
+    label — and its ``properties(n)`` map was published untouched, ``:Source``
+    half included. That shape is not hypothetical: this repo's own product code
+    names the hybrids as production shapes (``mcp_server.py``'s #4649
+    blast-radius case is ``(:Object:Source)``; #12914 and ``tool_registry.py``
+    citing tortoise#13114 name ``(:Object:Source)`` / ``(:Subject:Source)`` /
+    ``(:Object:Event)`` as shapes the supersede path meets), and
+    ``relabel_legacy_documents`` (``migrate_kinds.py``) leaves ``:Document:Source``
+    behind on an interrupted run — the same legacy provenance class one spelling
+    over.
+
+    Deny by DEFAULT: an entry whose labels cannot be read at all is filtered, not
+    trusted. ``labels`` is additive on the payload; an older callee (or a
+    hand-built chain) that carries only ``node_type`` falls back to that single
+    string, which is exactly the previous behaviour rather than a widening.
+    """
+    labels = entry.get("labels")
+    if isinstance(labels, (list, tuple)) and labels:
+        readable = [lbl for lbl in labels if lbl]
+    else:
+        # An older callee (or a hand-built chain) carries only the single string.
+        readable = [entry.get("node_type")] if entry.get("node_type") else []
+    if not readable:
+        # ⛔ DENY BY DEFAULT includes ABSENCE. An entry with no readable label is
+        # filtered, never trusted: ``all(... for lbl in [])`` is vacuously True,
+        # which would let a label-less neighbour through with its whole map.
+        return False
+    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in readable)
+
+
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
                                 surface: str) -> dict:
     """Read ONE entity, refusing an id that names a node of another layer.
@@ -16146,6 +16243,50 @@ async def get_entity_relations(
     return body
 
 
+def _graph_event_types() -> list[str]:
+    """The event types this build actually writes into the GRAPH event store.
+
+    One home for the question ``_belief_changes_reach_the_graph_store`` answers,
+    so the route's published reason and its own branch cannot disagree.
+
+    ⛔ MIRRORS the emitter's gate, it does not restate one arm of it. ``sdk._emit_event``
+    admits a type on TWO paths — membership in ``_GRAPH_EVENT_TYPES``, OR
+    ``"PointRevised"`` when the #2353 change feed is on — and both end in
+    ``append_event``, so a set built from the frozenset alone would under-publish
+    what the store RECORDS. A client enumerating this field rules types OUT, so
+    the second arm has to be in it.
+    """
+    from tortoise.sdk import _GRAPH_EVENT_TYPES, _change_feed_enabled
+
+    types = set(_GRAPH_EVENT_TYPES)
+    # Read the SAME switch the emitter reads, so the two cannot diverge.
+    if _change_feed_enabled():
+        types.add("PointRevised")
+    return sorted(types)
+
+
+def _belief_changes_reach_the_graph_store() -> bool:
+    """Can a ``ConfidenceChanged`` row exist in the GRAPH event store at all?
+
+    ⛔ This is a property of the EMITTER, not of this route, and it is read from
+    the emitter's own gate rather than assumed: ``sdk._emit_event`` admits a type
+    on TWO paths — membership in ``_GRAPH_EVENT_TYPES``, or ``PointRevised`` when
+    the change feed is on — and ``ConfidenceChanged`` is in NEITHER, so no
+    ``:GraphEvent`` row of that type can exist. Every product ``append_event(``
+    call site is ``sdk.py::_emit_event``'s gated arm; a test that writes one
+    directly (as this route's own fixture must, since no producer can) bypasses
+    that gate and so proves nothing about production. Therefore
+    ``event_store.latest_for_node(..., "ConfidenceChanged", …)`` has nothing to
+    find on a real graph, and ``/belief`` must say that instead of letting a null
+    ``lastBeliefWrite`` be read as "this belief never moved".
+
+    It stays a runtime question on purpose: the day ``ConfidenceChanged`` joins
+    that set, the query starts answering with no change here, and the
+    ``lastBeliefWriteUnavailable`` reason disappears by itself.
+    """
+    return "ConfidenceChanged" in _graph_event_types()
+
+
 @app.get("/v1/entities/{entity_id}/belief")
 async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """#14592: one entity's current EP belief, when it last moved, and why.
@@ -16352,6 +16493,13 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if label == "Point":
         provenance = await _read_offload(
             lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
+        # ⛔ THE FOURTH DOOR ON THIS PR (#3998). `_provenance` attaches
+        # `properties(n)` for every neighbour of the author Subject, so a
+        # `references` edge to a `:Source` republished that Source's denied raw
+        # payload inside a `graphs:read` response — the disclosure
+        # `_layer_payload` and `_endpoint_preview` refuse on this same PR's other
+        # routes. Filtered at the ROUTE because this route owns the claim.
+        provenance = _filter_delegation_payloads(provenance)
     return {
         "entity": {
             "id": entity_id,
@@ -16412,11 +16560,51 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         # that window", never "this node never changed". The window bounds the
         # RESULT; it does not bound the store's work (there is no `type` index —
         # see `event_store.LATEST_FOR_NODE_SCAN`), so this is not an O(N) claim.
+        # ⛔ It is NOT named `eventsScanned`: that number is the window's SIZE, and
+        # a graph holding one `ConfidenceChanged` row reported `1000` under that
+        # name — a published count the store does not hold. `windowRows` states the
+        # dimension, so the same constant (the window's SIZE) cannot be read as a
+        # count of rows examined.
         "lastBeliefWriteScan": {
             "eventType": "ConfidenceChanged",
-            "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
+            "windowRows": event_store.LATEST_FOR_NODE_SCAN,
             "bounds": "retained rows, not the store's scan",
         },
+        # ⛔ A NULL `lastBeliefWrite` IS NOT "THIS BELIEF NEVER MOVED", and this
+        # field is how the route says so instead of leaving a client to infer it
+        # from an absent value. MEASURED: the GRAPH event store receives only the
+        # types in `sdk._GRAPH_EVENT_TYPES`, plus `PointRevised` when the #2353
+        # change feed is on (every product `append_event` call site is
+        # `sdk.py::_emit_event`'s graph-store arm) — and `ConfidenceChanged` is in
+        # NEITHER admission path. So on a real graph the scan above runs and finds
+        # nothing, and a null `lastBeliefWrite` alone reads as "never moved" while
+        # the change is in fact durable in the event JOURNAL. Naming the reason is
+        # this route's own established shape for an unanswerable half (see
+        # `currentUnavailable` / `NO_PERSISTED_BELIEF` above), and it keeps the
+        # claim honest without widening a shared product surface: emitting a new
+        # type into the change feed every tenant reads is a decision with its own
+        # owner, not something a Phase-A read may do on its own initiative.
+        "lastBeliefWriteUnavailable": (
+            None if last is not None or _belief_changes_reach_the_graph_store()
+            else {
+                "error_code": "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE",
+                "message": (
+                    "a null lastBeliefWrite does not mean this belief never "
+                    "moved. This build's GRAPH event store records only the "
+                    "types its emitter admits (`sdk._GRAPH_EVENT_TYPES`, plus "
+                    "`PointRevised` under the change feed), and "
+                    "`ConfidenceChanged` is in neither, so no row of that type "
+                    "exists to read — the belief change itself IS durable, in "
+                    "the event journal, but NOTHING READABLE EXPOSES THAT "
+                    "JOURNAL YET: no MCP tool and no REST route returns "
+                    "`ConfidenceChanged` rows (`tortoise_belief_timeline` is "
+                    "an alias for a different question — decision Points "
+                    "`aboutObject`-connected to a topic, never the journal), so "
+                    "no remedy is named here rather than naming a tool that "
+                    "would send a caller somewhere else. This is a read-parity "
+                    "gap of its own, not evidence about the belief."),
+                "recordedEventTypes": _graph_event_types(),
+            }),
         "evidence": {
             # `null` for a non-Point entity: the chain is recorded on Points
             # (#1423's "who decided this?"), and saying so is not the same as
@@ -54662,7 +54850,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (724 distinct
+# ABSOLUTE line number from 208 tracked files (725 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
