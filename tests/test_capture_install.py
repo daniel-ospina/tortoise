@@ -928,6 +928,162 @@ def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home)
     assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "keep.ts").exists()
 
 
+def test_pi_install_disables_the_second_capture_producer_non_destructively(home):
+    """#3512 — agent-infra's ``reflect-hook.ts`` is a SECOND producer: it writes
+    one record per quit session into ``~/.tortoise/session-events/`` on top of
+    this seam's per-turn spool, so left registered every session is stored and
+    filed twice. Installing this seam must leave ONE producer, and must do it
+    without destroying the other's bytes.
+
+    Mutation: drop the ``_disable_pi_second_producer`` call from ``_install_pi``
+    (both producers stay registered — the install reports success over the
+    duplication), or ``unlink()`` the file (the user's copy is gone)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    original = "// agent-infra reflect-hook — the other producer\nexport default 1\n"
+    producer.write_text(original)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not producer.exists(), (
+        "the second capture producer is still registered: every session would "
+        "be written to both ~/.tortoise/capture-spool and "
+        "~/.tortoise/session-events")
+    disabled = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    assert disabled.read_text() == original, (
+        "the second producer's bytes were not preserved by the disable")
+    assert any("second capture producer" in a for a in res.actions), res.actions
+    assert (ext_dir / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
+
+    # A re-run finds nothing to disable and is a clean no-op — otherwise every
+    # install would report a change forever (the legacy guard's own lesson).
+    second = install_capture("pi", home=home)
+    assert second.ok, second.error
+    assert second.changed is False, f"re-run reported changes: {second.actions}"
+    assert second.actions == ()
+
+
+def test_pi_install_refuses_when_the_second_producer_and_its_disabled_name_both_exist(
+        home):
+    """Both ``reflect-hook.ts`` and ``reflect-hook.ts.disabled`` present → the
+    rename would clobber a file (or raise), and doing nothing silently leaves
+    two registered producers. Refuse loudly, exactly like the legacy guard, and
+    touch neither.
+
+    Mutation: ``active.rename(disabled)`` unconditionally."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.write_text("// live producer\n")
+    kept = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    kept.write_text("// keep me\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "already exists" in res.error, res.error
+    assert "captured twice" in res.error, res.error
+    assert kept.read_text() == "// keep me\n"
+    assert active.read_text() == "// live producer\n", (
+        "a refused install moved the producer anyway")
+
+
+def test_pi_install_never_disables_the_second_producer_before_the_seam_is_verified(
+        home, monkeypatch):
+    """ORDERING IS THE SAFETY PROPERTY: disabling the other producer before the
+    replacement is verified in place can leave a box with NO producer at all —
+    capture silently stops, which is strictly worse than the duplication.
+
+    Mutation: move the ``_disable_pi_second_producer`` call above the
+    ``assert_seam_target`` block."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.write_text("// live producer\n")
+    # The seam write does not land — the install must fail (it cannot verify).
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert producer.read_text() == "// live producer\n", (
+        "the only working producer was disabled by an install that then failed "
+        "— this box now captures nothing")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_pi_install_dry_run_names_the_second_producer_without_touching_it(home):
+    """A dry run reports the rename it would do and mutates nothing.
+
+    Mutation: put the disable outside the ``dry_run`` branch (a `--dry-run`
+    silently changes what the box captures)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.write_text("// live producer\n")
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    assert producer.read_text() == "// live producer\n"
+    assert any(a.startswith("[dry-run] would rename")
+               and "reflect-hook" in a for a in res.actions), res.actions
+
+
+#: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``:
+#: top-level ``*.ts`` / ``*.js`` and ``<dir>/index.ts`` / ``<dir>/index.js``
+#: (``dist/core/extensions/loader.js``; also stated in agent-infra's
+#: ``pi-bootstrap/cell-install.sh``). Anything the loader registers and that
+#: POSTs ``/v1/sessions`` or writes a session substrate is a producer.
+_PRODUCER_STEMS = ("tortoise-capture", "reflect-hook")
+
+
+def _registered_producers(ext_dir: Path) -> list[str]:
+    """Every entry Pi would LOAD that is one of the capture producers.
+
+    The rule, not the exact path: a `.bak.ts` / `.disabled.js` / `dir/index.ts`
+    variant is loaded one level down from the name an exact-path test looks at
+    (agent-infra tracked that as #2147 for a different stem)."""
+    found: list[str] = []
+    for entry in ext_dir.iterdir():
+        if entry.name.startswith("."):
+            continue  # the loader skips dot-prefixed entries
+        if entry.is_dir():
+            for index in ("index.ts", "index.js"):
+                if (entry / index).is_file():
+                    found.append(f"{entry.name}/{index}")
+        elif entry.suffix in (".ts", ".js"):
+            found.append(entry.name)
+    return [f for f in found
+            if any(f.split("/")[0].startswith(stem) for stem in _PRODUCER_STEMS)]
+
+
+def test_pi_install_leaves_exactly_one_registered_capture_producer(home):
+    """THE INVARIANT the whole guard exists for: after an install, a session is
+    captured ONCE. Read through the loader's own rule rather than an exact
+    path, so a suffixed variant of the producer cannot pass the test while Pi
+    still loads it.
+
+    Mutation: drop the second-producer guard (two entries come back), or rename
+    to ``reflect-hook.disabled.ts`` — a name the loader DOES load, which the
+    exact-path assertion in the sibling test would not catch."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    (ext_dir / "tortoise-capture").mkdir(parents=True)
+    (ext_dir / "tortoise-capture" / "index.ts").write_text("// legacy producer\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text(
+        "// agent-infra producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], (
+        f"a session would be captured by more than one producer: {producers}")
+
+
 def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
         home, monkeypatch):
     """#10241: an install may not report success over bytes it has NOT read

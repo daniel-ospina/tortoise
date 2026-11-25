@@ -335,6 +335,29 @@ LEGACY_PI_DIRNAME = "tortoise-capture"
 #: loader skips it (``entry.name.startsWith(".")``) while its files live on.
 PI_DISABLED_DIRNAME = ".tortoise-capture.disabled"
 
+#: The OTHER producer agent-infra installs (#3512, #3713's sibling): a
+#: top-level ``extensions/reflect-hook.ts`` whose only handler is the
+#: ``session_shutdown`` capture. It writes ONE record per quit session into
+#: ``~/.tortoise/session-events/<day>.jsonl`` BEFORE its network attempt — for
+#: EVERY session, whether or not the egress gate is open — and then POSTs the
+#: same ``/v1/sessions`` body. So a box carrying both producers stores every
+#: session TWICE, in two substrates, and drains both.
+#:
+#: MEASURED on the reference box (2026-11-25): 265/265 sessions in the capture
+#: spool were ALSO in ``session-events/``, turn-for-turn identical except for
+#: the truncation marker (the spool annotates a 5 000-char cut, reflect-hook
+#: hard-slices). The four fields only reflect-hook records
+#: (``metadata.team/projectRoot/prs/charCount``) are dropped by the drain at
+#: filing time — see ``session_events_drain``'s payload builder — so nothing is
+#: filed from them.
+PI_SECOND_PRODUCER_NAME = "reflect-hook.ts"
+
+#: Where the second producer is moved when disabled. NOT a loadable name: Pi's
+#: loader takes top-level ``*.ts`` / ``*.js`` (``dist/core/extensions/loader.js``),
+#: so ``<stem>.ts.disabled`` is skipped while the file itself lives on — the
+#: same non-destructive contract as the legacy guard above.
+PI_SECOND_PRODUCER_DISABLED_NAME = "reflect-hook.ts.disabled"
+
 # ── #3516 §B / #3515 piece 12 — the client-timestamp floor ───────────────
 # The store-proven check pairs with a FLOOR: the matched record's
 # CLIENT-recorded instant must be strictly after the install, less a skew
@@ -1799,6 +1822,45 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
+def _disable_pi_second_producer(
+        ext_dir: Path, *, dry_run: bool) -> tuple[bool, list[str], str | None]:
+    """Disable agent-infra's ``reflect-hook.ts`` — the other capture producer.
+
+    Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the producer is
+    RENAMED to a name Pi's loader does not load (``reflect-hook.ts.disabled``),
+    so its bytes survive and a user can put it back. Never a delete.
+
+    Absent = nothing to do (never installed, or already disabled — a farm that
+    re-materializes it is the caller's follow-up, not a failure here).
+    """
+    active = ext_dir / PI_SECOND_PRODUCER_NAME
+    disabled = ext_dir / PI_SECOND_PRODUCER_DISABLED_NAME
+    if not os.path.lexists(active):
+        return False, [], None
+    if os.path.lexists(disabled):
+        # Renaming over it would destroy a file and may raise — and leaving both
+        # registered is the duplication. Refuse, exactly like the legacy guard.
+        return False, [], (
+            f"cannot disable the second capture producer {active}: "
+            f"{disabled} already exists. Move one of them aside and re-run. "
+            "Both would otherwise stay registered, so every session would be "
+            "captured twice (~/.tortoise/capture-spool and "
+            "~/.tortoise/session-events).")
+    if dry_run:
+        return True, [f"[dry-run] would rename {active} → {disabled}"], None
+    try:
+        active.rename(disabled)
+    except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
+        return False, [], (
+            f"the capture seam is installed, but the second capture producer "
+            f"could not be disabled ({active} → {disabled}): "
+            f"{e.__class__.__name__}: {e}. TWO producers are registered, so "
+            "every session is captured twice until one of them is removed.")
+    return True, [
+        f"disabled the second capture producer: renamed {active} → {disabled} "
+        "(files preserved; it wrote ~/.tortoise/session-events/)"], None
+
+
 def _install_pi(
         home: Path, *, dry_run: bool,
         introduce_read_seam: bool = True) -> InstallResult:
@@ -1992,6 +2054,27 @@ def _install_pi(
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions),
                                  changed_artifacts=_written(), error=divergence)
+
+    # #3512 / the one-producer invariant: agent-infra installs a SECOND capture
+    # producer (``reflect-hook.ts``) that writes every quit session to
+    # ``~/.tortoise/session-events/`` as well. Left alongside this seam, one
+    # session is stored twice and filed twice; the whole point of the install
+    # is ONE capture path.
+    #
+    # ⛔ ORDERING IS THE SAFETY PROPERTY, not a style choice: this runs AFTER
+    # ``assert_seam_target`` verified the replacement is on disk. Disabling the
+    # other producer first would open a window with NO producer at all — capture
+    # silently stops, which is the failure this guard must never introduce.
+    second_changed, second_actions, second_error = _disable_pi_second_producer(
+        ext_dir, dry_run=dry_run)
+    changed = changed or second_changed
+    actions.extend(second_actions)
+    if second_error:
+        # A capture seam that installed while BOTH producers stay registered is
+        # not a success: it is the duplication this guard exists to remove,
+        # reported green. Fail closed and say what landed (#10241's doctrine).
+        return InstallResult(harness, changed=changed, actions=tuple(actions),
+                             changed_artifacts=_written(), error=second_error)
 
     # (#2119) The seam's SECOND artifact — the per-turn READ extension. Written
     # after the capture half is verified, so a refused/failed capture install
