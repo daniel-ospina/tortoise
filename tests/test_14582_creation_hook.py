@@ -1364,8 +1364,8 @@ def test_the_hook_gives_a_new_graph_a_row_and_its_first_write_applies(
 @pytestmark_live
 def test_the_hook_is_idempotent_and_never_re_bases_an_armed_graph(
         armed, fresh_graph):
-    """A door can be RE-ENTERED (a retry, the default graph's self-heal), so the
-    second call must be a no-op rather than a refusal — while never moving a
+    """A door can be RE-ENTERED (a retry, a re-provision of the default row), so
+    the second call must be a no-op rather than a refusal — while never moving a
     counter that is already allocating."""
     org, graph = fresh_graph.org, fresh_graph.graph
     first = rw.provision_graph_record(org_id=org, graph_id=graph)
@@ -1393,9 +1393,9 @@ def test_a_graph_the_record_already_knows_is_refused_not_seeded(
     instead of being silently re-based onto a number nobody can derive.
 
     ⛔ A DENSE PRE-EXISTING JOURNAL IS **NOT** THIS CASE, and conflating them was
-    the review's P2-6: `1, 2, 3` is a graph the self-heal must HEAL (seed to 3),
-    because the count equals the max. The two are separated by `SEED_SQL`'s own
-    `MAX(seq) <= enumerated_floor` guard, not by a second predicate here.
+    the review's P2-6: `1, 2, 3` is a graph a re-entered hook must HEAL (seed to
+    3), because the count equals the max. The two are separated by `SEED_SQL`'s
+    own `MAX(seq) <= enumerated_floor` guard, not by a second predicate here.
     """
     org, graph = fresh_graph.org, fresh_graph.graph
     with fresh_graph.admin.cursor() as cur:
