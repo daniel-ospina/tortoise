@@ -528,6 +528,36 @@ class TestThePointerIsCallableAtTheContainer:
             f"{name}'s {kind} must be INSIDE props — `tortoise_create_entity(type, name, "
             f"props=None)` has no {kind} parameter: {pointer!r}")
 
+    def test_a_renamed_argument_keeps_the_door_default(self):
+        """A RENAMED argument can lose its VALUE silently, which no keyword check sees.
+
+        `tortoise_diary_read(agent_name, last_n: int = 10)` becomes
+        `tortoise_list_knowledge(kind="diary", agent=..., limit=...)`, whose `limit`
+        default is 20 and which the SDK forwards as `_diary_read(last_n=limit)`. A
+        migrating caller who omits the argument gets TWICE the rows the door gave it —
+        the "silently widens the read" class the P11 block names, riding the default.
+
+        The pointer therefore names the VALUE (`limit=10`), and this case DERIVES that
+        value from the retired door's own signature rather than restating it: move the
+        door's default and the pointer must move with it; drop the value and the read
+        widens again. It also asserts the container's own default really is different, so
+        the pin is about a live divergence and not about a coincidence.
+        """
+        name, retired_kwarg, container_kwarg = "tortoise_diary_read", "last_n", "limit"
+        pointer = RETIRED_USE_INSTEAD[name]
+        door_default = inspect.signature(getattr(ms, name)).parameters[retired_kwarg].default
+        container_default = inspect.signature(
+            ms.tortoise_list_knowledge).parameters[container_kwarg].default
+        assert door_default != container_default, (
+            f"{name}'s {retired_kwarg}={door_default} now equals the container's "
+            f"{container_kwarg}={container_default} — the widening this pin's value "
+            "compensates for is gone, so delete this case with the fact it recorded")
+        assert f"{container_kwarg}={door_default}" in pointer, (
+            f"{name} is pointed at {pointer!r} without {container_kwarg}={door_default}: "
+            f"the door defaulted {retired_kwarg}={door_default} and the container defaults "
+            f"{container_kwarg}={container_default}, so a migrating caller who omits it "
+            "doubles its read with no error")
+
 
 class TestEveryPointerResolvesInOneHop:
     def test_every_retired_name_points_at_a_live_tool(self):

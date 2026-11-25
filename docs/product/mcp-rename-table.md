@@ -43,7 +43,7 @@ not something to reconcile silently.
 | 23 | `tortoise_delete_entity` | `tool_registry.py:1428` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `delete_knowledge` | warning shim |
 | 24 | `tortoise_delete_knowledge` | `tool_registry.py:1502` | **no replacement** | `delete_knowledge` | absent |
 | 25 | `tortoise_delete_point` | `tool_registry.py:808` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `delete_knowledge` | warning shim |
-| 26 | `tortoise_diary_read` | `tool_registry.py:971` | `tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)` | `list_knowledge` | warning shim |
+| 26 | `tortoise_diary_read` | `tool_registry.py:971` | `tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)` | `list_knowledge` | warning shim |
 | 27 | `tortoise_diary_write` | `tool_registry.py:962` | `tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing": ...})` | `create_entity` | warning shim |
 | 28 | `tortoise_dream` | `tool_registry.py:680` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `refresh_confidence` | warning shim |
 | 29 | `tortoise_dream_health` | `tool_registry.py:696` | `tortoise_graph_overview(section="dream_health")` | `graph_overview` | warning shim |
@@ -226,7 +226,7 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_delete` | `delete_knowledge` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `delete_knowledge` | AGREE |
 | `tortoise_delete_entity` | `delete_knowledge` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `delete_knowledge` | AGREE |
 | `tortoise_delete_point` | `delete_knowledge` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `delete_knowledge` | AGREE |
-| `tortoise_diary_read` | `list_knowledge` | `tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)` | `list_knowledge` | AGREE |
+| `tortoise_diary_read` | `list_knowledge` | `tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)` | `list_knowledge` | AGREE |
 | `tortoise_diary_write` | `create_entity` | `tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing": ...})` | `create_entity` | AGREE |
 | `tortoise_dream` | `refresh_confidence` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `refresh_confidence` | AGREE |
 | `tortoise_dream_health` | `graph_overview` | `tortoise_graph_overview(section="dream_health")` | `graph_overview` | AGREE |

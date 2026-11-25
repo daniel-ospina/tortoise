@@ -46,7 +46,6 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.tool_registry import (
     RETIRED_TOOL_REGISTRY,
-    RETIRED_USE_INSTEAD,
     TOOL_REGISTRY,
 )
 

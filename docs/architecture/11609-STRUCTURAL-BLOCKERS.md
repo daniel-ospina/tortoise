@@ -34,6 +34,7 @@ aboutObjects: "#11609, TOOL_REGISTRY, PROTECTED, NO_CONTAINER_YET, FastAPIRouter
 > `explore_connections` and retired all nine doors forward.
 >
 > What this changes below:
+>
 > - §2.1's decision stands as a RECORD and is **not** reversed: the union remains available
 >   if a paged arm ever needs a declared `anyOf`. Nothing in the tree annotates a container.
 > - §2.3 (`query`) and §1.4 (`org_create`, `ingest`) are UNCHANGED and still hold: those

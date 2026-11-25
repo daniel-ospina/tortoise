@@ -3237,8 +3237,17 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # the same body is not the test — agreeing with the map that decides where the
     # capability lands is.
     "tortoise_list_namespaces": 'tortoise_list_knowledge(kind="namespace")',
+    # ⛔ `limit=10`, NOT `limit=...`: THE DEFAULT IS PART OF THE MIGRATION. The door's
+    # `last_n` default was 10 and the container's `limit` default is 20 (`mcp_server.py`),
+    # which the SDK forwards as `_diary_read(last_n=limit)`. A caller who migrates without
+    # naming the argument therefore gets TWICE the rows the door gave it — the same "silently
+    # widens the read" class the paragraph above names, riding the DEFAULT rather than the
+    # rename. Naming the value keeps the absorbed read byte-identical, and
+    # `tests/test_11609_door_retirement.py::TestThePointerIsCallableAtTheContainer::
+    # test_a_renamed_argument_keeps_the_door_default` derives it from the retired door's own
+    # signature, so the pointer and the door cannot drift apart.
     "tortoise_diary_read":
-        'tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)',
+        'tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)',
     "tortoise_expand_relationships":
         'tortoise_explore_connections(node_id, include_content=True, hops=...)',
     "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',

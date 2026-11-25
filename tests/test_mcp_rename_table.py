@@ -288,7 +288,10 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_list_batches": 'tortoise_list_knowledge(kind="batch", limit=...)',
     "tortoise_list_namespaces": 'tortoise_list_knowledge(kind="namespace")',
     "tortoise_diary_read": (
-        'tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)'
+        # ⛔ `limit=10` is the DOOR's `last_n` default, named as a VALUE because the
+        # container's own default is 20 — a pointer that only renamed the argument
+        # would silently double a migrating caller's read (#14645 review P2).
+        'tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)'
     ),
     "tortoise_expand_relationships": (
         'tortoise_explore_connections(node_id, include_content=True, hops=...)'

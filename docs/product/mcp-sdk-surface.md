@@ -332,7 +332,7 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 | `tortoise_delete` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `_delete` | http |
 | `tortoise_delete_entity` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `_delete_entity__svc` | http |
 | `tortoise_delete_point` | `tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)` | `_delete_point_wrapped` | http |
-| `tortoise_diary_read` | `tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)` | `—` | http |
+| `tortoise_diary_read` | `tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)` | `—` | http |
 | `tortoise_diary_write` | `tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing": ...})` | `_diary_write` | http |
 | `tortoise_dream` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `_dream` | stdio-only |
 | `tortoise_dream_health` | `tortoise_graph_overview(section="dream_health")` | `_dream_health_check` | stdio-only |

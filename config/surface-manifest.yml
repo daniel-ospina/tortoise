@@ -1214,7 +1214,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_diary_read
-  use_instead: tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)
+  use_instead: tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)
   sdk_method: null
   http_policy: true
   approval: null
