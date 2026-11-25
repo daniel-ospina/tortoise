@@ -2451,10 +2451,14 @@ def test_bootstrap_tolerates_a_partial_apply_that_does_build_the_record(monkeypa
 
 @requires_doc_pin
 def test_the_files_scanned_count_is_pinned_too(tmp_path):
-    """§0 publishes "295 files scanned", which `files` (the files WITH a site) is not.
+    """§0 publishes the scanned-file count as its own row, which `files` (the files
+    WITH a site) is not — a module can be scanned and carry no statement.
 
     `check()` compared only the keys it computed, so the doc's scanned count could
     drift by any amount while `--check` stayed green (`#13098` review P3).
+
+    ⛔ Neither figure is quoted here: this docstring said "295 files scanned" long
+    after §0 had stopped saying it, which is the rot a number beside a claim buys.
 
     ⛔ `@requires_doc_pin` (#2148/B1), and the NON-VACUITY assert is what makes
     that safe. This arm's mutation is a `str.replace` of the pin AT THE MEASURED
