@@ -641,15 +641,29 @@ def test_a_whitespace_bearing_name_round_trips_through_the_title_grammar():
 def test_a_name_that_contains_the_title_suffix_still_round_trips():
     """The grammar's `$` anchor is what makes a NON-GREEDY capture safe, so pin it.
 
-    The comment above `_TITLE_RE` states the group is non-greedy "so a name that
-    itself CONTAINS the suffix still round-trips". That property does not come from
-    the non-greediness at all — a shortest-match group is free to stop early — it
-    comes from the ESCAPED SUFFIX being anchored with `$`, which forces the match to
-    run to the end of the line. Removing that anchor (or turning the pattern into a
-    `search` over a longer string) would break exactly this class while leaving every
-    underscore-shaped name green, so the class gets its own row rather than living as
-    prose a reader has to trust. `read_fly_secret_names` accepts such a name: it
-    requires only a non-empty string.
+    An earlier revision of the comment above `_TITLE_RE` claimed the NON-GREEDINESS was
+    what made a suffix-bearing name round-trip. That claim was wrong, and it was
+    measured: with the anchor kept, replacing `(.+?)` by `(.+)` leaves every row in
+    this file green (49 passed), because a hard `$` forces the group's extent either
+    way. What protects the class is the ESCAPED SUFFIX being anchored with `$`, and
+    nothing else pins that — the sibling whitespace row exercises `A B`, `A\tB` and an
+    underscore shape, none of which contains the suffix, so dropping the anchor leaves
+    it green.
+
+    Measured here, not asserted: drop the trailing `r"$"` from `_TITLE_RE` and
+    `pytest -k round_trips` gives `1 failed, 1 passed` — this row reds with
+    `'BEFORE\n'`-style truncation while the sibling whitespace row STAYS GREEN, which is
+    the point. `read_fly_secret_names` accepts any non-empty name and a shortest-match
+    group is free to stop early, so the class is reachable in production. The comment
+    above `_TITLE_RE` currently states the same causal fact this docstring does — noted
+    as CURRENTLY AGREEING rather than as an enforced invariant, because both are prose
+    and NOTHING READS THAT COMMENT, so neither its wording nor its presence is pinned by
+    any row. They can drift, and no row would notice. What IS pinned is the grammar's
+    BEHAVIOUR: a change to `_TITLE_RE` reds this row, the whitespace row, and — measured
+    by stripping the suffix's leading space — the behavioural
+    `test_a_clean_tick_files_nothing_and_closes_what_it_owns` (3 failed, 46 passed), while
+    `test_the_workflow_owns_the_grammar_in_exactly_one_place` separately keeps the shell
+    from spelling a title literal of its own. No row reads the comment.
     """
     suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
     for name in (
@@ -1139,13 +1153,31 @@ def test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN():
 def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     """A ledger-closing guard placed BELOW the sweep guards nothing.
 
-    `_Harness.run()` hands the shipped step its `env:` itself, so no behavioural row
-    can see WHERE in the step the guards sit: move either one below the `resolve`
-    call and every row stays green while the sweep has already closed the issue.
-    The guards' VALUES are pinned by
-    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event`; this row
-    pins only the ORDER, so neither property can be lost silently when the other is
-    edited.
+    ⛔ THIS ROW IS A DIAGNOSIS, NOT THE ONLY NET — an earlier revision of this
+    docstring claimed "no behavioural row can see WHERE in the step the guards sit",
+    and a review measured that FALSE: the behavioural rows run the SHIPPED step, so
+    lifting the CLEAN arm's dry-run guard (its `if [ "${FILE_ISSUES:-true}" != "true" ]`
+    block in `.github/workflows/fly-secret-declaration-drift.yml`, the CLEAN arm's copy —
+    the DRIFT arm carries an identical one) to just after `done < "$mine"`
+    gives 2 failed — this row and `test_a_dispatched_dry_run_resolves_nothing`, which
+    reds because the sweep mutated on a run the UI calls dry. The net is that NARROW,
+    and its breadth was measured rather than assumed: a CLEAN-arm REORDER can only reach
+    rows that enter the CLEAN arm, which is why `test_a_dispatched_dry_run_files_nothing`
+    and `test_a_dirty_tick_files_one_issue_per_name_and_never_twice` — both `rc=1`, both
+    DRIFT-arm rows — stay green on it. `files_nothing` is reached by a DIFFERENT mutant:
+    lift the guard ABOVE the CLEAN arm and it reds as well (2 failed, 47 passed — it and
+    this row). What this row adds is that it NAMES the fault: a deletion or a reordering
+    reds here with
+    "the CLEAN arm no longer honours the dry-run input" / "a ledger-closing guard sits
+    BELOW the sweep", rather than off a downstream behaviour diff — and it catches a
+    CLEAN-arm deletion at all, which is what the scoping note below exists for.
+
+    The guards' VALUES are pinned separately and both halves exist: `REF` and
+    `DEFAULT_BRANCH` by
+    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event`, and
+    `FILE_ISSUES` by `test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN`
+    (#14601 — that wire is FAIL-OPEN, unlike the other two). This row pins only the
+    ORDER, so neither property can be lost silently when the other is edited.
 
     ⛔ THE SEARCH IS SCOPED TO THE CLEAN ARM, and that is load-bearing rather than
     tidy (a review round measured the unscoped version and an earlier draft of this
