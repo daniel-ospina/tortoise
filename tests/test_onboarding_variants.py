@@ -1706,7 +1706,7 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 #     actually there." RED again and no table row noticed).
 _PRE_CUE_ONLY = _inversion_form(
     r"^(?:please\s+)?(?:confirm|check|verify|see|look|ensure|list)\w*\b"
-    r"[^.;]*?\btools\b"
+    r"[^\n]*?\btools\b"
 )
 
 
@@ -1732,54 +1732,77 @@ _INVERSION_FORMS = (
     _inversion_form(
         r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         + _CONFIRM_PREDICATE
-        + r"[^.;]*?\btools\b"
+        + r"[^\n]*?\btools\b"
     ),
     # (b) a participle that places the confirmation before the restart:
     #     "Restart your client, having first confirmed the tools are there".
-    _inversion_form(r"\bhaving\b[^.;]*?" + _CONFIRM_PREDICATE + r"[^.;]*?\btools\b"),
+    _inversion_form(r"\bhaving\b[^\n]*?" + _CONFIRM_PREDICATE + r"[^\n]*?\btools\b"),
     # (c) an ADVERSATIVE clause leading with the pre-restart marker:
     #     "Restart your client, but first confirm the tools are actually there".
     #     A BARE leading "first" is deliberately not graded — "Restart your
     #     client first and confirm the tools …" is the forward reading of the
     #     same words.
     _inversion_form(
-        r"^(?:but|however|though|yet)\b[^.;]*?\b(?:first|beforehand)\b[^.;]*?"
+        r"^(?:but|however|though|yet)\b[^\n]*?\b(?:first|beforehand)\b[^\n]*?"
         + _CONFIRM_PREDICATE
-        + r"[^.;]*?\btools\b"
+        + r"[^\n]*?\btools\b"
     ),
     # (d) a marker trailing the object, unambiguous about the order:
     #     "… confirm the tools are actually there beforehand".
     _inversion_form(
-        _CONFIRM_PREDICATE + r"[^.;]*?\btools\b[^.;]*?"
+        _CONFIRM_PREDICATE + r"[^\n]*?\btools\b[^\n]*?"
         r"\b(?:beforehand|before restarting|before you restart)\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
     #     "Restart your client only once the tools are actually there",
-    #     "… once the tools appear". The predicate is REQUIRED and restricted to
-    #     a presence sense — a bare `once the tools` reddened "… once the tools
-    #     stop appearing", which is a remedy with the restart first (measured).
-    #     A determiner/modifier other than a bare `the` is still the same shape:
+    #     "… once the tools appear". The predicate is REQUIRED — a bare `once the
+    #     tools` reddened "… once the tools stop appearing", a remedy with the
+    #     restart first (measured). What is required is a COPULA or one of
+    #     appear|show|exist|load|listed|visible; the copulas admit any complement
+    #     on purpose ("… once the tools are ready" is still a tool-state the
+    #     reader must reach BEFORE restarting), so the claim here is that
+    #     predicate SET, not "a presence sense".
+    #     A determiner/modifier other than a bare `the` is the same shape:
     #     "once your tools appear" / "once all the tools appear" were GREEN
     #     (measured) while "once the tools appear" was RED — the modifier is
     #     bounded to two words so the pattern cannot wander.
+    #     The PERFECT auxiliaries are deliberately NOT in the set: `have`/`has`
+    #     admitted every complement, and redded "… once the tools have stopped
+    #     appearing" — the simple-tense twin this form must keep GREEN
+    #     (measured).
     _inversion_form(
         r"\b(?:only\s+)?once\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
-        r"(?:are|is|have|has|appear|show|exist|load|listed|visible)\b"
+        r"(?:are|is|appear|show|exist|load|listed|visible)\b"
     ),
     _PRE_CUE_ONLY,
 )
 
 # A config-side noun: the config is a FILE, readable without a restart.
-_CONFIG_NOUN_RE = re.compile(r"\b(?:configs?|settings|installer|\.mcp\.json)\b",
-                             re.IGNORECASE)
+# ⛔ `\b` cannot precede `\.` — a word boundary needs a WORD character on one
+# side, so `\b\.mcp\.json` matched only `x.mcp.json` and was DEAD for every real
+# spelling (`.mcp.json`, `the .mcp.json file`, `~/.mcp.json`). Measured: the
+# `config` spelling of a sentence was exempted while the `.mcp.json` spelling of
+# the same sentence was graded — the false RED the arm exists to prevent.
+_CONFIG_NOUN_RE = re.compile(
+    r"(?:\b(?:configs?|settings|installer)\b|\.mcp\.json)", re.IGNORECASE)
 # …including one naming the scope AFTER the object ("… the tools are enabled in
 # your client settings"), and one pointing back at the file by PRONOUN ("… the
 # config file exists and the tools are enabled in it") — both are file-side, and
 # both were measured as FALSE REDS before their arm existed.
 _CONFIG_PREP_RE = re.compile(
     r"\b(?:in|from|inside|per|under)\s+(?:it|them|that|those)\b"
-    r"|\b(?:in|from|inside|per|under)\b[^.;]{0,40}?\b(?:config|settings)\b",
+    r"|\b(?:in|from|inside|per|under)\b[^\n]{0,40}?\b(?:config|settings)\b",
     re.IGNORECASE)
+# ⛔ A TERMINATOR ENDS A STATEMENT ONLY WHEN IT REALLY ENDS ONE. Splitting on a
+# bare `[.;—]` cut INSIDE dotted tokens — `v1.2`, `e.g.`, `.mcp.json` — which let
+# a claimed inversion through ("… after confirming release v1.2 works and the
+# tools are actually there": the window ended inside the version number, so form
+# (a) never saw the tools) and redded forward copy ("…, e.g. quit and reopen the
+# app, then confirm the tools are there"). Both measured. A `;` or an em dash
+# breaks when followed by whitespace; a `.` breaks only when what follows looks
+# like the start of a sentence (or the text ends).
+_STATEMENT_BREAK_RE = re.compile(r"(?:[;—]\s+|\.\s+(?=[A-Z\"'`(\[]|$))")
+
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
 _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards)\b", re.IGNORECASE)
@@ -1838,7 +1861,7 @@ def _tools_appear_after_cue(quick: str) -> bool:
     UNRELATED later mention — this paragraph ends "if the tools are missing, run
     `tortoise mcp-status`" — so any paragraph that says "restart" and mentions
     the tools anywhere would pass. The window is the cue's sentence plus the
-    next one, and no further: measured, "Restart your client. The config is
+    next one — `parts[:2]` of a split at REAL statement breaks — and no further: measured, "Restart your client. The config is
     reloaded. The tools appear later." must NOT satisfy it.
     """
     para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
@@ -1849,7 +1872,7 @@ def _tools_appear_after_cue(quick: str) -> bool:
     # filled from further along — measured: "Restart your client. The config is
     # reloaded. The tools appear later." wrongly satisfied the bound. Only the
     # separating whitespace/comma that continues the cue is stripped.
-    parts = re.split(r"[.;—]", after.lstrip(" \t,"), maxsplit=2)
+    parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,"), maxsplit=2)
     return re.search(r"\btools\b", " ".join(parts[:2])) is not None
 
 
@@ -1910,7 +1933,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # An em dash ends it too: "Restart your client — once the tools are listed,
     # run `tortoise mcp-status --live`." is a separate statement (measured RED
     # while the dash was inside the window), exactly as the `;` twin is.
-    post_sentence = re.split(r"[.;—]", after.lstrip(" \t,"), maxsplit=1)[0]
+    post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,"), maxsplit=1)[0]
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
@@ -1925,10 +1948,10 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         # the tools are there, run …" all put the confirmation AFTER the restart
         # and were RED (measured). The sequencer is what says so; the
         # subordinator that follows it does not make it a deferral.
-        # Leading punctuation must not hide the sequencer: "Restart your client
-        # — once the tools are listed, run …" and "… (then once the tools are
-        # listed, run …)" are the same forward continuation as the `;` twin and
-        # were RED (measured) while it was GREEN.
+        # Leading punctuation must not hide the sequencer: "… (then once the
+        # tools are listed, run …)" was RED (measured) while its bare twin was
+        # GREEN. (The em-dash twin is protected by the STATEMENT BREAK instead —
+        # the dash ends the window, so it never reaches this clause.)
         if (_FORWARD_SEQUENCER_RE.match(clause.lstrip('—–-:;(\'" \t'))
                 or _confirmation_scopes_the_config(clause)):
             continue
@@ -2003,9 +2026,9 @@ def test_3232_generic_restart_lines_are_exact():
     # (measured: reverting it to a paragraph-wide search reds a row there). A
     # COMMA does not bound it — "Restart your client after changing the config,
     # then confirm the tools …" is forward and must pass — so only a sentence
-    # terminator does. Note the leading `lstrip` removes a terminator that
-    # directly follows the cue, so "the cue's sentence" means the cue's own
-    # sentence OR the one immediately after it. The paragraph's sentence-before
+    # terminator does. The two-sentence reach comes from `parts[:2]`; the
+    # leading `lstrip` only removes the separating COMMA/space that continues
+    # the cue, never a terminator (stripping one would buy a second sentence). The paragraph's sentence-before
     # shape ("Confirm the tools are actually there. Restart your client …") is
     # graded by form (f) only when the cue's own or next sentence ALSO names the
     # tools; when it does not, THIS bound fails first, with the tools-appear
@@ -2025,8 +2048,9 @@ def test_3232_generic_restart_lines_are_exact():
     # #3429's lesson (pin the ORDER, not one reword) survives. "Restart your
     # client after changing the config, then confirm the tools …" stays GREEN
     # because form (a) requires the confirmation predicate in the connective's
-    # OWN clause ("changing" is not one) — NOT because of the `,`/`.`/`;` split
-    # (measured: removing the split changes no row in the table below).
+    # OWN clause ("changing" is not one) — NOT because of the COMMA split
+    # (measured: removing the comma split changes no row; it is the STATEMENT
+    # break that rows like "… Once the tools are listed, run …" depend on).
     #
     # What the graded set IS and IS NOT (#14679's reviews measured both):
     # - It is the SIX forms in `_INVERSION_FORMS`, each observed GREEN before
@@ -2086,15 +2110,16 @@ def test_3232_generic_restart_lines_are_exact():
     # ── inversions that were GREEN on the first closed set ──────────────────
     # ⛔ OUT OF SCOPE BY DESIGN, recorded so it is not silently re-added: an
     # inversion stated in the sentence AFTER the cue ("Restart your client.
-    # After confirming the tools are actually there.") is not graded, because
-    # that shape is indistinguishable from forward copy the pin must ACCEPT —
-    # "Restart your client. Confirm the tools are actually there." is the
-    # shipped sentence re-punctuated, and "… Once the tools are listed, run
-    # `tortoise mcp-status --live`." carries out the confirmation after the
-    # restart. Grading the next sentence redded both (measured); within one
-    # sentence the order is grammatical, across sentences it is not gradeable
-    # mechanically. `_restart_cue_order_violation` grades the cue's OWN sentence
-    # and says so.
+    # After confirming the tools are actually there.") is NOT graded. The window
+    # closes at the cue's own statement because grading the next one redded
+    # forward copy that must pass — "Restart your client. Confirm the tools are
+    # actually there." is the shipped sentence re-punctuated, and "… Once the
+    # tools are listed, run `tortoise mcp-status --live`." confirms AFTER the
+    # restart (both measured RED). That is a real coverage cost and not an
+    # equivalence worth claiming: an ADVERSATIVE inversion there ("… . But first
+    # confirm the tools are actually there.") is measurably distinguishable from
+    # forward copy and is still left ungraded, because keeping the window closed
+    # is what protects the forward shapes.
     # a case-insensitive connective BEFORE the cue, and a pre-cue inversion that
     # follows a comma (the `^`-anchored forms died on the leading space):
     ("AFTER confirming the tools are actually there. Restart your client, then "
@@ -2167,6 +2192,19 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after verifying the config lists the Tools.", False),
     ("Restart your client once you have checked the Tools are enabled in your "
      "client settings.", False),
+    # ⛔ DOTTED TOKENS ARE NOT STATEMENT BREAKS — `v1.2`, `e.g.`, `.mcp.json`.
+    # The window split on a bare `[.;—]`, so a version number ended it and this
+    # inversion slipped through while the `e.g.` shapes below went RED (measured;
+    # the form wildcards also stopped at the dot, so both halves needed fixing):
+    ("Restart your client after confirming release v1.2 works and the tools are "
+     "actually there.", True),
+    ("Restart your client, e.g. quit and reopen the app, then confirm the tools "
+     "are there.", False),
+    ("Restart your client (e.g. quit and reopen), then confirm the tools are in "
+     "the list.", False),
+    # the perfect tense of the REMEDY shape must stay GREEN: `have`/`has` were in
+    # form (e)'s predicate set and redded it (measured), which is why they are not.
+    ("Restart your client once the tools have stopped appearing.", False),
     # the typographic apostrophe, which no other row exercised:
     ("Restart your client after you\u2019ve verified the tools are actually there.",
      True),
@@ -2178,6 +2216,16 @@ def test_3232_generic_restart_lines_are_exact():
      "to do.", False),
     ("Restart your client after editing `.mcp.json` so the tools are listed.",
      False),
+    # …and the `.mcp.json` arm is load-bearing only through a CONFIRMATION whose
+    # predicate reaches the tool list — "editing" is not a predicate, so the row
+    # above passes without the exclusion. Measured RED before the arm could match:
+    ("Restart your client after checking the `.mcp.json` lists the tools.",
+     False),
+    ("Restart your client after checking the config lists the tools.", False),
+    # the PRE-cue config exclusion: a file-side check before the cue is forward,
+    # and nothing else in this table depends on that arm (measured):
+    ("After verifying the config lists the tools, Restart your client and "
+     "confirm the tools are there.", False),
     # leading punctuation must not hide a forward sequencer:
     ("Restart your client — once the tools are listed, run `tortoise "
      "mcp-status --live`.", False),
