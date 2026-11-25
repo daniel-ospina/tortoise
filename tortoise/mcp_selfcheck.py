@@ -28,10 +28,15 @@ DESIGN CONSTRAINTS (stated, because each one is a way this could silently rot):
   ever tested for blankness.
 * **The class names the layer; the line names the fix.** A class without a fix is
   a dead end, and a dead end is what this issue is about.
-* **It reads the config the HARNESS reads.** The paths per harness are declared in
-  `HARNESS_CONFIG_PATHS` and are the ones this repo verified; a harness whose file
-  moves is a new class (``entry-absent``) that says which files were read, so the
-  message can never be a lie about a file nobody looked at.
+* **It reads the config paths the HARNESS is DECLARED to read.** The paths per
+  harness are declared in `HARNESS_CONFIG_PATHS`; a harness whose file moves is a
+  new class (``entry-absent``) that says which files were read, so the message can
+  never be a lie about a file nobody looked at. ⛔ What this module CANNOT see is
+  the LOADER: `HARNESS_LOADER_NOTES` states, per harness, where the declared path
+  is not the harness's own built-in convention (today: `pi`, where these are the
+  `mcp-client` extension's files and the built-in loader reads `.pi/mcp.json`
+  instead). A green is about the ENDPOINT the entry names; on such a harness it
+  never proves the file is loaded unless that loader is the one running.
 """
 from __future__ import annotations
 
@@ -118,6 +123,16 @@ HARNESS_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
     # it (stated, not implied) — see `_TOML_HARNESSES`.
     "codex": ("~/.codex/config.toml",),
     "cursor": (".cursor/mcp.json", "~/.cursor/mcp.json"),
+}
+
+#: What LOADS each harness's config, where that is not the harness itself.
+#: A green proves the ENDPOINT answered; it cannot prove the harness read the
+#: file, so the note travels WITH the green rather than living in a docstring.
+HARNESS_LOADER_NOTES: dict[str, str] = {
+    "pi": ("pi loads this file through the `mcp-client` extension (its hub and "
+           "repo layers); pi's BUILT-IN loader reads `.pi/mcp.json` instead — so "
+           "this proves the ENDPOINT answered, not that this install reads the "
+           "file"),
 }
 
 #: Harnesses whose config is TOML. Declared so the verdict can say "this verifier
@@ -486,8 +501,16 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # and each more specific layer is applied as a DELTA over what is accumulated.
     _base_source, base_entry = layers[-1]
     base_dropped = _unloadable(base_entry)
+    dropped_base: dict | None = None
     if base_dropped:
-        base_entry = {}          # the harness DROPS an entry with a bad transport
+        # The harness DROPS an entry with a bad transport. ⛔ KEEP the dropped ENTRY
+        # on the side: without it the merge ends empty and `classify` can only say
+        # "the entry declares neither a `url` nor a `command`" — about a config that
+        # declares one, just not as a string. It is NEVER re-classified as a live
+        # transport (see `classify`); the class stays "cannot start" and only the
+        # DETAIL names the field.
+        dropped_base = base_entry
+        base_entry = {}
     merged: dict = _sanitized(base_entry)
     # The harness ALSO drops a base entry left with no transport after the falsy
     # strip (`deadTransports` → delete → `continue` when neither key remains). `{}`
@@ -567,8 +590,10 @@ def read_entry(harness: str, *, project_dir: Path | None = None
             for field in STDIO_TRANSPORT_FIELDS:
                 merged.pop(field, None)
     if not merged.get("url") and not merged.get("command"):
-        # Nothing that can start: the miss class, never `("ok", {})`.
-        return layers[0][0], merged, read, ENTRY_ABSENT
+        # Nothing that can start: the miss class, never `("ok", {})`. When the
+        # reason is a DROPPED entry, hand that entry back so the class can name it
+        # (see `dropped_base` above) instead of describing an empty dict.
+        return layers[0][0], (dropped_base if dropped_base is not None else merged), read, ENTRY_ABSENT
     return layers[0][0], merged, read, OK
 
 
@@ -582,6 +607,27 @@ def _repo_root(project_dir: Path) -> Path | None:
         if (candidate / ".git").exists():
             return candidate
     return None
+
+
+def write_layer(project_dir: Path, rel: str) -> Path | None:
+    """The layer a WRITE may target — never a file outside the project it edits.
+
+    ⛔ THE READ WALK IS NOT THE WRITE WALK. `_project_layer` mirrors the harness and
+    deliberately escapes to the filesystem ROOT when there is no git top-level
+    (`mcp-client`'s `resolveMcpConfigPaths`), which is correct for reading: it is
+    the file the harness loads. Following it for a WRITE is not: measured
+    `cd ~/scratch && tortoise onboard --harness pi` (no `.git` above `scratch`) —
+    the config went to `/tmp/ancestor/.mcp.json` and the two sentences into
+    `/tmp/ancestor/AGENTS.md` (`~/AGENTS.md` is a reachable target), with
+    `--scope project` reporting project scope and `--uninstall` run anywhere else
+    unable to find the block. So: inside a git work tree the write walk IS the read
+    walk (bounded by the top level); outside one, only `<project_dir>/<rel>`.
+    """
+    project_dir = Path(project_dir).resolve()
+    if _repo_root(project_dir) is None:
+        candidate = project_dir / rel
+        return candidate if candidate.exists() else None
+    return _project_layer(project_dir, rel)
 
 
 def _project_layer(project_dir: Path, rel: str) -> Path | None:
@@ -725,6 +771,32 @@ def classify(harness: str, *, project_dir: Path | None = None
                     f"harness reads (read: {', '.join(read) or 'none present'})"),
             fix=(f"register it: `tortoise onboard --harness {harness}`"),
             configs_read=read)
+    if status == ENTRY_ABSENT and entry:
+        # ⛔ THE ENTRY WAS **DROPPED**, NOT MERGED. `read_entry` hands back the
+        # definition the harness's own predicate threw away (`typeof … !== "string"
+        # && !!…`) so this line can NAME the field — and nothing else: it is not a
+        # live transport, so it must never be re-classified. Re-deriving transport
+        # from it turned `{"url": [], "command": "python3"}` into `resolves-unprobed`
+        # over `command` — a false PASS for an entry no server loads, which is
+        # exactly what the drop exists to close.
+        field = next((f for f in ("url", "command") if f in entry), None)
+        if field is None:
+            return Verdict(
+                status=COMMAND_MISSING,
+                detail=("the entry declares no `url` (http) and no `command` "
+                        "(stdio), so the harness cannot load it"),
+                fix=f"re-register it: `tortoise onboard --harness {harness}`",
+                source=source, configs_read=read)
+        return Verdict(
+            status=COMMAND_MISSING,
+            detail=(f"the entry's `{field}` is {type(entry[field]).__name__} "
+                    f"({entry[field]!r}), not a string — the harness DROPS an "
+                    f"entry whose transport is a non-string, so this server "
+                    f"never loads"),
+            fix=f"re-register it: `tortoise onboard --harness {harness}`",
+            source=source,
+            transport="http" if field == "url" else "stdio",
+            configs_read=read)
 
     leaves = _walk_strings(entry)
     unset: list[str] = []
@@ -764,11 +836,32 @@ def classify(harness: str, *, project_dir: Path | None = None
                 fix=f"re-register it: `tortoise onboard --harness {harness}`",
                 source=source, transport="stdio", configs_read=read)
     else:
+        # ⛔ NAME THE ACTUAL FAULT. Five earlier revisions of the previous sentence
+        # read, for an entry that DOES declare `url` (`"url": ["https://…"]`) as
+        # well as for one that declares nothing, "the entry declares neither a
+        # `url` (http) nor a `command` (stdio) … its `type` does not select a
+        # transport" — a wrong statement about a field the entry visibly carries,
+        # and one that sends the reader to inspect `type` (which is not a transport
+        # selector in the harness at all). The harness DROPS an entry whose
+        # transport is a non-string, so the class stays `command-missing` (it
+        # cannot start); the detail says why.
+        declared = [f for f in ("url", "command") if f in entry]
+        if declared:
+            field = declared[0]
+            return Verdict(
+                status=COMMAND_MISSING,
+                detail=(f"the entry's `{field}` is {type(entry[field]).__name__} "
+                        f"({entry[field]!r}), not a string — the harness DROPS an "
+                        f"entry whose transport is a non-string, so this server "
+                        f"never loads"),
+                fix=f"re-register it: `tortoise onboard --harness {harness}`",
+                source=source,
+                transport="http" if field == "url" else "stdio",
+                configs_read=read)
         return Verdict(
             status=COMMAND_MISSING,
             detail="the entry declares neither a `url` (http) nor a `command` "
-                   "(stdio), so the harness cannot load it — its `type` does not "
-                   "select a transport",
+                   "(stdio), so the harness cannot load it",
             fix=f"re-register it: `tortoise onboard --harness {harness}`",
             source=source, transport="stdio", configs_read=read)
     if unset:
@@ -889,7 +982,16 @@ def classify(harness: str, *, project_dir: Path | None = None
             source=source, transport=transport, configs_read=read)
 
     # http
-    if not _header_carries_credential(entry) and not credentials_present(project_dir):
+    # ⛔ A CONFIG CARRIES ONLY WHAT IT DECLARES (#10605). For an HTTP entry that is
+    # the `Authorization` header or OAuth — an HTTP MCP client does NOT send a
+    # bearer from an arbitrary environment variable, so `credentials_present()`
+    # ("a key exists in this shell") is not evidence about this entry's request.
+    # Grading on it was a FALSE PASS in the verifier: a headerless entry read
+    # "resolves and carries a credential", and `check(live=True)` then green'd it by
+    # supplying the shell's key ITSELF — for a config whose own request goes out
+    # with no `Authorization` at all. Credential existence belongs in the DETAIL and
+    # in the probe, never in this guard as a substitute for the header.
+    if not _header_carries_credential(entry):
         # ⛔ A loopback daemon may not WANT a credential: the shipped compose default
         # is `auth_mode=none` with an empty key ("optional while the daemon stays
         # loopback-bound"), so asserting DOWN here reported a working self-hosted
@@ -903,19 +1005,25 @@ def classify(harness: str, *, project_dir: Path | None = None
         if _is_loopback_endpoint(_expand(entry.get("url") or "")[0]):
             return Verdict(
                 status=RESOLVES_UNPROBED,
-                detail=("the entry names a LOOPBACK endpoint and carries no "
-                        "credential — a local daemon may not require one "
-                        "(auth_mode=none), so this cannot be called down; the "
+                detail=("the entry declares no `Authorization` header and names a "
+                        "LOOPBACK endpoint, which may need no credential "
+                        "(auth_mode=none) — so this cannot be called down, and the "
                         "static pass cannot prove it either"),
                 fix="prove it: `tortoise mcp-status --live`",
                 source=source, transport=transport, configs_read=read)
+        sources = credentials_present(project_dir)
+        found = (f"{', '.join(sources)} resolves in this shell, but an HTTP MCP "
+                 f"client sends only the header the config declares (or OAuth)"
+                 if sources else
+                 "no credential resolves in the environment or either store")
         return Verdict(
             status=NO_CREDENTIAL,
-            detail=("the entry carries no credential and no credential resolves "
-                    "in the environment or either store — the request goes out "
-                    "unauthenticated"),
-            fix=("mint or supply a key (`tortoise signup`, or "
-                 "`tortoise init --api-key tt_…`), then re-verify"),
+            detail=(f"the http entry declares no `Authorization` header, so the "
+                    f"request it sends carries NO credential — {found}"),
+            fix=("two shapes work: put the credential in the entry's `headers` "
+                 "(a fresh capture of the variable, expanded at spawn), or use the "
+                 "credential-free bridge, which resolves it on every request: "
+                 f"`tortoise onboard --harness {harness}`"),
             source=source, transport=transport, configs_read=read)
     return Verdict(
         status=RESOLVES_UNPROBED,
@@ -1135,7 +1243,7 @@ def _entry_bearer(harness: str, project_dir: Path | None = None
 
 
 def probe(*, project_dir: Path | None = None, url: str | None = None,
-          token: str | None = None) -> Verdict:
+          token: str | None = None, send_credential: bool = True) -> Verdict:
     """Make ONE live tool call through the product's own MCP client.
 
     Uses `mcp_client`'s per-request credential resolution, so a key added after
@@ -1146,6 +1254,13 @@ def probe(*, project_dir: Path | None = None, url: str | None = None,
     absent the client's own resolution stands. The verdict's `detail` names which
     endpoint was graded, because "the endpoint answers" is only meaningful about
     a NAMED host.
+
+    ⛔ `send_credential=False` GRADES THE ENTRY'S OWN REQUEST. An HTTP entry sends
+    only the header it declares, so a probe that resolved a key from the SHELL and
+    sent it on the entry's behalf graded something the harness never runs — a
+    false PASS for a headerless config (the shell had a key; the config sends
+    nothing). `check` passes `False` whenever the effective entry is http and
+    declares no credential header.
 
     ⛔ THE PROBE RUNS UNDER THE ENVIRONMENT THE HARNESS WILL SPAWN, not the
     operator's shell (`_as_the_child`). Grading an entry's URL while the CLIENT
@@ -1182,6 +1297,8 @@ def probe(*, project_dir: Path | None = None, url: str | None = None,
     async def _call() -> list:
         resolved = target or mcp_client.mcp_url()
         provider = _FixedBearer(resolved) if token else _BearerProvider(resolved)
+        if not send_credential:
+            provider.auth_flow = _declared_only_flow.__get__(provider)
         async with _client(provider) as client:
             tools = await client.list_tools()
             return list(tools or [])
@@ -1296,6 +1413,22 @@ def _first_line(exc: BaseException, limit: int = 240) -> str:
 
 # ── The entry point the CLI and the installer both use ─────────────────────
 
+def _entry_declares_credential(harness: str, static: Verdict,
+                               project_dir: Path | None) -> bool:
+    """Does the EFFECTIVE entry's own request carry a credential?
+
+    ⛔ THE PROBE MUST RUN THE SHAPE THE HARNESS RUNS. For a stdio entry the bridge
+    resolves the key per request from the environment, so the probe supplying it is
+    faithful. For an http entry the config carries only what it declares: no
+    header means nothing is sent, and a probe that borrows the shell's key grades a
+    request the harness never makes (the false PASS F6 of the #14617 review).
+    """
+    if static.transport != "http":
+        return True
+    _source, entry, _read, _status = read_entry(harness, project_dir=project_dir)
+    return _header_carries_credential(entry or {})
+
+
 def check(harness: str = "pi", *, project_dir: Path | None = None,
           live: bool = False) -> Verdict:
     """Classify statically, then (when ``live``) probe.
@@ -1361,7 +1494,9 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
                  f"`tortoise onboard --harness {harness}`"),
             source=static.source, transport=static.transport,
             configs_read=static.configs_read)
-    probed = probe(project_dir=project_dir, url=endpoint, token=token)
+    probed = probe(project_dir=project_dir, url=endpoint, token=token,
+                   send_credential=_entry_declares_credential(harness, static,
+                                                              project_dir))
     # Keep the config provenance the static pass found: the probe does not read
     # the harness file, so dropping it would lose "which file did I load" — and
     # the probe always speaks HTTP to the endpoint even when the ENTRY is stdio
@@ -1370,4 +1505,26 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
     probed.source = static.source
     probed.transport = static.transport
     probed.configs_read = static.configs_read
+    # ⛔ A GREEN PROVES THE ENDPOINT, NOT THE LOADER. Where the declared paths are a
+    # third-party loader's convention rather than the harness's own, saying that on
+    # the green line is the difference between "the endpoint answers" and "your
+    # agent now has tools" — the claim `docs/quickstart-cloud.md` §2 used to make
+    # unconditionally, and what F5 of the #14617 review measured.
+    note = HARNESS_LOADER_NOTES.get(harness)
+    if note and probed.status == OK:
+        probed.detail = f"{probed.detail} — {note}"
     return probed
+
+
+def _declared_only_flow(self, request):
+    """`_BearerProvider.auth_flow` with the AMBIENT credential removed.
+
+    Used when the entry is http and declares no credential header: the harness
+    sends exactly that (nothing), so the probe must too — otherwise it supplies a
+    key the config never carries and greens a config that goes out unauthenticated.
+    `sent` stays None, which is the truthful provenance for "no credential on the
+    wire".
+    """
+    self.sent = None
+    self.withheld = None
+    yield request

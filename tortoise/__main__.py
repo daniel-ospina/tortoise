@@ -18736,7 +18736,11 @@ def main(argv: list[str] | None = None) -> int:
              "MCP (credential-free bridge), verify it with a live call, install "
              "the capture + per-turn recall seam, and write the two MCP-first "
              "sentences into AGENTS.md/CLAUDE.md (shown as a diff, idempotent, "
-             "reversible with --uninstall)")
+             "reversible with --uninstall). ⛔ For `pi` the config written is the "
+             "`mcp-client` extension's (`.mcp.json` / `~/.pi/agent/.mcp.json`); "
+             "pi's BUILT-IN loader reads `.pi/mcp.json`, so `mcp-status` greens the "
+             "ENDPOINT — restart the client and check for `tortoise_*` tools",
+        )
     onboard.add_argument(
         "--url", default=None,
         help="MCP endpoint the bridge forwards to (default: the hosted "
@@ -18762,9 +18766,12 @@ def main(argv: list[str] | None = None) -> int:
     onboard.add_argument(
         "--scope", default="project", choices=["project", "user"],
         help="With --harness: which config to register the MCP in — `project` "
-             "(default: the repo's .mcp.json, reviewable in a diff) or `user` "
-             "(the harness's global catalog, ~/.pi/agent/.mcp.json or "
-             "~/.claude.json)")
+             "(default: the project's own config, reviewable in a diff — the "
+             "repo-root `.mcp.json` inside a git work tree, and never a file "
+             "above that directory) or `user` (the harness's global catalog, "
+             "~/.pi/agent/.mcp.json or ~/.claude.json). Codex has no project "
+             "scope: its single `~/.codex/config.toml` is TOML, so it is "
+             "refused by name rather than written")
     onboard.add_argument(
         "--uninstall", action="store_true", default=False,
         help="With --harness: remove ONLY the marked instruction block this "
@@ -18790,9 +18797,9 @@ def main(argv: list[str] | None = None) -> int:
              "config is never green")
     mcp_status.add_argument(
         "--live", action="store_true", default=True,
-        help="Make ONE real call to the endpoint (default). Its failure is "
-             "reported as its own class — transport vs auth — never folded "
-             "into a credential verdict")
+        help="Accepted for symmetry — the live call IS the default (use "
+             "`--offline` to skip it). Its failure is reported as its own class "
+             "— transport vs auth — never folded into a credential verdict")
     mcp_status.add_argument(
         "--json", action="store_true", default=False,
         help="Machine-readable verdict (status, detail, fix, source, exit code)")

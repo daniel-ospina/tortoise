@@ -66,6 +66,14 @@ One command writes the entry AND verifies it with a live call:
 tortoise onboard --harness pi   # claude | codex | cursor | pi
 ```
 
+> ⚠️ **`--harness pi` targets the `mcp-client` extension's files** (`.mcp.json` and
+> `~/.pi/agent/.mcp.json`). pi's **built-in** MCP loader reads `.pi/mcp.json`
+> instead, so on a pi install without that extension the file is written but never
+> loaded. `tortoise mcp-status` says which file it read and what it graded, and its
+> green line names the extension: it proves the **endpoint** answered, not that
+> your agent reads the file. Verify the load the only way it can be verified —
+> restart the client and look for the `tortoise_*` tools.
+
 By hand, the entry is below — `type` is `"stdio"`, there is **no** `headers` block, and the only
 `env` value is the endpoint.
 
@@ -119,7 +127,7 @@ codex mcp add tortoise -- python3 -m tortoise.mcp_bridge
 # TORTOISE_MCP_URL=https://api.premiselabs.co/mcp/ in the client's environment
 ```
 
-Restart your client. You should now have Tortoise's tools (create points, query the graph, run evidence propagation, capture sessions).
+Restart your client, then confirm the tools are actually there — `tortoise_*` in the client's MCP/tool list (create points, query the graph, run evidence propagation, capture sessions). A written config is not a loaded one: if the tools are missing, run `tortoise mcp-status` (and `tortoise mcp-status --live`) — it names the file it read and the class of the failure.
 
 Rate limit: **100 requests/min per key**.
 

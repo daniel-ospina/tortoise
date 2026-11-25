@@ -1433,7 +1433,12 @@ def test_an_entry_with_neither_url_nor_command_is_never_ok(project, monkeypatch)
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_whatever")
     verdict = mcp_selfcheck.classify("pi", project_dir=project)
     assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
-    assert "its `type` does not" in verdict.detail
+    # ⛔ `type` IS NOT BLAMED (#14617 F2). The old sentence ended "its `type` does
+    # not select a transport", which is false — `type` is not a selector in the
+    # harness at all, it dispatches on `url`/`command` — and it sent the reader to
+    # inspect a field that was never the problem.
+    assert "`url`" in verdict.detail and "`command`" in verdict.detail
+    assert "its `type` does not" not in verdict.detail, verdict.detail
     assert not verdict.ok and verdict.exit_code != 0
 
 
@@ -1487,6 +1492,11 @@ def test_a_repo_only_entry_declaring_both_transports_is_kept_over_url(
     (repo / ".git").mkdir(parents=True)
     (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
         "type": "http", "url": "https://api.premiselabs.co/mcp/",
+        # ⛔ the credential layer is NOT what this arm grades: since #14617 F6 an
+        # http entry with no `Authorization` header is `no-credential` (a config
+        # sends only what it declares), so a literal header keeps the TRANSPORT
+        # question — the one this arm exists for — the thing under test.
+        "headers": {"Authorization": "Bearer tt_literal_14607"},
         "command": "python3"}}}), encoding="utf-8")
     verdict = mcp_selfcheck.classify("pi", project_dir=repo)
     assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
@@ -1585,7 +1595,11 @@ def test_check_refuses_to_probe_an_http_entry_with_no_readable_endpoint(
     """
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
     monkeypatch.setenv("TORTOISE_TEST_BLANK_14607", "   ")
-    _write_config(project, {"url": "${TORTOISE_TEST_BLANK_14607}"})
+    # A DECLARED credential keeps the entry past the http credential layer (#14617
+    # F6: a headerless http entry is `no-credential`, a different question) so this
+    # arm still grades the endpoint guard it exists for.
+    _write_config(project, {"url": "${TORTOISE_TEST_BLANK_14607}",
+                            "headers": {"Authorization": "Bearer tt_literal_14607"}})
 
     probed: list[object] = []
     monkeypatch.setattr(mcp_selfcheck, "probe",
@@ -1618,7 +1632,9 @@ def test_a_kept_repo_only_entry_survives_a_DROPPED_base(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
-        "url": "https://api.premiselabs.co/mcp/", "command": "python3"}}}),
+        "url": "https://api.premiselabs.co/mcp/", "command": "python3",
+        # a DECLARED credential: the transport question is the one under test here
+        "headers": {"Authorization": "Bearer tt_literal_14607"}}}}),
         encoding="utf-8")
     verdict = mcp_selfcheck.classify("pi", project_dir=repo)
     assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
@@ -1726,7 +1742,10 @@ def test_a_sanitised_away_base_is_not_inherited_but_an_empty_one_is(tmp_path, mo
     (home / ".pi/agent").mkdir(parents=True)
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
-    repo_entry = {"url": "https://api.premiselabs.co/mcp/", "command": "python3"}
+    # a DECLARED credential: the merge three-state is what this arm grades, and
+    # since #14617 F6 a headerless http entry is `no-credential` before it gets here.
+    repo_entry = {"url": "https://api.premiselabs.co/mcp/", "command": "python3",
+                  "headers": {"Authorization": "Bearer tt_literal_14607"}}
     (repo / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"tortoise": repo_entry}}), encoding="utf-8")
 
@@ -1739,3 +1758,274 @@ def test_a_sanitised_away_base_is_not_inherited_but_an_empty_one_is(tmp_path, mo
         "tortoise": {}}}), encoding="utf-8")
     inherited = mcp_selfcheck.classify("pi", project_dir=repo)
     assert inherited.status == mcp_selfcheck.COMMAND_MISSING, inherited.line()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #14617 review round 7 — the eight `no row reddens` rows, each with its arm.
+#
+# F1..F7 were a single shape: a behaviour the diff asserted in prose (a refusal
+# text, a docstring, a verdict line) that NO assertion varied, so reverting the
+# behaviour left the suite green. Each arm below states the revert it reds.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_codex_at_project_scope_names_the_file_codex_actually_reads(
+        project, monkeypatch):
+    """F1 — `--harness codex` at the DEFAULT scope named `<repo>/.mcp.json` as TOML.
+
+    `HARNESS_CONFIG_PATHS["codex"]` has no project rels, so the project loop was
+    empty and the old fallback returned `<repo>/.mcp.json`. The refusal then told a
+    Codex user to paste a TOML table into a file Codex never reads — three false
+    statements in one message, at the path a plain `tortoise onboard --harness
+    codex` takes (`--scope` defaults to `project`).
+
+    REDS ON REVERT: move the TOML refusal back after `_config_path` (or drop the
+    `if not project_rels: return None` arm) — the message names `.mcp.json` again.
+    """
+    project = Path(project)
+    (project / ".git").mkdir()
+    home = Path.home()
+    (home / ".codex").mkdir(parents=True, exist_ok=True)
+    real = home / ".codex/config.toml"
+
+    assert harness_onboard._config_path("codex", project, scope="project") is None, (
+        "codex has no project layer — inventing `<repo>/.mcp.json` is the F1 defect")
+
+    out = harness_onboard.write_config("codex", project, scope="project")
+    assert out.wrote == []
+    text = "\n".join(out.refusals)
+    assert str(real) in text, f"the refusal must name the file Codex reads: {text!r}"
+    assert str(project / ".mcp.json") not in text, (
+        f"the refusal named a file Codex never reads: {text!r}")
+    assert "is TOML" not in text.replace(f"{real} is TOML", ""), (
+        f"only the harness's OWN TOML file may be called TOML: {text!r}")
+    assert "--scope project" in text, (
+        "codex has one global config; saying so is the fix's second half")
+    assert not (project / ".mcp.json").exists()
+
+
+def test_a_dropped_DELTA_leaves_the_base_standing(tmp_path, monkeypatch):
+    """F2(a) — the arm that reds `_unloadable` on its own.
+
+    The existing non-string arm asserted `command-missing` for a repo-only bad
+    entry — a class the mutant produces too, so `_unloadable -> return False` left
+    it GREEN. The discriminating shape is a DROPPED DELTA over a good base: head
+    keeps the base (`resolves-unprobed`/http), the mutant reports the delta's
+    `command-missing`/stdio instead.
+
+    REDS ON REVERT: `_unloadable` -> `return False`.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp/",
+                     "headers": {"Authorization": "Bearer tt_base_14607"}}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": ["https://evil-14607.invalid/mcp"]}}}), encoding="utf-8")
+
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
+    assert verdict.transport == "http", (
+        "the repo layer's non-string `url` must be DROPPED, leaving the base's "
+        f"http entry standing — not read as a stdio switch: {verdict.line()}")
+    assert "premiselabs.co" in mcp_selfcheck.declared_endpoint("pi", project_dir=repo)
+
+
+def test_a_non_string_transport_is_named_as_the_fault_not_as_type(project, monkeypatch):
+    """F2(b) — the `isinstance` selector in `classify`, reachable on its own.
+
+    With `_unloadable` present a non-string transport never reaches `classify`, so
+    the selector there had no arm: dropping both `isinstance(...)` checks made
+    `url.strip()` raise on a list, and nothing reddened. `read_entry` is stubbed
+    here so `classify` itself is the unit under test.
+
+    REDS ON REVERT: remove `isinstance(url_value, str)` / `isinstance(command_value,
+    str)` — `AttributeError`/`TypeError` out of `classify` instead of a verdict.
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    for entry, field in (({"url": ["https://x/mcp/"]}, "url"),
+                         ({"command": ["python3"]}, "command"),
+                         ({"url": 123}, "url"),
+                         ({"command": {"a": 1}}, "command")):
+        monkeypatch.setattr(mcp_selfcheck, "read_entry",
+                            lambda *a, _e=entry, **k: ("stub/.mcp.json", _e, [], "ok"))
+        verdict = mcp_selfcheck.classify("pi", project_dir=project)
+        assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+        assert f"`{field}`" in verdict.detail, verdict.detail
+        assert "not a string" in verdict.detail, (
+            "the detail must name the actual fault — a declared field that is not "
+            f"a string — not `type`: {verdict.detail!r}")
+        assert "`type`" not in verdict.detail, verdict.detail
+
+
+def test_project_scope_never_writes_outside_a_project_without_git(
+        tmp_path, monkeypatch):
+    """F3 — outside a git work tree, `--scope project` edited an ANCESTOR's files.
+
+    `_project_layer` mirrors the harness's READ walk, which escapes to the
+    filesystem root when there is no `.git` (`resolveMcpConfigPaths`). Following it
+    for a WRITE made `cd ~/scratch && tortoise onboard --harness pi` edit
+    `~/AGENTS.md` and `~/.mcp.json` while the flag reported project scope — a write
+    outside the directory the user scoped, with a false provenance label.
+
+    REDS ON REVERT: `write_layer` -> `_project_layer` in `_config_path` /
+    `_instruction_path`.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / "home").mkdir(exist_ok=True)
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir()
+    (ancestor / ".mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    (ancestor / "AGENTS.md").write_text("# ancestor house rules\n", encoding="utf-8")
+    project = ancestor / "proj"
+    project.mkdir()
+
+    # The READ side must NOT change: it is the file the harness loads.
+    assert mcp_selfcheck._repo_root(project) is None
+    assert mcp_selfcheck._project_layer(project, ".mcp.json") == ancestor / ".mcp.json"
+    assert mcp_selfcheck.write_layer(project, ".mcp.json") is None
+
+    config = harness_onboard.write_config("pi", project, scope="project")
+    assert config.wrote == [str(project / ".mcp.json")], (
+        f"a write must stay inside the project it was scoped to: {config.wrote}")
+    assert harness_onboard._instruction_path(project, "AGENTS.md") == \
+        project / "AGENTS.md"
+    notes = harness_onboard.write_instructions("pi", project)
+    assert notes.wrote == [str(project / "AGENTS.md")], notes.wrote
+
+    assert (project / ".mcp.json").exists()
+    assert (project / "AGENTS.md").exists()
+    assert (ancestor / "AGENTS.md").read_text(encoding="utf-8") == \
+        "# ancestor house rules\n", "the ancestor's instruction file was edited"
+    assert json.loads((ancestor / ".mcp.json").read_text(encoding="utf-8")) == \
+        {"mcpServers": {}}, "the ancestor's config was edited"
+
+
+def test_the_backup_keeps_the_source_mode_and_is_never_0644(tmp_path, monkeypatch):
+    """F4 — the 0600-backup fix landed with NO assertion, so a revert was silent.
+
+    `write_text` creates at `0666 & ~umask`: a measured backup of a `0600
+    ~/.claude.json` landed at **0644** with the key material inside — the installer
+    widening the permissions of a file it was only reading.
+
+    REDS ON REVERT: `os.open(..., mode)` + `chmod` -> `backup.write_text(before)`.
+    """
+    import stat as stat_mod
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    home.mkdir(parents=True, exist_ok=True)
+    target = home / ".claude.json"
+    target.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    target.chmod(0o600)
+
+    out = harness_onboard.write_config("claude", home, scope="user")
+    assert out.wrote == [str(target)], out.actions + out.refusals
+    backup = target.with_suffix(target.suffix + ".bak-14607")
+    assert backup.exists(), out.actions
+    assert stat_mod.S_IMODE(backup.stat().st_mode) == 0o600, (
+        "the backup of a 0600 config must stay 0600 — a 0644 copy leaks the key "
+        f"material the installer was only reading (mode {oct(stat_mod.S_IMODE(backup.stat().st_mode))})")
+
+
+def test_an_unprotectable_backup_refuses_instead_of_rewriting(tmp_path, monkeypatch):
+    """F4 — the refuse-on-unprotectable arm, which had no assertion either.
+
+    REDS ON REVERT: delete the `except OSError -> refusals + return out` arm; the
+    config is then rewritten with no protected copy of what it held.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    target = home / ".claude.json"            # claude's USER-scope file
+    before = json.dumps({"mcpServers": {}}, indent=2)
+    target.write_text(before, encoding="utf-8")
+    # The backup is `<file>.bak-14607` in the SAME directory, so a home directory
+    # that refuses new entries is exactly "a backup that cannot be created".
+    home.chmod(0o500)
+    try:
+        out = harness_onboard.write_config("claude", home, scope="user")
+    finally:
+        home.chmod(0o700)
+    assert out.refusals, "an unprotectable backup must be a REFUSAL, not a write"
+    assert out.wrote == []
+    assert target.read_text(encoding="utf-8") == before, (
+        "the config was rewritten after its backup could not be protected")
+    assert not (home / ".claude.json.bak-14607").exists()
+
+
+def test_a_green_line_for_pi_names_the_extension_that_loads_the_file(
+        project, monkeypatch):
+    """F5 — an `OK` for `pi` claimed a load the verifier cannot see.
+
+    `HARNESS_CONFIG_PATHS["pi"]` is the `mcp-client` EXTENSION's convention; pi's
+    built-in loader reads `.pi/mcp.json`. The probe grades the ENDPOINT, so an
+    unqualified green said "your agent has tools" for a file pi may never load —
+    and `onboard` then wrote the "reads go through the MCP" sentences on it.
+
+    REDS ON REVERT: drop the `HARNESS_LOADER_NOTES` append in `check()` (or empty
+    the `pi` note).
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    _write_config(project, {
+        "type": "stdio", "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": "http://127.0.0.1:1/mcp"},
+    })
+    monkeypatch.setattr(mcp_selfcheck, "probe", lambda **kw: mcp_selfcheck.Verdict(
+        status=mcp_selfcheck.OK, detail="live call succeeded"))
+
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.status == mcp_selfcheck.OK
+    assert "mcp-client" in verdict.detail and ".pi/mcp.json" in verdict.detail, (
+        "a green for pi must say what LOADED the file and what it did not prove: "
+        f"{verdict.detail!r}")
+
+
+def test_a_headerless_http_entry_never_borrows_the_shells_credential(
+        project, monkeypatch):
+    """F6 — the false PASS in the credential layer.
+
+    An http entry with NO `headers` sends nothing, but `credentials_present()`
+    answered "a key exists in this shell" and the static pass read that as "the
+    entry carries a credential"; `check(live=True)` then supplied the shell's key
+    itself and printed `OK — live call succeeded` for a config whose own request
+    goes out unauthenticated. Every earlier layer passed truthfully.
+
+    REDS ON REVERT: restore `and not credentials_present(project_dir)` as the
+    guard's second disjunct — the status is `resolves-unprobed` again.
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_shell_only_14607")
+    _write_config(project, {"type": "http", "url": "https://api.premiselabs.co/mcp/"})
+
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.NO_CREDENTIAL, verdict.line()
+    assert "carries a credential" not in verdict.detail, verdict.detail
+    assert "tt_shell_only_14607" not in verdict.line(), (
+        "no credential VALUE may appear in a verdict")
+    assert "env:TORTOISE_API_KEY" in verdict.detail, (
+        "the detail must name WHERE the credential it is NOT sending came from, "
+        f"so the reader knows the shell has one: {verdict.detail!r}")
+    assert "headers" in verdict.fix and "bridge" in verdict.fix, (
+        f"the fix must name both working shapes: {verdict.fix!r}")
+
+    # …and the LIVE pass must not inject it either: headerless + loopback is the one
+    # http shape that needs no credential, and it is graded as the harness would
+    # send it (nothing).
+    probed: list[bool] = []
+    monkeypatch.setattr(mcp_selfcheck, "probe_probe", None, raising=False)
+    monkeypatch.setattr(mcp_selfcheck, "probe", lambda **kw: probed.append(
+        kw.get("send_credential", True)) or mcp_selfcheck.Verdict(
+            status=mcp_selfcheck.OK, detail="live call succeeded"))
+    _write_config(project, {"type": "http", "url": "http://127.0.0.1:1/mcp"})
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert probed == [False], (
+        "an http entry that declares no Authorization header must be probed as it "
+        f"sends: with NO credential borrowed from the shell, got {probed}")
+    assert verdict.status == mcp_selfcheck.OK
