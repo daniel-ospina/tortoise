@@ -13450,10 +13450,11 @@ durations:
   # `test_13043_record_allocator_cli.py` row records — a file a PR ADDS can never
   # carry a CI junit reading yet, so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading. What the weight covers, on the
-  # DB-free lane: every creation door calls the hook (AST-pinned for
-  # `hosted_api._provision_graph_record`,
-  # `supabase_control._provision_default_graph_record` and
-  # `sdk._graph_create`); the hook ARMS (the plan's §A7.8 item 8 / M16 falsifier)
+  # DB-free lane: the two fileable creation doors call the hook (AST-pinned for
+  # `hosted_api._provision_graph_record` and
+  # `supabase_control._provision_default_graph_record`), and `sdk._graph_create`
+  # is pinned UNHOOKED — both of its arms are findings rather than omissions;
+  # the hook ARMS (the plan's §A7.8 item 8 / M16 falsifier)
   # and reuses `seed`; the uncut registry's cap, its overflow counter and its
   # NO-tenant-identifiers rule; `/health` seeding the three keys and folding `ok`
   # on an armed deployment carrying an uncut graph while leaving `degraded`'s

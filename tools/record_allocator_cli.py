@@ -147,7 +147,8 @@ must be true before the flag is rolled, and none of them is this command's to do
 
   2. EVERY GRAPH WRITTEN AFTER THE CUTOVER NEEDS ITS OWN COUNTER ROW.
      `#14582` added the creation hook that gives a NEW graph one
-     (`record_writer.provision_graph_record`, called at every create door), so
+     (`record_writer.provision_graph_record`, called at the doors the record can file —
+     ⛔ NOT at `sdk._graph_create`, whose both arms are findings rather than omissions), so
      graphs created from that point on are born cut over. ⛔ IT IS
      BEST-EFFORT: a record outage at creation does not fail the create, it
      leaves the graph UNCUT — which `/health` reports as
