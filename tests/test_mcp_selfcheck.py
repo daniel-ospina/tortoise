@@ -996,6 +996,35 @@ def test_a_fenced_example_of_the_block_is_neither_counted_nor_removed():
         "the fenced example was edited — it is documentation, not our block")
 
 
+def test_uninstall_on_a_file_that_only_DOCUMENTS_the_block_says_nothing_to_remove(
+        project):
+    """⛔ THE COUNT SAID "documentation", THE BRANCH BELOW STILL SAID "ours".
+
+    `_marker_pair` reads a marker inside a fence as documentation, but
+    `remove_instructions` still branched on `BEGIN_MARK not in before` — a SUBSTRING
+    test — so a repo that documents the block in a fenced example took the REMOVAL
+    path: `_strip_block` removed nothing, an (empty) diff was recorded, the file was
+    written back byte-identical, and `onboard` then printed NOTHING, because the
+    "nothing to remove" action is only added when `not removed.diffs`. That is the
+    same silent-exit-0 arm `test_uninstall_says_so_when_there_is_nothing_to_remove`
+    pins for a file with no markers at all — reached through the one shape the fence
+    rule was just added for.
+    """
+    fenced = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
+              "\nexample body\n" + harness_onboard.END_MARK + "\n```\n\n"
+              "My own notes: never delete this.\n")
+    (project / "AGENTS.md").write_text(fenced, encoding="utf-8")
+    result = harness_onboard.onboard("pi", project_dir=project, uninstall=True)
+    assert not result.diffs, (
+        f"nothing was removed, so there is no change to show: {result.diffs!r}")
+    assert result.actions, (
+        "'nothing to remove' must be SAID — a silent exit 0 is indistinguishable "
+        "from a failed removal")
+    assert not result.wrote, "a documentation-only file must not be rewritten"
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == fenced, (
+        "the documented example is not ours to touch")
+
+
 def test_a_real_block_is_removed_while_the_fenced_example_survives():
     """Both at once: the real block goes, the example stays, the notes stay."""
     text = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +

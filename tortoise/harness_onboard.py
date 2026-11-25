@@ -705,7 +705,13 @@ def write_instructions(harness: str, project_dir: Path, *,
             f"the partial `{BEGIN_MARK}` / `{END_MARK}` pair by hand first, so the "
             f"block stays reversible")
         return out
-    if BEGIN_MARK in before and END_MARK in before:
+    if _marker_pair(before) == (1, 1):
+        # ⛔ `_marker_pair`, NOT a substring test. The well-formed check above already
+        # guarantees the pair is (0, 0) or (1, 1) OUTSIDE fences, so the only question
+        # left is whether OUR block exists — and `BEGIN_MARK in before` answers a
+        # different one: a repo that DOCUMENTS the block in a fenced example carries
+        # both strings without carrying the block (`_is_marker_line` is the rule, and
+        # this is the same branch decision, one layer up).
         # Idempotent: replace the block in place, preserving everything around it.
         # ⛔ Edits the user made INSIDE the block are NOT preserved — the block is
         # ours and is rewritten whole. (The previous comment claimed otherwise; the
@@ -754,7 +760,14 @@ def remove_instructions(harness: str, project_dir: Path, *,
             f"uninstall: {path}: {why} — REFUSING to remove, because a malformed "
             f"pair would take your own text with it. Remove the block by hand")
         return out
-    if BEGIN_MARK not in before:
+    # ⛔ `_marker_pair`, NOT `BEGIN_MARK not in before`. A marker inside a fenced
+    # example is DOCUMENTATION, so counting it here took a documentation-only file
+    # down the removal path: `_strip_block` then removed nothing, an empty diff was
+    # recorded, the file was written back byte-identical, and `onboard` printed
+    # NOTHING — because "nothing to remove" is only reported when `not diffs`.
+    # Measured before this fix: `--uninstall` over a repo that documents the block
+    # exited 0 in silence. The user could not tell it from a failed removal.
+    if _marker_pair(before)[0] == 0:
         out.planned.append(str(path))    # nothing of ours is there
         return out
     after = _strip_block(before)
