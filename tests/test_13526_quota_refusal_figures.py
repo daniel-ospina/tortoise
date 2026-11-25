@@ -33,6 +33,7 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -71,6 +72,34 @@ MEASURED_USED_MB = 329.0
 #: to catch a LITERAL date (thousands of seconds old within a day of merging, or
 #: negative when future-dated), not to squeeze the offset.
 _FRESH_FIXTURE_MAX_AGE_S = 360
+
+
+def _measured_at_argument(construction: ast.Call) -> ast.expr | None:
+    """The expression a ``MeterReading(...)`` construction hands over as the reading.
+
+    Read from the KEYWORD when one names it, and BY POSITION otherwise:
+    ``MeterReading`` is a plain dataclass whose field order puts ``measured_at``
+    second (``tortoise/allowance_gate.py``), so ``MeterReading(used, ts, True)``
+    is ordinary, correct Python. Reading only the keyword REDDENED exactly that
+    correct fixture (review of #14646 at ``fc870945fc``: *"a POSITIONAL
+    ``MeterReading(...)`` construction reds the freshness pin with correct
+    code"*) — a pin that fires on a shape that is right is the failure mode this
+    whole arm was built to avoid, from the other side.
+
+    ``None`` means the reading is NOT visible in the call (fewer than two
+    positional arguments, or a ``*args`` splat in that slot). The caller's
+    vacuity assertion fires on ``None``, so an unreadable construction fails
+    CLOSED rather than passing silently.
+    """
+    for keyword in construction.keywords:
+        if keyword.arg == "measured_at":
+            return keyword.value
+    if len(construction.args) < 2:
+        return None
+    second = construction.args[1]
+    if isinstance(second, ast.Starred):
+        return None
+    return second
 
 
 def test_the_cap_under_test_is_the_artifact_number_not_a_literal():
@@ -349,15 +378,18 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "so this arm cannot see the reading it exists to pin and would pass "
         "vacuously (#14646). Teach it the new shape rather than deleting it: "
         "what must be pinned is the value the gate is handed.")
+    # Keyword OR position — `MeterReading`'s own field order puts `measured_at`
+    # second, and a positional construction is correct Python. An unreadable
+    # construction (fewer than two positional args, a `*args` in that slot)
+    # contributes nothing here, so the vacuity assertion below still fires on it.
     handed = [
-        keyword.value
-        for construction in constructions
-        for keyword in construction.keywords
-        if keyword.arg == "measured_at"]
+        value for value in map(_measured_at_argument, constructions)
+        if value is not None]
     assert handed, (
-        "no `MeterReading(measured_at=…)` keyword found inside "
-        "`_single_sample_meter`, so this arm cannot see the reading the gate is "
-        "handed and would pass vacuously (#14646)")
+        "no `MeterReading(measured_at=…)` keyword, and no readable second "
+        "positional argument, found inside `_single_sample_meter` — so this arm "
+        "cannot see the reading the gate is handed and would pass vacuously "
+        "(#14646)")
     undated = [
         value for value in handed if not reaches_a_clock(value, scope)]
     pinned = [
@@ -405,6 +437,56 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         "structural arm above has now been beaten twice, and this one is what "
         "still catches a same-day literal if it is beaten a third time "
         "(#14646)")
+
+
+def test_the_freshness_pin_reads_a_positional_construction():
+    """A positional ``MeterReading(used, ts, …)`` is CORRECT and must be measured.
+
+    ``MeterReading`` is a plain frozen dataclass and its field order puts
+    ``measured_at`` second (``tortoise/allowance_gate.py``), so the positional
+    form is ordinary Python. The arm read only ``keyword.arg == "measured_at"``,
+    so that form collected nothing and the vacuity assertion fired — red on code
+    that is RIGHT (review of #14646 at ``fc870945fc``, P3). It now falls back to
+    the second positional argument, and this test pins that fallback, including
+    the shapes that must still fail CLOSED (nothing readable → ``None``).
+
+    NON-VACUITY: this reds on the pre-fix code — ``_measured_at_argument`` does
+    not exist there — and the assertion on ``pre_fix`` below is the regression
+    itself restated executably: the old keyword-only filter finds NOTHING in the
+    positional call, while the helper finds the reading.
+    """
+    def call_of(source: str) -> ast.Call:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        return node.value
+
+    positional = call_of('MeterReading(used, measure(), True, "note")')
+    keyworded = call_of('MeterReading(used=used, measured_at=measure(), estimated=True)')
+    keyword_beats_position = call_of('MeterReading(used, measure(), measured_at=other())')
+    too_short = call_of("MeterReading(used)")
+    splatted = call_of("MeterReading(*args)")
+
+    # The pre-fix predicate, verbatim: it is what this test exists to replace.
+    pre_fix = [
+        keyword.value for keyword in positional.keywords
+        if keyword.arg == "measured_at"]
+    assert pre_fix == [], (
+        "this shape no longer reproduces the P3 (it carries a `measured_at` "
+        "keyword), so the regression it documents would be measured against "
+        "nothing")
+
+    assert ast.unparse(_measured_at_argument(positional)) == "measure()"
+    assert ast.unparse(_measured_at_argument(keyworded)) == "measure()"
+    assert ast.unparse(_measured_at_argument(keyword_beats_position)) == "other()", (
+        "a keyword names the reading explicitly, so it wins over the position; "
+        "the arm must not prefer a positional argument the call overrides")
+    assert _measured_at_argument(too_short) is None, (
+        "with fewer than two positional arguments the reading is not visible, "
+        "and `None` is what makes the caller's vacuity assertion fire — fail "
+        "closed, never pass")
+    assert _measured_at_argument(splatted) is None, (
+        "`*args` in the second slot cannot be read as the reading; treat it as "
+        "unreadable rather than guessing")
 
 
 def _armed_gate(monkeypatch, used: float) -> None:
