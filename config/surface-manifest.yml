@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: d4b2df6d826224f26d226a98bfb8e341ead10305
+cut_at_commit: 69397cd3b15b5813321a9b71d3fa1c2c4a937e3b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1099,20 +1099,20 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 39
+  tools: 30
   sdk_public_methods: 39
-  retired: 73
+  retired: 82
   keyword_distribution:
-    fetch: 10
+    fetch: 6
     create: 6
-    update: 5
+    update: 4
     delete: 2
-    list: 3
+    list: 1
     find: 2
     trace: 1
-    check: 5
+    check: 4
     link: 3
-    operate: 2
+    operate: 1
 high_water_counts:
   tools: 48
   sdk_public_methods: 39
@@ -1135,6 +1135,16 @@ retired:
 - name: tortoise_belief_timeline
   use_instead: tortoise_check_confidence(topic=...)
   sdk_method: _belief_timeline
+  http_policy: true
+  approval: null
+- name: tortoise_calibrate_summary
+  use_instead: tortoise_check_confidence(calibrate=True)
+  sdk_method: _calibrate_summary
+  http_policy: true
+  approval: null
+- name: tortoise_check_structure
+  use_instead: tortoise_graph_overview(section="structure_check")
+  sdk_method: _check_structure
   http_policy: true
   approval: null
 - name: tortoise_checkpoint
@@ -1203,6 +1213,11 @@ retired:
   sdk_method: _delete_point_wrapped
   http_policy: true
   approval: null
+- name: tortoise_diary_read
+  use_instead: tortoise_list_knowledge(kind="diary", agent=..., limit=..., wing=...)
+  sdk_method: null
+  http_policy: true
+  approval: null
 - name: tortoise_diary_write
   use_instead: 'tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing":
     ...})'
@@ -1228,6 +1243,11 @@ retired:
   use_instead: tortoise_poll_events(after=..., types=..., limit=...)
   sdk_method: poll_events
   http_policy: true
+  approval: null
+- name: tortoise_expand_relationships
+  use_instead: tortoise_explore_connections(node_id, include_content=True, hops=...)
+  sdk_method: null
+  http_policy: false
   approval: null
 - name: tortoise_file_decision
   use_instead: tortoise_write_question(options, evidence, choice)
@@ -1319,6 +1339,11 @@ retired:
   sdk_method: _list_batch
   http_policy: true
   approval: null
+- name: tortoise_list_batches
+  use_instead: tortoise_list_knowledge(kind="batch", limit=...)
+  sdk_method: _list_batches
+  http_policy: true
+  approval: null
 - name: tortoise_list_dedup_candidates
   use_instead: tortoise_review_link_candidates(kind="dedup", candidate_type=...)
   sdk_method: null
@@ -1327,6 +1352,11 @@ retired:
 - name: tortoise_list_graphs
   use_instead: tortoise_graph_overview(section="graphs")
   sdk_method: _list_graphs
+  http_policy: true
+  approval: null
+- name: tortoise_list_namespaces
+  use_instead: tortoise_graph_overview(section="namespaces")
+  sdk_method: null
   http_policy: true
   approval: null
 - name: tortoise_list_pointkinds
@@ -1416,6 +1446,18 @@ retired:
   sdk_method: _review_connections
   http_policy: true
   approval: null
+- name: tortoise_search
+  use_instead: tortoise_search_knowledge(query=..., kind=..., limit=..., entity_type=..., order_by=..., min_confidence=...,
+    threshold=..., relationship_filter=..., traversal_path=...)
+  sdk_method: _tortoise_fts_query
+  http_policy: true
+  approval: null
+- name: tortoise_search_sessions
+  use_instead: tortoise_search_knowledge(mode="sessions", query=..., agent=..., topics=..., after=..., before=...,
+    limit=..., offset=...)
+  sdk_method: null
+  http_policy: true
+  approval: null
 - name: tortoise_session_capture
   use_instead: tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=..., machine_id=...,
     model=...)
@@ -1444,6 +1486,11 @@ retired:
   approval: null
 - name: tortoise_status
   use_instead: tortoise_graph_overview(section="status")
+  sdk_method: null
+  http_policy: true
+  approval: null
+- name: tortoise_suggest_entry_points
+  use_instead: tortoise_search_knowledge(mode="entry_points", query=..., limit=..., kind=...)
   sdk_method: null
   http_policy: true
   approval: null
@@ -1521,32 +1568,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_query
-- name: tortoise_expand_relationships
-  served_from: tortoise/mcp_server.py:8a975e1d38dfad38
-  served_attributes: c81d1f648ddc8eef
-  family: memory
-  family_rank: 1
-  served: stdio-only
-  sdk_method: ''
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: 'Full relationship payload for ONE Point, incl. each related point''s content (the expand side of the #1353
-    list/expand split — search returns bounded state entries; use this to read a neighbor''s full text on demand).'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_get_historical_knowledge
   served_from: tortoise/mcp_server.py:4a28275833c22810
   served_attributes: 68ac5380bf83d5d1
@@ -1576,35 +1597,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_search
-  served_from: tortoise/mcp_server.py:f788896e1ec6f6c0
-  served_attributes: a54ebe88150f0091
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: _tortoise_fts_query
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: 'Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching
-    by MEANING (natural-language query); for exact structural/filter queries use tortoise_query. Full-scan mode:
-    omit query, set kind → all Points of kind.'
-  dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
-  lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_search_knowledge
-  served_from: tortoise/mcp_server.py:360ef46d2191dbc7
+  served_from: tortoise/mcp_server.py:dd2652048dc1dcbb
   served_attributes: d4c22101ac22f5ae
   family: memory
   family_rank: 1
@@ -1629,57 +1623,6 @@ rows:
   basis: observed
   reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
     that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:4d9e136ab2d3b5f9
-  served_attributes: 542cf2dbb222d260
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: Entity resolution — NL query → matching entities from the graph.
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: fix-declaration
-  basis: decided
-  reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
-    is a false declaration to correct (or a tool to retire — that part is the owner's call)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_calibrate_summary
-  served_from: tortoise/mcp_server.py:785dfd3207055667
-  served_attributes: d1d847feeecfe0de
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: _calibrate_summary
-  group_source: mapped
-  keyword: update
-  keyword_rank: 3
-  cluster: null
-  canonical: null
-  job: Audit graph calibration state. Returns per-point guidance.
-  dependency: declares TortoiseSDK._calibrate_summary (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1775,34 +1718,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_list_batches
-  served_from: tortoise/mcp_server.py:7b10522163a3916e
-  served_attributes: a6f98a0ada3b45d0
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: _list_batches
-  group_source: defaulted
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: Batch discovery — the most recent distinct ingest batch_ids with their point/direct-edge counts (ordered
-    by newest stamp, capped at limit, default 20).
-  dependency: declares TortoiseSDK._list_batches (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_list_knowledge
-  served_from: tortoise/mcp_server.py:cbda87f587f5146f
+  served_from: tortoise/mcp_server.py:bd4308e0dab34cdc
   served_attributes: e640c8f1b224c015
   family: memory
   family_rank: 1
@@ -1833,7 +1750,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_check_confidence
-  served_from: tortoise/mcp_server.py:4f5930ddfee59b8c
+  served_from: tortoise/mcp_server.py:978a87923ae70f66
   served_attributes: e3f8f18328387d37
   family: memory
   family_rank: 1
@@ -2025,7 +1942,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_explore_connections
-  served_from: tortoise/mcp_server.py:3ec7c00b4927db21
+  served_from: tortoise/mcp_server.py:1422a4cf5bcbdf47
   served_attributes: 5371ba821439a0fe
   family: reasoning
   family_rank: 3
@@ -2109,31 +2026,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_check_structure
-  served_from: tortoise/mcp_server.py:5a71d61b89cd7f8c
-  served_attributes: d1d847feeecfe0de
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: _check_structure
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: Check Gate 0→4 chain integrity (orphans, dangling refs).
-  dependency: declares TortoiseSDK._check_structure (resolves)
-  lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_review_link_candidates
   served_from: tortoise/mcp_server.py:c00f5b1f175d3cc8
   served_attributes: f6b160f62f0b2694
@@ -2163,31 +2055,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_search_sessions
-  served_from: tortoise/mcp_server.py:1aed89c1abfa02e4
-  served_attributes: 0a83402375ac3bcd
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: Search indexed agent sessions. Returns Events with narrative_arc snippets.
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_graph_set_recording
   served_from: tortoise/mcp_server.py:eec0371362f0b761
   served_attributes: 153b4547ee465158
@@ -2205,31 +2072,6 @@ rows:
     override, null removes it (inherit the team default — never flips a team ON). Requires hosted mode + a team:manage-scoped
     key (or legacy full-access) — the capture 409 (''Session recording is disabled for this graph'') routes agents
     here; call this tool to turn recording back on, then retry the capture.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_namespaces
-  served_from: tortoise/mcp_server.py:13e3adca797bc8eb
-  served_attributes: d1d847feeecfe0de
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List installed pack namespaces.
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2440,31 +2282,6 @@ rows:
     option Points, the evidence Points and the IMPL edges atomically. options: option descriptions; evidence: evidence
     statements; choice: 0-indexed preferred option. Returns {decision_id, option_ids, evidence_ids}.'
   dependency: declares TortoiseSDK.write_question (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_diary_read
-  served_from: tortoise/mcp_server.py:a21b617497cea620
-  served_attributes: fd3a38a2d5978fbf
-  family: journal
-  family_rank: 7
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: Read recent diary entries for an agent, newest first.
-  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep

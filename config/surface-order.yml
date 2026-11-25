@@ -278,13 +278,29 @@ family_rank:
 # Both corrections are the derivation's own output, not a re-count by hand. Measured, not
 # asserted: this is the check's own output against the P7 registry (`fetch: 10, create: 6,
 # update: 5, delete: 2, list: 3, find: 2, trace: 1, check: 5, link: 3, operate: 2`).
+# #11609 LANE P11 (the nine envelope doors): 39 -> 30, and FIVE counts move, every one of them
+# a retirement with no row arriving (no container was added — all four destinations were
+# already advertised):
+#   · `fetch` 10 -> 6   — `search`, `search_sessions`, `suggest_entry_points` and `diary_read`
+#                         all derive `fetch` and all four retire forward.
+#   · `check` 5 -> 4    — `check_structure` retires into
+#                         `graph_overview(section="structure_check")`.
+#   · `update` 5 -> 4   — `calibrate_summary` retires into `check_confidence(calibrate=True)`.
+#   · `list` 3 -> 1     — `list_batches` and `list_namespaces` retire into
+#                         `list_knowledge(kind="batch")` and
+#                         `graph_overview(section="namespaces")`.
+#   · `operate` 2 -> 1  — `expand_relationships` retires into `explore_connections`.
+# ⛔ `link`, `create`, `find`, `delete` and `trace` are unmoved, and that is the derivation's
+# own output rather than a hand-count: the nine retired rows simply do not derive them.
+# Recorded deliberately, per the rule above: the distribution moved WITH the registry, and a
+# re-cut that left this table alone would turn the AC13 check off instead of re-basing it.
 baseline_counts:
-  fetch: 10
+  fetch: 6
   create: 6
-  list: 3
-  check: 5
-  operate: 2
-  update: 5
+  list: 1
+  check: 4
+  operate: 1
+  update: 4
   find: 2
   delete: 2
   link: 3

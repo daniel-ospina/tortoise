@@ -139,14 +139,23 @@ def test_the_guard_fails_closed_when_the_baseline_is_missing(tmp_path):
 
 
 def test_the_guard_reds_when_a_tool_is_added(tmp_path):
-    """The whole point: a registry entry the owner never approved is a failure."""
+    """The whole point: a registry entry the owner never approved is a failure.
+
+    ⛔ The representative is read from the FROZEN manifest and must be a row the
+    DECLARATION still advertises. This case stripped `tortoise_search` until
+    #11609 lane P11 retired that door: stripping a RETIRED name from the manifest
+    removes nothing the registry still advertises, so the guard correctly stayed
+    green and the test read it as a broken gate. Deriving the name from the manifest
+    keeps the case measuring the property, not one door's continued existence.
+    """
     doc = _manifest()
-    doc["rows"] = [r for r in doc["rows"] if r["name"] != "tortoise_search"]
+    representative = doc["rows"][0]["name"]
+    doc["rows"] = [r for r in doc["rows"] if r["name"] != representative]
     stripped = tmp_path / "stripped.yml"
     stripped.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
     result = _run("tools/surface-guard.py", "--manifest", str(stripped))
     assert result.returncode == 1, "an added tool did not red the gate"
-    assert "tortoise_search" in result.stdout
+    assert representative in result.stdout
 
 
 def test_the_guard_reds_when_a_public_method_is_added(tmp_path):
@@ -763,7 +772,26 @@ def test_every_row_declares_whether_it_decides_or_merely_observes() -> None:
     decided = [r for r in rows if r["basis"] == "decided"]
     observed = [r for r in rows if r["basis"] == "observed"]
     assert len(decided) + len(observed) == len(rows)
-    assert decided, "at least one recommendation must derive from a decision already made"
+    # ⛔ THE DECIDED POPULATION IS EMPTY AT THIS HEAD, and that is a RESULT, not a lost
+    # assertion. The single row carrying a decision recommendation was
+    # `tortoise_suggest_entry_points` (`fix-declaration`: "declares an SDK method that does
+    # not exist … a false declaration to correct (or a tool to retire — that part is the
+    # owner's call)"). #11609 lane P11 took the second branch of that sentence: the door
+    # retired FORWARD into `search_knowledge(mode="entry_points")`, so the row is gone and
+    # a door that no longer exists cannot carry a false declaration.
+    #
+    # So the guard changes from "at least one row must be decided" to the property that
+    # actually holds it: EVERY row whose recommendation demands a decision must be
+    # classified `decided`, and the two populations must be the same set. That still reds if
+    # a `merge`/`kill`/`fix-declaration` row appears with an `observed` basis (the failure
+    # this pin exists for), and it no longer REDS ON CORRECT WORK — the shape that made an
+    # earlier floor in this file land exactly on its own population (#13599 / #13678).
+    pending_decisions = [r for r in rows if r["recommendation"] in (
+        "merge", "kill", "fix-declaration")]
+    assert decided == pending_decisions, (
+        "the DECIDED population must be exactly the rows whose recommendation demands a "
+        f"decision: decided={[r['name'] for r in decided]}, "
+        f"pending={[r['name'] for r in pending_decisions]}")
 
 
 def _write(doc: dict, tmp_path) -> str:
@@ -821,14 +849,22 @@ def test_the_guard_reds_when_a_tools_SDK_binding_moves(tmp_path):
     """P2 found by review: CONTRIBUTING promised this; the guard did not do it.
 
     `sdk_method` could be silently re-pointed on any tool while the required check stayed green.
+
+    ⛔ The representative is the first row that ACTUALLY DECLARES a binding, read from the
+    frozen manifest. It used to be hard-coded to `tortoise_search`, which declares
+    `sdk_method` — and #11609 lane P11 retired that door, so the case found no row and
+    raised. A hand-picked name is a pin on one door's existence, not on the property; a
+    row that names no binding cannot have its binding moved, so selecting on the binding
+    is also the correct eligibility test.
     """
     doc = _manifest()
+    representative = next(
+        r["name"] for r in doc["rows"]
+        if not str(r["name"]).startswith("sdk:") and r.get("sdk_method"))
     for row in doc["rows"]:
-        if row["name"] == "tortoise_search":
+        if row["name"] == representative:
             row["sdk_method"] = "definitely_not_the_real_binding"
             break
-    else:
-        raise AssertionError("tortoise_search missing from the baseline")
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "a moved SDK binding did not red the gate"
     assert "binding" in result.stdout
@@ -1278,12 +1314,19 @@ def test_the_check_reds_when_a_served_default_changes_behind_an_unchanged_code_o
     from tortoise import mcp_server
 
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    # ⛔ #11609 lane P11 retired `tortoise_search`, the door this case used to pin. The
+    # property is about the DERIVATION — a served default changing behind a byte-identical
+    # code object — so the representative only has to be a live tool whose handler carries
+    # a NUMERIC positional default; pinning it to one door's continued existence made the
+    # case a surface pin in disguise. `tortoise_graph_overview`'s `days` (index 2) is that
+    # default, and its retirement is not on any lane's path.
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
     fn = original.fn
-    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+    assert fn.__defaults__[2] == 30, (
+        "this test is pinned to tortoise_graph_overview's `days` default")
 
-    tampered = _shadow_of(fn, __defaults__=(*fn.__defaults__[:3], 999, *fn.__defaults__[4:]))
+    tampered = _shadow_of(fn, __defaults__=(*fn.__defaults__[:2], 999, *fn.__defaults__[3:]))
     assert sm._code_digest(tampered.__code__) == sm._code_digest(fn.__code__), (
         "the code object must be identical, or this is not the #4192 case"
     )
@@ -1295,7 +1338,7 @@ def test_the_check_reds_when_a_served_default_changes_behind_an_unchanged_code_o
     finally:
         components[key] = original
     assert rc == 1, "a changed served default did not red the derivation check (#4192)"
-    assert "served_attributes" in out and "tortoise_search" in out, out
+    assert "served_attributes" in out and "tortoise_graph_overview" in out, out
 
 
 def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):

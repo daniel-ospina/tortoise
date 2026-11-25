@@ -16,7 +16,7 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server serves **112 tools** (39 of them advertised, 73 retired shims — the `graph_overview`
+Today they cannot: the MCP server serves **112 tools** (30 of them advertised, 82 retired shims — the `graph_overview`
 container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, the
 batch-1 archives of #11609 removed four no-destination tools, #11609 Phase 2's READ/QUERY
 containers retired nine more, its WRITE/MUTATE containers retired fourteen more into six, its
@@ -79,7 +79,7 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 ## The reconciliation — MCP 91 → 27
 
-> Every figure below is the MERGED surface (**39 live + 73 retired shims = 112 served**), not either
+> Every figure below is the MERGED surface (**30 live + 82 retired shims = 112 served**), not either
 > wave's own measurement: the vision started at **99**, the five `run_onboarding` deletions removed
 > five (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
 > while retiring five (#4282, 76 → 72 advertised), #11609 batch 1 archived four no-destination
@@ -162,13 +162,14 @@ to 67 live + 30 retired shims (97 served at that wave): the SOURCES/MINE/SESSION
 approved names in and retired SEVEN advertised ones into them (#3883 keeps every retired
 name answering, which is why the served count RISES while the advertised count falls).
 Composed at this head with lane B (#4282's WRITE/MUTATE wave, which landed on `main` first), the
-same population reads **39 live + 73 retired shims = 112 served** — measured off the merged
+same population reads **30 live + 82 retired shims = 112 served** — measured off the merged
 registry, not added by hand (`tools/bridge_table.py --check` reports 112 registry tools). The
 door-retirement waves move the SPLIT only: seven advertised doors left the surface in #13052's
 wave, two more in #11609 lane P1 and two more again in #11609 P2's confidence-arms wave, and
 each kept answering on its retired name, so the served population is unchanged at 108 across those
 retirement waves while the split goes 48/60 → 46/62 → 44/64 → 42/66 → 40/68 — and lane P7's four
-new rows take it to 39/73 = 112.
+new rows take it to 39/73 = 112, then #11609 lane P11 retired the nine envelope doors into
+containers that were already advertised and takes the SPLIT (never the population) to 30/82 = 112.
 
 The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
 DELETED from the served registry rather than retired into nothing, because the owner's
@@ -187,8 +188,9 @@ retired `tortoise_create_point` / `tortoise_diary_write` into them, and #11609 P
 `tortoise_compute_confidence` / `tortoise_recall` into `check_confidence`'s new arms — three
 waves that move the SPLIT and never the population — and then #11609 lane P7 registered the four
 approved target names that had no entry and retired five doors forward into them, which moves
-both (108 -> 112 served):
-**39 live + 73 retired shims = 112 served** — the figures the table above records, the
+both (108 -> 112 served), and #11609 lane P11 retired nine envelope doors into containers already
+advertised — a SPLIT move only, so the population holds at 112:
+**30 live + 82 retired shims = 112 served** — the figures the table above records, the
 population the MCP server serves today, and the numbers `config/surface-manifest.yml` derives. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible

@@ -87,6 +87,17 @@ def _registry_pairs() -> list[tuple[str, str]]:
     #                        of the four new targets is a pass-through wrapper
     #                        (`tortoise_get_historical_knowledge`), which is why the
     #                        floor below is re-pinned UP in the same wave.
+    #   30 / 24              #11609 lane P11 — the NINE envelope doors all named an
+    #                        `sdk_method` and all retired FORWARD with no row arriving
+    #                        (`search`/`search_sessions`/`suggest_entry_points` →
+    #                        `search_knowledge`; `list_batches`/`diary_read` →
+    #                        `list_knowledge`; `list_namespaces`/`check_structure` →
+    #                        `graph_overview`; `calibrate_summary` →
+    #                        `check_confidence`; `expand_relationships` →
+    #                        `explore_connections`), so the pair population falls by
+    #                        exactly nine: 39 − 9 = 30 rows, 28 − 9 = 19 pairs — measured
+    #                        as 24, i.e. five of the nine did NOT name an `sdk_method` in
+    #                        their declaration. The MEASURED value is what the pin follows.
     # Every one of those waves retired doors that DID name an `sdk_method`; before them, the
     # READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves and #11609's
     # seven-door wave did the same (`get_session`, `list_batch`,
@@ -107,7 +118,7 @@ def _registry_pairs() -> list[tuple[str, str]]:
     # left at the pre-consolidation number REDS on a CORRECT retirement, which is what the
     # previous `> 40` did when the seventh door left. A floor that drifts down by as much as
     # the surface does stops noticing a scan that has lost an arm of its own.
-    assert len(pairs) > 24, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    assert len(pairs) > 20, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
