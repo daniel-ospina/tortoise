@@ -18,6 +18,13 @@ Three calls, recorded verbatim with their arguments:
   * `tortoise_check_structure()` — the structural validator's verdict on a graph
     holding two mutually exclusive live decisions (G1/G5).
 
+Like its siblings, the run carries a VERDICT: `ok` in the artifact and a non-zero
+exit when a call refused or answered nothing, so a receipt whose claim door,
+confidence read or structure check failed cannot be committed as a successful
+run. An empty `tortoise_check_structure` answer is the validator reporting
+nothing wrong — that is a RESULT, and `verdict()` treats the envelope, not the
+row count, as the signal.
+
 Run it in the SAME sitting as `run_ingest.py`: the graph name is this bundle's
 own (`xv14592_operating_model`), and the committed receipts are the durable
 evidence — a lane container that has been torn down cannot be re-read.
@@ -68,6 +75,30 @@ async def _call(client, tool, args):
                 "error": f"{type(exc).__name__}: {exc}"}
 
 
+def verdict(out: dict) -> int:
+    """0 only when every call SUCCEEDED and carried a reply envelope.
+
+    This is the exit code and the `ok` field the artifact carries — the key
+    `WRITTEN_KEYS` has been promising since the producer was committed. The
+    previous revision declared `ok`, never wrote it, and returned 0
+    unconditionally, so a receipt whose claim door, confidence read and structure
+    check ALL refused could still be committed as a successful run: the exact
+    fail-open shape the other three producers were changed to close.
+
+    The signal is the ENVELOPE, never the row count: `tortoise_check_structure`
+    answers `{"result": []}` when the graph has no structural violation, and an
+    empty reply there is a result — not a failed read.
+    """
+    for key, _tool, _args in CALLS:
+        receipt = out.get(key) or {}
+        if receipt.get("ok") is not True:
+            return 1
+        reply = receipt.get("reply")
+        if not isinstance(reply, (dict, list)) or not reply:
+            return 1
+    return 0
+
+
 def _provenance() -> dict:
     body = Path(__file__).read_bytes()
     return {
@@ -96,9 +127,14 @@ async def run() -> int:
             print(f"\n=== {tool} {json.dumps(args)} ===")
             print(json.dumps(out[key], indent=1, default=str)[:4000])
 
+    code = verdict(out)
+    out["ok"] = code == 0
     (OUT / "census2.json").write_text(json.dumps(out, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'census2.json'}")
-    return 0
+    if code:
+        print("!! census2 NOT OK: a call refused or answered nothing — this is "
+              "not a successful run")
+    return code
 
 
 if __name__ == "__main__":

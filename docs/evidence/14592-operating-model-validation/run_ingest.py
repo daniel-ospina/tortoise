@@ -39,6 +39,18 @@ OUT.mkdir(exist_ok=True)
 GRAPH = "xv14592_operating_model"
 
 
+def verdict(receipt: dict) -> int:
+    """0 only when every document's capture SUCCEEDED.
+
+    This is the exit code `main()` returns. The previous revision recorded
+    `ok: False` on a document whose capture raised and then returned 0, so the
+    phase that produces every later phase's input could report success over a
+    corpus it never wrote. A receipt with no document at all is not a run.
+    """
+    rows = receipt.get("documents") or []
+    return 0 if rows and all(row.get("ok") is True for row in rows) else 1
+
+
 def main() -> int:
     from tortoise.sdk import TortoiseSDK
 
@@ -101,7 +113,15 @@ def main() -> int:
     (OUT / "ingest-receipt.json").write_text(
         json.dumps(receipt, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'ingest-receipt.json'}")
-    return 0
+    code = verdict(receipt)
+    if code:
+        failed = [row["doc_id"] for row in receipt["documents"]
+                  if row.get("ok") is not True]
+        print(f"!! ingest NOT OK: {len(failed)} capture(s) failed "
+              f"({', '.join(failed) or 'no documents'}) — the receipt is committed "
+              "alongside a non-zero exit on purpose: the contradiction has to be "
+              "visible, and nothing here may guess at a retry")
+    return code
 
 
 if __name__ == "__main__":

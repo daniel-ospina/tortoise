@@ -2,9 +2,10 @@
 
 **Answer: partly. It extracts the operating model's *content* well and wires the
 *reasoning* around a decision correctly. It does not represent a contradiction between two
-documents, does not emit the role→object `performs`/`owns` relation, and its search door returns
-the *stale* side of the contradiction as its best answer. Those are gaps to fix, not inventions —
-nothing in the extracted graph was unsupported by the corpus.**
+documents, it writes the role→object `ownedBy` relation in the **inverted orientation** (which, by
+the repo's own `ownedBy` convention, asserts that the *object* owns the person), and its search
+door returns the *stale* side of the contradiction as its best answer. Those are gaps to fix, not
+inventions — nothing in the extracted graph was unsupported by the corpus.**
 
 | | |
 |---|---|
@@ -271,7 +272,7 @@ Search returned NAND families over the "viable delivery partner" belief
 | option ↔ option `NAND` | ✅ | NAND operator families on the delivery-partner belief (`family_size: 2`) |
 | goal → constraint | ✅ (as text + `IMPL`) | "The growth goal depends on the delivery partner keeping morning slots" → `IMPL` → "Every new restaurant account requires a morning delivery slot"; "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees" |
 | source → claim `extractedFrom` | ✅ (structural) | 5 `agentSession` Sources, each with 8–13 Points; `relation_write.edges` shows `related`/`managedBy` written as `structural` |
-| **role → object `performs` / `owns`** | ❌ **ABSENT** | The corpus fact is extracted as a *statement* ("Marta Reyes owns the cold-chain temperature log" — subject `Marta Reyes`) and **no `performs`/`owns` edge to an Object exists.** Ownership is prose, not structure. See **G2** |
+| **role → object `ownedBy` / `performs`** | ⚠️ **EMITTED, INVERTED** | The run wrote **8 `ownedBy` rows with `write_path: "structural"`** (doc-04 ×7, doc-03 ×1) with `src` = the person and `dst` = the thing they own; `ownedBy`'s own convention reads `src --ownedBy--> dst` as **`dst` owns `src`**, so the rows assert the reverse of the corpus. No `performs` edge either way. See **G2** |
 | cross-document contradiction | ❌ **ABSENT** | See **G1** |
 
 ### Were any relations or entities invented?
@@ -310,14 +311,15 @@ date — dropped` is a *drop*, not a fabrication.
 | 11 | **Role** Marta Reyes — owns delivery scheduling + cold-chain log | ✅ as text | ✅ | ✅ | "Marta Reyes owns the cold-chain temperature log" — **rank 1** for its probe |
 | 12 | **Role** Dev Patel — owns supplier payments + capex approvals | ✅ as text | ✅ | ✅ | "No capital spend is approved unless Dev Patel approves it" |
 | 13 | **Role** Priya Nair — owns account onboarding + pipeline | ✅ as text | ✅ | ✅ | "Priya Nair owns the restaurant account pipeline" |
-| 14 | **Role → Object edge** (`owns`/`performs`) | ❌ **absent** | — | — | No `owns`/`performs` edge; ownership only as statement text. **G2** |
+| 14 | **Role → Object edge** (`ownedBy`/`performs`) | ⚠️ **present, INVERTED** | ⚠️ | ✅ | 8 `ownedBy` structural rows (doc-04 ×7, doc-03 ×1) written person → object; under `SEMANTICS_DIRECTIONS["ownedBy"] = "->"` that asserts *the object owns the person*. No `performs` edge either way. **G2** |
 | 15 | **Contradiction** ColdPath failed the audit | ✅ | ✅ | ✅ (`quote` present) | "The cold-chain audit failed ColdPath Logistics last week" (conf 0.3294) |
 | 16 | **Contradiction resolved** revert to NordicFreight | ✅ as a decision Point | ✅ | ✅ | `core:decision` "the revert to NordicFreight"; "We revert to NordicFreight as our delivery partner…" |
 | 17 | **Contradiction as a graph conflict** | ❌ **absent** | — | — | No `NAND`/supersede edge between doc-01's choose-ColdPath and doc-05's revert. Both `status: live` (conf 0.5 and 0.4622). **G1** |
 | 18 | **EP per object** | ✅ | ⚠️ flat | ✅ | `ep_state: measured` on every statement; `confidence_mean` 0.5 for almost all, 0.3294/0.4622 on contested ones; `variance` ≈ 0.083. `contested: true` on **every** statement including uncontested ones — the flag does not discriminate |
 
-**Score: 14 of 18 elements fully correct and traceable. Two structural classes missing (14, 17), one
-retrieval failure (6), one confidence field that does not discriminate (18).**
+**Score: 14 of 18 elements fully correct and traceable. One structural class missing (17), one
+structural class present but **inverted** (14), one retrieval failure (6), one confidence field that
+does not discriminate (18).**
 
 ---
 
@@ -385,16 +387,46 @@ This is the difference between "an operating model" and "a pile of true sentence
 business": the model must know that the current partner is NordicFreight *because* ColdPath was
 rejected, not hold both.
 
-### G2 — role → object `performs`/`owns` is never emitted
+### G2 — the role → object `ownedBy` relation IS emitted, in the INVERTED orientation
 
-Doc-04 is entirely "who owns what", and the required relation class from the brief does not appear.
-Ownership survives only as statement text with a `subject`; there is no Object endpoint and no
-`owns`/`performs`/`managedBy` edge from a person to the thing they own. (Three structural `managedBy`
-edges do exist — on the extractor's own internal entities, not on the corpus's ownership facts:
-`relation_write.write_paths.structural = 3`.)
+An earlier revision of this section claimed the class was never emitted. That was **false, and its
+own receipt says so**: the run wrote **8 `ownedBy` rows** with `write_path: "structural"` — **7**
+from doc-04 (the "who owns what" document) and **1** from doc-03 — every one of them
+`predicate: "ownedBy"` with `direction: null` (`out/ingest-receipt.json` →
+`documents[3].result.relation_write.edges`).
 
-The corpus is unambiguous ("Marta Reyes owns the cold-chain temperature log") and the extractor read
-it correctly. It has no output section for it.
+| edge (`ingest-receipt.json`) | `src` resolved | `dst` resolved |
+|---|---|---|
+| doc-04 `1a21036f576-4ff0e1fbd786` → `1a21038124d-aa5c6c6cfc8f` | **subject** "Marta Reyes", `kind: core:naturalPerson` | **object** "cold-chain temperature log", `entity_type: object` |
+| doc-04 `1a21036f586-adbeff52ccd8` → `1a210381266-cfc6aa838e51` | **subject** "Dev Patel", `core:naturalPerson` | **object** "capital spending approvals", `entity_type: object` |
+| doc-04 ×5, doc-03 ×1 | unresolved — 5 distinct ids (`1a210381241…`, `1a21038125a…`, `1a21037b672…`, `1a2103812b4…`, `1a2103812bf…`) appear only as `dst_id` | — |
+
+Endpoint identity is read off `out/census.json`: `.recall_people.reply.results[0].subject` =
+`{"id": "1a21036f576-4ff0e1fbd786", "name": "Marta Reyes", "kind": "core:naturalPerson"}` and its
+`.related_objects[1]` = `{"id": "1a21038124d-…", "entity_type": "object", "content": "cold-chain
+temperature log"}`; `Dev Patel` and `capital spending approvals` resolve the same way. The remaining
+six `dst_id`s are recorded in the receipt but not returned by any committed read, so **their kind is
+not re-derivable from this bundle** — the two above are, and they are the claim's witness.
+
+**The orientation is inverted.** The repo's convention is that the OWNED thing points at its OWNER:
+`tortoise/pack_registry.py:521` sets `"ownedBy": "->"` and the docstring at `:791-794` states it in
+words — *"`investment --ownedBy--> fund` means the fund owns the investment (`->`)"* — while
+`projection/edges.py:create_owned_by(entity_id, subject_id)` writes
+`entity -[:ownedBy]-> subject` and `sdk._get_owned_entities(subject_id)` traverses
+`(s:Subject)<-[:ownedBy]-(e)`. Schema.org's `owner`/`owns` pair is the same convention (an inverse
+pair, the passive form pointing at the owner). So a row reading
+`Marta Reyes --ownedBy--> the cold-chain temperature log` asserts **the log owns Marta Reyes** — the
+reverse of the corpus sentence, and the reverse of what a reader querying "who owns the log?" gets
+back from `_get_owned_entities`.
+
+Nothing else in the old parenthetical held either: the run wrote exactly **one** `managedBy` row
+(doc-01), and `relation_write.write_paths.structural = 3` is doc-01's *total* structural edge count
+(2 `related` + 1 `managedBy`), not a `managedBy` count. The run's totals are **22 structural / 4
+direct** across the five documents.
+
+So the gap is not "the extractor has nowhere to put ownership" — it has the relation, the endpoints
+and the predicate, and writes them the wrong way round. That is a smaller fix and a worse defect
+than the one this section used to report.
 
 ### G3 — search returns the refuted claim as the best answer
 
@@ -509,9 +541,14 @@ mechanism works — it is the silent subset without a span that matters, and the
    and the drop arm requires the far side to be in *this* capture's payload, which a cross-document
    edge never is. `supersessions: 0` is the symptom; this stage is the cause. *Evidence: G1, G3; §5
    relation table; `expand` on both decision points.*
-2. **Add an output section for ownership.** `role → object performs/owns` is in the brief's required
-   list and in `ONTOLOGY.md`'s predicate set (`ownedBy`, `managedBy`, `performs`), and the extractor
-   reads the sentence correctly. It has nowhere to put it. *Evidence: G2; element 14.*
+2. **Fix the ownership edge's ORIENTATION — the relation is emitted, backwards.** `role → object` is
+   in the brief's required list and in `ONTOLOGY.md`'s predicate set (`ownedBy`, `managedBy`,
+   `performs`), and the extractor reads the sentence and mints both endpoints correctly. What it gets
+   wrong is the order: its 8 rows run person → object, which under
+   `SEMANTICS_DIRECTIONS["ownedBy"] = "->"` asserts *the object owns the person*. Canonicalise the
+   endpoints so the owned thing points at its owner (or pin the direction explicitly); do **not** add
+   a new output section — the section exists and writes the wrong direction. *Evidence: G2;
+   element 14.*
 3. **Rank extracted claims above raw episodic turns, or separate the two lists.** `tortoise_search`
    returning `[user] And the auditor?` beside a verified claim is a precision failure a caller cannot
    correct without knowing the `[user]`/`[assistant]` convention. *Evidence: G4; the constraint and
@@ -621,10 +658,12 @@ looked self-described while holding no provenance block at all. The receipt is k
 block rather than deleted.
 
 ⚠️ **What the new `ok` verdicts guarantee, and what they do not.** Every phase now returns non-zero
-and writes `ok: false` when its target did not resolve or its relation read came back empty, so the
-*script* can no longer report success over a failed read. No exit code can stop an operator from
-committing a receipt a failing run wrote; the residual is that a human `git add` after a non-zero exit
-is still possible, which is why `ok` travels inside the receipt where the contradiction is visible.
+and writes `ok: false` when its work failed — a target that did not resolve, a relation read that
+came back empty, a tool call that refused (`run_census2.py`), or a capture that raised
+(`run_ingest.py`, recorded per document) — so the *script* can no longer report success over a failed
+read. No exit code can stop an operator from committing a receipt a failing run wrote; the residual
+is that a human `git add` after a non-zero exit is still possible, which is why `ok` travels inside
+the receipt where the contradiction is visible.
 
 ### What this bundle does not establish
 

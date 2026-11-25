@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -456,9 +457,13 @@ def test_an_empty_relation_read_is_a_non_zero_exit_not_just_a_printed_finding():
     assert census.verdict({"relation_read_findings": ["no decision point"]}) == 1
 
     # The WIRING, by AST: deleting the `verdict(...)` return from `run()` reds
-    # here rather than silently restoring the always-zero exit.
+    # here rather than silently restoring the always-zero exit. `run_census2` joined
+    # this loop in #14606 round 2: it was outside it by construction, which is how a
+    # declared-but-never-written `ok` survived review (`run_ingest`'s `main` is graded
+    # by its own test below).
     import ast
-    for module in (readback, census3, census):
+    census2 = _real_driver("run_census2.py")
+    for module in (readback, census3, census, census2):
         tree = ast.parse(Path(module.__file__).read_text())
         run_fn = next(node for node in tree.body
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -490,6 +495,10 @@ def test_every_receipt_declares_that_its_producer_did_not_write_it():
     assert blocks["census3.json"]["missing_producer_keys"] == [
         "graph", "provenance", "ok", "resolved"]
     assert len(blocks["census3.json"]["hardcoded_point_ids"]) == 2
+    assert blocks["census2.json"]["missing_producer_keys"] == [
+        "graph", "provenance", "ok"], (
+        "`ok` is a key the producer now WRITES (`verdict`), so this list is exactly the "
+        "gap a re-run closes — a phantom entry here could never come true")
     assert blocks["readback.json"]["missing_producer_keys"] == [
         "provenance", "ok", "decision_probe_findings"]
     # `census.json`'s `provenance` key was a CALL RECEIPT, not a block. The shape
@@ -499,6 +508,147 @@ def test_every_receipt_declares_that_its_producer_did_not_write_it():
     assert census["provenance"]["renamed_receipt_key"] == (
         "provenance -> confidence_provenance_read")
     assert census["confidence_provenance_read"]["tool"] == "tortoise_check_confidence"
+
+
+# ── #14606 round 2, finding 2 (P1): G2's defect is an INVERTED edge, not an absent one ──
+
+
+def test_g2_reports_the_owned_by_rows_its_own_receipt_carries():
+    """REDS IF G2 goes back to "never emitted", or the receipt drifts under it.
+
+    Measured pre-fix (this round's review, finding 2): §G2 said *"there is no Object
+    endpoint and no `owns`/`performs`/`managedBy` edge from a person to the thing they
+    own"* while `out/ingest-receipt.json` carries **8** `ownedBy` rows with
+    `write_path: "structural"` — 7 in doc-04 and 1 in doc-03 — two of them resolving
+    to a `core:naturalPerson` Subject pointing at an `object`. The prose arm reds on
+    that text; the artifact arms red if a re-run drops or renames the rows.
+    """
+    docs = _artifact("ingest-receipt.json")["documents"]
+    edges = [edge for doc in docs
+             for edge in ((doc.get("result") or {}).get("relation_write") or {})
+             .get("edges") or []]
+    owned = [edge for edge in edges if edge["predicate"] == "ownedBy"]
+    assert len(owned) == 8, "the ownership rows moved — re-read, do not edit"
+    assert all(edge["write_path"] == "structural" for edge in owned)
+    assert all(edge["direction"] is None for edge in owned), (
+        "with no declared direction, `SEMANTICS_DIRECTIONS['ownedBy']` is the only reading")
+    per_doc = [sum(1 for edge in (((doc.get("result") or {}).get("relation_write") or {})
+                                 .get("edges") or [])
+                    if edge["predicate"] == "ownedBy") for doc in docs]
+    assert per_doc == [0, 0, 1, 7, 0], per_doc
+    # The old parenthetical's arithmetic was wrong in both directions.
+    assert sum(1 for edge in edges if edge["predicate"] == "managedBy") == 1
+    assert sum(1 for edge in edges if edge["write_path"] == "structural") == 22
+    assert sum(1 for edge in edges if edge["write_path"] == "direct") == 4
+
+    # Two rows have BOTH endpoints re-derivable from the committed artifacts.
+    pairs = set()
+    for row in _artifact("census.json")["recall_people"]["reply"]["results"]:
+        subject = row.get("subject") or {}
+        for obj in row.get("related_objects") or []:
+            if subject.get("kind") == "core:naturalPerson" and obj.get("entity_type") == "object":
+                pairs.add((subject["id"], obj["id"], subject["name"], obj["content"]))
+    assert ("1a21036f576-4ff0e1fbd786", "1a21038124d-aa5c6c6cfc8f",
+            "Marta Reyes", "cold-chain temperature log") in pairs
+    assert ("1a21036f586-adbeff52ccd8", "1a210381266-cfc6aa838e51",
+            "Dev Patel", "capital spending approvals") in pairs
+    assert {("1a21036f576-4ff0e1fbd786", "1a21038124d-aa5c6c6cfc8f"),
+            ("1a21036f586-adbeff52ccd8", "1a210381266-cfc6aa838e51")} <= {
+        (edge["src_id"], edge["dst_id"]) for edge in owned}, (
+        "the resolved person→object pairs must BE receipt rows, not a paraphrase of them")
+
+    # The convention that makes person→object read as "the object owns the person".
+    registry = (REPO / "tortoise" / "pack_registry.py").read_text()
+    assert '"ownedBy": "->"' in registry
+    assert "means *the fund owns the investment*" in registry
+    sdk = (REPO / "tortoise" / "sdk.py").read_text()
+    assert 'MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100' in sdk
+
+    report = _report()
+    g2 = report.split("### G2")[1].split("### G3")[0]
+    assert "is never emitted" not in g2, "G2 must not restore the claim its receipt refutes"
+    assert "inverted" in g2.lower()
+    assert "8 `ownedBy` rows" in g2
+    assert "the log owns Marta Reyes" in g2
+    assert "no `owns`/`performs`/`managedBy` edge from a person" not in report
+    assert "Three structural `managedBy`" not in report
+    assert "does not emit the role→object" not in report, "the headline state is withdrawn"
+
+    # §5's required-class row and §6's element 14 must not restate the absent claim.
+    section5 = report.split("### Required relation classes")[1].split("### Were any")[0]
+    assert "ABSENT" not in section5.split("cross-document")[0], (
+        "the ownership row is emitted, so it cannot read ABSENT")
+    element14 = next(line for line in report.splitlines() if line.startswith("| 14 |"))
+    assert "INVERTED" in element14
+
+
+# ── #14606 round 2, finding 4 (P2): a producer that DECLARES a verdict writes one ──
+
+
+def test_census2_computes_the_verdict_it_declares_and_exits_on_it():
+    """REDS IF `run_census2.py` goes back to `return 0` with `ok` in WRITTEN_KEYS.
+
+    Measured pre-fix: `WRITTEN_KEYS` listed `ok`, the producer never wrote it (so
+    `census2.json`'s `missing_producer_keys` reports a key a re-run cannot supply and
+    the stamp can never come true) and `run()` returned 0 unconditionally — the same
+    fail-open shape the other three producers were changed to close.
+    """
+    census2 = _real_driver("run_census2.py")
+    assert "ok" in census2.WRITTEN_KEYS, "`ok` must stay declared AND be written"
+
+    def receipt(key, reply, ok=True):
+        return {key: {"tool": "t", "args": {}, "ok": ok, "reply": reply}}
+
+    good = {}
+    for key, reply in (("claims", {"results": [{"id": "a"}], "total": 1}),
+                       ("conf_one", {"result": [{"id": "b"}]}),
+                       ("structure", {"result": []})):
+        good.update(receipt(key, reply))
+    assert census2.verdict(good) == 0, (
+        "an empty `structure` reply is the validator answering NOTHING TO REPORT")
+    assert census2.verdict({**good, "claims": {"ok": False, "reply": None,
+                                              "tool": "t", "args": {}}}) == 1
+    assert census2.verdict({**good, "conf_one": {"ok": True, "reply": [],
+                                                "tool": "t", "args": {}}}) == 1
+    assert census2.verdict({key: good[key] for key in ("claims", "conf_one")}) == 1, (
+        "a phase that never ran is not a phase that succeeded")
+
+    # The WIRING, by AST: `run()` must compute AND return the verdict and write `ok`.
+    import ast
+    tree = ast.parse(Path(census2.__file__).read_text())
+    run_fn = next(node for node in tree.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name == "run")
+    source = ast.unparse(run_fn)
+    assert "verdict(" in source
+    assert "out['ok'] = code == 0" in source, source[-400:]
+    returned = {ast.unparse(node.value) for node in ast.walk(run_fn)
+                if isinstance(node, ast.Return) and node.value is not None}
+    assert returned == {"code"}, returned
+
+
+def test_run_ingest_returns_non_zero_when_a_capture_recorded_not_ok():
+    """REDS IF `run_ingest.py` returns 0 over a corpus whose capture raised.
+
+    Measured pre-fix: a document whose capture raised was recorded `ok: False` and
+    `main()` still returned 0, so the phase that produces every later phase's input
+    could report success over a corpus it never wrote.
+    """
+    ingest = _real_driver("run_ingest.py")
+    assert ingest.verdict({"documents": [{"ok": True}, {"ok": True}]}) == 0
+    assert ingest.verdict({"documents": [{"ok": True}, {"ok": False}]}) == 1
+    assert ingest.verdict({"documents": []}) == 1, "a receipt with no document is not a run"
+
+    import ast
+    tree = ast.parse(Path(ingest.__file__).read_text())
+    main_fn = next(node for node in tree.body
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and node.name == "main")
+    source = ast.unparse(main_fn)
+    assert "verdict(" in source
+    returned = {ast.unparse(node.value) for node in ast.walk(main_fn)
+                if isinstance(node, ast.Return) and node.value is not None}
+    assert "code" in returned, returned
 
 
 def test_a_producer_written_block_is_never_stamped_over():
@@ -553,3 +703,14 @@ def test_the_bundle_is_registered_in_the_docs_index():
     """
     index = (REPO / "docs" / "00_index.md").read_text()
     assert "docs/evidence/14592-operating-model-validation/REPORT.md" in index
+    row = next(line for line in index.splitlines()
+               if "docs/evidence/14592-operating-model-validation/REPORT.md" in line)
+    # REDS IF the row cites a gap the report does not define (`G12` was cited for a
+    # section REPORT.md does not carry), or restates a READ-side duplicate as a WRITE.
+    assert "G12" not in row
+    assert "writes one operator TWICE" not in row
+    report = _report()
+    cited = {f"G{n}" for n in re.findall(r"\*\*G(\d+)\*\*", row)}
+    missing = sorted(gap for gap in cited if f"### {gap} " not in report)
+    assert not missing, f"the index cites gaps the report does not define: {missing}"
+    assert "never emitted" not in row, "the index restated the G2 claim its receipt refutes"
