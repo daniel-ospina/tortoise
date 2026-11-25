@@ -340,6 +340,29 @@ def test_the_hook_matcher_is_not_vacuous():
     assert "other_call" not in found, (
         "an unrelated callee was matched as the hook — the matcher is no longer "
         "prefix-scoped to the hook's own name")
+
+    # ⛔ The door-side HELPER has its own arm (`_HOOK_HELPERS`), and an arm that
+    # nothing asserts is an arm a later reader reverts: measured at the reviewed
+    # head (#14587 review P3), restoring the prefix-only matcher left this test
+    # and the absence pin below BOTH green, while wiring `sdk._graph_create` to
+    # the helper no longer reddened anything.
+    helper = ast.parse(
+        "def door():\n"
+        "    _provision_default_graph_record(o, g)\n"
+        "    helper(g)\n"
+        "    provision(g)\n").body[0]
+    helper_found = set(_hook_call_names(helper))
+    assert "_provision_default_graph_record" in helper_found, (
+        f"the matcher answered {sorted(helper_found)} — it does not count the "
+        "door-side helper that `_HOOK_HELPERS` names. That helper is what "
+        "`sdk._graph_create` and `_membership_remove` must NOT call (their arm's "
+        "`public.graphs` row does not exist: no FK parent, every seed refused), so "
+        "a prefix-only matcher leaves the absence pin green over the exact wiring "
+        "it exists to forbid")
+    assert not ({"helper", "provision"} & helper_found), (
+        f"a near-name was counted as a hook call: {sorted(helper_found)} — the "
+        "helper arm must name `_provision_default_graph_record`, not any call "
+        "that contains `provision`")
     # ⛔ DECLARED over-match, asserted so it cannot drift silently in either
     # direction: any callee whose name STARTS with the hook's name counts as a call
     # to it (fail-closed — a renamed hook is caught, at the price of an unrelated
@@ -427,13 +450,22 @@ def _is_graphs_insert(node: ast.AST) -> bool:
     """Does this node INSERT a `public.graphs` row through the control plane?
 
     The shape is `cp.query("graphs", method="POST", json_body=…)` — matched
-    structurally (table + method as constants), so a differently-named
-    transport is still seen and a POST to any other table is not.
+    structurally (table + method as constants), so a POST to any other table is
+    not a mint.
+
+    ⛔ ANY `query*` METHOD COUNTS, not just the exact spelling `query` (#14587
+    review P2): the control plane carries `query_with_total`, which takes the same
+    `method="POST"`, and an exact-name test shipped with a docstring claiming "a
+    differently-named transport is still seen" while a mint through that verb was
+    invisible. What the matcher does NOT see, stated so the pin's promise is not
+    read as more than it is: a BOUND-METHOD ALIAS (`q = cp.query; q(...)`), which
+    needs dataflow this pin does not have. The residual is listed on the pin.
     """
     if not isinstance(node, ast.Call):
         return False
     func = node.func
-    if not (isinstance(func, ast.Attribute) and func.attr == "query"):
+    if not (isinstance(func, ast.Attribute)
+            and func.attr.startswith("query")):
         return False
     table = node.args[0] if node.args else next(
         (kw.value for kw in node.keywords if kw.arg == "table"), None)
@@ -444,17 +476,25 @@ def _is_graphs_insert(node: ast.AST) -> bool:
     return isinstance(method, ast.Constant) and method.value == "POST"
 
 
-def _enclosing_sites(predicate) -> dict[tuple[str, str], list[ast.AST]]:
-    """`{(module, INNERMOST enclosing function): [matching nodes, source order]}`
-    for every call in `tortoise/**` that `predicate` accepts.
+def _enclosing_sites(predicate) -> dict[tuple[str, str],
+                                        tuple[ast.AST, list[ast.AST]]]:
+    """`{(module, INNERMOST enclosing function): (function node, [matches])}` for
+    every call in `tortoise/**` that `predicate` accepts.
 
     Innermost on purpose: a mint inside a nested helper is reported as that
     helper, which is the thing a reader has to classify, not its outer shell.
     The LIST is what lets :func:`_mint_sites` key site by site (see
     :data:`_GRAPH_MINT_SITES`): one function can carry several INSERTs, and
     collapsing them to one key is how a new arm hid behind a neighbour's hook.
+
+    ⛔ THE FUNCTION NODE IS RETURNED BY IDENTITY, and a caller must use it rather
+    than look the name up in `_functions(rel)`: that dict is `{name: node}` with
+    the LAST walk winning, so in a module carrying two same-named defs (a
+    module-level function and a method) a name lookup graded the WRONG body and
+    reported a hooked site over a function that never calls the hook (#14587
+    review P2 — a weakening introduced by an earlier revision of this pin).
     """
-    per: dict[tuple[str, str], list[ast.AST]] = {}
+    per: dict[tuple[str, str], tuple[ast.AST, list[ast.AST]]] = {}
 
     def walk(rel: str, node: ast.AST, current: ast.AST | None) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -463,7 +503,18 @@ def _enclosing_sites(predicate) -> dict[tuple[str, str], list[ast.AST]]:
             assert current is not None, (
                 "a `public.graphs` INSERT outside any function — this pin cannot "
                 "attribute it to a door")
-            per.setdefault((rel, current.name), []).append(node)
+            owner, sites = per.setdefault((rel, current.name), (current, []))
+            # ⛔ Two defs sharing a name in one module make `(module, name)`
+            # ambiguous: the key would collapse their sites and grade whichever
+            # node the walk met first — measured as a GREEN over an unhooked mint
+            # (#14587 review P2). Fail closed instead; a duplicate name is not a
+            # shape this census can key, and it does not occur in the tree today.
+            assert owner is current, (
+                f"{rel} defines `{current.name}` more than once, so this pin "
+                "cannot key a mint inside it — the site would be attributed to "
+                "the other def's body. Rename one, or give the census a "
+                "disambiguator before adding the duplicate")
+            sites.append(node)
         for child in ast.iter_child_nodes(node):
             walk(rel, child, current)
 
@@ -473,17 +524,21 @@ def _enclosing_sites(predicate) -> dict[tuple[str, str], list[ast.AST]]:
     return per
 
 
-def _mint_sites() -> dict[tuple[str, str, int], ast.AST]:
-    """Every `public.graphs` INSERT, keyed BY SITE — `(module, function, ordinal)`.
+def _mint_sites() -> dict[tuple[str, str, int], tuple[ast.AST, ast.AST]]:
+    """Every `public.graphs` INSERT, keyed BY SITE — `(module, function, ordinal)`,
+    carrying `(insert node, THE enclosing function node)`.
 
     The ordinal is source order within the function, so adding a second mint to a
     function whose first mint is already declared produces a NEW key that the
     declaration table does not hold, and the pin reds. That is the whole point of
     the third component: function-level keys let a new arm inherit its
-    neighbour's hook (measured, #14587 review P2).
+    neighbour's hook (measured, #14587 review P2). The function node travels with
+    the site so the `hooked` check grades the body that CONTAINS it — see
+    :func:`_enclosing_sites` on why a name lookup is not the same thing.
     """
-    return {(rel, fn, idx): node
-            for (rel, fn), nodes in _enclosing_sites(_is_graphs_insert).items()
+    return {(rel, fn, idx): (node, owner)
+            for (rel, fn), (owner, nodes)
+            in _enclosing_sites(_is_graphs_insert).items()
             for idx, node in enumerate(nodes)}
 
 
@@ -508,14 +563,40 @@ def test_every_graph_minting_site_is_declared():
     A mint that is not hooked (and not a helper whose every caller is) creates a
     graph with no cursor row — the user's writes succeed, the record accumulates
     nothing for that graph, and `/health` reads green until the graph's first
-    refused write. This enumerates the INSERTs themselves, so the next arm added
-    anywhere under `tortoise/` reds HERE instead of shipping as a silent gap.
+    refused write. This enumerates the INSERTs themselves, so a new mint site
+    under `tortoise/` reds HERE instead of shipping as a silent gap.
 
     Two closes for a red: HOOK it, or declare it a named residual with a tracked
     issue and its reason (which is what `_UNHOOKED` does for the doors that must
     NOT be hooked). What is not a close is leaving it out of the table.
+
+    ⛔ WHAT THIS PIN CANNOT SEE, stated here so its green is not read as more than
+    it is (#14587 review, two rounds). It is a STATIC, PER-SITE census — it cannot
+    follow control flow or dataflow, so it does not prove that the hook runs on
+    the arm that minted: a site declared `hooked` whose function calls the hook on
+    a DIFFERENT arm (one that returns before it) is green here. Neither can it see
+    a mint through a BOUND-METHOD ALIAS (`q = cp.query; q(...)`). What covers
+    those is behavioural, not structural:
+    `test_a_rename_that_mints_the_default_row_provisions_it`,
+    `test_a_recording_override_that_mints_the_default_row_provisions_it` and the
+    convergent-adopt pins assert the hook is called for the id that became durable
+    on every minting arm of both minters.
     """
     measured = _mint_sites()
+    # Closed set: a typo'd or invented verdict must not read as coverage. The two
+    # arms below compare `== "hooked"` / `== "delegated"`, so `"Hooked"` or
+    # `"hooked "` would silently exempt a site from BOTH checks.
+    known = {verdict for verdict in _GRAPH_MINT_SITES.values()
+             if verdict in {"hooked", "delegated"}}
+    unknown = sorted({
+        verdict for verdict in _GRAPH_MINT_SITES.values()
+        if verdict not in {"hooked", "delegated"}
+        and not verdict.startswith("residual:")})
+    assert not unknown, (
+        f"_GRAPH_MINT_SITES carries verdicts outside the closed set "
+        f"{sorted(known)} / `residual:<issue> — <why>`: {unknown}. An unrecognised "
+        "spelling exempts the site from both arms below, which is how a pin over a "
+        "typo'd table reads green over an unhooked mint")
     undeclared = sorted(set(measured) - set(_GRAPH_MINT_SITES))
     assert not undeclared, (
         f"these functions INSERT a `public.graphs` row and are NOT in "
@@ -532,9 +613,10 @@ def test_every_graph_minting_site_is_declared():
         "table to the measured set rather than leaving a name that outlived its "
         "mint")
 
-    unhooked = [f"{rel}::{fn}#{idx}" for (rel, fn, idx), _node in measured.items()
+    unhooked = [f"{rel}::{fn}#{idx}"
+                for (rel, fn, idx), (_node, owner) in measured.items()
                 if _GRAPH_MINT_SITES[(rel, fn, idx)] == "hooked"
-                and not _calls_a_door_hook(_functions(rel)[fn])]
+                and not _calls_a_door_hook(owner)]
     assert not unhooked, (
         f"these `public.graphs` minters are declared `hooked` and call no "
         f"creation hook: {unhooked} — the declaration is now the lie the defect "
@@ -542,7 +624,7 @@ def test_every_graph_minting_site_is_declared():
 
     doors = {(rel, fn) for rel, fn, _callee in _DOORS}
     unprovisioned = sorted(
-        site for (rel, fn, _idx), _node in measured.items()
+        site for (rel, fn, _idx), (_node, _owner) in measured.items()
         if _GRAPH_MINT_SITES[(rel, fn, _idx)] == "delegated"
         for site in _call_sites(fn) - doors)
     assert not unprovisioned, (
@@ -579,6 +661,14 @@ def test_the_mint_census_is_not_vacuous():
     assert not _is_graphs_insert(_first_call(
         "def f(cp):\n    cp.query('api_keys', method='POST', json_body={})\n"
     )), "a POST to another table must not be counted as a graph mint"
+    # ⛔ Any `query*` verb counts, not just the spelling `query` (#14587 review P2:
+    # `query_with_total` takes the same `method="POST"` and was invisible).
+    assert _is_graphs_insert(_first_call(
+        "def f(cp):\n"
+        "    cp.query_with_total('graphs', method='POST', json_body=row)\n"
+    )), ("a mint through `query_with_total` is no longer recognised — it is a real "
+         "control-plane verb taking method='POST', so a mint through it would be "
+         "invisible to the census")
     # And the census really does see the two arms the #14587 review found.
     measured = set(_enclosing_sites(_is_graphs_insert))
     assert {("tortoise/supabase_control.py", "set_graph_name"),
