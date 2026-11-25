@@ -294,6 +294,26 @@ def _read_json(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _js_falsy(value: object) -> bool:
+    """JS truthiness for the values a JSON config can carry.
+
+    ⛔ The harness predicate is ``typeof … !== "string" && !!…``, and `!!` is
+    JAVASCRIPT truthiness. Python's differs on exactly the empty containers:
+    `!![]` and `!!{}` are TRUE in JS (so the harness DROPS the whole entry), while
+    `[]`/`{}` are falsy in Python — so a Python-truthy guard read them as "absent"
+    and kept an entry the harness had thrown away, which is the false PASS this
+    guard exists to close. The falsy scalars are the shared set: null/undefined,
+    false, 0/-0/NaN and the empty string.
+    """
+    if value is None or value is False:
+        return True
+    if isinstance(value, str):
+        return value == ""
+    if isinstance(value, (int, float)):
+        return value == 0 or value != value          # 0, -0, NaN
+    return False
+
+
 def read_entry(harness: str, *, project_dir: Path | None = None
                ) -> tuple[str | None, dict | None, list[str], str]:
     """Find the `tortoise` entry the harness would load, MERGED across layers.
@@ -379,7 +399,9 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         for field in ("url", "command"):
             if field in entry:
                 value = entry[field]
-                if value and not isinstance(value, str):
+                if isinstance(value, str):
+                    continue
+                if not _js_falsy(value):
                     return True
         return False
 
@@ -395,6 +417,12 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         for field in ("url", "command"):
             if field in clean and not clean[field]:
                 clean.pop(field)
+            elif isinstance(clean.get(field), str) and not clean[field].strip():
+                # Whitespace-only is not a transport either: `new URL("   ")`
+                # throws, so the harness cannot load it, while a truthy string
+                # selected http and `declared_endpoint` returned None — so the
+                # probe graded the CLIENT-resolved endpoint and printed `OK`.
+                clean.pop(field)
         return clean
 
     # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
@@ -403,13 +431,19 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     if _unloadable(base_entry):
         base_entry = {}          # the harness DROPS an entry with a bad transport
     merged: dict = _sanitized(base_entry)
+    # ⛔ "There is no inherited entry" is a FACT that must survive: when the base
+    # was dropped (or sanitised to nothing), a more specific layer is no longer a
+    # delta over anything, and the harness then KEEPS a repo-only entry that
+    # declares both transports (it runs over `url`). Losing this flag made exactly
+    # that case a false `command-missing` on a config the harness loads.
+    has_base = bool(merged.get("url") or merged.get("command"))
     for _source, delta in reversed(layers[:-1]):
         if _unloadable(delta):
             continue             # a dropped delta leaves the base standing
         delta = _sanitized(delta)
         declares_http = bool(delta.get("url"))
         declares_stdio = bool(delta.get("command"))
-        if declares_http and declares_stdio:
+        if declares_http and declares_stdio and has_base:
             # Ambiguous DELTA over an existing entry: ignored whole, as the harness
             # does. ⛔ NOT the same case as a repo-only entry declaring both, which
             # the harness KEEPS and runs over `url` (dropping it would zero a
@@ -417,10 +451,14 @@ def read_entry(harness: str, *, project_dir: Path | None = None
             # copy above, and skipping it here was a false `command-missing`.
             continue
         merged.update(delta)
-        if declares_stdio:
+        # ⛔ Only when the layer declares EXACTLY ONE transport. A kept repo-only
+        # entry declaring both must stay whole — the harness runs it over `url`, and
+        # popping `url` here because `command` is also present turned that documented
+        # case into a stdio verdict on a config that loads over http.
+        if declares_stdio and not declares_http:
             for field in HTTP_TRANSPORT_FIELDS:
                 merged.pop(field, None)
-        elif declares_http:
+        elif declares_http and not declares_stdio:
             for field in STDIO_TRANSPORT_FIELDS:
                 merged.pop(field, None)
     if not merged.get("url") and not merged.get("command"):
@@ -1016,8 +1054,20 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
     static = classify(harness, project_dir=project_dir)
     if not live or static.status not in (OK, RESOLVES_UNPROBED):
         return static
-    probed = probe(project_dir=project_dir,
-                   url=declared_endpoint(harness, project_dir=project_dir))
+    endpoint = declared_endpoint(harness, project_dir=project_dir)
+    if endpoint is None and static.transport == "http":
+        # ⛔ DEFENSIVE: an http entry whose endpoint cannot be read must not fall back
+        # to the CLIENT-resolved endpoint. That fallback is precisely how a config the
+        # harness cannot load came back `OK — live call succeeded`; whatever got past
+        # the static pass, the probe may not invent a target.
+        return Verdict(
+            status=PROBE_UNKNOWN,
+            detail=("the entry is http but declares no readable endpoint, so there "
+                    "is nothing to probe — an abstention, not a pass"),
+            fix="re-register it: `tortoise onboard --harness " + harness + "`",
+            source=static.source, transport=static.transport,
+            configs_read=static.configs_read)
+    probed = probe(project_dir=project_dir, url=endpoint)
     # Keep the config provenance the static pass found: the probe does not read
     # the harness file, so dropping it would lose "which file did I load" — and
     # the probe always speaks HTTP to the endpoint even when the ENTRY is stdio

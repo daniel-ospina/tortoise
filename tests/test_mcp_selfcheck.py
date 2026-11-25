@@ -1365,3 +1365,54 @@ def test_a_non_string_transport_is_unloadable_not_a_live_transport(project, monk
         verdict = mcp_selfcheck.classify("pi", project_dir=project)   # must not raise
         assert verdict.status == mcp_selfcheck.COMMAND_MISSING, (entry, verdict.line())
         assert not verdict.ok and verdict.exit_code != 0
+
+
+# ── JS truthiness: `[]` and `{}` are TRUTHY, so the harness drops the entry ──
+
+def test_empty_container_transports_are_unloadable_like_the_harness_says(
+        project, monkeypatch):
+    """`!![]` and `!!{}` are TRUE in JS — Python reads both as falsy.
+
+    The harness predicate is `typeof … !== "string" && !!…`, so those entries are
+    DROPPED; a Python-truthy guard read them as absent and kept an entry the harness
+    had thrown away, which is the false PASS this whole guard exists to close.
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    for entry in ({"url": []}, {"url": {}}, {"command": []}, {"command": {}}):
+        _write_config(project, entry)
+        verdict = mcp_selfcheck.classify("pi", project_dir=project)
+        assert verdict.status == mcp_selfcheck.COMMAND_MISSING, (entry, verdict.line())
+        assert not verdict.ok
+
+
+def test_a_blank_url_is_not_a_transport_and_cannot_be_probed(project, monkeypatch):
+    """Whitespace-only selects http but resolves to no endpoint — must not probe."""
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    _write_config(project, {"url": "   "})
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.status != mcp_selfcheck.OK, verdict.line()
+    assert not verdict.ok and verdict.exit_code != 0
+
+
+def test_a_kept_repo_only_entry_survives_a_DROPPED_base(tmp_path, monkeypatch):
+    """"There is no inherited entry" must survive the base being dropped.
+
+    With the base dropped, a repo entry declaring both transports is no longer a
+    delta — the harness KEEPS it and runs over `url`, while the verifier reported
+    `command-missing` on a config that loads.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "http", "url": ["bad-transport"]}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "url": "https://api.premiselabs.co/mcp/", "command": "python3"}}}),
+        encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
+    assert verdict.transport == "http", verdict.line()

@@ -466,12 +466,14 @@ protocol below BEFORE writing):
 { "mcpServers": { "tortoise": { "command": "python3", "args": ["-m", "tortoise.mcp_bridge"], "env": { "TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/" } } } }
 ```
 
-(`type` is deliberately absent: the harness dispatches on `command`/`url`, and a
-`type` field is an agreement constraint rather than a selector — `tortoise
-mcp-status` grades the merge the same way.)
+(`type` may be omitted here: the harness dispatches on `command`/`url` — a `type`
+field is an agreement constraint rather than a selector, and `tortoise mcp-status`
+grades the merge the same way. Note `tortoise onboard` DOES add a `type: stdio`
+field and a `_comment` to the entry it installs, so what it writes is this block
+plus those two fields; a Cursor entry is written without any type.)
 
-⛔ **This is the SAME entry `tortoise onboard --harness pi` writes, and it is
-deliberately credential-free.** The older recipe here expanded
+⛔ **This is the entry `tortoise onboard --harness pi` installs (see above), and it
+is deliberately credential-free.** The older recipe here expanded
 `${TORTOISE_API_KEY}` in an `Authorization` header; that is a **capture** — the
 value is frozen at the harness's process start, an unset variable expands to an
 empty bearer the server can only answer `-32001`, and a rotated key changes
