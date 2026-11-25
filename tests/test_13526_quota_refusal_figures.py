@@ -868,10 +868,12 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
     #:   property of the START time on any day, not of the month end (month end
     #:   is only the subset where the midnight crossing also crosses the month).
     #:   The year-crossing shift exposes it regardless;
-    #: * a SUB-DAY pin is the inverse — `replace(hour=2)` moves exactly 0 s under
-    #:   `+6h` (caught there) and exactly the shift under `+405d`, because 405
-    #:   days is a whole number of days, so the year-crossing shift does NOT
-    #:   catch it.
+    #: * a SUB-DAY pin is the inverse — `replace(hour=2)` moves 0 s under `+6h`
+    #:   when the start is before 18:00Z, and a whole day (86400 s) once that
+    #:   shift rolls the date, because the retained hour then lands on the NEXT
+    #:   date; it is caught either way. Under `+405d` it moves exactly the shift,
+    #:   because 405 days is a whole number of days, so the year-crossing shift
+    #:   does NOT catch it.
     #:
     #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
     #: one is the real test": doing so silently stops catching sub-day pins, and
