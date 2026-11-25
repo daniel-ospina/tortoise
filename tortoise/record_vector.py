@@ -267,7 +267,7 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: operator shape that carries a vector at all — measured on a scratch graph
 #: (`tests/test_14560_operator_vectors.py`, with the docker lane's URI): a
 #: `create_operator` Point lands NO
-#: `embedding` in either store (operators store no content, `#548`), while a hybrid
+#: VECTOR in either store (operators store no content, `#548`), while a hybrid
 #: Point lands one in the graph AND journals it, so its record row is filled by the
 #: same write.
 #:
@@ -286,9 +286,17 @@ GRAPH_KIND_FILTER: dict[str, str] = {
 def graph_kind_filter(entity_type: str) -> str:
     """The graph-node predicate narrowing ``entity_type``'s LABEL, or ``""``.
 
-    ``""`` for every entity type that IS its own label (`point`, `object`, `subject`,
-    `event`, `source`, `document`) — a whole-label count is the right population
-    there, so the caller splices nothing.
+    ``""`` for the entity types that ARE their own label (`point`, `object`, `subject`,
+    `event`) — a whole-label count is the right population there, so the caller splices
+    nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason: they
+    are not their own population, they are an UNDECLARED SLICE. :data:`tortoise.security.ENTITY_TYPE_LABELS`
+    maps BOTH to the one `Source` label, and the discriminator that WOULD narrow them —
+    `documentKind` — is deliberately absent from :data:`GRAPH_KIND_FILTER` (see the note
+    above that dict: the pair is not measured as blocking anything, `#14552` read `:Source`
+    at 0 vector-bearing nodes, and adding them is one line when a measurement asks). So
+    ``""`` here is a stated GAP, not a population claim — reading it as "the whole label is
+    this type's population" is the inversion these notes exist to prevent (see
+    :data:`Coverage`).
 
     ⛔ THE RETURNED STRING IS CYPHER SPLICED INTO A STATEMENT, so it must only ever
     come from :data:`GRAPH_KIND_FILTER` — a closed dict keyed by a validated entity

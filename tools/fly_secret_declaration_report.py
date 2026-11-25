@@ -161,9 +161,26 @@ TITLE_SUFFIX = (
 #: fix. ⛔ `\S+` is NOT permissive enough and the earlier spelling was self-refuting:
 #: a WHITESPACE-BEARING name (`A B`) is accepted by `read_fly_secret_names`, filed
 #: under a title `\S+` cannot re-read, and so never resolved — the very
-#: "ledger that can only grow" defect (#8841) this comment claimed to prevent. The
-#: group is NON-GREEDY so a name that itself CONTAINS the suffix still round-trips
-#: to the shortest (i.e. the name's own) spelling.
+#: "ledger that can only grow" defect (#8841) this comment claimed to prevent.
+#:
+#: ⛔ WHAT MAKES A SUFFIX-BEARING NAME ROUND-TRIP IS THE `$` ANCHOR, NOT THE
+#: NON-GREEDINESS — an earlier revision of this comment claimed the opposite and a
+#: review measured it false: with the anchor kept, replacing `(.+?)` by `(.+)` leaves
+#: every row in the suite green (49 passed), because a hard `$` forces the group's
+#: extent either way.
+#:
+#: ⛔ DO NOT CLAIM THE `.+?` SPELLING IS SAFER — two revisions of this comment tried,
+#: and both were measured false. With `$` present the spellings capture IDENTICALLY (a
+#: hard literal `$` forces the group's extent from either end, and the greedy spelling
+#: leaves the suite green). With `$` REMOVED the non-greedy spelling is strictly WORSE:
+#: it truncates a suffix-bearing name (`"BEFORE <suffix> AFTER"` reads back as
+#: `"BEFORE "`) and it FOLDS distinct names onto one read-back (`"A"` and
+#: `"A<suffix> B"` both read back as `"A"`), while `(.+)` round-trips both exactly. So
+#: the non-greedy spelling is retained only because it is what shipped; it carries no
+#: protection of its own, and it is not the safer choice. The anchor does the work — and
+#: if the anchor is ever loosened,
+#: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` reds on the
+#: truncation rather than letting the loss pass unnoticed.
 _TITLE_RE = re.compile(
     r"^" + re.escape(TITLE_PREFIX) + r"(.+?)" + re.escape(TITLE_SUFFIX) + r"$"
 )
