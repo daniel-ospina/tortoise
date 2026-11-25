@@ -1031,7 +1031,7 @@ def test_missing_module_checks_the_dotted_module_not_its_package(
 
 # ── 13 · the CLI lets `default_url()` supply the endpoint ────────────────
 
-def test_the_cli_does_not_hardcode_the_hosted_default(project, monkeypatch):
+def test_the_cli_does_not_hardcode_the_hosted_default(project, monkeypatch, tmp_path):
     """`TORTOISE_MCP_URL` must win at WRITE time on the path users run.
 
     `url=getattr(args,"url",None) or DEFAULT_MCP_URL` meant `onboard` never saw
@@ -1046,6 +1046,20 @@ def test_the_cli_does_not_hardcode_the_hosted_default(project, monkeypatch):
     self_hosted = "http://self-hosted-14607.invalid/mcp"
     monkeypatch.setenv("TORTOISE_MCP_URL", self_hosted)
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_x")
+    # ⛔ `dir=` is a knob the CODE under test resolves, so this arm's sandbox was
+    # only as good as that resolution. Measured while fixing #14607: with
+    # `project_dir=_Path.cwd()` in `_cmd_onboard_harness`, this test wrote its
+    # `.invalid` endpoint into the REPO'S OWN `.mcp.json` and then reported the
+    # FileNotFoundError below — a repo-mutating test whose symptom named the
+    # fixture, not the damage, and whose only real signal was a downstream
+    # `TestCommittedRepoMcpJson` arm going red over a committed config.
+    # ⛔ chdir to an EMPTY scratch dir, NOT to `project`: the write must still land
+    # in `project` only because `dir` was honoured, so a `dir` regression reds here
+    # (the fixture file is absent) instead of passing on a cwd coincidence — and
+    # the damage can only land in scratch, never in the checkout.
+    scratch = tmp_path / "not-the-checkout"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
     args = SimpleNamespace(
         harness="pi", dir=str(project), url=None, dry_run=False, verify=False,
         no_verify=True, no_hooks=True, no_instructions=True, uninstall=False,
