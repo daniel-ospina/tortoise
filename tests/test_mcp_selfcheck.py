@@ -1071,6 +1071,22 @@ def test_a_four_space_indented_example_is_not_ours_either():
             "\n    example body\n    " + harness_onboard.END_MARK +
             "\n    ```\n\nMy own notes: keep.\n")
     assert harness_onboard._markers_well_formed(text) == (True, "")
+
+    # ⛔ AND A CLOSER MAY NOT BE INDENTED MORE THAN ITS OPENER. The same relaxation
+    # applied to the closer makes a fence nested INSIDE an outer one close the outer
+    # one early — then the markers SHOWN IN THE EXAMPLE read as the real block and
+    # `--uninstall` deletes the example's body. Measured: exit 0, no refusal, and the
+    # body gone. None of the four fence arms closed at a deeper indent than their
+    # opener, which is why this stayed green.
+    nested = ("# House rules\n\n```md\nWrite the block inside a list item:\n"
+              "    ```\n    " + harness_onboard.BEGIN_MARK +
+              "\n    our sentences — never delete this example body\n    " +
+              harness_onboard.END_MARK + "\n    ```\n```\n"
+              "\nMy own later notes: never delete this.\n")
+    assert "never delete this example body" in harness_onboard._strip_block(nested), (
+        "a closer indented deeper than its opener closed the OUTER fence early, so the "
+        "markers inside the example were read as the real block and the example body "
+        "was deleted")
     assert "example body" in harness_onboard._strip_block(text), (
         "a 4-space-indented example was deleted")
 

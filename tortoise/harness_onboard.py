@@ -538,9 +538,11 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     open_len = 0
     open_at = 0
     open_line = 0
+    open_indent = 0
     offset = 0
     for number, line in enumerate(text.splitlines(keepends=True), start=1):
         stripped = line.lstrip(" \t")
+        indent = len(line) - len(stripped)
         candidate = stripped[:1]
         run = 0
         while run < len(stripped) and stripped[run] == candidate:
@@ -549,7 +551,17 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
         if open_char is None:
             if is_fence:
                 open_char, open_len, open_at, open_line = candidate, run, offset, number
-        elif is_fence and candidate == open_char and run >= open_len:
+                open_indent = indent
+        # ⛔ A CLOSER MAY NOT BE INDENTED MORE THAN ITS OPENER. The relaxation that
+        # reads an indented fence as a fence (so a doc example in a list item is
+        # left alone) must NOT apply to the closer as well: then a fence nested
+        # INSIDE an outer one closes the OUTER one early, the markers shown in the
+        # example are read as the real block, and `--uninstall` deletes the
+        # example's body — measured, exit 0 with NO refusal, on a doc that fences
+        # the block inside a list item. Erring toward "this is documentation, leave
+        # it" is the only direction that cannot destroy text.
+        elif (is_fence and candidate == open_char and run >= open_len
+              and indent <= open_indent):
             spans.append((open_at, offset + len(line)))
             open_char = None
         offset += len(line)
