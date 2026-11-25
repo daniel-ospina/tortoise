@@ -135,7 +135,12 @@ def _score_rule(merged: list[tuple[str, float]], pass1_ids: set[str],
     it is measured over the WHOLE merged leg, so it cannot saturate the way a
     "did the top row move" boolean does (under both rules the merged head is
     dominated by whatever that rule puts first, which is why a boolean there
-    would read 0.0 for both arms and measure nothing)."""
+    would read 0.0 for both arms and measure nothing).
+
+    ⛔ Every key returned here is one `measure()` CONSUMES. Two keys that merely
+    restated ``pass1_only_retained`` / ``new_admitted`` under a second name sat
+    here unused (found in #14619's review): a counter nothing reads is not a
+    measurement, and it invites a reader to think it was reported."""
     head = [pid for pid, _s in merged[:k]]
     positions = [pid for pid, _s in merged]
     return {
@@ -146,12 +151,6 @@ def _score_rule(merged: list[tuple[str, float]], pass1_ids: set[str],
         "new_admitted": sum(1 for pid in head if pid in expanded_ids
                             and pid not in pass1_ids),
         "pass1_rank0_position": positions.index(pass1_rank0),
-        "pass1_only_rows_in_head": sum(1 for pid in head
-                                       if pid in pass1_ids
-                                       and pid not in expanded_ids),
-        "expansion_only_rows_in_head": sum(1 for pid in head
-                                           if pid in expanded_ids
-                                           and pid not in pass1_ids),
     }
 
 

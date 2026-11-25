@@ -878,3 +878,55 @@ def test_the_published_measurement_table_is_the_committed_receipt():
     assert dropped_violations, (
         "a deleted §2 row went UNREPORTED — a table that publishes fewer `k` "
         "values than the receipt holds must red")
+
+
+def _counters_measure_aggregates(module) -> set[str]:
+    """The counter names `measure()` ACTUALLY accumulates, read off a one-trial
+    run rather than hardcoded — the point is to mirror the aggregation, not to
+    restate it. `n` is dropped: it counts trials, it is not a measurement."""
+    receipt = module.measure(trials_per_shape=1)
+    shape = next(iter(receipt["per_shape"].values()))
+    return set(next(iter(shape["old"].values()))) - {"n"}
+
+
+def test_the_instrument_reports_only_the_counters_it_aggregates():
+    """#14619 review (the non-blocking observation, taken as a defect):
+    `_score_rule` returned `pass1_only_rows_in_head` and
+    `expansion_only_rows_in_head`, cell-for-cell duplicates of
+    `pass1_only_retained` / `new_admitted`, and `measure()` consumed NEITHER.
+
+    Why that is worth a pin rather than a shrug: this tool's whole output is a
+    set of counters, so a counter no aggregation reads is indistinguishable, to a
+    reader of the function, from one that was measured and reported — and a
+    duplicated counter also invites a future edit to move ONE of the pair and
+    leave the other stating the old number.
+
+    Two arms, both derived rather than hardcoded:
+      (a) `_score_rule`'s key set == what `measure()` aggregates;
+      (b) the committed receipt's own cell key set carries nothing outside that
+          set — the artifact cannot gain a counter the tool does not aggregate.
+
+    ⛔ NON-VACUITY: on the pre-fix code `_score_rule` returned SIX keys against
+    the four `measure()` consumes, so arm (a) reds (measured: deleting the two
+    keys is what this commit does, and the pre-fix tool reproduced the committed
+    receipt byte-for-byte, i.e. the deletion moved no number).
+    """
+    module = _measurement_tool()
+    consumed = _counters_measure_aggregates(module)
+    assert len(consumed) >= 3, (
+        f"`measure()` aggregated only {sorted(consumed)} — a set this small means "
+        "the tool stopped accumulating, not that the instrument is clean")
+
+    merged = [("a", 1.0), ("b", 0.9), ("c", 0.8)]
+    reported = set(module._score_rule(merged, {"a", "b"}, {"b", "c"}, 2, "a"))
+    assert reported == consumed, (
+        f"`_score_rule` reports {sorted(reported)} but `measure()` aggregates "
+        f"only {sorted(consumed)}. A counter nothing aggregates reads as "
+        f"measured without being reported: {sorted(reported - consumed)}")
+
+    receipt = json.loads(_RECEIPT.read_text(encoding="utf-8"))
+    shape = next(iter(receipt["per_shape"].values()))
+    published = set(next(iter(shape["old"].values()))) - {"n"}
+    assert not published - consumed, (
+        "the committed receipt publishes counters the tool does not aggregate — "
+        f"the artifact and the instrument have drifted: {sorted(published - consumed)}")
