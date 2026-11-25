@@ -868,15 +868,30 @@ def _no_ambient_uncut_graphs():
     so importing `tortoise.record_writer` here would make the whole suite depend
     on that module importing cleanly, and a process that never loaded it has no
     registry to clear.
+
+    ⛔ `reset_uncut_graphs()` zeroes the COUNT maps but NOT
+    ``record_writer._uncut_warned_at`` — the per-graph WARNING throttle, keyed
+    the same ``org\\0graph`` way and equally process-global (#14610 review cycle 2,
+    P3, measured with a teardown-hook probe: it survives setup, teardown and every
+    later test). It is latent today because no test asserts the warning's presence
+    or absence, so the fixture clears it directly rather than editing the
+    production reset seam — a one-line change there would shift every
+    ``record_writer.py:<line>`` cite below it, which is the cascade this PR just
+    spent two commits repairing. The production gap is recorded on the PR.
     """
     import sys
 
     record_writer = sys.modules.get("tortoise.record_writer")
-    if record_writer is not None:
+
+    def _reset() -> None:
+        if record_writer is None:
+            return
         record_writer.reset_uncut_graphs()
+        record_writer._uncut_warned_at.clear()
+
+    _reset()
     yield
-    if record_writer is not None:
-        record_writer.reset_uncut_graphs()
+    _reset()
 
 
 @pytest.fixture(autouse=True)
