@@ -169,23 +169,25 @@ def list_layer(
     if kind:
         # ⛔ THE TWO SPELLINGS OF ONE KIND ARE THE SAME KIND, so the filter is an
         # equivalence set, not equality. `core:team` and `team` are both admitted
-        # by the route's validator and BOTH are storable: a BLANK kind is
-        # DROPPED by `kind_fallbacks.named_kind` (not refused), an uninstalled
-        # NAMESPACE is refused by `hosted_api._require_approved_kind` — a check
-        # on the namespace, never on the spelling — and the caller's spelling is
-        # persisted VERBATIM. Measured: one graph holds `team` and `core:team`
-        # side by side, and `kind_is_known` (a boolean VALIDATOR, reached on a
-        # create through the warn-not-block `kind_other_layer` advisory, none of
-        # which raises or rewrites — the call count is a property of the door and
-        # the spelling, so it is deliberately NOT quoted here) changes nothing.
-        # So an
-        # equality filter answered `200 count: 0, truncated: false` for the
-        # spelling that happened not to be the stored one — the "byte-identical
-        # to *this graph names no such thing*" page this read exists not to
-        # produce, recommended by the route's own refusal list. The set is
-        # exactly {bare, core:bare} for a `core:`-namespaced kind and its bare
-        # form; an ARBITRARY namespace stays exact, because `zzz:goal` is a
-        # vocabulary item of its own and must not pull in the bare `goal` rows.
+        # by the route's validator, and both are storable: a blank kind is
+        # DROPPED by `kind_fallbacks.named_kind` (which also TRIMS surrounding
+        # whitespace, so the stored value is the caller's spelling apart from
+        # that trim), an uninstalled NAMESPACE is refused by
+        # `hosted_api._require_approved_kind` — a check on the namespace, never
+        # on the spelling — and nothing else rewrites the value. Measured: one
+        # graph holds `team` and `core:team` side by side. So an EQUALITY filter
+        # answered `200 count: 0, truncated: false` for the spelling that
+        # happened not to be the stored one — the "byte-identical to *this graph
+        # names no such thing*" page this read exists not to produce, and it was
+        # a spelling the route's own refusal list recommends. The set is exactly
+        # {bare, core:bare} for a `core:`-namespaced kind and its bare form; an
+        # ARBITRARY namespace stays exact, because `zzz:goal` is a vocabulary
+        # item of its own and must not pull in the bare `goal` rows.
+        # ⛔ `kind_is_known` appears nowhere in this rule: it is a boolean
+        # VALIDATOR (reached on a create through the warn-not-block
+        # `kind_other_layer` advisory, and none of those calls raises or
+        # rewrites), and a count of its calls is a property of the door and the
+        # spelling, so no number for it is quoted here.
         conditions.append(f"n.{kind_prop} IN $kinds")
         params = {"kinds": kind_equivalents(kind)}
     where = " AND ".join(conditions)
