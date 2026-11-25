@@ -9301,6 +9301,16 @@ def _carry_row_claims(header: str) -> tuple[dict[str, float], set[str]]:
     the value the sentence states for it, and `negative` is the set it says carries NO row. Both
     halves are real claims about the map, and they are graded in opposite directions by
     `_carry_row_claim_violations`, so neither can be dropped without a red.
+
+    ⛔ THE TWO HALVES DO NOT RESOLVE EACH OTHER, and subtracting one from the other is a FAIL-OPEN
+    this arm shipped once. The pre-fix form returned `negative - set(positive)`, so a file named in
+    BOTH halves lost its ABSENCE claim. MEASURED on the exact shape a `merge=union` splice produces —
+    "`<A>` carry an explicit `2.0` `durations` row, while `<A>` carry NO row", which is what a fold
+    yields when `--refresh-durations` ADDS the row one side's sentence denies — `negative` came back
+    EMPTY and `_carry_row_claim_violations` answered `([], [], [])`: both arms GREEN over a stated
+    absence that is false. The two halves make OPPOSITE claims about one map, so a file in both is a
+    CONTRADICTION to be redded by the `has_a_row` direction (the absence claim is the false one
+    whenever the map carries the row), never a duplicate to drop.
     """
     return _carry_row_claims_in(_unquoted_block(header))
 
@@ -9317,7 +9327,7 @@ def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, float], set[str]]:
         else:
             for name in names:
                 positive[name] = float(claim.group("value"))
-    return positive, negative - set(positive)
+    return positive, negative
 
 
 def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
@@ -10160,6 +10170,26 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     ), ("the `carry` predicate does not red on all three false claims (wrong value, absent row, "
         "row claimed absent) — measured, each of these was green under the pre-fix matchers:"
         f" {_carry_row_claim_violations(planted_positive, planted_negative, planted_rows)!r}")
+    # ⛔ AND THE SPLICE SHAPE, which is the one this block is most likely to receive: a `merge=union`
+    # fold keeping one side's "carry an explicit `2.0` `durations` row" beside the other's "carry NO
+    # row" FOR THE SAME FILE. Neither half may resolve the other — the sentence states an absence
+    # that is false — so the `has_a_row` direction must red it. MEASURED on the pre-fix form
+    # (`negative - set(positive)`): `negative` came back EMPTY and this returned `([], [], [])`,
+    # i.e. both arms GREEN over the false absence.
+    spliced = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
+               "while `#2`'s `tests/test_carry_planted_first.py` carry NO row")
+    spliced_positive, spliced_negative = _carry_row_claims(spliced)
+    assert spliced_positive == {"test_carry_planted_first.py": 2.0}, (
+        f"the `carry` matcher lost the positive half of the spliced sentence: {spliced_positive!r}")
+    assert spliced_negative == {"test_carry_planted_first.py"}, (
+        "the positive half silently resolved the `carry NO row` half of the same sentence, so the "
+        "false absence it states is graded by NOTHING — the two halves are separate claims about "
+        f"one map and neither may subtract the other: negative={spliced_negative!r}")
+    assert _carry_row_claim_violations(
+        spliced_positive, spliced_negative, {"test_carry_planted_first.py": 2.0}) == (
+            [], [], ["test_carry_planted_first.py"]), (
+        "a file whose row the block claims AND whose absence it also claims did not red the "
+        "`has_a_row` direction — the splice would ship stating a false absence")
     # …and an ODD quote count refuses to answer here too, rather than masking across the sentence
     # and reporting an empty claim (the fail-open shape the sibling arm already refuses).
     with pytest.raises(AssertionError, match="ODD number of double quotes"):
