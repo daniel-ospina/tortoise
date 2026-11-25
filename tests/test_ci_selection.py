@@ -21755,8 +21755,12 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # exit-code contract was graded by nothing.
     #
     # Mutation check: removing any ONE of the entries below empties `surfaces` for that
-    # path and drops the suite from `test_files` — measured at the reviewed head, with
-    # the rendered document's re-stage diff the one that then selects NOTHING at all.
+    # path and drops the suite from `test_files` — measured at the reviewed head. The
+    # rendered document's re-stage diff is the one where that is most misleading: the
+    # path still takes the docs-only early return, so the outcome is `surfaces: []` with
+    # 107 `test_files` remaining — the census suite is ABSENT, the selection is NOT empty
+    # (measured: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)` -> `surfaces=[]`,
+    # `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`).
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
