@@ -16236,6 +16236,16 @@ async def get_entity_relations(
     # wearing a total's clothes (``truncation.py``). A truncated page therefore
     # takes the contract's third state — incomplete, total unknown — and a
     # complete one is positively marked complete rather than left un-marked.
+    # ⛔ AND NO ``offset=`` HERE, unlike ``_paged`` — that is not an oversight.
+    # ``candidates`` is ``entity_reads.entity_relations``' POST-``SKIP``
+    # ``limit + 1`` probe (``entity_reads.py``), not a whole-population total, so
+    # the verdict already answers "is anything reachable past THIS page". Passing
+    # ``offset`` would compute ``offset + returned < candidates`` against an
+    # already-skipped probe and answer ``truncated: false`` while edges remain —
+    # fail-open, the exact defect ``truncation.py`` exists to prevent, and a
+    # client paging ``while truncated`` would drop them silently.
+    # (``tests/test_14592_read_parity.py::test_relations_pages_and_offset_actually_advances``
+    # closes the mutant: adding ``offset=offset`` reds it.)
     sink: dict = {}
     mark_truncation(sink, returned=body.get("count", 0),
                     candidates=candidates, exact=False)

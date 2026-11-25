@@ -33,6 +33,8 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from tortoise import pricing
@@ -91,7 +93,15 @@ def _single_sample_meter(used: float):
     """
     return lambda _org: MeterReading(
         used=used,
-        measured_at="2026-11-24T02:00:00+00:00",
+        # ⛔ CLOCK-DERIVED, NEVER A LITERAL (#9127). The gate ages a reading
+        # against `STALE_AFTER_SECONDS` (24 h) and, past that bound, leaves the
+        # dimension UNARMED — so a hardcoded stamp is a FRESHNESS fixture with a
+        # shelf life: stamped `2026-11-24T02:00:00+00:00` it was true for one
+        # day, then reddened this file on 2026-11-25 with NO code change and no
+        # diff to blame, taking `python-ci-gate` (the REQUIRED aggregate) red for
+        # every PR. This stamp is not a parse input, so deriving it from the
+        # clock is the only form that cannot rot.
+        measured_at=datetime.now(UTC).isoformat(),
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )
