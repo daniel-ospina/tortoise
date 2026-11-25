@@ -174,8 +174,10 @@ def list_layer(
         # NAMESPACE is refused by `hosted_api._require_approved_kind` — a check
         # on the namespace, never on the spelling — and the caller's spelling is
         # persisted VERBATIM. Measured: one graph holds `team` and `core:team`
-        # side by side, and `kind_is_known` (a bucket validator, on no create
-        # path) rewrites nothing. So an
+        # side by side, and `kind_is_known` (a boolean VALIDATOR, reached on a
+        # create only through the warn-not-block `kind_other_layer` advisory —
+        # measured: three calls per write, none of which raises or rewrites)
+        # changes nothing. So an
         # equality filter answered `200 count: 0, truncated: false` for the
         # spelling that happened not to be the stored one — the "byte-identical
         # to *this graph names no such thing*" page this read exists not to
