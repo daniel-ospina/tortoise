@@ -151,58 +151,125 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
 
     * behavioural — the reading is inside the gate's own freshness window,
       which is the condition under which the dimension is armed at all;
-    * structural — the reading is DERIVED, not a literal. A literal written
-      TODAY is fresh for 24 h and then reds this file with no commit in
-      between; asserting the ``measured_at`` VALUE is clock-derived fails at
-      the edit instead of a day later.
+    * structural — the value that REACHES the gate is clock-derived, so it
+      fails at the EDIT instead of a day later.
 
-    ⛔ The structural arm asserts the VALUE, not the quoting. It was a regex
-    requiring a quote immediately after `=` first, and that arm was
-    quote-adjacent: measured, a HARDCODED instant survived it two ways with all
-    11 tests green — ``measured_at = f"2026-…"`` (no quote right after `=`) and
-    ``_FIXTURE_MEASURED_AT = "2026-…"`` at module level (``getsource`` of the
-    function never sees the literal). Both are exactly the edits a later lane
-    makes, and both put the 24 h bomb back. So the arm parses the fixture and
-    requires a CLOCK CALL in the bound expression, resolving ONE hop of
-    module-level constant so hoisting the instant out of the function cannot
-    hide it — while a hoisted *derived* reading is still accepted.
+    ⛔ The structural arm asserts the VALUE THAT REACHES THE GATE, not the
+    binding and not the quoting. Two weaker arms came before it, both measured
+    open with all 11 tests green:
+
+    * a regex requiring a quote right after `=` — beaten by ``f"2026-…"`` (no
+      quote after `=`) and by a module-level ``_FIXTURE_MEASURED_AT`` the
+      function's own source never shows;
+    * the same parse walking only the local ``measured_at = …`` binding — beaten
+      by leaving that binding derived and hardcoding the instant one line below
+      it, at the ``MeterReading(measured_at=…)`` construction site. The binding
+      stayed a clock call, the in-fixture age check above read the LOCAL and
+      stayed green, and only the value handed to the gate was a literal.
+
+    So the arm resolves the ``MeterReading`` keyword through the fixture's own
+    scope — plain and annotated assignments, the last one winning as Python
+    does, plus one hop into a module-level constant OR a module-level helper
+    function — and requires that the resolved expression reach a clock. That is
+    the strictest statement the shape allows and it is also the least
+    over-strict: an annotated binding and a ``def _now_iso()`` helper are
+    ordinary ways to write this correctly, and both are accepted.
     """
     import ast
     import inspect
 
     from tortoise.allowance_gate import STALE_AFTER_SECONDS
 
+    #: Attribute calls that READ a clock, whichever module carries them. Kept
+    #: narrow deliberately: `isoformat`/`fromisoformat` are FORMATTERS, and a
+    #: literal formatted at import time must not read as derived. Any call whose
+    #: receiver is the `datetime`/`time` module is also accepted, which covers
+    #: `time.strftime`, `datetime.fromtimestamp` and friends without listing them.
+    clock_attrs = {"now", "utcnow", "today", "gmtime", "localtime", "time"}
+    clock_modules = {"datetime", "time"}
+
+    def reaches_a_clock(node, scope, seen=frozenset()):
+        """True when `node` reaches a clock call, resolving `scope` Names anywhere in it.
+
+        Resolution is transitive (bounded by `seen`) rather than one hop at the
+        root, because the ordinary correct shapes nest it: `measured_at` names a
+        module constant, which names the expression — or names a helper FUNCTION
+        whose body holds the clock.
+        """
+        if isinstance(node, ast.Name):
+            if node.id in scope and node.id not in seen:
+                return reaches_a_clock(scope[node.id], scope, seen | {node.id})
+            return False
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and (
+                node.func.attr in clock_attrs
+                or (isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in clock_modules)
+            )
+        ):
+            return True
+        return any(
+            reaches_a_clock(child, scope, seen)
+            for child in ast.iter_child_nodes(node))
+
     fn = next(
         node for node in ast.parse(inspect.getsource(_single_sample_meter)).body
         if isinstance(node, ast.FunctionDef))
-    bound = [
-        node.value for node in ast.walk(fn)
-        if isinstance(node, ast.Assign)
-        and any(getattr(target, "id", None) == "measured_at"
-                for target in node.targets)]
-    assert bound, (
-        "the fixture no longer binds `measured_at` — this arm cannot see the "
-        "reading it exists to pin, so it would pass vacuously (#14646)")
+
+    # Scope, in Python's own resolution order: module globals first, then the
+    # function's locals overriding them. The LAST binding of a name wins, which
+    # is what a rebind does at runtime — a derived value shadowed by a later
+    # literal below it is still a literal.
+    scope: dict[str, ast.expr] = {}
     module = ast.parse(inspect.getsource(inspect.getmodule(_single_sample_meter)))
-    hoisted = {
-        target.id: node.value
-        for node in module.body if isinstance(node, ast.Assign)
-        for target in node.targets if isinstance(target, ast.Name)}
-    resolved = [
-        hoisted.get(value.id, value) if isinstance(value, ast.Name) else value
-        for value in bound]
-    derived = [
-        call for value in resolved for call in ast.walk(value)
-        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-        and call.func.attr in {"now", "utcnow", "today", "time"}]
-    assert derived, (
-        "the fixture pins an absolute instant again — it holds "
-        f"{[ast.unparse(value) for value in resolved]!r} with no clock call, so "
-        "the gate ages that reading by "
+    for body in (module.body, fn.body):
+        for stmt in body:
+            if isinstance(stmt, ast.Assign):
+                targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+                value = stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                targets, value = [stmt.target.id], stmt.value
+            else:
+                continue
+            for name in targets:
+                scope[name] = value
+    # A helper defined at module level is a legitimate place for the clock; walk
+    # its body so `def _now_iso(): return datetime.now(UTC)...` resolves.
+    for stmt in module.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope.setdefault(stmt.name, stmt)
+
+    constructions = [
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "MeterReading"]
+    assert constructions, (
+        "`_single_sample_meter` no longer constructs a `MeterReading` directly, "
+        "so this arm cannot see the reading it exists to pin and would pass "
+        "vacuously (#14646). Teach it the new shape rather than deleting it: "
+        "what must be pinned is the value the gate is handed.")
+    handed = [
+        keyword.value
+        for construction in constructions
+        for keyword in construction.keywords
+        if keyword.arg == "measured_at"]
+    assert handed, (
+        "no `MeterReading(measured_at=…)` keyword found inside "
+        "`_single_sample_meter`, so this arm cannot see the reading the gate is "
+        "handed and would pass vacuously (#14646)")
+    literals = [
+        value for value in handed if not reaches_a_clock(value, scope)]
+    assert not literals, (
+        "the fixture hands the gate a reading that derives from no clock — "
+        f"{', '.join(ast.unparse(value) for value in literals)} — so the gate "
+        "ages it by "
         f"STALE_AFTER_SECONDS ({STALE_AFTER_SECONDS} s) and will SERVE instead of "
         "arming this dimension 24 h later, reddening this file with no commit in "
-        "between. Derive it (`datetime.now(UTC).isoformat()`) or monkeypatch the "
-        "window (#14646)")
+        "between (#9127, third recurrence). Derive it from the clock "
+        "(`datetime.now(UTC) - timedelta(minutes=5)`) and hand THAT value to "
+        "`MeterReading`.")
 
     reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
     age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
