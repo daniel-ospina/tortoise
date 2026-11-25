@@ -59,16 +59,19 @@ version: 1
 # `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
 # this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 825.6 s
-# (a, b, c, d, e, f, g, h, i, j, k), so `ceil(825.6/60 x 2)` = 28 m governs (a shard's job-level
+# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 825.8 s
+# (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so `ceil(825.8/60 x 2)` = 28 m governs
+# (a shard's job-level
 # wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
 # each tree's own map, `main` `10f0107689b9` alone packs nine shards at 825.4 s and two at 825.5 s —
 # quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
 # the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1330 files at this head against 1329 on `main`, and the ONE addition is
-# this PR's `tests/test_14559_reaper_schedule.py`. ⛔ `#14415`'s two rows
+# small: `fast_pool()` holds 1331 files at this head against 1329 on `main`, and the two additions
+# are this branch's `tests/test_14559_reaper_schedule.py` (#14565's fold) and
+# `tests/test_fly_secret_declaration_report.py` (#14574, the drift reporter this branch adds — the
+# row that moved the partition from a flat 825.6 s to nine-at-825.8/two-at-825.7). ⛔ `#14415`'s rows
 # (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
 # NOT this PR's: they were that PR's own additions and they landed before this fold.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
@@ -7802,6 +7805,19 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #14574: the SCHEDULED reader of the same registry — an undeclared Fly secret
+  # used to be invisible until a deploy was attempted (measured 2026-11-21..24: ~2
+  # days and 75+ commits behind a frozen deploy). Registered `core` beside the
+  # guard it reports on (`test_fly_secret_drift.py`), because the subjects it
+  # guards are `.github/workflows/fly-secret-declaration-drift.yml` (which matches
+  # no `SOURCE_PATTERNS` row) and `tools/fly_secret_declaration_report.py` (a
+  # `tools/` path, which `_keep_changed` DROPS — the #12363 silent-drop class, so
+  # the tool also carries a `CORE_ALSO` entry). Without this row `--integrity`
+  # reds (`manifest drift: test_fly_secret_declaration_report.py`). Hermetic: the
+  # workflow is parsed as YAML, its `run:` bodies are executed against a stub `gh`,
+  # and the reporter's Fly read is the gate's own `FLY_SECRETS_FILE` fixture seam —
+  # no Fly call, no credential, no network.
+  - test_fly_secret_declaration_report.py
   # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
   # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
   # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a
