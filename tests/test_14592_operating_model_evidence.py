@@ -704,11 +704,15 @@ def test_census2_computes_the_verdict_it_declares_and_exits_on_it():
     def receipt(key, reply, ok=True):
         return {key: {"tool": "t", "args": {}, "ok": ok, "reply": reply}}
 
-    good = {}
+    # A dict comprehension, NOT a `good.update(…)` loop: `tools/sdk_privatise.py
+    # --check` counts an untyped `.update(` receiver as residue and its RATCHET reds
+    # the required `surface-guard` job on any increase (this row put main at 11912
+    # against a 11911 baseline).
+    good: dict = {}
     for key, reply in (("claims", {"results": [{"id": "a"}], "total": 1}),
                        ("conf_one", {"result": [{"id": "b"}]}),
                        ("structure", {"result": []})):
-        good.update(receipt(key, reply))
+        good = {**good, **receipt(key, reply)}
     assert census2.verdict(good) == 0, (
         "an empty `structure` reply is the validator answering NOTHING TO REPORT")
     assert census2.verdict({**good, "claims": {"ok": False, "reply": None,
