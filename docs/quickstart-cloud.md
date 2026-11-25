@@ -46,31 +46,52 @@ Measured 2026-11-23: ~11 s end to end (`docs/evidence/14424-onboarding/`). Keep 
 
 2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact <support@premiselabs.co>.
 
-## 2. Connect your agent (MCP over HTTP)
+## 2. Connect your agent (MCP over the stdio bridge)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp/`. The transport is **Streamable HTTP**, and in
-client JSON config its value is `"http"`.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`. Your agent reaches it through the **bridge**
+(`python3 -m tortoise.mcp_bridge`), which resolves your key on every request from `TORTOISE_API_KEY`,
+`./.tortoise` or `~/.tortoise/credentials.json`.
 
-> ⚠️ Never set an entry's `type` to `"streamable-http"`. That is a Claude Code alias for this
-> transport, not a second one: Cursor's CLI can silently drop a whole config file that uses it,
-> leaving you with no error and no connection. If your client requires a `type`, use `"http"`;
-> Cursor and Pi omit `type` entirely and infer the transport from `url`.
+> ⛔ **Never put the credential — or `${TORTOISE_API_KEY}` — in a config file.** An `${VAR}` in a
+> config is a *capture* of an environment variable your client read once, at spawn: unset, it expands
+> to `""`, the request goes out carrying an `Authorization: Bearer` header with an EMPTY token, and
+> the server can only answer `-32001 invalid or missing Bearer token` — a message about the key's
+> VALUE when the fault is that the client never had one. The bridge carries no credential, so there
+> is nothing to expand, and a missing key is a named `MCP-KEY-EMPTY` refusal instead of a silent
+> empty bearer.
 
-Auth is a Bearer header that reads your key from the environment — never paste the literal key into a
-config file, because config files get committed.
+One command writes the entry AND verifies it with a live call:
 
-**Claude Code** — add to `.mcp.json` in your project. Claude Code requires `"type": "http"` (a `url`
-entry with no `type` is read as stdio and the server is skipped):
+```bash
+# `pi`: writes the `mcp-client` EXTENSION's files (.mcp.json / ~/.pi/agent/.mcp.json).
+# If pi's BUILT-IN loader is what runs on your box, it reads .pi/mcp.json and
+# ~/.pi/agent/mcp.json instead — put the same entry there (pi 1.2.0:
+# `dist/extensions/mcp/config.js:107-108`). `tortoise mcp-status --harness pi`
+# reports which layer it graded.
+tortoise onboard --harness pi   # claude | codex | cursor | pi
+```
+
+> ⚠️ **`--harness pi` targets the `mcp-client` extension's files** (`.mcp.json` and
+> `~/.pi/agent/.mcp.json`). pi's **built-in** MCP loader reads `.pi/mcp.json`
+> instead, so on a pi install without that extension the file is written but never
+> loaded. `tortoise mcp-status` says which file it read and what it graded, and its
+> green line names the extension: it proves the **endpoint** answered, not that
+> your agent reads the file. Verify the load the only way it can be verified —
+> restart the client and look for the `tortoise_*` tools.
+
+By hand, the entry is below — `type` is `"stdio"`, there is **no** `headers` block, and the only
+`env` value is the endpoint.
+
+**Claude Code** — add to `.mcp.json` in your project:
 
 ```json
 {
   "mcpServers": {
     "tortoise": {
-      "type": "http",
-      "url": "https://api.premiselabs.co/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${TORTOISE_API_KEY}"
-      }
+      "type": "stdio",
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_bridge"],
+      "env": { "TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/" }
     }
   }
 }
@@ -80,37 +101,38 @@ A project-scope `.mcp.json` stays **⏸ Pending approval** in Claude Code until 
 approve it once — start `claude` in the project and allow the prompt, or run
 `/mcp` (`claude mcp reset-project-choices` resets the choice).
 
-**Cursor** — add to `.cursor/mcp.json`. Cursor expands `${env:…}` and infers the transport from `url`,
-so the entry carries **no** `type`:
+**Cursor** — add to `.cursor/mcp.json`. Cursor infers the transport from the entry, so it carries
+**no** `type`:
 
 ```json
 {
   "mcpServers": {
     "tortoise": {
-      "url": "https://api.premiselabs.co/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${env:TORTOISE_API_KEY}"
-      }
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_bridge"],
+      "env": { "TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/" }
     }
   }
 }
 ```
 
-Export the key you were shown in step 1 so the header resolves — the config file holds the *reference*,
-not the secret:
+Export the key you were shown in step 1 — it stays in your shell, and the bridge reads it from there
+on every request. It is never copied into a config file:
 
 ```bash
 export TORTOISE_API_KEY="tt_..."   # the key from step 1; add to your shell profile to persist
 ```
 
-**Codex** instead:
+**Codex** instead (Codex reads TOML, so its entry is a `[mcp_servers.tortoise]` table — `tortoise
+onboard` writes JSON configs only and REFUSES rather than writing a file Codex cannot parse):
 
 ```bash
-codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
-# then export TORTOISE_API_KEY=tt_YOUR_KEY in your shell
+codex mcp add tortoise -- python3 -m tortoise.mcp_bridge
+# then export TORTOISE_API_KEY=tt_YOUR_KEY in your shell, and
+# TORTOISE_MCP_URL=https://api.premiselabs.co/mcp/ in the client's environment
 ```
 
-Restart your client. You should now have Tortoise's tools (create points, query the graph, run evidence propagation, capture sessions).
+Restart your client, then confirm the tools are actually there — `tortoise_*` in the client's MCP/tool list (create points, query the graph, run evidence propagation, capture sessions). A written config is not a loaded one: if the tools are missing, run `tortoise mcp-status` (and `tortoise mcp-status --live`) — it names the file it read and the class of the failure.
 
 Rate limit: **100 requests/min per key**.
 
