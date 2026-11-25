@@ -85,25 +85,6 @@ version: 1
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
 # graded claim about THIS head — a fold re-derives them with the verb, it never carries
 # them.
-# reader of the prose can see. On THIS tree — `origin/main` `837bba743d38` folded in, carrying
-# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row, `#14574`'s drift-reporter row
-# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14560`'s
-# `tests/test_14560_operator_vectors.py` and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (both `core`, both flat 2.0 s, both `main`'s) —
-# plus THIS branch's own row (`tests/test_14592_operating_model_evidence.py`, `core`, at the same
-# flat 2.0 s `DEFAULT_FAST_WEIGHT`), the verb packs the pool into two bins: three shards at 826.4 s
-# (a, j, k) and eight at 826.3 s (b, c, d, e, f, g, h, i), so `ceil(826.4/60 x 2)` = 28 m governs (a
-# shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree by construction rather
-# than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1334 files at this head against 1333 on `main`, and
-# the ONE addition this branch brings is `tests/test_14592_operating_model_evidence.py`. ⛔ The
-# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
-# this branch's: each landed before this fold. The name lists are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
-# a graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
