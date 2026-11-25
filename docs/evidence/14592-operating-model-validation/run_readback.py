@@ -229,14 +229,14 @@ async def run() -> int:
         report["search"] = []
         for label, q, expect in PROBES:
             r = await _call(client, "tortoise_search", {"query": q, "limit": 8})
-            r.update({"element": label, "query": q, "expected": expect})
-            r["search_knowledge"] = await _call(
+            row: dict = {**r, "element": label, "query": q, "expected": expect}
+            row["search_knowledge"] = await _call(
                 client, "tortoise_search_knowledge", {"query": q, "limit": 8})
-            r["entry_points"] = await _call(
+            row["entry_points"] = await _call(
                 client, "tortoise_suggest_entry_points", {"query": q, "limit": 5})
-            report["search"].append(r)
+            report["search"].append(row)
             print(f"\n=== search [{label}] {q!r} ===")
-            print(json.dumps(r.get("reply", r), indent=1, default=str)[:4000])
+            print(json.dumps(row.get("reply", row), indent=1, default=str)[:4000])
 
         # ── (c) entity reads (top-level named things) ────────────────────
         report["entities"] = []
