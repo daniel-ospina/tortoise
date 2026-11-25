@@ -9225,23 +9225,17 @@ _DERIVATION_LOOKAHEAD = 60
 #: `tests/test_sdk_privatise_sweep.py` (the `#14548` residue RATCHET),
 #: `tests/test_14559_reaper_schedule.py` (`#14565`) and `#14415`'s files, which earlier revisions of
 #: the block or of this arm could not reach at all.
-#: ⛔ THE STATED RESIDUAL — one row claim in the block is in NO shape this arm reads, and it is
-#: DECLARED rather than left to be rediscovered. The `#14544` paragraph says of
-#: `tests/test_dod_5090_probe.py`: "the weight comes from the file's own `durations` row, not from
-#: either registration". That is a row claim, it is TRUE (the map carries
-#: `test_dod_5090_probe.py: 90.0`), and deleting that row leaves THIS arm GREEN — measured, not
-#: inferred: the path and the word `row` are separated by `… the file's own `durations` `, so no
-#: anchor here reaches it, and `--integrity`'s coverage check is a 0.90 RATIO that cannot see one
-#: missing row either.
-#: ⛔ It is nonetheless GRADED, indirectly, and the difference is worth stating rather than hiding
-#: behind "the arm reads four shapes": a `durations` row is also a SHARD-LAYOUT input, so a weight
-#: large enough to move a bin reds `states_the_measured_emission` when it disappears. MEASURED for
-#: this one: dropping `test_dod_5090_probe.py`'s `90.0` row repacks the pool to 819.1/819.0 with
-#: different shard groupings against the stated 827.1/827.0, so that arm reds. That is NOT a
-#: guarantee this arm can offer — a row whose removal moves no bin (the flat 2.0 s majority) would
-#: vanish unseen. A fifth matcher for `<path>` … `'s `durations` ` row` is the shape that would grade
-#: the claim DIRECTLY; until one is written, this paragraph is the only record that it is ungraded
-#: HERE, so do not reword it into a coverage claim.
+#: ⛔ The `#14544` paragraph's row claim for `tests/test_dod_5090_probe.py` IS graded here — and it
+#: took a REWORDING to get there, which is worth recording because the failure was silent. While
+#: that sentence read "the weight comes from the file's own `durations` row", the path and the word
+#: `row` were separated by `… `durations` `, so no anchor above reached it and deleting the row left
+#: THIS arm GREEN (measured). `ee49c4f3` moved the path beside the word — "the weight comes from
+#: `tests/test_dod_5090_probe.py` row in `durations`" — which is the `<file>` row shape from the
+#: paragraph above, so `_row_claims` returns it (MEASURED at this head) and deleting the row reds.
+#: ⛔ So the residual for this claim is NONE, and the lesson is the SHAPE rather than the file: a
+#: fold that rewords it back into `… the file's own `durations` row` drops the claim out of every
+#: shape read here with no arm able to see it. The word `row` next to the path is what makes it
+#: gradable, and `--integrity`'s coverage check is a 0.90 RATIO that cannot see one missing row.
 #: The CARRY sentence's ABSENCE half
 #: is graded separately (`test_the_fast_shards_header_block_grades_the_carry_row_spelling`), because
 #: handing a file the block says has NO row to an arm that reds on absence would invert its meaning.
@@ -10379,8 +10373,9 @@ def test_the_row_list_alone_reaches_every_item_it_names():
 
     Two halves, over the list ALONE (sliced `A ROW is an entry in` … `THE LIST IS POSITIVE ONLY`):
     every path it names is a row claim `_row_claims` returns FROM THAT SLICE, and no issue label in
-    it sits without its own path beside it. Both are checked against the live block and against the
-    list's own pre-fix spelling, so neither can pass by grading nothing.
+    it sits without its own path beside it. The SPELLING half is driven against the list's own
+    pre-fix text below; the REACH half needs no fixture — it grades the live list, so an item the
+    list leaves unreachable reds it directly.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     enumeration = _row_enumeration(header)
