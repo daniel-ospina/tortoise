@@ -16066,11 +16066,12 @@ async def list_objects(
     ``FalkorProjection._resolve_entity`` plus the layer's own
     ``filter_source_props`` (the two functions ``TortoiseSDK.get_entity`` is
     built on), and deliberately NOT to ``sdk.get_entity``: that door applies the
-    ``TORTOISE_RECORD_SERVE`` seam, which these routes do not consult (§2.0 of
-    ``tortoise.entity_reads``), so on an armed deployment it can answer
-    ``{"residency": "not-hot", …}`` or ``{}`` rather than the stored
-    properties. Either way a caller reading ``status`` in the payload can see
-    the row is ended. Measured: a retracted Object answers 200 here with
+    ``TORTOISE_RECORD_SERVE`` seam, and these routes deliberately do NOT consult it
+    (§2.0 of ``tortoise.entity_reads``) — which is precisely why the seam's answers
+    cannot appear here; the same reasoning keeps it off ``GET /v1/points``
+    (``hosted_api``: it is armed on the ANCHORED single-Point read only). A caller
+    reading ``status`` in the payload can therefore see the row is ended.
+    Measured: a retracted Object answers 200 here with
     ``status: "retracted"`` in the payload, while ``GET /v1/points/{id}`` refuses
     a retracted POINT by name (``get_point``'s ``status == "retracted"`` arm,
     #432/#689). ⛔ That 404 is NOT evidence about an Object: ``/v1/points/{id}``
@@ -54865,7 +54866,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (727 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
