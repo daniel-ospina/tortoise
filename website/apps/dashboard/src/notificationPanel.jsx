@@ -70,7 +70,6 @@ import {
   undismiss,
   unsnooze,
   snoozedUntil,
-  entryKeyOf,
   writeState,
 } from './notificationLedger.js'
 // The two "we could not look" sentences are the SAME facts the previous surface
@@ -300,6 +299,13 @@ export function NotificationBell({
     setOpenedAt(new Date())
   }
 
+  // ONE clock. `clock` is what the render uses; `freshClock()` is what a RE-READ
+  // uses — and on a test's injected `now` they must agree, or opening the panel
+  // would prune a snooze against the wall clock while the list rendered against
+  // the injected one (a snooze set "in the future" by the fixture would silently
+  // vanish on open).
+  const freshClock = () => (nowProp ? new Date(nowProp) : new Date())
+
   const handleSnooze = (entry, ms) => {
     persist(snooze(ledger.state, entry.key, ms, clock))
   }
@@ -318,7 +324,7 @@ export function NotificationBell({
     if (opening) {
       // Re-read on open: another tab may have snoozed or dismissed something, and
       // a reloaded page is not the only way this store changes.
-      setLedger(readState(storage, key, new Date()))
+      setLedger(readState(storage, key, freshClock()))
       setOpenedAt(new Date())
       setDetailKey(null)
     }
@@ -339,11 +345,17 @@ export function NotificationBell({
   const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
   const entries = [...ledgerView.current]
   if (showOlder) entries.push(...ledgerView.older)
-  // Resolved by the ledger's OWN key function, so a row without a server
-  // `episode` (an older API deploy, a synthetic row) still opens.
-  const detailAlert = detailKey
-    ? (alerts || []).find((a) => entryKeyOf(a) === detailKey) || null
-    : null
+  // Resolved from the LEDGER, not from the raw feed: the ledger is what the reader
+  // clicked, and it collapses rows that share an identity (see `buildLedger`), so
+  // a lookup by key there cannot show a different episode from the one on screen.
+  const everyEntry = [
+    ...ledgerView.current,
+    ...ledgerView.older,
+    ...ledgerView.snoozed,
+    ...ledgerView.dismissed,
+  ]
+  const detailEntry = detailKey ? everyEntry.find((e) => e.key === detailKey) || null : null
+  const detailAlert = detailEntry ? detailEntry.alert : null
 
   const count = ledgerView.unresolved
   const bellLabel = count ? `${BELL_LABEL} — ${count} unresolved` : BELL_LABEL

@@ -363,10 +363,25 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   const snoozed = []
   const acked = []
   const dismissed = []
+  // ONE ROW PER IDENTITY. The local key is `type|message` (see `entryKeyOf`), and
+  // the feed can return two episodes that share it — two separate bouts of the
+  // same flag type, weeks apart. They are one dismissal decision, so they must be
+  // one ROW: two rows with the same key are two React children with the same key
+  // (`key={entry.key}`), which React resolves by dropping one, and a list that
+  // silently loses a notification on a security surface is the defect class this
+  // whole change is about. Newest wins, because the newest row is the one that
+  // describes the live episode.
+  const byKey = new Map()
   for (const alert of alerts || []) {
     if (!alert) continue
     const entry = entryOf(alert, now)
-    if (alert.acked) {
+    const seen = byKey.get(entry.key)
+    if (!seen || entry.atMs > seen.atMs) byKey.set(entry.key, entry)
+  }
+  const unique = [...byKey.values()].sort(newestFirst)
+  for (const entry of unique) {
+    const alert = entry.alert
+    if (alert && alert.acked) {
       acked.push(entry)
       continue
     }
@@ -382,10 +397,6 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
     if (isOld(alert, now, days)) older.push(entry)
     else current.push(entry)
   }
-  current.sort(newestFirst)
-  older.sort(newestFirst)
-  snoozed.sort(newestFirst)
-  dismissed.sort(newestFirst)
   return {
     current,
     older,

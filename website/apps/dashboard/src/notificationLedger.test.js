@@ -301,6 +301,35 @@ test('an episode renders as ONE row carrying its ×N count and window', () => {
   assert.equal(entry.ageLabel, '5 min ago')
 })
 
+test('two rows that share an identity render as ONE row, and the newest wins', () => {
+  // The local key is `type|message`, so two separate bouts of the same flag type
+  // — weeks apart — are one decision and must be one ROW: two React children with
+  // the same key would drop one of them, and a list that silently loses a
+  // notification is the defect class this change exists to remove.
+  const olderBout = alert({
+    message: 'same wording',
+    at: new Date(NOW.getTime() - 20 * DAY).toISOString(),
+    count: 3,
+  })
+  const newerBout = alert({
+    message: 'same wording',
+    at: new Date(NOW.getTime() - 1 * HOUR).toISOString(),
+    count: 9,
+    episode: 'flag||rekeyed',
+  })
+  const ledger = buildLedger({ alerts: [olderBout, newerBout], state: emptyState(), now: NOW })
+  assert.equal(ledger.current.length, 1)
+  assert.equal(ledger.current[0].countLabel, '×9', 'the row describes the live episode')
+  // Order of the input does not matter — the newest still wins.
+  const reversed = buildLedger({ alerts: [newerBout, olderBout], state: emptyState(), now: NOW })
+  assert.equal(reversed.current.length, 1)
+  assert.equal(reversed.current[0].countLabel, '×9')
+  // One dismissal covers both, which is the same "one episode, one decision"
+  // trade-off documented on `entryKeyOf`.
+  const state = dismiss(emptyState(), entryKeyOf(newerBout), NOW)
+  assert.equal(buildLedger({ alerts: [olderBout, newerBout], state, now: NOW }).unresolved, 0)
+})
+
 test('an activity row is flagged as a measurement, an incident row is not', () => {
   const [incident] = buildLedger({ alerts: [alert()], state: emptyState(), now: NOW }).current
   const [activity] = buildLedger({
