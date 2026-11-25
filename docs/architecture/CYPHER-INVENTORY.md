@@ -436,9 +436,13 @@ site, and every `file:line` row after the edit re-derived.** `tortoise/record_al
 to assume) — a Postgres statement named by a module constant, exactly the shape this section folds to
 `non_cypher_door_calls` (§1's non-Cypher arm, not the `unresolved` over-report arm). So
 `non_cypher_door_calls` 267→**268** and `ast_door_calls` 1594→**1595** (= 1327 + 268);
-`sites` **1327**, `files` **102**, `files_scanned` **313**, `unresolved` **105**, `candidates` **589**,
+`sites` **1327**, `files` **102**, `files_scanned` **314**, `unresolved` **105**, `candidates` **589**,
 `partial` **321**, `plain` **875** (read **589** / write **286**) and every other shape are unchanged —
-the new call is not a statement site, so the migration metric §0 is about does not move. §1's door
+the new call is not a statement site, so the migration metric §0 is about does not move. ⛔
+`files_scanned` reads **314** here only because this merge carries `main`'s `#14344` file (313→**314**);
+this branch adds NO scanned module (`git diff --name-status c3dca699..HEAD -- tortoise/` has no `A`
+row), so that move is `main`'s and is narrated at the `#14344` paragraph below, not re-narrated here.
+§1's door
 predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
 **1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
 ⚠️ **Any movement in the verb figures is NOT this cut's:**
@@ -449,7 +453,7 @@ re-cut. ⛔ **This paragraph does NOT restate those totals.** They were cut at a
 branch and read one low against the current tree, and re-deriving them here is the hand-arithmetic
 that produced that: they are the unpinned-prose class a recorded decision (#13098) declined to pin,
 with the drift tracked as tortoise#14616. **§1 above is authoritative at this head** (bare
-case-sensitive **2,117**, `-i` without the exclusion **2,478**, over the 313 files **2,114** /
+case-sensitive **2,117**, `-i` without the exclusion **2,478**, over the 314 files **2,114** /
 **2,388**, exclusion dropped **2,116** / **2,391**). The **graded** figures in this paragraph — the
 two pins above — ARE re-derived, and they agree with `cypher_inventory.py --check`'s **25 pinned
 counts match**. Appendix
