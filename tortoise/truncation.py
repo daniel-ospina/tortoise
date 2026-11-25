@@ -89,9 +89,12 @@ page, so they are never marked here. The criterion is REACHABILITY, and it is
 applied per surface rather than stated once: the marker is written where a row
 dropped at the cap is unreachable by any subsequent call.
 
-The hosted ``_paged`` routes are the recorded exception, and they are an
-exception in FORM only (``hosted_api.py::_paged``, below): they are
-``SKIP``/``LIMIT`` paged, so their marker answers the same reachability question
+The hosted ``_paged`` routes are the recorded exception, and the exception is to
+this module's CRITERION and to its arithmetic at once (``hosted_api.py::_paged``,
+below): they ARE ``SKIP``/``LIMIT`` paged, and a row dropped at the cap is
+reachable by continuing the walk — so they are excepted from "mark only what is
+unreachable" rather than merely from the form of the answer — and their marker
+answers the reachability question of the PREVIOUS paragraph
 — *"does the population extend beyond what THIS RESPONSE delivered?"* — as
 ``offset + delivered < total``, never ``total > page length``. Marking the
 terminal page truncated is the inverse of this module's defect: a caller paging
@@ -118,9 +121,11 @@ are rather than naming them:
 - ``tortoise/hosted_api.py::_paged`` — hosted ``GET /v1/objects`` and
   ``GET /v1/subjects`` (both via ``_list_layer_route``) and hosted
   ``GET /v1/sources`` (via ``list_sources``): all THREE routes reach it, through
-  its TWO callers. (This register is written at FUNCTION granularity, so a route
-  count and a caller count are different numbers — `grep -n 'return _paged('`
-  answers the second, and no test grades either.)
+  its TWO callers. (This register is written at FUNCTION granularity, and the two
+  counts differ: `tests/test_8447_truncation_marker.py` grades the ROUTE set
+  against ``{/v1/objects, /v1/subjects, /v1/sources}``, while the caller count —
+  `grep -n 'return _paged('`, which returns the two call expressions and NOT the
+  `def` — is graded by nothing.)
   ⚠️ Its verdict is OFFSET-AWARE and is the recorded exception described above:
   the marker is asked about ``offset + delivered``, so a page with matches
   behind it is ``truncated: true`` (plus ``total_available``) and the TERMINAL
