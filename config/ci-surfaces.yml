@@ -63,8 +63,10 @@ version: 1
 # drift-reporter registration (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
 # `tests/test_record_read_point_vector_keys.py`, `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` and `#14597`'s
-# `tests/test_expansion_fusion_14344.py` (that last trio `core`, all at the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`, all `main`'s) — the verb packs the pool into two bins: ten shards at
+# `tests/test_expansion_fusion_14344.py` (that last trio `core`, each carrying an explicit
+# `durations` row rather than the default — a ROW is what records their weight, and the default
+# is the registration's alone in this sentence — all `main`'s) — the verb packs the pool
+# into two bins: ten shards at
 # 826.5 s (a, b, c, d, e, f, g, h, i, k) and one at 826.6 s (j), so `ceil(826.6/60 x 2)` = 28 m
 # governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
 # `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 826.6 = 2.0324), so the two agree by
