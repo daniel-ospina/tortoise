@@ -70,18 +70,16 @@ version: 1
 # than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is ZERO BY CONSTRUCTION here, and the CONSTRUCTION is what to read: `fast_pool()` is a function of
-# the SELECTOR and its INPUTS, never of this branch's data — the manifest (both sides CODE), the
-# `ENV_BROKEN_FILES` / `on_demand` constants inside `tools/ci_selection.py` itself, and, for the
-# `on_demand: <dir>/**` subtree entries (`eval/**`, `longmem_eval/**` here), the FILESYSTEM under
-# them, which `on_demand_subtree_files` expands with `rglob("test_*.py")` deliberately, so a file
-# added to a non-gating subtree cannot silently re-enter the gate. ⛔ The claim this sentence makes is
-# therefore about INPUT EQUALITY, not an enumeration of every way the pool could move — an exhaustive
-# list would be false the moment someone edits the selector, which is itself one of the inputs.
-# Every one of those inputs is identical on the two sides here: this PR edits one comment and one
-# `durations` comment, adds no test file, and leaves the selector untouched — so the delta is zero,
-# and `#14592`'s `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head and NOT
-# this PR's. ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
+# is ZERO at this head, and it was MEASURED, not reasoned: `fast_pool()` was computed from both
+# sides' manifests and the two sets are equal — and the parsed manifests are identical too, so the
+# `durations` comment rewrite below changes no value. ⛔ That zero is a READING of this head, never a
+# promise about the next fold: `fast_pool()` takes its inputs from the tree being measured (the
+# manifest, the selector's own constants, and the filesystem under an `on_demand: <dir>/**` subtree,
+# which `on_demand_subtree_files` expands with `rglob("test_*.py")` on purpose — a file added to a
+# non-gating subtree must not silently re-enter the gate), so re-measure the delta on the tree you are
+# merging INTO rather than carrying this sentence's zero. This PR adds no test file, and `#14592`'s
+# `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head and NOT this PR's.
+# ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
 # EARLIER spelling, quoted only so the rot it suffered is legible — `1333` here against `1332` on
 # `main`, nothing graded it, and it outlived the landing that made it false. A count in this block is
 # re-measured where it LANDED or not written at all, and this sentence's job is the reason the delta is
