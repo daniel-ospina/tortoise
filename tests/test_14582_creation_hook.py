@@ -831,6 +831,80 @@ def test_the_WRITE_PATH_feeds_and_retracts_the_registry(monkeypatch):
         rw.reset_uncut_graphs()
 
 
+class _RowOnlyControlPlane:
+    """The control plane reduced to the ONE read a credential resolution makes."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries: list[tuple[str, tuple[str, ...]]] = []
+
+    def query(self, table, select=None, filters=None):
+        self.queries.append((table, tuple(select or ())))
+        return self.rows
+
+
+def test_a_credential_resolution_over_an_existing_row_never_enters_the_mint(
+        monkeypatch):
+    """⛔ THE "SELF-HEAL ON THE NEXT AUTHENTICATED REQUEST" CLAIM IS FALSE, AND
+    THIS PINS THE REACHABILITY THAT SAYS SO (#14624 review ISSUE 2).
+
+    `_provision_default_graph_record`'s docstring claimed that an org whose
+    default graph was missed — *"the hook failed, or the graph predates it"* —
+    *"is provisioned on its next authenticated request instead of waiting for an
+    operator"*. Both of those populations HAVE the `public.graphs` row and LACK
+    the cursor row, and `default_graph_for_credential` returns a PRESENT row's id
+    at its own short-circuit **without** calling `ensure_default_graph_row`
+    (whose only production caller is `_mint_default_graph_row_best_effort`). So
+    that population is reached by no credential resolution at all; its remedy is
+    `record_allocator_cli.py backfill`, which the corrected docstring now says.
+
+    ⛔ THIS ROW PINS THE REACHABILITY, NOT THE PROSE — prose cannot be asserted.
+    It reds if someone wires the present-row arm into the mint or the hook, which
+    is exactly the change that would make the old sentence true: at that point
+    the docstring and this test must change DELIBERATELY rather than the claim
+    quietly becoming true while the plan still sends the operator to `backfill`.
+    """
+    from tortoise import supabase_control
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_mint(cp, org_id, graph_name=None, *, context):
+        calls.append((org_id, f"mint:{context}"))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not enter "
+            "the mint: the self-heal claim belongs to the MISS path only")
+
+    def fake_ensure(cp, org_id, graph_name=None):
+        calls.append((org_id, "ensure_default_graph_row"))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not re-run "
+            "the creation door — `backfill` is that population's remedy")
+
+    def fake_hook(org_id, graph_id):
+        calls.append((org_id, graph_id))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not reach "
+            "the creation hook — that is the claim this row exists to falsify")
+
+    monkeypatch.setattr(
+        supabase_control, "_mint_default_graph_row_best_effort", fake_mint)
+    monkeypatch.setattr(
+        supabase_control, "ensure_default_graph_row", fake_ensure)
+    monkeypatch.setattr(
+        supabase_control, "_provision_default_graph_record", fake_hook)
+
+    cp = _RowOnlyControlPlane([{"id": "g_default", "namespace": "org_ns"}])
+    namespace, graph_id = supabase_control.default_graph_for_credential(
+        cp, "org-14582", "org_ns", context="test")
+
+    assert (namespace, graph_id) == ("org_ns", "g_default"), (
+        "the pair must come off the one row read, unchanged")
+    assert cp.queries == [("graphs", ("id", "namespace"))], (
+        f"the credential path is ONE read and nothing else: {cp.queries}")
+    assert calls == [], (
+        f"the credential path re-entered the creation door/hook: {calls}")
+
+
 def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
         monkeypatch):
     """⛔ #14587 review P1 — THE OVERFLOW COUNTER WAS A LATCH IN THE `ok` FOLD.

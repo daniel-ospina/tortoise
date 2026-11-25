@@ -3303,6 +3303,11 @@ def provision_graph_record(*, org_id: str, graph_id: str,
        behind every refusal AND 500 the create. The failure is therefore made
        LOUD and VISIBLE instead: counted and named on `/health` as
        `armed_but_uncut`, and healed by `record_allocator_cli.py backfill`.
+       ⛔ **AND THE DEPARTURE IS RECORDED, NOT QUIETLY ADOPTED** — a plan
+       decision that says "fail-hard" must not survive only as a docstring a
+       reader may treat as legacy: `docs/plans/2026-11-15-issue-12894-storage-shape.md`
+       §A8.3.13 carries the `OVERRIDES:` line for it (and #14582 the marker), so
+       read that before "restoring" the one-transaction RPC or the hard failure.
     3. ⛔ **IT COMMITS, ONCE, AND ONLY ON SUCCESS.** The seed and the arm are one
        transaction (`record_allocator.provision_graph_record` does not commit),
        so a graph is never left in the state that allocates nothing.

@@ -4320,25 +4320,38 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
 
     Called at every arm of :func:`ensure_default_graph_row` that yields a row id:
     the active-row short-circuit, the mint, and the convergent adopt. ⛔ ALL
-    THREE, deliberately — the short-circuit is not just an optimisation here, it
-    is the **self-heal**: every credential resolver in the tree reaches this
-    function through :func:`default_graph_id_for_credential`, so an org whose
-    default graph was missed (the hook failed, or the graph predates it) is
-    provisioned on its next authenticated request instead of waiting for an
-    operator. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
-    repeat costs one scoped read.
+    THREE, deliberately — the short-circuit is not just an optimisation here: a
+    (re-)provision of an org whose default row already exists is the path that
+    re-runs this hook over a row it did not mint. `provision_graph_record` is
+    idempotent (`active` ⇒ no-op), so the repeat costs one scoped read.
 
-    ⛔ IT HEALS THE PRE-EXISTING GRAPH TOO, and that is why the floor is not this
-    caller's business: `default_graph_id_for_credential` only reaches the mint
-    arm when `default_graph_row_for` found no row, but the SHORT-CIRCUIT arm runs
-    for a graph that already exists and may carry a journal this hook never
+    ⛔ AND IT IS **NOT** A SELF-HEAL FOR A PRE-EXISTING GRAPH (#14624 review
+    ISSUE 2; an earlier revision of this docstring claimed it was, and that
+    sentence is the one a maintainer reads when deciding whether the
+    pre-existing population needs `backfill` at all). The reachability, read off
+    the tree: :func:`ensure_default_graph_row`'s only production caller is
+    :func:`_mint_default_graph_row_best_effort`, and the credential resolvers'
+    one home :func:`default_graph_for_credential` returns a PRESENT row's id at
+    its own short-circuit **without** calling the mint. So an org whose default
+    graph was missed — the hook failed, or the graph predates it; both have the
+    ROW and lack the cursor row — is **not** reached here by its next
+    authenticated request. Its remedy is `tools/record_allocator_cli.py
+    backfill` (or `sweep`), which is what that CLI's own cutover text says and
+    what `/health`'s `record.armed_but_uncut` entry names. The population this
+    arm DOES cover is a re-provision (the replay lanes call
+    :func:`_mint_default_graph_row_best_effort` unconditionally) and the race in
+    which the row appears after the credential path's miss read.
+
+    ⛔ WHEN IT DOES RUN OVER A PRE-EXISTING GRAPH — the re-provision and the race
+    above — the floor is not this caller's business: the SHORT-CIRCUIT arm can
+    select a graph that already exists and may carry a journal this hook never
     accounted for. The hook derives its floor from
     `record_allocator.JOURNAL_COUNT_SQL` in the same tenant-scoped transaction, so
     a graph with journal lines `1..N` seeds to `N` — the count is how many
     positions already exist. A hard-coded `0` here would refuse exactly the
-    population this arm exists to heal (`SeedRefused(reason="divergence")`, with
-    text claiming the record holds positions the journal cannot reproduce, which
-    is false for a healthy pre-existing graph).
+    pre-existing population this arm can select (`SeedRefused(reason="divergence")`,
+    with text claiming the record holds positions the journal cannot reproduce,
+    which is false for a healthy pre-existing graph).
 
     ⛔ BEST-EFFORT, and this one is not even a choice: this function's caller
     (`_mint_default_graph_row_best_effort`) exists because `#10025` F1 forbids
