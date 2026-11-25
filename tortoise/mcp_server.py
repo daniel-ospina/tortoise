@@ -9373,17 +9373,13 @@ def _get_auto_detect(id: str) -> dict:
     except Exception:
         resolved = []
     if resolved:
-        # ⛔ THIS ARM APPLIED NO FILTER AT ALL (#14593 review P2, measured), so a
+        # ⛔ This arm applied no filter before (#14593 review P2, measured), so a
         # plain `:Source` — not only a hybrid — returned its stored map through
         # `tortoise_get(id)`. It now grades the label SET and filters through the
         # one `#3998` home.
-        # ⛔ NO SENTENCE HERE ABOUT THE OTHER `tortoise_get` SPELLINGS. Four drafts
-        # tried one ("all of them now answer the same way", "the typed spellings do
-        # not share it", ...) and every one was measured false: the rest of the
-        # family is mode-dependent, so a claim phrased over it has to be re-derived
-        # per deployment and goes stale in the file that made it. Which doors grade
-        # and which do not lives at the rule's home
-        # (`projection.entities.label_set_publishable`) and in #14655.
+        # Nothing is said here about any OTHER read door. Which doors grade, and
+        # under which deployment, is `projection.entities.label_set_publishable`
+        # and #14655 — read it there.
         entry = resolved[0]
         props = dict(entry["properties"])
         from tortoise.projection.entities import filter_source_props, label_set_publishable
