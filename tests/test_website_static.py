@@ -5620,24 +5620,37 @@ def _compact_selector(selector: str) -> str:
     return re.sub(r"\s*>\s*", ">", " ".join(selector.split()))
 
 
-def _part_targets_ground(part: str, side: str) -> bool:
-    """Does this single selector address a `.beat` ground's `side` child?
+def _beats_whose_ground(selector: str, side: str,
+                        beat_ids: list[str]) -> list[str]:
+    """The beats whose GROUND — the DIRECT child of `#beat-x` / `.beat` — is `side`.
 
-    `:first-child` may be preceded by a type or universal selector
-    (`#beat-hero > div:first-child`, `… > *:first-child`) and those are the same
-    element — only the PSEUDO decides, so the optional simple selector is
-    accepted rather than graded as a different rule (#14683 review N3).
+    ⛔ The combinator is anchored to the beat's OWN compound selector rather
+    than "a `>` somewhere before the pseudo" (#14683 review B2, measured both
+    ways on the head page):
+
+        `#beat-hero .doc-copy > :first-child`  ->  a NESTED child, NOT the
+            ground. Accepting it left every phone in portrait top-aligned with
+            the guard GREEN — #14677 restored, silently.
+        `#beat-hero > .doc-grid:first-child`   ->  IS the ground (`.doc-grid`
+            is the hero's only child). Rejecting it false-RED an edit that is
+            behaviourally identical to the shipped one, with a message saying
+            the rule was missing.
+
+    So: the beat's compound must be followed by the child combinator, and a
+    simple selector of ANY kind (type, class, `*`) between the combinator and
+    the pseudo is accepted — those all address the same ELEMENT, since the
+    combinator still makes it a direct child of the beat. `(?![-\\w])` keeps
+    `#beat-hero-copy` from satisfying `#beat-hero`.
     """
-    return re.search(rf">(?:[A-Za-z][\w-]*|\*)?:{side}\b",
-                     _compact_selector(part)) is not None
-
-
-def _beats_named_by(selector: str, beat_ids: list[str]) -> list[str]:
-    """The beats a selector addresses: by id, or the `.beat` class."""
-    named = re.findall(r"#(beat-[a-z-]+)", selector)
-    if re.search(r"(?<![\w-])\.beat(?![\w-])", selector):
-        named = list(beat_ids)
-    return [beat for beat in beat_ids if beat in named]
+    compact = _compact_selector(selector)
+    out: list[str] = []
+    for beat in beat_ids:
+        for subject in (f"#{beat}", ".beat"):
+            if re.search(rf"{re.escape(subject)}(?![-\w])[^\s>]*>"
+                         rf"(?:[^\s>]*)?:{side}\b", compact):
+                out.append(beat)
+                break
+    return out
 
 
 def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
@@ -5676,11 +5689,9 @@ def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
             if any(start <= match.start() < end for start, end in other_media):
                 continue
         for part in (p for p in prelude.split(",") if p.strip()):
-            beats = _beats_named_by(part, beat_ids)
             for side, _props in GROUND_ENDS:
-                if _part_targets_ground(part, side):
-                    for beat in beats:
-                        homes.setdefault(beat, []).append((side, height))
+                for beat in _beats_whose_ground(part, side, beat_ids):
+                    homes.setdefault(beat, []).append((side, height))
     return homes
 
 
@@ -5713,7 +5724,7 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
     `justify-content: flex-start`; the auto margins are what still centre the
     copy when it FITS. Those two halves are only a centring mechanism if they
     are active TOGETHER — so for every block that sets a beat's alignment to
-    `flex-start`/`start`, that beat needs a `margin-top: auto` on its first
+    `flex-start`, that beat needs a `margin-top: auto` on its first
     child and a `margin-bottom: auto` on its last child in a block that fires
     at least as often (a WIDER `max-height`, or the base rule).
 
@@ -5734,7 +5745,7 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             # Only an arm that actually TOP-ALIGNS needs centring under it; a
             # `center`/`safe center` here is the other row's finding, not this
             # one's.
-            if not values or values[-1] not in {"flex-start", "start"}:
+            if not values or values[-1] != "flex-start":
                 continue
             for beat in re.findall(r"#(beat-[a-z-]+)", prelude):
                 arms.setdefault(beat, set()).add(height)
@@ -5847,7 +5858,7 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         clipped and h1 under the pill, which is worse than the bug being fixed.
         Auto margins have no support band: they absorb the free space when there
         is any and resolve to zero when there is not. So this row pins the
-        MECHANISM (a `flex-start`/`start` alignment plus `margin-*: auto` on the
+        MECHANISM (a `flex-start` alignment plus `margin-*: auto` on the
         ground's first and last child), not the spelling of a keyword that a
         browser may accept and ignore.
 
@@ -5891,14 +5902,15 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 "over-flowing beat is clipped at the top with its heading "
                 "under the Login pill. Centre the beat with `margin-*: auto` "
                 "instead — it has no such support band.")
-            assert values[-1] in {"flex-start", "start"}, (
+            assert values[-1] == "flex-start", (
                 f"{PRODUCT_TEAMS_HTML.name}: the hatch for "
                 f"{' '.join(selector.split())} ends its `justify-content` at "
-                f"{values[-1]!r} (all: {values!r}). It must be `flex-start` "
-                "(or `start`): that is the alignment the auto margins below "
-                "have to override-able, and the one an over-flowing beat needs "
-                "so its copy starts at `padding-top` and can be scrolled from "
-                "the top rather than clipped above it.")
+                f"{values[-1]!r} (all: {values!r}). It must be `flex-start`: "
+                "that is the alignment the sibling row above also requires, "
+                "the one the auto margins below have to be able to override, "
+                "and the one an over-flowing beat needs so its copy starts at "
+                "`padding-top` and can be scrolled from the top rather than "
+                "clipped above it.")
 
         # …AND THE CENTRING ITSELF, graded PER BLOCK (#14683 review P2). Auto
         # margins on the ground's first and last child absorb the free space
@@ -6116,7 +6128,43 @@ class TestShortViewportCentringIsGradedPerBlock:
             + "\n      #beat-hero > div:last-child { margin-bottom: auto; }"))
         assert _short_viewport_centring_problems(page) == []
 
-    def test_a_wider_alignment_arm_needs_centring_too(self):
+    def test_a_nested_child_is_not_the_ground(self):
+        """`#beat-hero .doc-copy > :first-child` centres a DESCENDANT, not the ground.
+
+        The pre-fix regex accepted any `>` upstream of the pseudo, so moving the
+        centring off the beat's ground onto a nested child left the guard GREEN
+        with #14677 restored — and this page has the natural shape for it
+        (`.outcomes > :first-child` inside `#beat-compute`).
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero .doc-copy > :first-child { margin-top: auto; }"
+            + "\n      #beat-hero .doc-copy > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a rule centred on a NESTED child was accepted as the ground — the "
+            "beat itself keeps no auto margins, which is #14677 verbatim.")
+        assert "beat-hero > :first-child" in problems[0], problems
+        assert _beats_whose_ground(
+            "#beat-hero .doc-copy > :first-child", "first-child",
+            ["beat-hero"]) == []
+
+    def test_a_class_qualified_ground_is_still_the_ground(self):
+        """`#beat-hero > .doc-grid:first-child` IS the hero's ground."""
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > .doc-grid:first-child { margin-top: auto; }"
+            + "\n      #beat-hero > .doc-grid:last-child { margin-bottom: auto; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "the class-qualified ground selector was reported missing — it "
+            "addresses the same element as `#beat-hero > :first-child`.")
+
+    def test_a_longer_id_is_not_the_beat(self):
+        """`#beat-hero-copy` must not satisfy `#beat-hero`'s ground."""
+        assert _beats_whose_ground(
+            "#beat-hero-copy > :first-child", "first-child",
+            ["beat-hero"]) == []
+
         """Centring at 820 does not cover a hatch arm that fires at 1200."""
         page = self._page(
             hatch=self.CENTRED_HATCH,
