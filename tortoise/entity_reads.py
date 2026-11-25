@@ -412,10 +412,14 @@ def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
 
     MEASURED, and the reason this paragraph exists: ``_create_source(url, "web",
     name="My Doc Name")`` renders ``name: "My Doc Name"`` as a ROOT and
-    ``name: <url>`` as a neighbour, and an unnamed ``:Event`` renders
-    ``name: <eventId>`` as a root and ``name: null`` as a neighbour — the same node,
-    two strings, in one response. That is a DELIBERATE asymmetry (each side answers
-    its own question), not an identity, and calling it one was the defect.
+    ``name: <url>`` as a neighbour — the same node, two strings, in one response.
+    That is a DELIBERATE asymmetry (each side answers its own question), not an
+    identity, and calling it one was the defect. ⛔ The asymmetry is SOURCE-SHAPED:
+    an eventId-only ``:Event`` now answers the SAME string on both sides, because
+    ``m.eventId`` joined the ``ELSE`` arm below in the same change that wrote this
+    paragraph — before that it answered ``null`` as a neighbour while its root
+    answered the eventId. Stating the measured post-change fact rather than the
+    pre-change one is the whole point of the paragraph.
 
     The full body of a Point is not lost by the cap: the root is by definition
     reachable at its own route (``/v1/points/{id}`` and siblings), and this route

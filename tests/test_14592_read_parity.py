@@ -999,9 +999,12 @@ def test_relations_never_publishes_a_legacy_Documents_stored_body(tmp_path):
     stored it, so this is the same disclosure class one label over — and the
     route's own docstring claimed the rule was "everything else by its name".
 
-    ⛔ The fallback is now ``coalesce(m.name, m.url, m.id)``: a name if the node
-    has one, else its identity. Nothing legitimate is lost — `:Event` keeps its
-    narrative in `session_narrative`, never on the node.
+    ⛔ The fallback is `_RELATION_ENDPOINT_NAME`'s ELSE arm — a name if the node
+    has one, else its identity (`url`, `id`, then `eventId`). Nothing legitimate
+    is lost — `:Event` keeps its narrative in `session_narrative`, never on the
+    node — and this fixture passes through `m.id` either way, so the arm's exact
+    text is named here rather than restated (a restated copy went stale within
+    one commit when `eventId` joined that arm).
     """
     secret = "PRE-D10 DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
     legacy_id = "doc-legacy-14593"
