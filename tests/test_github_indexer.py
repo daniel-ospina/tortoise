@@ -3352,9 +3352,13 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # merge resolved this file to) and therefore NOT identical at this head. So the reds this
     # table's own guard raised were this BRANCH's shift (`+6` above `update_knowledge`, `+25`
     # below it), not an inherited `main` red. See the re-derivation that follows.
-    # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
-    # by its own `continue` terminator (`56538`) — never by the start text alone, which would
-    # admit either occurrence.
+    # ⛔ The un-supersede arm's start text occurs TWICE at this head (`56623`, the admission arm
+    # this row pins, and `56662`, a hint-message expression, which is NOT an arm), so its row is
+    # located by its own `continue` terminator (`56632`) — never by the start text alone, which
+    # would admit either occurrence. Re-measured with `grep -n` on this tree; the
+    # `56529`/`56568`/`56538` triple this sentence used to carry was the `bbe54363ad65`-era address
+    # of the same two occurrences and the same terminator, and it names unrelated lines both here
+    # and on `origin/main` (`56598`/`56637` there), so it is superseded rather than deleted.
     # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
     # re-derive every address at the current tree), so the note that "no landing re-derived
     # these four rows" no longer holds. Its figures are above and were re-measured here, not
