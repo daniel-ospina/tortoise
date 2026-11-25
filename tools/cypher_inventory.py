@@ -1019,6 +1019,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # ⛔ THE REFUSAL ABOVE COVERS ONE PAIR; THE INVARIANT IT STATES IS ABOUT THE SET
+    # (#14625 review, P2). The comment above says "a combination must not silently
+    # drop one", but the `if` tested `--check`+`--render` ALONE, so three more pairs
+    # were accepted and each ran ONE verb and discarded the other with **rc 0** —
+    # measured on the shipped tree: `--check --json` printed `check: 25 pinned counts
+    # match` and emitted no JSON, `--check --markdown` printed the same line and no
+    # table, and `--json --markdown` returned the JSON payload for a caller who asked
+    # for the appendix table (a lane redirecting that saves a `.json` body as `.md`).
+    # That is the "gate that silently does nothing" class this module exists to
+    # refuse, and it is a CLASS rather than a pair: every one of these verbs owns its
+    # own output stream, so no precedence exists to apply and none is invented here —
+    # a second one is refused (2 = could not run). `--all-surface` is a MODIFIER, not
+    # an output verb, so `--markdown --all-surface` / `--json --all-surface` stay
+    # legal; `--check --all-surface` is refused separately above.
+    _output_verbs = [
+        verb for verb, chosen in (
+            ("--check", args.check is not None),
+            ("--render", args.render is not None),
+            ("--markdown", args.markdown),
+            ("--json", args.json),
+        ) if chosen
+    ]
+    if len(_output_verbs) > 1:
+        print(
+            "these verbs each own their own OUTPUT, so a combination would silently\n"
+            f"drop all but one: got {' + '.join(_output_verbs)}. Run one per command —\n"
+            "`--check`, `--render`, `--markdown` and `--json` are four runs, and\n"
+            "`--all-surface` is the modifier that may accompany any of the last two.",
+            file=sys.stderr,
+        )
+        return 2
+
     # ⛔ `--render` MUST NOT OVERWRITE A TRACKED PATH. The refusal inside `render()`
     # guards the SOURCE'S CONTENT (a source that already carries rows), never the
     # DESTINATION — so `--render docs/architecture/CYPHER-INVENTORY.src.md` read the

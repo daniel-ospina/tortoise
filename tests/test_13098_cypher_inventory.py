@@ -362,6 +362,43 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
         "the refusal must name BOTH verbs so the lane knows what to split; stderr "
         f"was:\n{proc.stderr}")
 
+    # ⛔ THE INVARIANT IS ABOUT THE SET, NOT THAT ONE PAIR (#14625 review, P2). The
+    # guard above tested `--check`+`--render` only, so every OTHER pair of output
+    # verbs was accepted and ran one verb while DISCARDING the other with rc 0 —
+    # measured on the shipped tree: `--check --json` printed `check: 25 pinned counts
+    # match` and emitted no JSON, `--check --markdown` the same line and no table, and
+    # `--json --markdown` returned the JSON payload to a caller who asked for the
+    # appendix table. Each is the same "gate that silently does nothing" shape, so
+    # each must answer 2 and name both verbs. `--all-surface` is a MODIFIER (not an
+    # output verb), so the two wide-census forms stay legal — asserted below, because
+    # a fix that refused them would break §1's own recipe.
+    for combo in (("--check", "--json"),
+                  ("--check", "--markdown"),
+                  ("--json", "--markdown"),
+                  ("--render", "--json")):
+        both = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *combo],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert both.returncode == 2, (
+            f"`{' '.join(combo)}` must exit 2 (could not run), got "
+            f"{both.returncode}; a 0 here reads as 'ran both' when one verb's output "
+            f"was SILENTLY DROPPED. stdout was:\n{both.stdout}")
+        for verb in combo:
+            assert verb in both.stderr, (
+                f"the refusal must name every verb in `{' '.join(combo)}` so the lane "
+                f"knows what to split; stderr was:\n{both.stderr}")
+
+    for legal in (("--markdown", "--all-surface"), ("--json", "--all-surface")):
+        ok = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *legal],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert ok.returncode == 0, (
+            f"`{' '.join(legal)}` must stay LEGAL — `--all-surface` is the modifier "
+            f"that widens the census, not a second output verb; got {ok.returncode} "
+            f"with stderr:\n{ok.stderr}")
+
 
 def test_a_directory_destination_is_refused_AS_a_directory(tmp_path):
     """A directory destination exits 2 with the TRUE cause, not "a TRACKED path".
