@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a29b5f24ce95` folded in, carrying
+# reader of the prose can see. On THIS tree — `origin/main` `a3cedc2b96fac` folded in, carrying
 # `#14592`'s row (`tests/test_14592_operating_model_evidence.py`, `core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) alongside the older `#14596`, `#14552`, `#14560`, `#14574`, `#14565` and
 # `#14559` rows — plus THIS PR's own `tests/test_14582_creation_hook.py` (`core`, that same flat

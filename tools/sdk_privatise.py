@@ -408,7 +408,7 @@ SWEEP_NAMES = 66
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
 #: therefore stands on what IS measured — no REMOTE branch and no `main` reaches such a commit (a
 #: leftover LOCAL branch may still contain it; the remote BRANCH that carried it is gone, which is
-#: exactly what `git branch -r --contains` reads as empty), so it sits
+#: exactly what the scoped `for-each-ref --contains … refs/remotes/origin/` reads as empty), so it sits
 #: outside every branch history the repo PUBLISHES (it IS inside `refs/pull/14108/head`'s, which is this
 #: paragraph's own point, stated earlier in it — ⛔ NOT "four lines above", as an earlier draft of
 #: this clause said: that offset does not reproduce, and an offset is the same RELATIVE-REFERENCE
