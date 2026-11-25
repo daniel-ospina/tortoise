@@ -276,6 +276,109 @@ def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsy
         "grade its pins over a committed copy of the rows")
 
 
+def test_every_emitted_row_is_detected_as_a_pasted_row() -> None:
+    """`CENSUS_ROW` matches the row `markdown_table` actually emits.
+
+    ⛔ THE REFUSAL ABOVE IS ONLY AS GOOD AS ITS DETECTOR, AND THE DETECTOR WAS
+    NARROWED. It used to trigger on "a table row whose first cell is a
+    `file:line`", which refused a hand-authored prose table and told its author to
+    delete correct prose (`#13098` review P3). It now requires the GENERATED shape
+    — `file:line | fn | shape | role` — and the failure mode of that narrowing is
+    silent: rename or re-order a cell in `markdown_table` and every real paste
+    stops being caught, with this suite still green.
+
+    So the detector is graded against the generator, on a SYNTHETIC site: no census
+    run, no counted number, nothing here rots when the tree moves.
+    """
+    site = census.Site(
+        path="tortoise/example.py", line=7, function="f", door="query",
+        shape="plain", role="read", digest="MATCH (n) RETURN n",
+    )
+    emitted = census.markdown_table([site])
+    rows = [ln for ln in emitted.splitlines() if ln.startswith("| `")]
+    assert len(rows) == 1, f"expected exactly one emitted site row, got {rows!r}"
+    assert census.CENSUS_ROW.search(rows[0]), (
+        "`markdown_table`'s own output is no longer recognised by `CENSUS_ROW`, so a "
+        "pasted appendix would be accepted silently — re-point the detector at the "
+        f"emitted row's shape. Row: {rows[0]!r}")
+
+
+def test_a_prose_table_row_is_not_refused_as_a_census_row() -> None:
+    """A hand-authored table may START a row with a site address (`#13098` review P3).
+
+    The over-broad detector refused this shape with "delete the rows; `--render`
+    appends them from the tree" — i.e. it prescribed deleting CORRECT prose. Such a
+    row is not the generated six-cell shape and must pass.
+    """
+    prose = "| `tortoise/sdk.py:1234` | the EP write |\n"
+    assert not census.CENSUS_ROW.search(prose), (
+        "a two-cell prose row whose first cell is a site address is being refused as "
+        "a pasted census row — the detector must match the GENERATED six-cell shape")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_the_generated_document_is_untracked_and_ignored() -> None:
+    """The OUTPUT is never committed — the contract this split exists to keep.
+
+    ⛔ WITHOUT THIS ARM THAT CONTRACT HAS NO EXECUTABLE COVERAGE, and the conflict
+    engine can return silently: `--check` grades the tracked SOURCE, so if a lane
+    re-adds the rendered document (`git add -f`, which `--check` never reads) the
+    suite stays as green as it is now while every open PR starts conflicting again.
+    Measured on the pre-fix tree: `--check` printed "25 pinned counts match" (exit 0)
+    with a fully rowed document sitting tracked beside it.
+
+    Mirrors `tests/test_registry_integrity.py::
+    test_the_generated_rename_table_is_not_tracked`, which pins the same contract for
+    the sibling generated artifact.
+    """
+    rel = str(census.DOC_OUT.relative_to(ROOT))
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", rel],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert tracked == "", (
+        f"{rel} is TRACKED again — it is `--render`'s gitignored output, and "
+        "committing it restores the conflict on every PR that moves a statement "
+        "(8 of 11 open PRs, measured 2026-11-24). Untrack it: `git rm --cached "
+        f"{rel}`")
+    ignored = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "-q", "--", rel],
+    )
+    assert ignored.returncode == 0, (
+        f"{rel} is untracked but NOT gitignored — it would show up as an "
+        "untracked file in every lane's `git status`, where the next `git add -A` "
+        "(or `-f`) picks it up. Restore its `.gitignore` row")
+
+
+@requires_doc_pin
+def test_the_default_render_target_is_the_gitignored_document() -> None:
+    """`--render` with NO path writes `DOC_OUT` — the command every docstring names.
+
+    ⛔ THE DOCUMENTED COMMAND IS `--render` WITH NO ARGUMENT, and until this arm
+    existed no test ran that form: both appendix arms pass an explicit `tmp_path`
+    path, so `argparse`'s `const=` for `--render` was unpinned and could drift to
+    another file while every arm stayed green (`#13098` review P2).
+
+    The write is idempotent and lands on the GITIGNORED path, which is exactly what
+    the documented procedure does, so running it changes no tracked byte.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), "--render"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, f"`--render` (no path) refused:\n{proc.stdout}\n{proc.stderr}"
+    expected = str(census.DOC_OUT.relative_to(ROOT))
+    assert f"to {census.DOC_OUT}" in proc.stdout, (
+        f"`--render` with no path did not write {census.DOC_OUT} — the documented "
+        f"command's default target has moved. stdout: {proc.stdout!r} (expected "
+        f"the default const to be {expected!r})")
+    assert census.DOC_OUT.exists(), (
+        f"`--render` reported success but {census.DOC_OUT} does not exist")
+    assert not census.CENSUS_ROW.search(_source_text()), (
+        "rendering in place appended rows to the SOURCE — the refusal is not "
+        "holding on the default path")
+
+
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 
 # ⛔ EVERY `_exactly_one` ARM `_grade_doc_text` MAKES, one row each, as
@@ -1890,9 +1993,16 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
         "pytest errors in session setup and no census arm runs at all")
     # …and the arms it produces for are still here. A structural count, not a
-    # reading of the file's content: the decorator is applied at 7 arms + 1
+    # reading of the file's content: the decorator is applied at 8 arms + 1
     # parametrized one (7 cases), and an arm leaving this module is a diff a
     # reviewer sees — what is invisible is the ENV disappearing, which is above.
+    #
+    # ⛔ THE COUNT IS A DELIBERATE 9 SINCE `#13098` review round 1 added
+    # `test_the_default_render_target_is_the_gitignored_document` (the documented
+    # `--render`-with-no-path form, which no arm had ever run). This pin fired on
+    # that addition exactly as designed, and the number was re-derived — 8 → 9 —
+    # rather than the pin being relaxed to `>=`, which is the slack its own comment
+    # warns about.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
     # is 15 at this head — the 8 decorator lines PLUS 7 prose/format mentions (the
@@ -1915,8 +2025,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
             for dec in node.decorator_list
         )
     ]
-    assert len(decorated) == 8, (
-        "expected EXACTLY 8 `@requires_doc_pin` arms (7 single + 1 parametrized); got "
+    assert len(decorated) == 9, (
+        "expected EXACTLY 9 `@requires_doc_pin` arms (8 single + 1 parametrized); got "
         f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
         "delete this pin with them, or restore them")
 

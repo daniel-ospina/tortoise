@@ -150,7 +150,22 @@ DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
 #: A source that carries a census row: the defect this split exists to make
 #: impossible (someone pastes the appendix back into the tracked file, and the
 #: conflict engine returns). `--render` and `--check` both refuse it.
-CENSUS_ROW = re.compile(r"^\| `[^`]+:\d+` \|", re.MULTILINE)
+#:
+#: ⛔ IT MATCHES THE GENERATED ROW'S SHAPE, NOT "a table whose first cell is a
+#: `file:line`". The first cut was `^\| `[^`]+:\d+` \|`, which also matched a
+#: hand-authored prose table that happens to start with a site address — and
+#: then refused it with "delete the rows", i.e. it told an author to delete
+#: correct prose (`#13098` review P3). `markdown_table` emits six cells
+#: (`file:line | fn | shape | role | verdict | statement`), so the detector
+#: requires the `fn` cell plus the two lowercase classifier cells.
+#:
+#: ⚠️ THE NARROWING IS PINNED, NOT TRUSTED:
+#: `tests/test_13098_cypher_inventory.py::test_every_emitted_row_is_detected_as_a_pasted_row`
+#: asserts `markdown_table`'s own output matches this regex, so a future change
+#: to the row format cannot quietly stop the guard from catching a real paste.
+CENSUS_ROW = re.compile(
+    r"^\| `[^`]+:\d+` \| `[^`]*` \| [a-z_]+ \| [a-z_]+ \|", re.MULTILINE
+)
 
 #: Files whose statements are the PRODUCT's. Everything else is measured, never
 #: folded in — the census unit is named above.
