@@ -397,25 +397,29 @@ _RELATION_ENDPOINT_NAME = (
 def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
     """The entity the caller ASKED for — same BOUND, same FLAG, not same coalesce.
 
-    ⛔ THE PARITY IS CAP + FLAG, AND ONLY THAT (#14593 review P3, twice). What an
-    earlier revision claimed was "the same coalesce … so the two sides render the
-    same way"; what is true is narrower and stated here rather than implied:
+    ⛔ THE PARITY IS CAP + FLAG, AND ONLY THAT (#14593 review, four rounds). The
+    CAP (``_ENDPOINT_NAME_MAX``) and the ``nameTruncated`` FLAG are shared with a
+    neighbour's preview, so a client may treat both sides the same way.
 
-    * the CAP (``_ENDPOINT_NAME_MAX``) and the ``nameTruncated`` FLAG are shared
-      with a neighbour's preview, so a client can treat both sides the same way;
-    * the COALESCE is NOT shared. A neighbour is selected PER LAYER in Cypher
-      (``_RELATION_ENDPOINT_NAME``): a ``:Source`` answers ``url``, a ``:Point``
-      ``content``, everything else ``name → url → id → eventId``. The root reads
-      the map the projection already handed us, in ONE order
-      (``name → content → url → eventId``), because it is a single known entity
-      rather than a heterogeneous neighbour list.
+    ⛔ THE COALESCE IS NOT SHARED, and this docstring does NOT paraphrase it —
+    earlier revisions did, three times, and each copy was wider than the code:
+    "the same coalesce … so the two sides render the same way" (wrong: they do
+    not), "the asymmetry is SOURCE-SHAPED" (wrong: it is not layer-specific), and
+    a per-layer restatement that gave ``:Point → content`` while the arm is
+    ``coalesce(m.content, m.name)``. The rule has ONE home — the code:
+    ``_RELATION_ENDPOINT_NAME`` ABOVE (the neighbour side, per layer) and
+    ``raw = …`` BELOW (the root side, one ``or``-chain). Read those two sites.
 
-    MEASURED, and the reason this paragraph exists: ``_create_source(url, "web",
-    name="My Doc Name")`` renders ``name: "My Doc Name"`` as a ROOT and
-    ``name: <url>`` as a neighbour, and an unnamed ``:Event`` renders
-    ``name: <eventId>`` as a root and ``name: null`` as a neighbour — the same node,
-    two strings, in one response. That is a DELIBERATE asymmetry (each side answers
-    its own question), not an identity, and calling it one was the defect.
+    What is asserted HERE is only what was measured, and it is enough to stop the
+    mistake this paragraph exists for: the two sides CAN answer different strings
+    for the same node — MEASURED on this head for a ``:Point`` carrying both
+    ``name`` and ``content``, for a ``:Source`` carrying a ``name``, and for an
+    ``:Event`` carrying ``content``. ``_create_source(url, "web",
+    name="My Doc Name")`` is the shortest of the three: ``name: "My Doc Name"`` as
+    a ROOT, ``name: <url>`` as a neighbour.
+    ⛔ Operationally: do not dedupe ``entity.name`` against ``other.name`` on any
+    layer, and do not infer the per-layer rule from this comment — it does not
+    state one.
 
     The full body of a Point is not lost by the cap: the root is by definition
     reachable at its own route (``/v1/points/{id}`` and siblings), and this route
@@ -462,8 +466,12 @@ def _endpoint_preview(row: Any) -> dict:
     above the two UNION branches), because a single blanket ``coalesce(m.name,
     m.content, m.url)`` reached ``content`` for a ``:Source`` too — the ``#3998``
     payload disclosure arriving through the name field, which
-    ``filter_source_props`` never sees. A Source is answered by its ``url``; a
-    Point by its ``content``; everything else by its ``name``.
+    ``filter_source_props`` never sees.
+    ⚠️ The arms are NOT restated here. An earlier revision summarised them as
+    "a Source by its ``url``; a Point by its ``content``; everything else by its
+    ``name``", which was false twice over — the ``:Point`` arm is
+    ``coalesce(m.content, m.name)`` and the ``ELSE`` arm ends in an identity
+    (``url``, ``id``, ``eventId``), not in ``name`` alone. Read the constant.
     """
     labels = row[1] or []
     raw = row[2]
