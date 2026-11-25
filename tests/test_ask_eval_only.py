@@ -269,17 +269,18 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   re-measured from the registry (39 live entries, 34 advertised) — the same move
     #   `test_10084_graph_argument_omit_first` already records for the advertising view.
     #   The five `http_policy=False` rows are unchanged, so 34 = 39 - 5.
-    #   #11609 lane P11 (the nine envelope doors) retires EIGHT `http_policy=True`
-    #   doors — `search`, `search_sessions`, `suggest_entry_points`, `list_batches`,
-    #   `list_namespaces`, `diary_read`, `check_structure`, `calibrate_summary` — and
-    #   registers NOTHING (each retires into a container already in this population), so
-    #   34 - 8 = **26**. Re-measured from the registry the other way: 30 live entries
-    #   minus the FOUR `http_policy=False` rows
-    #   (`index_sources_from_directory`, `mine_knowledge_from_directory`, `org_create`,
-    #   `refresh_confidence`) = 26. The ninth door, `expand_relationships`, is one of the
-    #   `http_policy=False` rows — it left this population without moving it, which is
-    #   why the retirement count and the live-surface count are derived separately here
-    #   rather than assumed to agree.
+    #   ⛔ #11609 lane P11 (the nine envelope doors) retires NINE doors and registers
+    #   NOTHING. EIGHT were `http_policy=True` and every one of the eight delivered into a
+    #   container ALREADY in this view (`search_knowledge`, `list_knowledge`,
+    #   `check_confidence`, `graph_overview`), so no container row arrives and the listing
+    #   moves by exactly -8: 34 - 8 = **26**, re-measured from the registry's own
+    #   `http_policy` population (30 live entries, 26 advertised). The NINTH door,
+    #   `expand_relationships`, was `http_policy=False`, so it was never in this view —
+    #   but it WAS one of the five exclusion rows, so the exclusion term moves 5 -> 4
+    #   (the remaining four are still `http_policy=False`), which is why this view moves
+    #   by the eight departures and not by the nine: 26 = 30 - 4. That ninth door moved
+    #   the UNFILTERED census instead, and `test_10084_graph_argument_omit_first` derives
+    #   that move separately — the two numbers are not interchangeable.
     # Anything BELOW 26 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
 
