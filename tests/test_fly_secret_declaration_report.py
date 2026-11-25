@@ -657,9 +657,15 @@ def test_a_name_that_contains_the_title_suffix_still_round_trips():
     group is free to stop early, so the class is reachable in production. The comment
     above `_TITLE_RE` currently states the same causal fact this docstring does — noted
     as CURRENTLY AGREEING rather than as an enforced invariant, because both are prose
-    and nothing reads that comment: the only grammar test,
-    `test_the_workflow_owns_the_grammar_in_exactly_one_place`, asserts on the workflow's
-    shell, not on the comment. They can drift, and no row here would notice.
+    and NOTHING READS THAT COMMENT. The five rows that exercise the grammar split
+    four-and-one: `test_the_issue_title_is_a_stable_dedupe_key`,
+    `test_the_resolve_sweep_only_recognises_this_workflows_own_titles`, the whitespace
+    row and this row all drive the shipped tool through
+    `_tool(… '--title' / '--filter-owned-titles')` and inspect its OUTPUT, never the
+    comment; the fifth, `test_the_workflow_owns_the_grammar_in_exactly_one_place`, reads
+    the WORKFLOW text for a stray title literal and calls `_tool` not at all. So neither
+    the Python comment nor its wording is read by any row. They can drift, and no row
+    here would notice.
     """
     suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
     for name in (

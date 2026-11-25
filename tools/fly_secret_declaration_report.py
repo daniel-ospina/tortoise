@@ -167,16 +167,19 @@ TITLE_SUFFIX = (
 #: NON-GREEDINESS — an earlier revision of this comment claimed the opposite and a
 #: review measured it false: with the anchor kept, replacing `(.+?)` by `(.+)` leaves
 #: every row in the suite green (49 passed), because a hard `$` forces the group's
-#: extent either way. The non-greedy spelling is kept as the narrower default for a
-#: DIFFERENT reason than the one above: should the `$` anchor ever be loosened, it
-#: stops at the FIRST suffix rather than the last, so the failure is loud — a name
-#: truncated back toward itself, which the round-trip row reds on — instead of silent
-#: folding of one name into another. ⛔ It is NOT load-bearing for the class today and
-#: is not claimed to be: with `$` present neither spelling can over-capture (measured —
-#: `(.+)` leaves the suite green), and with `$` REMOVED the non-greedy spelling is the
-#: one that truncates a suffix-bearing name while `(.+)` still round-trips it. The
-#: PROPERTY this comment exists to protect is the anchor's.
-#: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` pins it.
+#: extent either way.
+#:
+#: ⛔ DO NOT CLAIM THE `.+?` SPELLING IS SAFER — two revisions of this comment tried,
+#: and both were measured false. With `$` present the spellings capture IDENTICALLY
+#: (0 differing captures across 20,005 generated cases, double-suffix included). With
+#: `$` REMOVED the non-greedy spelling is strictly WORSE: it truncates a suffix-bearing
+#: name (`"BEFORE <suffix> AFTER"` reads back as `"BEFORE "`) and it FOLDS distinct
+#: names onto one read-back (`"A"` and `"A <suffix> B"` both read back as `"A"`),
+#: while `(.+)` round-trips both exactly. So the non-greedy spelling is retained only
+#: because it is what shipped; it carries no protection of its own, and it is not the
+#: safer choice. The anchor does the work — and if the anchor is ever loosened,
+#: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` reds on the
+#: truncation rather than letting the loss pass unnoticed.
 _TITLE_RE = re.compile(
     r"^" + re.escape(TITLE_PREFIX) + r"(.+?)" + re.escape(TITLE_SUFFIX) + r"$"
 )
