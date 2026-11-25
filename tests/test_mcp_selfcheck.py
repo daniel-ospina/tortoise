@@ -1430,6 +1430,47 @@ def test_a_marker_line_preceded_by_a_BOM_is_still_the_marker(tmp_path):
         repr(written.count(harness_onboard.BEGIN_MARK)))
 
 
+def test_installing_TWICE_never_deletes_a_documented_example(tmp_path):
+    """⛔ P0: the APPEND REPAIRED the file's fences, so the second run ate the user's line.
+
+    A file that only DOCUMENTS the block reads `_marker_pair == (0, 0)` — its BEGIN is
+    inside a fence, i.e. documentation — so `write_instructions` takes the APPEND branch.
+    Appending our own fences RE-PAIRS the file: the same document now reads `(1, 1)`,
+    with the USER's documented BEGIN as the block's BEGIN. The next run strips from that
+    BEGIN to our END, and the user's own prose between them is GONE — no refusal, exit 0.
+
+    MEASURED at the head before the guard: `refusals=[]`, `BEGINs=1`, sentinel deleted.
+    The text below is the minimal shape an exhaustive 4-6 line enumeration produced; it
+    needs no exotic separator, just plain backticks and a `+3` indented closer — the
+    documentation file this change exists to make work.
+
+    The invariant: an install must never change what a LATER run REMOVES.
+    """
+    original = ("```\n   ```\n```\n" + harness_onboard.BEGIN_MARK +
+                "\nSENTINEL: my own notes, never delete this\n```\n")
+    path = tmp_path / "AGENTS.md"
+    path.write_text(original, encoding="utf-8")
+
+    first = harness_onboard.write_instructions("pi", tmp_path, dry_run=False)
+    assert first.refusals, (
+        "writing this block re-pairs the file's fences, so a later run would strip "
+        "from the user's own documented BEGIN — the install must refuse instead")
+    assert path.read_text(encoding="utf-8") == original, (
+        "a refused install must leave the file byte-identical")
+
+    # And the property behind it, stated directly: whatever we write, a later removal
+    # must take exactly what we appended and nothing else. A SEPARATE directory, because
+    # the writer always targets the harness's own instruction file name.
+    plain_dir = tmp_path / "plain-case"
+    plain_dir.mkdir()
+    plain = plain_dir / "AGENTS.md"
+    plain.write_text("# House\n\nTail.\n", encoding="utf-8")
+    harness_onboard.write_instructions("pi", plain_dir, dry_run=False)
+    harness_onboard.write_instructions("pi", plain_dir, dry_run=False)
+    assert plain.read_text(encoding="utf-8").count(harness_onboard.BEGIN_MARK) == 1, (
+        "a second install must not duplicate the block on an ordinary file")
+
+
 def test_a_closer_carrying_an_INFO_STRING_does_not_close_the_fence(tmp_path):
     """⛔ ` ```bash ` IS CONTENT, NOT A CLOSER (CommonMark) — and reading it as one
     DELETED the user's own text.

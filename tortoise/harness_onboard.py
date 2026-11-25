@@ -1015,6 +1015,22 @@ def write_instructions(harness: str, project_dir: Path, *,
     else:
         after = (before.rstrip("\r\n") + nl + nl + block
                  if before.strip() else block)
+    # ⛔ THE APPEND MUST NOT REPAIR THE FILE'S FENCES. Measured P0: a file that only
+    # DOCUMENTS the block (` ``` `/`   ``` `/` ``` `/BEGIN/sentinel/` ``` `) reads
+    # `_marker_pair == (0, 0)` — the BEGIN is fenced, i.e. documentation — so we take
+    # the append branch. Appending our own fences RE-PAIRS the file, so the SAME file
+    # now reads `(1, 1)` with the USER's documented BEGIN as the block's BEGIN. The
+    # next run strips from that BEGIN to our END and the user's own prose is gone, with
+    # no refusal and exit 0 (192 of the 41,619 `(0, 0)` documents an exhaustive 4-6 line
+    # enumeration produced, all plain backticks — no exotic separator needed).
+    # The installer must not change what a later run REMOVES; if it would, refuse.
+    if _strip_block(after) != _strip_block(before):
+        out.refusals.append(
+            f"{path}: writing the block would change what a later run removes "
+            f"(appending it re-pairs the file's fences) — the two sentences were "
+            f"NOT written, because a later `--uninstall` would then take your own "
+            f"text with it")
+        return out
     if after == before:
         out.planned.append(str(path))
         return out
