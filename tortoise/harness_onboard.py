@@ -849,6 +849,13 @@ def write_instructions(harness: str, project_dir: Path, *,
         # different one: a repo that DOCUMENTS the block in a fenced example carries
         # both strings without carrying the block (`_is_marker_line` is the rule, and
         # this is the same branch decision, one layer up).
+        # HONESTLY: because the gate above admits only (0, 0) or (1, 1) and
+        # `_strip_block` is a NO-OP on a (0, 0) file, this branch and the substring
+        # test are OBSERVATIONALLY IDENTICAL today (measured: the mutant survives the
+        # whole suite). It is kept as DEFENCE IN DEPTH — if `_strip_block` ever stopped
+        # being a no-op on a (0, 0) file, the substring test would silently rewrite a
+        # fenced example. The protection itself comes from `_strip_block`'s idempotence,
+        # not from this predicate; do not read this line as the guard.
         # Idempotent: replace the block in place, preserving everything around it.
         # ⛔ Edits the user made INSIDE the block are NOT preserved — the block is
         # ours and is rewritten whole. (The previous comment claimed otherwise; the

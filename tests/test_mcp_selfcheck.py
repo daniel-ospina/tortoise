@@ -1057,6 +1057,38 @@ def test_an_unclosed_fence_is_REFUSED_not_read_as_fenced_to_eof():
     assert ok is False, "an unclosed fence must be refused, never read as (0, 0)"
     assert "line 3" in why, why
 
+    # ⛔ `_strip_block` ALONE IS NOT SAFE ON THIS SHAPE — it deletes everything
+    # after the marker, because `_fence_spans` drops the partial span. Both
+    # production callers refuse before reaching it, so the REFUSAL above is the
+    # only thing standing between this document and data loss. The earlier
+    # `test_a_marker_inside_an_unclosed_fence_is_not_ours` pinned exactly this and
+    # was deleted with the doctrine it tested; the fact outlived the doctrine, so
+    # it is pinned here rather than dropped.
+    assert "half-written example" not in harness_onboard._strip_block(text), (
+        "`_strip_block` is destructive on this shape — that is WHY the caller must "
+        "refuse first; if this ever starts passing, the refusal stopped being the "
+        "only guard and something else is protecting the user's text")
+
+
+def test_a_marker_line_preceded_by_a_BOM_is_still_the_marker():
+    """⛔ A BYTE-ORDER MARK IS NOT PART OF THE MARKER — and dropping that strip is
+    silent and destructive.
+
+    `_is_marker_line` strips `\ufeff` before the anchored compare, matching the
+    sibling installer. Without that strip a BOM-prefixed BEGIN is not a marker, so
+    `_marker_pair` reads (0, 0) on a file that already carries the block and
+    `write_instructions` APPENDS a second copy instead of replacing the first — the
+    same "one more copy per run" failure the unclosed-fence refusal exists to stop.
+    The arm was unpinned (measured: the strip could be deleted with the suite green).
+    """
+    text = ("# House\n\n\ufeff" + harness_onboard.BEGIN_MARK + "\nbody\n" +
+            harness_onboard.END_MARK + "\n\nkeep.\n")
+    assert harness_onboard._marker_pair(text) == (1, 1), (
+        "a marker line carrying a byte-order mark is still the marker — the "
+        "compare anchors the whole line after the BOM strip")
+    # ...and the consequence that makes it matter: ONE block, not two.
+    assert text.count(harness_onboard.BEGIN_MARK) == 1
+
 
 def test_a_closer_carrying_an_INFO_STRING_does_not_close_the_fence(tmp_path):
     """⛔ ` ```bash ` IS CONTENT, NOT A CLOSER (CommonMark) — and reading it as one
