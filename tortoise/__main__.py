@@ -13686,7 +13686,13 @@ def _cmd_onboard_harness(args) -> int:
     result = harness_onboard.onboard(
         args.harness,
         project_dir=_Path(getattr(args, "dir", ".") or "."),
-        url=getattr(args, "url", None) or harness_onboard.DEFAULT_MCP_URL,
+        # ⛔ NO `or DEFAULT_MCP_URL` here. That fallback made `url` never None on
+        # the CLI path, so `onboard` never consulted `harness_onboard.default_url()`
+        # and a box with `TORTOISE_MCP_URL` exported still got the HOSTED default
+        # written into its entry — the exact write-time disagreement the helper
+        # was added to close, passing at the library level and broken on the only
+        # path users run. `default_url()` is the one owner of "no url given".
+        url=getattr(args, "url", None),
         dry_run=bool(getattr(args, "dry_run", False)),
         verify_only=bool(getattr(args, "verify", False)),
         live=not bool(getattr(args, "no_verify", False)),
@@ -13697,7 +13703,10 @@ def _cmd_onboard_harness(args) -> int:
     )
     harness_onboard.render(result)
     if getattr(args, "uninstall", False):
-        return 0
+        # An uninstall has no health verdict to return (there is nothing left to
+        # verify), but it DID edit the user's instruction file — so a refusal is
+        # non-zero, never a silent 0.
+        return 1 if result.refusals else 0
     if result.verdict is None:
         # `--verify` path without a verdict is a programming error, not a pass.
         print("  ⛔ no verdict was produced — reporting DOWN, never OK")
