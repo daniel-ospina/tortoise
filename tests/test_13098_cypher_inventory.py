@@ -411,12 +411,30 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
     class Recording:
         def __init__(self):
             self.text = ""
+            self.flushed = False
 
         def write(self, text):
             self.text += text
 
         def flush(self):
-            pass
+            self.flushed = True
+
+    class FailsOnFlush:
+        """A write that BUFFERS and fails at `flush` — the 120 case, and only it.
+
+        ⛔ WITHOUT THIS THE LOAD-BEARING HALF OF THE FIX IS UNGRADED (#13098 review):
+        `Failing` raises in `write`, so control never reaches `flush`, and deleting
+        `emit()`'s `out.flush()` left every assertion above green while the real
+        process regressed to exit **120** at interpreter shutdown (`--markdown >
+        /dev/full` measured). A write that appears to succeed and fails on flush is
+        exactly the smaller-payload case, so it gets its own double.
+        """
+
+        def write(self, _text):
+            pass      # buffered: this succeeds
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
 
     assert census.emit("x", Failing(OSError(28, "No space left on device"))) == 2, (
         "a full disk on `--markdown`'s 1,327-row payload must answer 2 — 1 is DRIFT")
@@ -431,9 +449,15 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatc
     assert census.emit("x") == 2, (
         "a closed fd 1 (sys.stdout is None) must answer 2 — 1 is DRIFT")
     monkeypatch.undo()
+    assert census.emit("x", FailsOnFlush()) == 2, (
+        "a write that buffers and fails at FLUSH must answer 2 — returning 0 lets the "
+        "shutdown flush become exit 120, which is neither 'could not run' nor DRIFT")
     ok = Recording()
     assert census.emit("row", ok) == 0 and ok.text == "row\n", (
         "the writer still writes when it can")
+    assert ok.flushed, (
+        "emit() must FLUSH — an unflushed payload fails at interpreter shutdown as 120 "
+        "with no diagnostic, which is the regression the explicit flush() exists to stop")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
