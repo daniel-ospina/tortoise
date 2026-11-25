@@ -290,16 +290,16 @@ def test_sources_list_imposes_a_TOTAL_order_the_callee_does_not_guarantee(
     `ORDER BY n.{order_prop}, id(n)`.
 
     ⛔ The callee is REPLACED here rather than seeded through the graph on
-    purpose, and the reason is MEASURED on both lanes: the tie order is
-    ENGINE-DEPENDENT. The embedded carve-out lane hands equal-`points` groups
-    back in key order (so the graph-seeded test above passes there even with the
-    sort removed), while the docker lane returned `mike, zeta, alpha` for
-    creation order `zeta, alpha, mike` (that is the peer fix's own measurement).
-    A graph fixture is therefore non-vacuous on at most ONE lane, and
-    `ORDER BY points DESC` promises nothing about ties on either. This fixture is
-    the contract violation itself: the SAME row set, with the tie order flipping
-    between calls, which is what "not total" means for a route that re-issues
-    the read per page.
+    purpose, and the reason is MEASURED: the tie order the engine returns is not
+    stable across fixtures. With the sort line removed, the graph-seeded test
+    above observes `mike, …, alpha` for creation order `zeta, alpha, mike` (so it
+    reds there), while a five-Source probe of the same route on this tree came
+    back in key order and would have passed. That is what "not total" means — the
+    tier order is the engine's to choose — so a graph fixture's discriminating
+    power is a property of the engine's current group order, not of the contract.
+    This fixture does not depend on it: the SAME population is handed back with
+    the tie order flipping between reads, which is the hazard exactly as a route
+    that re-issues the read per page would meet it, on any engine.
 
     Pre-fix this test is RED — the walk returns `[mm, aa, aa]` (a duplicate) and
     never yields `zz` (a dropped row) — which is what makes it a pin.
