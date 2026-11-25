@@ -16454,7 +16454,16 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if not any(entry.get("label") for entry in resolved):
         raise HTTPException(status_code=404, detail="Entity not found")
     label = resolved[0].get("label")
-    entity = resolved[0].get("properties") or {}
+    # ⛔ `_layer_payload`, NOT the raw resolved map (#3998, review at
+    # `d24fa898`): `_resolve_entity` returns RAW `properties(n)`, and the
+    # by-id routes filter it afterwards — this route did not, and then
+    # coalesced onto `content`, which `filter_source_props` drops
+    # everywhere else. MEASURED: a `:Source` whose `content` held the body
+    # answered `entity.name` with that body here, while `/v1/sources/{id}`
+    # withheld the same value. Reachability is not contrived — the
+    # session-capture producer writes `:Source {url: "session:<id>"}`, a
+    # slash-free identity this route's single path segment ADDRESSES.
+    entity = _layer_payload(resolved[0]) or {}
     # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE first, and only then ask EP.
     # EP's `_read_node` coalesces ABSENT params to Beta(1,1), so an Object, a
     # Subject, or a Point EP never consumed comes back as a perfectly-shaped

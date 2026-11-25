@@ -1461,6 +1461,43 @@ def test_belief_does_not_run_ep_for_a_node_with_no_belief(tmp_path):
         assert r.json()["current"] is None, r.text
 
 
+def test_belief_never_puts_a_sources_body_in_entity_name(tmp_path):
+    """#14593 review P1 (data disclosure, #3998): the FIFTH door, and the cheap one.
+
+    `get_entity_belief` read `resolved[0]["properties"]` RAW — `_layer_payload`,
+    which every by-id route applies, was skipped — and then coalesced
+    `name -> content -> url`. `content` is NOT in `_SOURCE_NODE_PROP_NAMES`, so
+    `filter_source_props` drops it everywhere else; here it was published as
+    `entity.name`. Measured: the body answered as the name on `/belief` while
+    `/v1/sources/{id}` withheld the same value.
+
+    ⛔ Reachability is not contrived: the session-capture producer writes
+    `:Source {url: "session:<id>"}`, a SLASH-FREE identity, so this route's single
+    `{entity_id}` segment addresses it (a normal url-keyed Source cannot be
+    reached here — its `/` breaks the segment, which the module documents).
+    """
+    url = "session:rev-14593-capture"
+    secret = "SESSION CAPTURE BODY THAT MUST NOT BE A NAME"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            assert sdk._create_source(url, "web")["id"] == url
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.content = $c",
+                params={"u": url, "c": secret}, read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{url}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        assert body["entity"]["label"] == "Source", body
+        assert body["entity"]["name"] == url, body
+        assert secret not in out.text, out.text
+        # The sibling door withheld it before this fix and must keep doing so.
+        assert secret not in client.get(f"/v1/sources/{url}").text
+
+
 def test_belief_404s_on_an_unknown_entity(tmp_path):
     """A 404 for an absent entity, with a POSITIVE CONTROL in the same test: a
     404 alone was satisfiable on the pre-change tree, where the route did not
