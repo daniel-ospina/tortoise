@@ -8407,8 +8407,6 @@ def _row_section_envelope(result: Any) -> Any:
     "a container may also build the same ``ToolResult`` by hand".
 
     #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
-
-    #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
     output schema for it, and its ``Tool.convert_result``
     (``fastmcp/tools/base.py``) carries ``structured_content`` ONLY for a dict
     return when no schema is declared. A section that returns ROWS therefore
