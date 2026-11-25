@@ -25,12 +25,13 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
   never holds, so the FK refuses it — F3). An unpinned absence is how the next
   reader "fixes" it back into a permanently-red health field;
 * the sites that create a graph BY DELEGATION (the HTTP create aliases, the
-  default-graph mint, the credential resolver, the two SDK verbs) are pinned as
+  default-graph mint, the credential resolver, the two SDK verbs and the signup
+  route — seven in all) are pinned as
   REACHING their graph-creating door, transitively, so a refactor that drifts an
   alias off the route reds instead of shipping a graph with no cursor row — ⛔ and
-  for the SDK/signup sites that door is the UNHOOKED one, so their route is pinned
-  as the census's record of the gap, not as coverage (#14587 P3-3: the PR body
-  claimed this pin and nothing pinned it);
+  for the three SDK/signup sites that door is the UNHOOKED one, so their route is
+  pinned as the census's record of the gap, not as coverage (#14587 P3-3: the PR
+  body claimed this pin and nothing pinned it);
 * a graph the record ALREADY knows is REFUSED, not seeded (`#12894`'s divergence
   rule) — `SEED_SQL`'s own guard decides it, there is no second predicate here;
 * `/health` CANNOT report `record.ok: true` for a graph THIS PROCESS has
@@ -139,19 +140,22 @@ _DELEGATED = (
      "ensure_default_graph_row"),
     ("tortoise/supabase_control.py", "default_graph_id_for_credential",
      "ensure_default_graph_row"),
-    # C1 / C2 / C3 — the SDK doors: the org/team create that mints the default
-    # graph, and the memory-graph verb. Both delegate to `_graph_create` — the door
-    # this lane REFUSES to hook, and `_UNHOOKED` pins the WHOLE FUNCTION, not one
-    # arm: NEITHER arm calls the hook (F1: the Supabase arm persists no row; F3: the
-    # registry arm mints one the record's FK refuses). The route is pinned because an
-    # alias that drifted off it would create a graph without reaching that door at all.
+    # C1 / C2 — the two SDK doors the census names: the org/team create that mints
+    # the default graph, and the memory-graph verb. Both delegate to `_graph_create`
+    # — the door this lane REFUSES to hook, and `_UNHOOKED` pins the WHOLE FUNCTION,
+    # not one arm: NEITHER arm calls the hook (F1: the Supabase arm persists no row;
+    # F3: the registry arm mints one the record's FK refuses). The route is pinned
+    # because an alias that drifted off it would create a graph without reaching
+    # that door at all.
     ("tortoise/sdk.py", "_org_create", "_graph_create"),
     ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
-    # C4 — `#14587` review (i), open at every head until now: the signup route is a
-    # graph-creating site the census found and this table did not pin, so an alias
-    # drifting off the route would have been invisible here. Pinned under the SAME
-    # door as C1-C3, because "the census found a seventh site" and "the table holds
-    # six" is a disagreement the next reader cannot resolve.
+    # C3 — the signup route, the census's third C arm and `#14587` review (i), open
+    # at every head until now: it is a graph-creating site the census NAMED and this
+    # table did not pin, so an alias drifting off the route would have been invisible
+    # here. Pinned under the SAME door as C1/C2, because "the census named seven
+    # sites" and "the table held six" is a disagreement the next reader cannot
+    # resolve. ⛔ C3, not "C4": the census's C range is C1/C2/C3 (the two SDK verbs
+    # and the signup path), so a `C4` label would invent a fourth arm.
     ("tortoise/hosted_api.py", "agent_signup", "_graph_create"),
 )
 
@@ -378,10 +382,10 @@ def test_every_delegating_creation_site_still_reaches_its_creation_door():
     """⛔ THE CENSUS'S OTHER HALF — the seven sites that create a graph BY DELEGATION.
 
     ⛔ The name says CREATION door, not "hooked door", and that is the fix to the
-    `#14587` review's P3-2: three of these rows (the two SDK verbs the census labels
-    C1-C3, plus C4) reach `sdk._graph_create`, which the sibling test pins UNHOOKED —
-    so a name promising a HOOKED door contradicted the file's own pin two functions
-    above.
+    `#14587` review's P3-2: three of these rows (the census's C1/C2/C3 — the two SDK
+    verbs and the signup route) reach `sdk._graph_create`, which the sibling pin
+    `test_the_doors_that_cannot_be_hooked_stay_unhooked` contradicts — a name
+    promising a HOOKED door against a test asserting the opposite.
 
     `_DOORS` pins the two sites that MINT an id AND hook it; these are the sites
     that reach one of them — or, for the three SDK/signup rows, reach the third
