@@ -326,6 +326,34 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
+def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_path):
+    """`--render`/`--check` answer 2 when the census cannot enumerate the tree.
+
+    `surface_files()` runs `git ls-files … check=True`, so a box with no `git` or no
+    index raises — and an uncaught exception exits the interpreter with **1**, the
+    code this tool reserves for the DRIFT verdict. `--render` has no drift verdict at
+    all, so a lane that could not enumerate would read "the census drifted" and re-cut
+    25 pins that were correct; `--check` would report drift about a box that could not
+    answer. The probe wrapper closes that for `git ls-files --error-unmatch`; this arm
+    closes it for the enumeration, which runs on EVERY path (measured: before the
+    guard, `PATH` without `git` gave `FileNotFoundError` and exit 1).
+
+    Both verbs are graded, and the target must not be written — the failure precedes
+    the render.
+    """
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError("No such file or directory: 'git'")
+
+    monkeypatch.setattr(census, "census", boom)
+    out = tmp_path / "never.md"
+    for argv in (["--render", str(out)], ["--check"], []):
+        rc = census.main(argv)
+        assert rc == 2, (
+            f"`{' '.join(argv) or '(bare census)'}` must exit 2 (could not run), got {rc} — "
+            "1 is this tool's DRIFT verdict and would misreport an unreadable tree")
+    assert not out.exists(), "the failure precedes the write, so nothing is rendered"
+
+
 def test_the_renderer_refuses_to_write_over_the_source(capsys):
     """`--render <the source>` would corrupt the tracked file AND lock the tool.
 

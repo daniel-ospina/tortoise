@@ -21755,6 +21755,15 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
         "docs/architecture/CYPHER-INVENTORY.src.md",
+        # ⛔ THE RENDERED DOCUMENT IS ITS OWN SUBJECT, and it is the one that matters
+        # for the failure this split exists to remove: a modify/delete conflict
+        # resolved by "keep our version" RE-STAGES the gitignored file, and
+        # `test_the_rendered_document_is_not_tracked` is the only thing that reds on
+        # it. With this entry removed, that diff selects `surfaces: []` and the suite
+        # is ABSENT — measured at #13098 review round 11 — so the arm was unscheduled
+        # for the exact re-add it was written to catch. On every other diff the entry
+        # is inert: `.gitignore` keeps the path out of the changed set.
+        "docs/architecture/CYPHER-INVENTORY.md",
     ):
         r = _sel([subject])
         assert "core" in r["surfaces"], (subject, r)
