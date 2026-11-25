@@ -467,6 +467,35 @@ def test_the_FALLBACK_re_dump_preserves_CRLF(project):
     assert "tortoise.mcp_bridge" in after
 
 
+def test_the_fallback_message_is_TRUE_for_a_duplicate_mcpservers_key(project):
+    """`json.loads` keeps the LAST duplicate key; `_member_span` reads the FIRST.
+
+    So a file with `"mcpServers": [1]` and then `"mcpServers": {"b": …}` resolves to
+    an OBJECT under `json.loads` yet cannot be spliced. The fallback's parenthetical
+    said "the file has none, or `mcpServers` is not an object" — false on the first
+    half for this shape, by the same standard that removed "no `mcpServers` object to
+    merge into". It now says "no `mcpServers` key, or its FIRST one is not an object".
+    """
+    original = ('{\n'
+                '  "mcpServers": [1],\n'
+                '  "mcpServers": {"b": {"y": 2}}\n'
+                '}\n')
+    path = project / ".mcp.json"
+    path.write_text(original, encoding="utf-8")
+    assert json.loads(original)["mcpServers"] == {"b": {"y": 2}}, (
+        "the fixture must resolve to an OBJECT under json.loads, or the message's "
+        "falsehood cannot be exercised")
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    said = " ".join(result.actions)
+    assert "the file has no `mcpServers` key, or its first one is not an object" in said, (
+        f"the fallback's stated reason is not true of a duplicate-key file: {said}")
+    assert "the file has none" not in said, (
+        f"the message denies a key `json.loads` proves is present: {said}")
+
+
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
     """Installing the two sentences must not rewrite the user's own AGENTS.md endings."""
     target = project / "AGENTS.md"

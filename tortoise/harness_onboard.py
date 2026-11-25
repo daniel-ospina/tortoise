@@ -374,10 +374,11 @@ def _insert_member(text: str, name: str, entry: dict,
     member, because inserting a multi-line value there would reformat the line it
     shares. Inserted lines use the document's OWN terminator (`_newline_of`).
 
-    Returns "" only when there is no object to insert into; ⛔ NO member/brace
-    LAYOUT is refused — the closing brace sharing the last member's line is
-    spliced (an earlier cut returned "" for it, which sent the common
-    hand-written shape through a whole-document re-dump).
+    ⛔ This function NEVER returns "" — the caller has already proved the object is
+    a JSON object, so every member/brace LAYOUT is spliced, including the closing
+    brace sharing the last member's line (an earlier cut returned "" for that
+    layout, which sent the common hand-written shape through a whole-document
+    re-dump).
     """
     nl = _newline_of(text)
     close = obj_end - 1                       # the object's own `}`
@@ -519,21 +520,23 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     if spliced:
         after = spliced
     else:
-        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has none, or the
-        # key is not a JSON object. Dump, and SAY that the whole file was written
-        # rather than implying a one-entry merge. ⛔ A file that merely LACKS the entry
-        # is NOT this branch — `_splice_entry` inserts into an existing object — and
-        # ⛔ neither is a LAYOUT: every member/brace shape, including the closing
-        # brace sharing the last member's line, is spliced. An earlier cut listed
-        # "a member/brace layout it does not splice" here, which was false once the
-        # layout became spliceable; the sentence names what it can still be.
+        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has no such key,
+        # or the FIRST one is not a JSON object. Dump, and SAY that the whole file was
+        # written rather than implying a one-entry merge. ⛔ A file that merely LACKS
+        # the entry is NOT this branch — `_splice_entry` inserts into an existing
+        # object — and ⛔ neither is a LAYOUT: every member/brace shape, including the
+        # closing brace sharing the last member's line, is spliced. ⛔ The parenthetical
+        # says FIRST because `json.loads` keeps the LAST duplicate key while
+        # `_member_span` reads the FIRST: a duplicate-`mcpServers` file whose first
+        # occurrence is a list resolves to an OBJECT under `json.loads` yet cannot be
+        # spliced, so "the file has none" would be false over it.
         nl = _newline_of(before)
         after = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", nl) + nl
         if before:
             out.actions.append(
                 f"{path}: no `mcpServers` object this installer can splice "
-                f"(the file has none, or `mcpServers` is not an object) — the "
-                f"whole document was re-written")
+                f"(the file has no `mcpServers` key, or its first one is not an "
+                f"object) — the whole document was re-written")
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose
