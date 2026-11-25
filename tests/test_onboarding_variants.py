@@ -796,8 +796,9 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # still grades which form Cursor's snippet must carry.
     # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
     # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
-    # ${TORTOISE_API_KEY}"`); the Cursor `env:` row has carried its form since
-    # `01b78913cde4` and did not move. Do not "restore" the plain snippet to
+    # ${TORTOISE_API_KEY}"`); the Cursor `env:` row predates that change — it
+    # arrived with `24e8388c5f316`, and `01b78913cde4` only dropped
+    # its `"type": "http",`. Do not "restore" the plain snippet to
     # satisfy a tighter locator: in a JSON header that form resolves once at
     # process start to an EMPTY `Authorization: Bearer` (SKILL.md:411-414) — the
     # empty-bearer class this guard exists to prevent.
@@ -1725,9 +1726,23 @@ def test_3232_generic_restart_lines_are_exact():
     # OWN clause is graded — splitting at the first `,`/`.`/`;` keeps "Restart
     # your client after changing the config, then confirm the tools …" GREEN,
     # because the inversion does not bind there.
-    cue_clause = re.split(r"[,.;]", after_cue, maxsplit=1)[0]
-    assert not re.search(r"\b(?:after|once|when|if)\b[^.;]*?\btools\b",
-                         cue_clause), (
+    #
+    # Two things a first cut got wrong, both measured on this pin:
+    # 1. The clamp strips leading punctuation BEFORE splitting, because a comma
+    #    right after the cue (`Restart your client, after confirming the tools
+    #    …` — a one-token edit of the sentence this pin grades) left an EMPTY
+    #    first clause, so the inversion was never graded and it stayed GREEN.
+    # 2. The pattern anchors on a CONFIRMATION verb. "restart after <verb> the
+    #    tools" inverts the order only when the user is told to confirm/check/
+    #    verify them FIRST; a purpose clause — "Restart your client after the
+    #    config change so it loads the tools", restart still first — must stay
+    #    GREEN, because a new false red is exactly how a pin gets deleted.
+    cue_clause = re.split(
+        r"[,.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
+    assert not re.search(
+        r"\b(?:after|once|when|if)\b[^.;]*?"
+        r"\b(?:confirm|check|verify|see|look|ensure|list)\w*\b[^.;]*?\btools\b",
+        cue_clause), (
         "docs/quickstart-cloud.md inverts its own restart cue: 'restart AFTER "
         "confirming the tools' asks the user to look for tools this session "
         "cannot have loaded yet — the restart comes FIRST (#3232, #14676)")
