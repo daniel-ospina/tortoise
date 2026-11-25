@@ -119,8 +119,8 @@ are rather than naming them:
   ``GET /v1/subjects`` (both via ``_list_layer_route``) and hosted
   ``GET /v1/sources`` (via ``list_sources``): all THREE routes reach it, through
   its TWO callers. (This register is written at FUNCTION granularity, so a route
-  count and a caller count are different numbers — `grep -n '_paged('` answers the
-  second, and no test grades either.)
+  count and a caller count are different numbers — `grep -n 'return _paged('`
+  answers the second, and no test grades either.)
   ⚠️ Its verdict is OFFSET-AWARE and is the recorded exception described above:
   the marker is asked about ``offset + delivered``, so a page with matches
   behind it is ``truncated: true`` (plus ``total_available``) and the TERMINAL
