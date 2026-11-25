@@ -354,10 +354,11 @@ def test_the_published_pair_condition_is_the_fusions_arithmetic():
     gives ``r > A*B/(A+B) - 61``, i.e. the shared id beats the WORSE-ranked
     incumbents — a TIE at equality and a loss below it. An earlier cut published
     ``r < (h1 + h2 - 61) / 2``, which disagrees with the engine on the sweep
-    below in both directions, and the sibling row
-    ``test_the_two_term_advantage_is_bounded_at_1based_61`` could not see it
-    because every fixture there is symmetric or top-slot — the two regions where
-    the two forms happen to agree.
+    below in both directions. The sibling row
+    ``test_the_two_term_advantage_is_bounded_at_1based_61`` could not see it: that
+    row grades the ENGINE at its own fixtures but never compares the published
+    FORM with it, so the formula's error was invisible there — this is the first
+    assertion that reads the form at all.
 
     Rational arithmetic decides the published bound (``Fraction``) and
     ``rrf_fusion`` itself decides the engine, so the equality case is decided by
