@@ -773,15 +773,27 @@ def test_relations_pages_and_offset_actually_advances(tmp_path):
         seen: list[str] = []
         offsets = (0, 1, 2, 3, 4)
         sizes = []
+        truncs = []
         for offset in offsets:
             body = client.get(f"/v1/entities/{hub['id']}/relations",
                               params={"limit": 1, "offset": offset}).json()
             sizes.append(body["count"])
+            truncs.append(body["truncated"])
+            # `candidates` is the POST-SKIP probe, so a page is marked truncated
+            # iff anything lies beyond it — never "beyond the whole population".
+            assert "total_available" not in body, body
             seen.extend(r["other"]["name"] for r in body["relations"])
         # The bound is the CALLER's: one row per request.
         assert sizes == [1, 1, 1, 1, 0], sizes
         # …and the window MOVED: five offsets walked all four spokes, no repeats.
         assert seen == ["S0", "S1", "S2", "S3"], seen
+        # ⛔ THE VERDICT IS EVALUATED PER PAGE, and this is what reds the tempting
+        # "make `offset` consistent with `_paged`" edit: passing `offset=offset`
+        # to `mark_truncation` here reads the ALREADY-SKIPPED probe as the whole
+        # population, so offset 1 answers False with two spokes still behind the
+        # cursor (`(1+1) < 2`) and a `while truncated` client drops them.
+        # Measured, not derived: offsets 0-2 each sit in front of a spoke.
+        assert truncs == [True, True, True, False, False], truncs
         # A page that holds everything says so.
         whole = client.get(f"/v1/entities/{hub['id']}/relations",
                            params={"limit": 10}).json()
