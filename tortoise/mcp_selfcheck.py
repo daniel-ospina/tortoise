@@ -417,12 +417,16 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         for field in ("url", "command"):
             if field in clean and not clean[field]:
                 clean.pop(field)
-            elif isinstance(clean.get(field), str) and not clean[field].strip():
-                # Whitespace-only is not a transport either: `new URL("   ")`
-                # throws, so the harness cannot load it, while a truthy string
-                # selected http and `declared_endpoint` returned None — so the
-                # probe graded the CLIENT-resolved endpoint and printed `OK`.
-                clean.pop(field)
+        # ⛔ NOT `not value.strip()`. The harness predicate is
+        # `typeof value === "string" && value !== ""` — a WHITESPACE-ONLY transport
+        # IS declared there, so it overrides the base and `new URL("  ")` then
+        # throws, i.e. the entry is dead. Treating it as absence graded something
+        # else entirely: with a delta `{"url": "  ", "command": "x"}` the harness
+        # sees an AMBIGUOUS delta and keeps the base (working), while the verifier
+        # stripped the url, read a stdio switch and reported `command-missing` for a
+        # command the harness never runs — and with `{"url": "  "}` alone it graded
+        # the BASE's endpoint and could print `OK`. The blank case is handled where
+        # it actually fails: in `classify`, as an unloadable selected transport.
         return clean
 
     # The BASE layer is copied VERBATIM (the harness does not ambiguity-test it),
@@ -436,7 +440,13 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     # delta over anything, and the harness then KEEPS a repo-only entry that
     # declares both transports (it runs over `url`). Losing this flag made exactly
     # that case a false `command-missing` on a config the harness loads.
-    has_base = bool(merged.get("url") or merged.get("command"))
+    # ⛔ OBJECT presence: `mergeMcpLayers` keys the same decision on
+    # `Object.hasOwn(merged, name)`, and a base entry with NO transport key at all
+    # (`{lazy: true}`, `{type: "http"}`) still counts as inherited — so a repo entry
+    # declaring both transports is an ambiguous DELTA and is ignored. Keying on a
+    # transport instead let that case fail OPEN: the repo entry was kept, resolved
+    # over `url`, and a dead config reported `resolves-unprobed`.
+    has_base = bool(merged)
     for _source, delta in reversed(layers[:-1]):
         if _unloadable(delta):
             continue             # a dropped delta leaves the base standing
@@ -638,8 +648,26 @@ def classify(harness: str, *, project_dir: Path | None = None
     command_value = entry.get("command")
     if isinstance(url_value, str) and url_value:
         transport = "http"
+        if not url_value.strip():
+            # Declared (so the harness selects it) but not a URL: `new URL("  ")`
+            # throws, so the entry cannot load. `COMMAND_MISSING` is the closest
+            # member of the CLOSED set ("this entry cannot start"); the detail says
+            # exactly what is wrong, which is what a reader acts on.
+            return Verdict(
+                status=COMMAND_MISSING,
+                detail="the entry's `url` is BLANK, so the harness cannot build a "
+                       "transport from it — the entry cannot load",
+                fix=f"re-register it: `tortoise onboard --harness {harness}`",
+                source=source, transport="http", configs_read=read)
     elif isinstance(command_value, str) and command_value:
         transport = "stdio"
+        if not command_value.strip():
+            return Verdict(
+                status=COMMAND_MISSING,
+                detail="the entry's `command` is BLANK, so the harness cannot spawn "
+                       "it — the entry cannot load",
+                fix=f"re-register it: `tortoise onboard --harness {harness}`",
+                source=source, transport="stdio", configs_read=read)
     else:
         return Verdict(
             status=COMMAND_MISSING,

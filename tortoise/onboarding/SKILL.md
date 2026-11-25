@@ -474,7 +474,7 @@ protocol below BEFORE writing):
 field is an agreement constraint rather than a selector, and `tortoise mcp-status`
 grades the merge the same way. Note `tortoise onboard` DOES add a `type: stdio`
 field and a `_comment` to the entry it installs, so what it writes is this block
-plus those two fields; a Cursor entry is written without any type.)
+plus those two fields — for EVERY harness, Cursor included. Only the by-hand Cursor recipe in `docs/quickstart-cloud.md` omits a type.)
 
 ⛔ **This is the entry `tortoise onboard --harness pi` installs (see above), and it
 is deliberately credential-free.** The older recipe here expanded

@@ -1479,20 +1479,64 @@ def test_empty_container_transports_are_unloadable_like_the_harness_says(
     had thrown away, which is the false PASS this whole guard exists to close.
     """
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
-    for entry in ({"url": []}, {"url": {}}, {"command": []}, {"command": {}}):
+    # ⛔ A container transport ALONE cannot discriminate: the old guard popped it as
+    # falsy and landed on the same class. The false PASS was reachable through a
+    # container transport BESIDE a working one, which the old code read as "absent"
+    # and kept — so those are the entries that red on a revert.
+    for entry in ({"url": []}, {"url": {}}, {"command": []}, {"command": {}},
+                  {"url": [], "command": "python3"},
+                  {"command": [], "url": "https://api.premiselabs.co/mcp/"},
+                  {"url": {}, "command": "python3"}):
         _write_config(project, entry)
         verdict = mcp_selfcheck.classify("pi", project_dir=project)
         assert verdict.status == mcp_selfcheck.COMMAND_MISSING, (entry, verdict.line())
         assert not verdict.ok
 
 
-def test_a_blank_url_is_not_a_transport_and_cannot_be_probed(project, monkeypatch):
-    """Whitespace-only selects http but resolves to no endpoint — must not probe."""
+def test_a_blank_url_is_declared_by_the_harness_and_is_unloadable(
+        project, monkeypatch):
+    """`typeof v === "string" && v !== ""` — so `"  "` IS a declared transport.
+
+    It overrides the base and `new URL("  ")` throws, i.e. the entry is dead. The
+    class must say so, and nothing may be probed for it.
+    """
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
     _write_config(project, {"url": "   "})
+
+    probed: list[object] = []
+    monkeypatch.setattr(mcp_selfcheck, "probe",
+                        lambda **kw: probed.append(kw) or mcp_selfcheck.Verdict(
+                            status=mcp_selfcheck.OK, detail="should not be reached"))
+
     verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
-    assert verdict.status != mcp_selfcheck.OK, verdict.line()
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+    assert "BLANK" in verdict.detail, verdict.detail
+    assert not probed, "a blank transport must never be probed"
     assert not verdict.ok and verdict.exit_code != 0
+
+
+def test_check_refuses_to_probe_an_http_entry_with_no_readable_endpoint(
+        project, monkeypatch):
+    """The generic guard behind the blank-url case: never invent a probe target.
+
+    `{"url": "${VAR}"}` with VAR blank classifies as http, and `declared_endpoint`
+    cannot read an endpoint from it — so `check` must abstain rather than grade the
+    CLIENT-resolved endpoint (which is how a dead config printed `OK`).
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_x-14607")
+    monkeypatch.setenv("TORTOISE_TEST_BLANK_14607", "   ")
+    _write_config(project, {"url": "${TORTOISE_TEST_BLANK_14607}"})
+
+    probed: list[object] = []
+    monkeypatch.setattr(mcp_selfcheck, "probe",
+                        lambda **kw: probed.append(kw) or mcp_selfcheck.Verdict(
+                            status=mcp_selfcheck.OK, detail="should not be reached"))
+
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert not probed, "the probe must not run without a readable endpoint"
+    assert verdict.status != mcp_selfcheck.OK
+    assert verdict.status in mcp_selfcheck.ABSTENTION_CLASSES or \
+        verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
 
 
 def test_a_kept_repo_only_entry_survives_a_DROPPED_base(tmp_path, monkeypatch):
