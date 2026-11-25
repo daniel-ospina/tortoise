@@ -13475,10 +13475,13 @@ durations:
   # and a three-key `/health` that is six): the TWO minting doors call the hook,
   # ONCE for `hosted_api._provision_graph` and THREE times for
   # `supabase_control.ensure_default_graph_row` (one per id-yielding arm), each
-  # through its helper (`_DOORS`, `_DOOR_HOOK_CALLS`, `_HELPERS`); the seven
-  # DELEGATING creation sites reach a graph-creating door transitively — the HTTP
-  # and default-graph ones at `_provision_graph`/`ensure_default_graph_row`, the SDK
-  # and signup ones at `sdk._graph_create`, whose REGISTRY arm is the hooked one
+  # through its helper (`_DOORS`, `_DOOR_HOOK_CALLS`, `_HELPERS`) — and the hook's
+  # own call site (inside `_provision_graph`) is GATED on
+  # `control_plane_owns_graph` (the arm that persisted a `public.graphs` row), so a
+  # REGISTRY-arm create never reaches the hook; the seven DELEGATING creation sites reach a graph-creating door
+  # transitively — the HTTP and default-graph ones at
+  # `_provision_graph`/`ensure_default_graph_row`, the SDK and signup ones at
+  # `sdk._graph_create`, a door the hook is deliberately NOT called from
   # (`_DELEGATED`, `_same_module_call_graph`);
   # ⛔ and `sdk._graph_create` is pinned the OPPOSITE way — it must NOT call the
   # hook (`_UNHOOKED`, F1/F3: its Supabase arm persists no `public.graphs` row and

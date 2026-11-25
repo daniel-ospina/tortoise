@@ -26,9 +26,11 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
   reader "fixes" it back into a permanently-red health field;
 * the sites that create a graph BY DELEGATION (the HTTP create aliases, the
   default-graph mint, the credential resolver, the two SDK verbs) are pinned as
-  REACHING a hooked door, transitively, so a refactor that drifts an alias off the
-  route reds instead of shipping a graph with no cursor row (#14587 P3-3: the PR
-  body claimed this pin and nothing pinned it);
+  REACHING their graph-creating door, transitively, so a refactor that drifts an
+  alias off the route reds instead of shipping a graph with no cursor row — ⛔ and
+  for the SDK/signup sites that door is the UNHOOKED one, so their route is pinned
+  as the census's record of the gap, not as coverage (#14587 P3-3: the PR body
+  claimed this pin and nothing pinned it);
 * a graph the record ALREADY knows is REFUSED, not seeded (`#12894`'s divergence
   rule) — `SEED_SQL`'s own guard decides it, there is no second predicate here;
 * `/health` CANNOT report `record.ok: true` for a graph THIS PROCESS has
@@ -138,8 +140,11 @@ _DELEGATED = (
     ("tortoise/supabase_control.py", "default_graph_id_for_credential",
      "ensure_default_graph_row"),
     # C1 / C2 / C3 — the SDK doors: the org/team create that mints the default
-    # graph, and the memory-graph verb. Both delegate to `_graph_create`, whose
-    # REGISTRY arm is the hooked one (the Supabase arm is `_UNHOOKED`, F1).
+    # graph, and the memory-graph verb. Both delegate to `_graph_create` — the door
+    # this lane REFUSES to hook, and `_UNHOOKED` pins the WHOLE FUNCTION, not one
+    # arm: NEITHER arm calls the hook (F1: the Supabase arm persists no row; F3: the
+    # registry arm mints one the record's FK refuses). The route is pinned because an
+    # alias that drifted off it would create a graph without reaching that door at all.
     ("tortoise/sdk.py", "_org_create", "_graph_create"),
     ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
     # C4 — `#14587` review (i), open at every head until now: the signup route is a
@@ -369,11 +374,18 @@ def _reaches(graph: dict[str, set[str]], start: str, target: str) -> bool:
     return False
 
 
-def test_every_delegating_creation_site_routes_through_a_hooked_door():
+def test_every_delegating_creation_site_still_reaches_its_creation_door():
     """⛔ THE CENSUS'S OTHER HALF — the seven sites that create a graph BY DELEGATION.
 
-    `_DOORS` pins the three sites that MINT an id; these are the sites that reach one
-    of them. They are the quiet half: a door keeps calling the hook perfectly while an
+    ⛔ The name says CREATION door, not "hooked door", and that is the fix to the
+    `#14587` review's P3-2: three of these rows (C1-C3, plus C4) reach
+    `sdk._graph_create`, which the sibling test pins UNHOOKED — so a name promising
+    a HOOKED door contradicted the file's own pin two functions above.
+
+    `_DOORS` pins the two sites that MINT an id AND hook it; these are the sites
+    that reach one of them — or, for the four SDK/signup rows, reach the third
+    minting door, `sdk._graph_create`, which `_UNHOOKED` pins the opposite way.
+    They are the quiet half: a door keeps calling the hook perfectly while an
     alias drifts off the route, and the graph the alias creates is born uncut with no
     test red (the failure mode the module docstring measures). The PR's census claimed
     them as "verified by AST pin" when the review found nothing pinned them (#14587
@@ -398,13 +410,15 @@ def test_every_delegating_creation_site_routes_through_a_hooked_door():
         if not _reaches(graph, entry, door):
             missing.append(f"{rel}::{entry} no longer reaches {door}")
     assert not missing, (
-        f"these graph-creating sites stopped routing through a hooked door: {missing}. "
+        f"these graph-creating sites stopped reaching their creation door: {missing}. "
         "A graph they create is born UNCUT — the record refuses every write for it "
         "(`cursor_not_active`) while `write_live_record`, fail-soft by contract, reports "
-        "success, so nothing reds and the loss only shows at a rebuild. Route it through "
-        "`_provision_graph` (A), `ensure_default_graph_row` (B) or `_graph_create`'s "
-        "REGISTRY arm (C), or — if it mints an id of its own — hook it and add it to "
-        "`_DOORS`")
+        "success, so nothing reds and the loss only shows at a rebuild. Route it back "
+        "through the door the census named — `_provision_graph` (A), "
+        "`ensure_default_graph_row` (B) or `_graph_create` (C) — or, if it now mints "
+        "an id of its own, hook it and add it to `_DOORS`. ⛔ A route to (C) is NOT a "
+        "hooked route: `_graph_create` is pinned UNHOOKED (`_UNHOOKED`, F1/F3), so "
+        "reaching it records the gap rather than curing it")
 
 
 def test_the_delegation_pin_reads_the_route_and_not_the_names():
@@ -436,21 +450,58 @@ def test_the_delegation_pin_reads_the_route_and_not_the_names():
                     "ensure_default_graph_row")
 
 
-def test_the_delegation_table_cannot_be_emptied():
-    """Non-vacuity for the table the route pin ITERATES (`#14587` review (ii)).
+#: The census `_DELEGATED` records, as `(module, entry point, door)` IDENTITIES.
+#:
+#: ⛔ A COUNT IS NOT A FLOOR (`#14587` review P3-3, measured): the guard this
+#: replaces asserted `len(_DELEGATED) >= 7`, which a SUBSTITUTION closes — replacing
+#: one row with a duplicate of another keeps the length at 7 while a site drops out
+#: of the route pin with nothing red.
+#: ⛔ AND THE DOOR IS PART OF THE IDENTITY (measured in this delta's own review):
+#: the route test grades whatever door the row NAMES, so a table whose third column
+#: was edited to a callee the entry happens to call DIRECTLY (`_graph_quota_gate`)
+#: stayed GREEN on both halves while `create_org_graph` had stopped reaching
+#: `_provision_graph` — the cut route the pin exists to catch. Pinning the door cell
+#: here means such an edit is a census edit, which is the review it should be.
+_DELEGATION_CENSUS = frozenset({
+    ("tortoise/hosted_api.py", "create_org_graph", "_provision_graph"),
+    ("tortoise/hosted_api.py", "create_graph", "_provision_graph"),
+    ("tortoise/supabase_control.py", "_mint_default_graph_row_best_effort",
+     "ensure_default_graph_row"),
+    ("tortoise/supabase_control.py", "default_graph_id_for_credential",
+     "ensure_default_graph_row"),
+    ("tortoise/sdk.py", "_org_create", "_graph_create"),
+    ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
+    ("tortoise/hosted_api.py", "agent_signup", "_graph_create"),
+})
+
+
+def test_the_delegation_table_matches_the_census_by_identity():
+    """Non-vacuity for the table the route pin ITERATES (`#14587` review (ii), (P3-3)).
 
     ⛔ The arm above is green when `_DELEGATED` is empty, because a pin that loops
     over nothing asserts nothing — measured at the reviewed head: `_DELEGATED = ()`
     left both delegation tests green (`2 passed, 29 deselected`) while the census's
-    other half silently stopped being checked. The floor is the census this table
-    records, so GROWING it is free and SHRINKING it has to come back here.
+    other half silently stopped being checked. So the table is asserted against the
+    census.
+
+    ⛔ By IDENTITY, not by length: a `len(...) >= 7` floor is green for a table that
+    swapped one site for a DUPLICATE of another (`#14587` review P3-3), which is the
+    same silent drop the floor exists to catch, one edit away. And the DOOR cell is
+    part of the identity, because the route test grades the door the row NAMES
+    (measured: a third-column edit to a callee the entry calls directly left both
+    halves green while the real route was cut). Adding a site to the table therefore
+    means adding it to `_DELEGATION_CENSUS` above — the census is what the entry is
+    graded against, and it is the only place a site enters.
     """
-    assert len(_DELEGATED) >= 7, (
-        f"`_DELEGATED` holds {len(_DELEGATED)} site(s) but the census found 7 — the "
-        "route pin only checks the entries it is given, so a table that lost an "
-        "entry (or was emptied) reports PASS for a site nobody looks at any more. "
-        "Re-census (`rg -n 'create_graph|insert_graph|ensure_default_graph_row|_graph_create' "
-        "tortoise/`) rather than lowering this floor")
+    pinned = set(_DELEGATED)
+    assert pinned == _DELEGATION_CENSUS, (
+        f"`_DELEGATED` is {sorted(pinned)} but the census is "
+        f"{sorted(_DELEGATION_CENSUS)} — the route pin only checks the entries it is "
+        "given, so a table that lost an entry, substituted one for a DUPLICATE of "
+        "another, was emptied, or repointed an entry at a door it calls directly "
+        "reports PASS for a site nobody looks at any more. Re-census "
+        "(`rg -n 'create_graph|insert_graph|ensure_default_graph_row|_graph_create' "
+        "tortoise/`) and fix the table — do not edit the census to match a typo")
 
 
 def test_the_hook_arms_and_does_not_only_seed():
