@@ -15721,6 +15721,11 @@ def _layer_payload(entry: dict) -> dict:
 #: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
 #: ``(:Document:Source)``, or any label this file has never heard of — is filtered
 #: through ``projection.entities.filter_source_props`` (deny by default, #3998).
+#: Every label on the neighbour must be in this set — the WHOLE set, not the
+#: first one (``_delegation_entry_publishable``), because a hybrid
+#: ``(:Object:Source)`` answers an allowed first label while carrying a
+#: ``:Source`` half. The callee now ships the label list alongside the single
+#: ``node_type`` that the wire shape keeps.
 _PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
 
 
@@ -15746,19 +15751,44 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
     labels are touched; every other node's map is returned as stored, so no other
     arm's payload changes shape.
 
+    ⛔ THE MULTI-LABEL RESIDUAL IS CLOSED HERE, and it was measured before it was
+    closed. The callee used to send ONE label (``labels(n)[0]``), so a node
+    carrying a publishable label FIRST and ``:Source`` as well — measured:
+    ``(:Point:Source)``, ``(:Object:Source)``, ``(:Event:Source)``,
+    ``(:Subject:Source)`` — answered a publishable ``node_type`` and its whole map
+    rode, ``text`` included. Label order is allocation-dependent (``CREATE
+    (f:Source:Point)`` yields ``['Point','Source']``), so no rule keyed on a
+    single label could ever close it: the filter now grades the WHOLE label SET
+    (``_delegation_entry_publishable``), which the callee carries as an ADDITIVE
+    ``labels`` key (``sdk._provenance``) while ``node_type`` keeps its single-label
+    meaning and wire type, so no consumer's shape moved. Reachability, for the
+    record: the one ``SET n:Source`` writer (``migrate_kinds``) also removes the
+    legacy document label in the same statement, and nothing writes
+    ``:Point:Source`` — the reachable paths were ``hosted_backup``'s operator
+    remedy ("add a SERVED label") and an SDK/direct-edge write. ⚠️ The callee-side
+    fix was contested as a surface change belonging to #14630; it landed here
+    because the alternative was shipping the disclosure behind a stated residual,
+    and an additive field on a returned map is not a tool/method surface change.
+    The fixture that proves it creates the hybrid with ``:Object`` FIRST, so the
+    disclosure reproduces instead of being assumed away.
+
     ⛔ DENY BY DEFAULT, and the reason is MEASURED, not stylistic. An earlier
     revision tested ``entry.get("node_type") == "Source"`` — and that field is
-    ``labels(n)[0]`` from the callee, which FalkorDB returns in LABEL-ALLOCATION
-    order, not by any semantic rank. A legacy ``(:Document:Source)`` node — the
-    exact shape an interrupted ``migrate_kinds.relabel_legacy_documents`` leaves
-    behind — therefore answers ``node_type: "Document"`` and the equality test
-    SKIPPED it: measured at this head, ``/belief`` still published
-    ``text: "RAW DOC BODY MUST NOT LEAK"`` for that shape while the single-label
-    fixture stayed green. A rule that names one spelling of a node it must
-    suppress is only as strong as that spelling, so the allow-list names the
-    labels whose WHOLE map this route may publish and everything else is
-    filtered. ``Document`` is deliberately NOT on it: post-D10 a document IS a
-    ``:Source``.
+    ``labels(n)[0]`` from the callee, while the ORDER of ``labels()`` is not
+    guaranteed by the engine (Cypher manual, list functions: *"the order of
+    returned labels is not guaranteed"*). Whether that equality test fires is
+    therefore a function of ALLOCATION, not of semantics — and the two legacy
+    shapes this file knows about allocate in OPPOSITE directions. Measured on
+    this tree: ``(:Document:Source)`` — the shape an interrupted
+    ``migrate_kinds.relabel_legacy_documents`` leaves behind — returns
+    ``['Source', 'Document']``, so ``node_type`` was ``"Source"`` and the old
+    test HIT it; the hybrid a review reproduced as a live leak,
+    ``(:Object:Source)``, returns ``['Object', 'Source']``, so ``node_type`` was
+    ``"Object"`` — an ALLOWED label — the same test SKIPPED it, and ``/belief``
+    published the raw ``text``. One rule, two spellings of one node class,
+    opposite outcomes, no code difference: a rule keyed on one label is only as
+    strong as that label's position. Hence the set grading below. ``Document`` is
+    deliberately NOT publishable: post-D10 a document IS a ``:Source``.
     """
     if not isinstance(provenance, dict):
         return provenance
@@ -15798,9 +15828,18 @@ def _delegation_entry_publishable(entry: dict) -> bool:
     string, which is exactly the previous behaviour rather than a widening.
     """
     labels = entry.get("labels")
-    if not isinstance(labels, (list, tuple)) or not labels:
-        labels = [entry.get("node_type")]
-    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in labels if lbl)
+    if isinstance(labels, (list, tuple)) and labels:
+        readable = [lbl for lbl in labels if lbl]
+    else:
+        # An older callee (or a hand-built chain) carries only the single string.
+        readable = [entry.get("node_type")] if entry.get("node_type") else []
+    if not readable:
+        # ⛔ DENY BY DEFAULT includes ABSENCE. An entry with no readable label is
+        # filtered, never trusted: `all(... for lbl in [] if lbl)` is vacuously
+        # True, which would let a label-less neighbour through — the mutant a
+        # review measured passing this filter before the arm was pinned.
+        return False
+    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in readable)
 
 
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
