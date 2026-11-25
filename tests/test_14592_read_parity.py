@@ -1988,16 +1988,29 @@ def test_belief_reports_the_NEWEST_write_not_the_oldest(tmp_path):
     """#14593 review F1 (P2): the `ORDER BY e.seq DESC` had no row that could red.
 
     ``latest_for_node``'s central promise is "the NEWEST matching event, ordered by
-    the store's own total order". Every belief row before this one planted exactly
-    ONE ``ConfidenceChanged`` for the node, so ``DESC`` and ``ASC`` answered
-    byte-identically and the ordering SURVIVED the revert — measured: flipping to
-    ``ASC`` left all 15 belief rows green, while the flipped build reports the
-    OLDEST committed write as ``lastBeliefWrite`` (a silently wrong answer on a
-    brand-new read surface, which is exactly the class this PR exists to close).
+    the store's own total order". Before this row, NO belief test planted a SECOND
+    ``ConfidenceChanged`` for the SAME node — the ones that planted any planted exactly
+    one each, and most planted none — so ``DESC`` and ``ASC`` answered identically
+    wherever the ordering was reached, and the ordering SURVIVED its own revert.
+    Measured: flipping to ``ASC`` left all 15 pre-existing belief rows green, while the
+    flipped build reports the OLDEST committed write as ``lastBeliefWrite`` (a silently
+    wrong answer on a brand-new read surface, which is exactly the class this PR exists
+    to close). ⛔ Stated as a population claim, not a census: three earlier cuts tried
+    to give the exact split ("every row planted exactly ONE", then "fourteen", then
+    "twelve") and each count was wrong, because a row that plants NO event never
+    reaches the ordering at all — the point is that the population which COULD have
+    discriminated never did, and that is what this fixture changes.
 
     ⛔ Two writes, SAME node id, different seqs, and the assert names the NEWER
     one — the fixture is what makes the ordering load-bearing. Asserting only that
     *a* write comes back is the shape that stayed green.
+
+    ⛔ ONE assertion, deliberately: a second `seq != older` line was cut in review
+    because `seq == newer` plus the fixture guard `newer > older` already IMPLY it, so
+    it could never be the line that reds — while its comment claimed it was the line
+    that caught an ASC scan (review P3, agent-infra#3442's dead-weight rule). ⛔ The
+    precise mechanism is implication, not unreachability: the line does execute,
+    whenever the two assertions above it pass; it simply cannot FAIL.
     """
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         p = client.post("/v1/points", json={
@@ -2018,14 +2031,15 @@ def test_belief_reports_the_NEWEST_write_not_the_oldest(tmp_path):
         r = client.get(f"/v1/entities/{p['id']}/belief")
         assert r.status_code == 200, r.text
         body = r.json()
-        # The NEWER row, by the store's own order.
+        # The NEWER row, by the store's own order — and this is the whole finding:
+        # revert the ordering and this line reports the OLDER seq instead.
         assert body["lastBeliefWrite"]["seq"] == newer, body["lastBeliefWrite"]
-        # …and it is not merely "some" row: the oldest is named so an ASC scan is
-        # caught by a row that says which one it should NOT be.
-        assert body["lastBeliefWrite"]["seq"] != older, body["lastBeliefWrite"]
         # The committed figures ride the SAME row as the seq — a route that took
         # the seq from one write and the numbers from another would pass a
-        # seq-only assertion.
+        # seq-only assertion. ⛔ An `!= older` line sat here and was removed: with
+        # `seq == newer` and the fixture guard `newer > older` above it, it is
+        # implied, so it can never be the line that reds — it detected nothing while
+        # its comment claimed an ASC scan would be caught by it.
         assert body["lastBeliefWrite"]["committed"] == {
             "confidence": 0.9, "posteriorAlpha": 9.0, "posteriorBeta": 1.0,
         }, body
