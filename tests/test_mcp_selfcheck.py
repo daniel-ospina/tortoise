@@ -352,9 +352,6 @@ def test_the_spliced_entry_keeps_the_FILES_own_indentation(project):
     path = project / "upgrade.mcp.json"
     path.write_text('{\n    "mcpServers": {\n        "tortoise": {"type": "http"}\n    }\n}\n',
                     encoding="utf-8")
-    harness_onboard._splice_entry(
-        path.read_text(encoding="utf-8"), "tortoise",
-        {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
     after = harness_onboard._splice_entry(
         path.read_text(encoding="utf-8"), "tortoise",
         {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
@@ -421,19 +418,16 @@ def test_a_CRLF_config_with_an_existing_entry_is_spliced_not_flattened(project):
 
 
 def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
-    """`""` is also returned for a shape `_insert_member` does not splice — say that.
+    """When there is NO `mcpServers` object, the fallback names THAT — not a layout.
 
-    Measured pre-fix on this fixture: `json.loads` proves an `mcpServers` OBJECT is
-    there, and the action said *"the file has no `mcpServers` object to merge into"* —
-    false over a file whose closing brace shares the last member's line. The fallback
-    itself is sound (the round-trip guard still proves the write); only the reason was
-    wrong, and it sent the reader looking for a missing object that is present.
+    The shared-closing-brace layout used to land here too and the message was false
+    over it (the object was present), so the layout is now spliced instead (see the
+    row above). What still falls back is a file with no `mcpServers` object at all,
+    and that is what the sentence must say.
     """
-    original = '{\n  "mcpServers": {\n    "other": {"a": 1}}\n}\n'
+    original = '{\n  "unrelated": {"a": 1}\n}\n'
     path = project / ".mcp.json"
-    path.write_text(original, encoding="utf-8")
-    assert json.loads(original)["mcpServers"] == {"other": {"a": 1}}, (
-        "the fixture must really hold an `mcpServers` object for this test to mean anything")
+    path.write_bytes(original.encode("utf-8"))
 
     result = harness_onboard.write_config("pi", project)
 
@@ -441,9 +435,9 @@ def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
     assert "tortoise.mcp_bridge" in path.read_text(encoding="utf-8")
     said = " ".join(result.actions)
     assert "no `mcpServers` object this installer can splice" in said, (
-        f"the fallback's stated reason does not cover this file: {result.actions}")
+        f"the fallback's stated reason does not name the shape: {result.actions}")
     assert "no `mcpServers` object to merge into" not in said, (
-        f"the stated reason denies an object `json.loads` proves is there: {result.actions}")
+        f"the old wording blamed a missing object it could not be sure of: {result.actions}")
 
 
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
@@ -467,6 +461,45 @@ def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
     assert harness_onboard.BEGIN_MARK not in back
     assert back.encode("utf-8") == original, (
         f"the install/uninstall round trip was not byte-identical:\n{back.encode()!r}")
+
+
+def test_a_SHARED_closing_brace_layout_is_spliced_not_re_dumped(project):
+    """The hand-written shape where the last value's `}` shares the object's line.
+
+    `_insert_member` used to BAIL on this (`"other": {"a": 1}}`), so the first
+    install fell back to a whole-document dump — and the action message then said
+    the file had "no `mcpServers` object", which was false: the object was right
+    there holding a sibling. The brace is now the insertion point, and the row
+    asserts BOTH halves: the sibling's bytes survive and no re-dump is reported.
+    """
+    original = ('{\n  "mcpServers": {\n'
+                '    "playwright": {"command": "npx", "args": ["-y", "x"]}}\n}\n')
+    path = project / ".mcp.json"
+    path.write_text(original, encoding="utf-8")
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    after = path.read_text(encoding="utf-8")
+    assert '"playwright": {"command": "npx", "args": ["-y", "x"]}' in after, (
+        "the sibling's bytes were reformatted — this layout must splice too")
+    assert not [a for a in result.actions if "re-written" in a], (
+        f"a re-dump was reported for a layout that can be spliced: {result.actions}")
+    parsed = json.loads(after)
+    assert parsed["mcpServers"]["playwright"] == {
+        "command": "npx", "args": ["-y", "x"]}
+    assert parsed["mcpServers"]["tortoise"]["args"] == ["-m", "tortoise.mcp_bridge"]
+
+    # ⛔ The two fixes INTERSECT here: this layout splices, and every inserted line
+    # uses the document's own terminator, so a CRLF config must stay CRLF.
+    crlf = ('{\r\n  "mcpServers": {\r\n'
+            '    "playwright": {"command": "npx", "args": ["-y", "x"]}}\r\n}\r\n')
+    spliced_crlf = harness_onboard._splice_entry(
+        crlf, "tortoise", {"type": "stdio", "args": ["-m", "tortoise.mcp_bridge"]})
+    assert "\n" not in spliced_crlf.replace("\r\n", ""), (
+        f"an inserted line used LF in a CRLF document:\n{spliced_crlf!r}")
+    assert json.loads(spliced_crlf)["mcpServers"]["tortoise"]["args"] == [
+        "-m", "tortoise.mcp_bridge"]
 
 
 def test_installer_refuses_an_unparseable_config(project):

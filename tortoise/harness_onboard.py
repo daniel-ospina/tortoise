@@ -331,14 +331,17 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     which is exactly the reformat this function exists to prevent. An EMPTY
     `mcpServers` object is spliced too, without a leading comma.
 
-    LINE ENDINGS ARE THE FILE'S OWN: `\\r\\n` is never translated (the text comes
+    LINE ENDINGS ARE THE FILE'S OWN: `\r\n` is never translated (the text comes
     from `_read_text`) and every line this function INSERTS uses the terminator the
     document already uses, so a CRLF config stays CRLF.
 
-    Returns the edited text, or "" when the text cannot be spliced: `mcpServers` is
-    absent or not a JSON OBJECT, or the object is a member/brace LAYOUT
-    `_insert_member` does not splice (the closing brace sharing the last member's
-    line). The caller then falls back to a full dump, and SAYS so.
+    Returns the edited text, or "" when there is no `mcpServers` OBJECT to edit: the
+    object is absent, `mcpServers` is not a JSON object, or the text does not parse
+    as the document the caller built. ⛔ NO member/brace LAYOUT is refused — the
+    closing brace sharing the last member's line is spliced like any other (an
+    earlier cut of this docstring listed it as a bail-out, which sent that common
+    hand-written shape through a whole-document dump). The caller then falls back
+    to a full dump, and SAYS so.
     """
     servers = _member_span(text, "mcpServers")
     if servers is None:
@@ -371,9 +374,10 @@ def _insert_member(text: str, name: str, entry: dict,
     member, because inserting a multi-line value there would reformat the line it
     shares. Inserted lines use the document's OWN terminator (`_newline_of`).
 
-    Returns "" for a shape this does not splice: a MULTI-LINE object whose closing
-    brace shares the last member's line (`{\n  "other": {"a": 1}}\n}`) — the caller
-    then re-dumps the document and says so, which is why that return is not silent.
+    Returns "" only when there is no object to insert into; ⛔ NO member/brace
+    LAYOUT is refused — the closing brace sharing the last member's line is
+    spliced (an earlier cut returned "" for it, which sent the common
+    hand-written shape through a whole-document re-dump).
     """
     nl = _newline_of(text)
     close = obj_end - 1                       # the object's own `}`
@@ -388,8 +392,6 @@ def _insert_member(text: str, name: str, entry: dict,
         return text[:close].rstrip() + ", " + member + text[close:]
     # ── multi-line object: find the line holding the closing brace, insert ABOVE it
     line_start = text.rfind("\n", 0, close) + 1
-    if text[line_start:close].strip():
-        return ""                            # a shape we do not understand: fall back
     obj_line_start = text.rfind("\n", 0, obj_start) + 1
     base = text[obj_line_start:obj_start]
     base = base[:len(base) - len(base.lstrip())]
@@ -402,6 +404,13 @@ def _insert_member(text: str, name: str, entry: dict,
     line = f'{member_indent}"{name}": {body}'
     if not inner.strip():
         return text[:line_start] + line + nl + text[line_start:]
+    if text[line_start:close].strip():
+        # ⛔ The closing brace SHARES its line with the last member's value — the
+        # common hand-written shape (`"other": {"a": 1}}`), and the shape an
+        # earlier cut of this function REFUSED, which re-dumped the whole document
+        # over a layout it simply did not anticipate. Insert AT the brace instead:
+        # the comma lands after that value and the new member starts its own line.
+        return text[:close] + "," + nl + line + nl + text[close:]
     return (text[:line_start].rstrip("\n").rstrip() + "," + nl + line + nl
             + text[line_start:])
 
@@ -510,22 +519,21 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     if spliced:
         after = spliced
     else:
-        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has none, the
-        # key is not an object, or the object is a member/brace layout
-        # `_insert_member` does not handle. Dump, and SAY that the whole file was
-        # written rather than implying a one-entry merge. ⛔ A file that merely LACKS
-        # the entry is NOT this branch — `_splice_entry` inserts into an existing
-        # object. ⛔ THE REASON IS NOT "no object": saying that over a file whose
-        # `json.loads` proves an object IS there is a false statement (measured on
-        # `{\n  "mcpServers": {\n    "other": {"a": 1}}\n}\n`), so the sentence
-        # names the shapes it actually covers.
+        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has none, or the
+        # key is not a JSON object. Dump, and SAY that the whole file was written
+        # rather than implying a one-entry merge. ⛔ A file that merely LACKS the entry
+        # is NOT this branch — `_splice_entry` inserts into an existing object — and
+        # ⛔ neither is a LAYOUT: every member/brace shape, including the closing
+        # brace sharing the last member's line, is spliced. An earlier cut listed
+        # "a member/brace layout it does not splice" here, which was false once the
+        # layout became spliceable; the sentence names what it can still be.
         nl = _newline_of(before)
         after = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", nl) + nl
         if before:
             out.actions.append(
                 f"{path}: no `mcpServers` object this installer can splice "
-                f"(absent, not an object, or a member/brace layout it does not "
-                f"splice) — the whole document was re-written")
+                f"(the file has none, or `mcpServers` is not an object) — the "
+                f"whole document was re-written")
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose
