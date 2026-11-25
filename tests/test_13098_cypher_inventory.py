@@ -316,7 +316,7 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
-def test_the_renderer_refuses_to_write_over_the_source():
+def test_the_renderer_refuses_to_write_over_the_source(capsys):
     """`--render <the source>` would corrupt the tracked file AND lock the tool.
 
     `render()`'s own refusal guards the SOURCE'S CONTENT, never the DESTINATION, so
@@ -335,6 +335,15 @@ def test_the_renderer_refuses_to_write_over_the_source():
     assert rc == 2, f"`--render <source>` must exit 2, got {rc}"
     assert DOC_SRC.read_bytes() == before, (
         "the tracked SOURCE was rewritten — the guard must refuse before writing")
+    # ⛔ ASSERT THE BRANCH, NOT JUST THE EXIT CODE (#13098 round 3): the source is
+    # ALSO tracked, so `git ls-files` refuses it too — an exit-2-only assertion
+    # therefore stays green if the `target == DOC_SRC` branch is DELETED, and that
+    # branch is the one that still holds where `git ls-files` cannot help: an
+    # untracked source, or an index mid-`CONFLICT (modify/delete)` where the path
+    # has stages and the working copy is the incoming document.
+    assert "refusing to render over the SOURCE" in capsys.readouterr().err, (
+        "refused, but by the TRACKED-PATH branch rather than the SOURCE branch — "
+        "the source-specific guard is then pinned by nothing")
 
 
 def test_the_renderer_refuses_to_write_over_a_tracked_path(monkeypatch):
