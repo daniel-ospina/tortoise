@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import json
 import os
 import uuid
 from pathlib import Path
@@ -488,7 +489,43 @@ def test_the_uncut_registry_is_bounded_and_counts_past_the_cap(monkeypatch):
 
 
 def test_the_registry_publishes_no_tenant_identifiers():
-    """`/health` is UNAUTHENTICATED: a graph id is the customer's own name."""
+    """`/health` is UNAUTHENTICATED: a graph id is the customer's own name.
+
+    ⛔ THIS MEASURES **CONTAINMENT, NOT LEAF EQUALITY** (#14610 review P3). The
+    first cut of this test built a `set` of published LEAVES and asserted the two
+    identifiers were not `in` it. That is blind to the one shape this payload is
+    most likely to grow: :data:`_UNCUT_GRAPHS` is keyed by the COMPOSITE
+    `f"{org_id}\\u0000{graph_id}"`, so publishing `sorted(_UNCUT_GRAPHS)` — the
+    obvious way to name the graphs behind the count — emits ONE leaf that
+    contains BOTH identifiers and equals NEITHER. Measured: with that line added
+    to `armed_but_uncut()`, the equality form of this test stayed GREEN while the
+    payload carried `org-SECRET\\u0000graph-SECRET`. A guard that passes the one
+    leak it exists to catch is a false PASS, so the assertion is on the RENDERED
+    payload: a substring cannot dodge a substring.
+
+    ⛔ WHAT THIS DOES *NOT* MEASURE — THE WIRE (#14610 review, second pass P3).
+    It guards the BUILDER, `armed_but_uncut()`. `hosted_api`'s health block COPIES
+    NAMED KEYS one at a time and never spreads the dict, so a leak introduced
+    ONLY on the wire (`block["armed_but_uncut_graphs"] = sorted(
+    record_writer._UNCUT_GRAPHS)`) is invisible here — measured: the whole file
+    still reads `42 passed`. The REALISTIC leak — name the graphs in the builder
+    AND forward the key — is caught, because the builder-side containment
+    assertion fires first. An earlier cut of this docstring claimed the mutation
+    reddened "the payload … on an unauthenticated endpoint", which overstated what
+    it measures by exactly that hop. Do not "restore" that sentence; a stated
+    measurement has to be re-derivable, and closing the wire gap needs a test that
+    calls the health block, which this one deliberately does not do.
+
+    The separator check is separate and deliberate: it reds the composite-key
+    SHAPE even if the identifiers in it happened to be harmless, because any value
+    carrying the registry's own key format is publishing the registry. ⛔ IT MUST
+    MATCH ON THE **ESCAPED** FORM: `json.dumps` renders a NUL as the six
+    characters `\\u0000`, never as a raw byte, so an earlier cut of this line
+    asserted on the raw character and was UNCONDITIONALLY TRUE — a dead assertion
+    whose comment advertised coverage it could not provide (same review, same
+    class as the leaf-equality defect above: a guard that cannot fire is a false
+    PASS on the surface it names).
+    """
     rw.reset_uncut_graphs()
     try:
         rw.note_uncut_graph("org-SECRET", "graph-SECRET", reason="no_cursor_row")
@@ -509,8 +546,17 @@ def test_the_registry_publishes_no_tenant_identifiers():
             yield value
 
     published = set(leaves(report)) | set(leaves(reasons))
-    assert "org-SECRET" not in published
-    assert "graph-SECRET" not in published
+    # The whole payload as `/health` would send it, keys included: the composite
+    # key can reach an operator as a dict KEY just as easily as a value.
+    rendered = json.dumps({"report": report, "reasons": reasons}, default=str)
+    assert "org-SECRET" not in rendered
+    assert "graph-SECRET" not in rendered
+    assert "\\u0000" not in rendered, (
+        "no published value may carry the registry's own composite-key shape — "
+        "`org\\u0000graph` contains both tenant identifiers and equals neither, "
+        "so it defeats an equality-based check. This asserts the ESCAPED form "
+        "because that is what `json.dumps` emits; asserting the raw NUL byte "
+        "here would be true by construction and could never fire.")
     assert all(isinstance(v, (int, str)) for v in published)
 
 
