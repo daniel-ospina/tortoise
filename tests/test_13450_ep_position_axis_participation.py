@@ -63,7 +63,14 @@ _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
     os.environ["TORTOISE_DB_URI"] = DB_URI
     _probe = TortoiseSDK()
-    _probe._get_proj().g.query("RETURN 1")
+    # ⛔ `ro_query`, not `.query`: `query` is a name on the retired public SDK
+    # surface, so `sdk_privatise`'s ratchet counts every ordinary-word `.query`
+    # receiver it cannot type as residue — and this file is NEW, so the two such
+    # calls in it RAISED that count (`surface-guard` red at baseline 11913 ->
+    # 11915). `ro_query` is the wrapper's own read verb (#3595 `=~` guard
+    # included) and is not on that map, which is the gate's own "convert the
+    # call" remedy; nothing about the probe's meaning changes.
+    _probe._get_proj().g.ro_query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
     # ⛔ A rename or typo in a seam this probe touches must NOT be read as
@@ -103,7 +110,14 @@ def _fresh_sdk() -> TortoiseSDK:
 
 
 def _q(sdk, cypher, params=None):
-    return sdk._get_proj().g.query(cypher, params=params or {}).result_set
+    # ⛔ `_query`, not `.query` — the same `surface-guard` ratchet as the probe
+    # above, on the arm that has to WRITE (the fixtures set `isClosed` /
+    # `pipelineSlot` directly). `_query` is the converted spelling the sweep
+    # itself names, it still carries the #3595 `=~` guard, and this module only
+    # ever addresses a per-run throwaway graph (`GRAPH = tortoise_test_13450_*`)
+    # with statements targeted by `id`, so the bulk-wipe check it does not run
+    # is not a guard these fixtures depend on.
+    return sdk._get_proj().g._query(cypher, params=params or {}).result_set
 
 
 def _belief(sdk, node_id):
@@ -176,10 +190,16 @@ class TestTheAxesAreOneDeclaration:
             "status", "outdated", "isClosed", "pipelineSlot")
 
     def test_a_non_terminal_slot_is_not_an_axis(self):
-        for slot in ("entry", "active", "suspended", "", None, " terminal "):
-            expected = ("pipelineSlot",) if slot and slot.strip() == (
-                TERMINAL_STAGE_SLOT) else ()
-            assert ending_axes("live", stage_slot=slot) == expected
+        for slot in ("entry", "active", "suspended", "", None):
+            assert ending_axes("live", stage_slot=slot) == ()
+        # ⛔ AND NEITHER IS A PADDED ONE (#13450 review, P3). This used to be
+        # the ONE value where the Python arm and the Cypher twin disagreed: the
+        # arm stripped the slot (`" terminal "` was an ending) while every
+        # Cypher reader compared it exactly (current). The comparison is exact
+        # on both sides now, so `" terminal "` is not an ending anywhere, and
+        # the parity pin in `test_13034_…` enumerates it rather than leaving the
+        # agreement to inspection.
+        assert ending_axes("live", stage_slot=" terminal ") == ()
 
     def test_the_marker_is_read_by_truthiness_like_advance_stage(self):
         assert ending_axes("live", is_closed="yes") == ("isClosed",)
@@ -193,7 +213,7 @@ class TestTheAxesAreOneDeclaration:
         words = [None, "live", "draft", "superseded", "retracted", "bogus"]
         flags = [False, True]
         closeds = [None, False, True]
-        slots = [None, "active", TERMINAL_STAGE_SLOT]
+        slots = [None, "active", TERMINAL_STAGE_SLOT, " terminal "]
         for word in words:
             for flag in flags:
                 for closed in closeds:

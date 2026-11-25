@@ -58,6 +58,15 @@ from tortoise.live import (
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import run_fts_query
 
+#: A slot that LOOKS terminal and is not one. The slot is compared EXACTLY, on
+#: every representation (#13450 review, P3): the Python mirror, the Cypher twin
+#: (`coalesce(n.pipelineSlot, '') <> 'terminal'`) and `pipeline`'s own
+#: `PipelineStage.is_terminal` all read `" terminal "` as CURRENT. It is
+#: enumerated here because it used to sit OUTSIDE this file's truth table while
+#: the Python arm stripped it and the Cypher arm did not — the one value the
+#: two sides disagreed on, in the silent-drop direction.
+PADDED_TERMINAL_SLOT = f" {TERMINAL_STAGE_SLOT} "
+
 GRAPH = f"tortoise_test_13034_{uuid.uuid4().hex[:8]}"
 DB_URI = _live_utils.docker_uri(GRAPH)
 FALKORDB_AVAILABLE = False
@@ -139,10 +148,15 @@ class TestThePythonMirrorReadsBothAxes:
         assert is_terminal_status(
             status, False, stage_slot=TERMINAL_STAGE_SLOT) is True
 
-    @pytest.mark.parametrize("slot", ["entry", "active", "suspended", "", None])
+    @pytest.mark.parametrize("slot", ["entry", "active", "suspended", "", None,
+                                      PADDED_TERMINAL_SLOT])
     def test_a_non_terminal_slot_is_not_an_ending(self, slot):
         # §4: those slots say how far along, never whether the commitment
         # still stands. A missing stage is not an ending either.
+        # ⛔ AND NEITHER IS A PADDED ONE (#13450 review, P3): the slot is
+        # compared EXACTLY, so `" terminal "` is not an ending here — which is
+        # what the Cypher twin (`coalesce(n.pipelineSlot, '') <> 'terminal'`)
+        # and `pipeline.PipelineStage.is_terminal` already answered.
         assert is_terminal_status("live", False, stage_slot=slot) is False
 
     def test_both_axes_are_read_not_one(self):
@@ -207,7 +221,8 @@ class TestTheCypherTwinReadsBothAxes:
     @pytest.mark.parametrize("status", [None, "live", "superseded"])
     @pytest.mark.parametrize("outdated", [None, False, True])
     @pytest.mark.parametrize("is_closed", [None, False, True])
-    @pytest.mark.parametrize("slot", [None, "active", TERMINAL_STAGE_SLOT])
+    @pytest.mark.parametrize("slot", [None, "active", TERMINAL_STAGE_SLOT,
+                                      PADDED_TERMINAL_SLOT])
     def test_keep_filter_expression_and_mirror_agree(
             self, status, outdated, is_closed, slot):
         sdk = _fresh_sdk()

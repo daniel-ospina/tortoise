@@ -166,10 +166,23 @@ def ending_axes(status, outdated: bool = False, *, is_closed=None,
     ⛔ ``goalState`` is deliberately NOT a fifth marker: it is a legacy arm in
     ``derived_invalidation``, not part of this rule (§6).
 
+    ⛔ THE SLOT IS COMPARED EXACTLY, NEVER STRIPPED (#13450 review, P3). An
+    earlier spelling of this rule read ``stage_slot.strip() ==
+    TERMINAL_STAGE_SLOT``, which made ``" terminal "`` an ending HERE while
+    every Cypher reader (:func:`_terminal_excluded` /
+    :func:`_terminal_expression`, ``coalesce(n.pipelineSlot, '') <>
+    'terminal'``) served it as CURRENT — the silent-drop direction, and the one
+    value that disagreed by construction. The exact comparison is also what
+    ``pipeline`` itself does (``PipelineStage.is_terminal`` and the stage
+    resolution in ``pipeline.py`` compare the slot with ``==``), so all three
+    representations now agree on every input, including the padded one.
+
     The CYPHER twin is :func:`_terminal_excluded` (the KEEP direction); it is a
     second REPRESENTATION of this one rule because it has to be, and
     ``tests/test_13034_currency_rule_reads_position.py`` pins the two together
-    over every combination rather than leaving the agreement to inspection.
+    over every combination rather than leaving the agreement to inspection —
+    ``" terminal "`` included, which is the case that used to fall outside the
+    enumeration while the two sides disagreed on it.
     """
     axes: list[str] = []
     if (status or "") in TERMINAL_EXCLUDED_STATUSES:
@@ -178,8 +191,7 @@ def ending_axes(status, outdated: bool = False, *, is_closed=None,
         axes.append("outdated")
     if is_closed is not None and bool(is_closed):
         axes.append("isClosed")
-    if (isinstance(stage_slot, str)
-            and stage_slot.strip() == TERMINAL_STAGE_SLOT):
+    if isinstance(stage_slot, str) and stage_slot == TERMINAL_STAGE_SLOT:
         axes.append("pipelineSlot")
     return tuple(axes)
 
