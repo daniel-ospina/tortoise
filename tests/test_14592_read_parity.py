@@ -1039,12 +1039,15 @@ def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
     The code said "the root's own name, on the same coalesce as a neighbour's"
     while the neighbour side had gained a cap and a flag the root did not have —
     so a client gating display on `nameTruncated` read the root's missing flag as
-    "bounded" and got an unbounded value (measured: 4000 characters). The two
-    sides now answer identically; the full body stays reachable at the entity's
-    own route.
+    "bounded" and got an unbounded value (measured: 4000 characters). What the two
+    sides now SHARE is the cap and the flag; the coalesce is deliberately not
+    shared (a neighbour is selected per layer, the root reads one known map), and
+    an earlier revision of this docstring overstated that as "answer identically"
+    — the same claim-wider-than-code defect one level down. The full body stays
+    reachable at the entity's own route.
     """
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
-        body_4000 = "y" * 4000
+        body_4000 = "ROOT-BODY-MARKER-" + ("y" * 4000)
         root = client.post("/v1/points", json={
             "content": body_4000, "kind": "statement"}).json()
         far = client.post("/v1/points", json={
@@ -1059,8 +1062,14 @@ def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
         assert r.status_code == 200, r.text
         entity = r.json()["entity"]
         assert len(entity["name"]) == 200, len(entity["name"])
+        # ⛔ The VALUE, not just the length: on an all-identical body a mutant
+        # that returns a different 200-character slice — or a "nicer"
+        # ``[:199] + "…"`` — stays green on a length assertion alone (review P3,
+        # the same gap the neighbour arm was tightened for one commit over).
+        from tortoise.entity_reads import _ENDPOINT_NAME_MAX
+        assert entity["name"] == body_4000[:_ENDPOINT_NAME_MAX], entity["name"][:40]
         assert entity["nameTruncated"] is True, entity
-        # The neighbour side answers with the SAME shape, which is the claim.
+        # The neighbour side carries the SAME flag, which is the shared half.
         assert r.json()["relations"][0]["other"]["nameTruncated"] is False
 
 

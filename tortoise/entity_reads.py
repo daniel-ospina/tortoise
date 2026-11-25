@@ -384,22 +384,41 @@ _ENDPOINT_NAME_MAX = 200
 _RELATION_ENDPOINT_NAME = (
     "CASE WHEN m:Source THEN m.url "
     "     WHEN m:Point THEN coalesce(m.content, m.name) "
-    "     ELSE coalesce(m.name, m.url, m.id) END"
+    # ⛔ ``m.eventId`` last, the same order the IDENTITY projection uses in the
+    # SELECT beside this one (``coalesce(m.id, m.eventId, m.url) AS oid``): an
+    # ``:Event``'s identity key is ``eventId`` and it writes no ``id``
+    # (``why.py``: ``MERGE (e:Event {eventId:$eid})``), so without it an unnamed
+    # Event neighbour answered ``name: null`` while the SAME row carried its
+    # eventId as ``other.id`` — measured (#14593 review P3).
+    "     ELSE coalesce(m.name, m.url, m.id, m.eventId) END"
 )
 
 
 def _root_preview(entity_id: str, root_label: str, root: dict) -> dict:
-    """The entity the caller ASKED for — same name answer, same bound, same flag.
+    """The entity the caller ASKED for — same BOUND, same FLAG, not same coalesce.
 
-    ⛔ The coalesce and the cap are IDENTICAL to a neighbour's preview, on
-    purpose (#14593 review P3). An earlier revision answered the root in full and
-    left the sentence "the root's own name, on the same coalesce as a neighbour's"
-    in the code — true about the coalesce, false about the bound the neighbour
-    side had just gained, so a client gating display on ``nameTruncated`` would
-    read the root's missing flag as "bounded" while receiving an unbounded value.
-    Bounding both makes the sentence true and the wire shape uniform; the FULL
-    body of a Point is not lost by this, because the root is by definition
-    reachable at its own route (``/v1/points/{id}`` and siblings) — this route
+    ⛔ THE PARITY IS CAP + FLAG, AND ONLY THAT (#14593 review P3, twice). What an
+    earlier revision claimed was "the same coalesce … so the two sides render the
+    same way"; what is true is narrower and stated here rather than implied:
+
+    * the CAP (``_ENDPOINT_NAME_MAX``) and the ``nameTruncated`` FLAG are shared
+      with a neighbour's preview, so a client can treat both sides the same way;
+    * the COALESCE is NOT shared. A neighbour is selected PER LAYER in Cypher
+      (``_RELATION_ENDPOINT_NAME``): a ``:Source`` answers ``url``, a ``:Point``
+      ``content``, everything else ``name → url → id → eventId``. The root reads
+      the map the projection already handed us, in ONE order
+      (``name → content → url → eventId``), because it is a single known entity
+      rather than a heterogeneous neighbour list.
+
+    MEASURED, and the reason this paragraph exists: ``_create_source(url, "web",
+    name="My Doc Name")`` renders ``name: "My Doc Name"`` as a ROOT and
+    ``name: <url>`` as a neighbour, and an unnamed ``:Event`` renders
+    ``name: <eventId>`` as a root and ``name: null`` as a neighbour — the same node,
+    two strings, in one response. That is a DELIBERATE asymmetry (each side answers
+    its own question), not an identity, and calling it one was the defect.
+
+    The full body of a Point is not lost by the cap: the root is by definition
+    reachable at its own route (``/v1/points/{id}`` and siblings), and this route
     answers "what is this entity connected to", not "give me its text".
 
     ``:Source`` cannot reach ``content`` here: ``navigation._resolve_root``
