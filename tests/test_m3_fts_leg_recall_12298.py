@@ -1425,18 +1425,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # live file with `sed -n "<n>p"`, never nudged by a constant — the three rows did
     # move by the same delta this time, which is a measurement, not an assumption.
     # The SYMBOLS are unchanged; only the numbers moved.
-    #
-    # ⛔ RE-DERIVED AGAIN on 2026-11-25 (main-red, uniform +149): all three rows had
-    # moved by the SAME +149 against the live file — re-derived per symbol with
-    # `sed -n "<n>p"`/an exact-substring search, never nudged by the constant, and
-    # each symbol is UNIQUE in the file, so the measured line is not an accident of
-    # a repeated token. The SYMBOLS are unchanged; only the numbers moved.
-    ("tortoise/projection/__init__.py", 21191, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21191`"),
-    ("tortoise/projection/__init__.py", 21634, "def _create_fulltext_index(",
-     "`:21634`"),
-    ("tortoise/projection/__init__.py", 22076,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22076`"),
+    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21042`"),
+    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
+     "`:21485`"),
+    ("tortoise/projection/__init__.py", 21927,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
 )
 
 
