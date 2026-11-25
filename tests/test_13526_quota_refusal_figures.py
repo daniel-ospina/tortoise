@@ -601,15 +601,23 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
 
     ``test_the_fixture_reading_is_fresh_and_derived_from_the_clock`` above decides
     by reading the fixture's SOURCE, and source-reading arms have now lost the
-    arms race four times — each time measured open with the file green. Two
-    shapes survive it at the head this test was added to, and they are why it
-    exists:
+    arms race four times — each time measured open with the file green. One
+    shape survives it at the head this test was added to, and it is why this
+    test exists:
 
     * ``datetime.now(UTC).replace(**{"year": 2026, "month": 11})`` — a clock
       call, so a source arm calls it derived, but the calendar component is
       PINNED: it reads as ~now for the rest of this month and then ages out,
-      which is the #9127/#14646 bomb with a later fuse;
-    * ``datetime.now(UTC).replace(day=1)`` — the same, one component down.
+      which is the #9127/#14646 bomb with a later fuse. It escapes the source
+      arm only because a ``**{…}`` splat gives ``keyword.arg is None``, so the
+      arm's calendar check sees no keyword to inspect.
+
+    ⛔ The NAMED form (``replace(day=1)``, ``replace(hour=2)``) is NOT an
+    example: the source arm's ``pins_a_calendar`` reads ``{"year", "month",
+    "day"}`` keywords and catches those already (`a714ff2`). An earlier revision
+    of this paragraph listed ``replace(day=1)`` as a second escaping shape and
+    that was measured FALSE — do not delete a component from the source arm's
+    set on the strength of this test covering it.
 
     So this arm does not look at the source at all. It hands the fixture two
     clock readings a known distance apart and requires the value that REACHES
@@ -660,10 +668,17 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
             An INSTANCE, not the class: ``__getattr__`` fires only for instance
             attribute access, so patching the class itself would make
             ``time.strftime`` an ``AttributeError`` and refuse a correct fixture.
+
+            ⛔ And CALLABLE, because ``from time import time`` binds this NAME to
+            a function: a non-callable stub turns a correct fixture into
+            ``TypeError: object is not callable``, which never mentions the rule.
             """
 
             def __getattr__(self, attr):
                 return getattr(_real_time, attr)
+
+            def __call__(self) -> float:
+                return _real_time.time() + offset.total_seconds()
 
             @staticmethod
             def time() -> float:
@@ -679,6 +694,7 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
                 return _real_time.localtime(
                     _real_time.time() + offset.total_seconds() if secs is None else secs)
 
+        previous_time = getattr(module, "time", _real_time)
         monkeypatch.setattr(module, "datetime", _Shifted)
         monkeypatch.setattr(module, "time", _Time(), raising=False)
         try:
@@ -686,7 +702,7 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
                 _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at)
         finally:
             monkeypatch.setattr(module, "datetime", real_datetime)
-            monkeypatch.setattr(module, "time", _real_time, raising=False)
+            monkeypatch.setattr(module, "time", previous_time, raising=False)
 
     base = handed(timedelta())
     #: TWO shifts, and the second crosses a year ON PURPOSE: a pinned calendar
@@ -707,10 +723,13 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
             "SERVED, and this file reds with no commit in between (#9127, third "
             "recurrence). Derive it — `datetime.now(UTC) - timedelta(minutes=5)` "
             "— and hand THAT to `MeterReading`.\n\n"
-            "⛔ This arm cannot shift a clock it cannot see, so a read through a "
-            "helper in ANOTHER module or a constant computed at IMPORT time is "
-            "refused here as well: a false red, with a cheap remedy — read the "
-            "clock inline (#14646).")
+            "⛔ This arm cannot shift a clock it cannot see, so three shapes are "
+            "refused here even though they are correct code: a read through a "
+            "helper in ANOTHER module, a constant computed at IMPORT time, and a "
+            "clock module imported INSIDE the fixture's own body (`import time "
+            "as _t`), whose local name this patch cannot reach. That is a false "
+            "red with a cheap remedy: read the clock inline — "
+            "`datetime.now(UTC) - timedelta(minutes=5)` (#14646).")
 
 
 def test_the_freshness_pin_reads_a_positional_construction():
