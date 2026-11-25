@@ -207,24 +207,41 @@ def list_layer(
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
     #
-    # ⚠️ INHERITED RESIDUE, stated rather than implied: this module's OWN calls
-    # hold the rule, but FOUR helpers it DELEGATES to still resolve through
-    # GRAPH.QUERY — `projection._resolve_entity` (behind every by-id route and
-    # `/belief`), `navigation._resolve_root` (behind `entity_relations`),
-    # `TortoiseSDK._list_sources` (`sdk.py:31639`, behind `GET /v1/sources`,
-    # which reaches it through `list_knowledge(kind='source')`) and
-    # `TortoiseSDK._provenance` (`sdk.py:38252`, behind `/belief`'s evidence arm
-    # for a Point). So "the new GETs cannot mint a graph" is true of the Cypher
-    # below and NOT yet of the four delegated reads; fixing those is pre-existing
-    # debt in their own homes, not a guarantee this module's comment can confer.
-    # ⛔ The list is FOUR, and it was two until a reviewer measured the other
-    # pair: a reader auditing the new GETs' write-verb exposure takes this
-    # paragraph as the complete residual, so an enumeration that is short by two
-    # is a false clean verdict on two of the eight routes — the same
-    # "claim wider than the measurement" class this comment exists to prevent.
-    # `proj.g.query` is the wrapper that dispatches the minting `query` verb
-    # (`projection/__init__.py::_ProjectionHandle.query` → `_dispatch_decided(…,
-    # "query", …)`), which is why it is residue and not a style note.
+    # ⚠️ INHERITED RESIDUE, stated rather than implied — FIVE delegated helpers
+    # behind these GETs still resolve through GRAPH.QUERY (`query`), the verb
+    # that MINTS a graph which does not exist; this module's OWN calls hold the
+    # `ro_query` rule above. `proj.g.query` is the wrapper that dispatches that
+    # minting verb (`projection/__init__.py::_ProjectionHandle.query` →
+    # `_dispatch_decided(…, "query", …)`), which is why this is residue and not
+    # a style note. Enumerated PER ROUTE rather than counted, because a count
+    # with no route beside it is what let this paragraph read two of five, and
+    # then four of five, under two separate reviewers:
+    #
+    #   * `projection.FalkorProjection._resolve_entity`
+    #     (`projection/__init__.py:21099`) — behind every by-id route
+    #     (`/v1/objects/{id}`, `/v1/subjects/{id}`, `/v1/sources/{id}`) AND
+    #     `/belief`'s own resolution;
+    #   * `navigation._resolve_root` (`navigation.py:95`) — behind
+    #     `entity_relations`;
+    #   * `TortoiseSDK._list_sources` (`sdk.py:31679`) — behind `/v1/sources`,
+    #     which reaches it through `list_knowledge(kind='source')`;
+    #   * `ep.TortoiseEP._read_node` (`ep.py:790`, the `self.g.query` at `:804`)
+    #     — behind `/belief`, through `sdk.check_confidence(claim_id=…)` →
+    #     `_get_confidence` → `ep.compute_confidence`;
+    #   * `TortoiseSDK._get_point` (`sdk.py:30632`, the cache arm's
+    #     `_cache_handle().g.query` at `:30717`) — behind `/belief`'s evidence
+    #     arm for a Point, through `sdk._provenance`.
+    #
+    # So "the new GETs cannot mint a graph" is true of the Cypher IN THIS MODULE
+    # and NOT yet of those five resolutions: the object/subject by-id routes
+    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` two
+    # (`_read_node` + `_get_point`) on top of the `_resolve_entity` its own
+    # resolution already reaches. Fixing them is pre-existing debt in their own
+    # homes; it is not a guarantee this module's comment can confer. ⛔ A reader
+    # auditing these routes' write-verb exposure takes this paragraph as the
+    # COMPLETE residual, so an enumeration that is short by even one is a false
+    # clean verdict on a route — the "claim wider than the measurement" class
+    # this comment exists to prevent.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
