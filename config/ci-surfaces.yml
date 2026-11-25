@@ -41,7 +41,7 @@ version: 1
 # different number on a different lane and is not touched by this line.
 #
 # #11576 raised S 10 -> 11 for the SAME reason, one merge later: main's
-# `test_embed_decision_step_11086.py` and this branch's
+# `test_embed_decision_step_11086.py` and `#11576`'s own
 # `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, and the union packs a
 # worst-shard figure heavier than either side alone packs it — `shard_watchdog_minutes()` rounds that
 # figure up, so a fraction of a second of extra packing crosses a whole watchdog minute. At that

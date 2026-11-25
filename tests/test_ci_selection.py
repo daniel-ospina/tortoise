@@ -9201,7 +9201,7 @@ _DERIVATION_LOOKAHEAD = 60
 #: that file, and this matcher required `row` ADJACENT to the path — so `'s `core` ` between them
 #: hid a live, false row claim. MEASURED before the fix: `_row_claims` on that very sentence
 #: returned `[]`, and every header-block arm that existed at that head stayed GREEN over the block
-#: that contained it (six such arms now; the count is not restated because it moves with the block).
+#: that contained it — no count is restated here, because the number of arms moves with the block.
 #: The optional middle group now admits it, and the fixture drives the shape so a re-narrowing
 #: reds.
 #: ⛔ THE CARRY SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
@@ -9292,10 +9292,10 @@ _ROW_CLAIM_CARRY_RE = re.compile(
 def _unquoted_block(header: str) -> str:
     """The block with double-quoted spans masked, refusing to answer on ODD quote parity.
 
-    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `"` re-pairs with the next
-    span's opening quote and swallows the live prose IN BETWEEN. Both arms that read the block
-    (the row word and the carry run) mask with this, so the parity precondition lives here, once:
-    a guard that cannot read its subject must not certify it. `_splice_shingle_positions` already
+    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `\"` re-pairs with the next
+    span's opening quote and swallows the live prose IN BETWEEN. Every arm that reads the block
+    through this mask (the row word, the carry run, the row enumeration) inherits the parity
+    precondition from here, once: a guard that cannot read its subject must not certify it. `_splice_shingle_positions` already
     RAISES rather than de-splicing around the mis-pairing, for exactly this reason.
     """
     quotes = header.count('"')
@@ -10309,9 +10309,9 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
 
     Two properties are asserted, and both hold of the POSITIVE-only text the block carries now: no
     live completeness frame, and every path the list names returned by `_row_claims` with a row
-    behind it. `#14560`'s, `#14565`'s and `#14552`'s entries are deliberately NOT required to spell
-    their paths here — the paragraph above names each of them with its path AND the word `row`, so
-    they are graded there, and a shorthand is only a defect when NO matcher can reach its file.
+    behind it. This arm does NOT grade the list's SPELLING — whether an entry names its path at all
+    is `test_the_row_list_alone_reaches_every_item_it_names`'s subject, which requires the list to be
+    self-sufficient; keeping the two apart is what stops this one passing over an item it never read.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     rows = set(cs.load_manifest()["durations"])
