@@ -793,7 +793,7 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # prefix is optional in the EXTRACTION only — the pin immediately below
     # still grades which form Cursor's snippet must carry.
     # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
-    # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
+    # `.mcp.json` snippet (`4b2fba3e^:tortoise/onboarding/SKILL.md:415`, `"Bearer
     # ${TORTOISE_API_KEY}"`); the Cursor `env:` row predates that change — it
     # arrived with `24e8388c5f316`, and `01b78913cde4` only dropped
     # its `"type": "http",`. So the red is LOCATOR DRIFT on a legitimate
@@ -802,7 +802,8 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # regex, and reds only from `d20162d21830` onward. Do not "restore" the
     # plain snippet to satisfy a tighter locator: in a JSON header that form
     # resolves once at process start to an EMPTY `Authorization: Bearer`
-    # (SKILL.md:411-414) — the empty-bearer class this guard exists to prevent.
+    # (tortoise/onboarding/SKILL.md:411-414) — the empty-bearer class this guard
+    # exists to prevent.
     referenced = set(
         re.findall(
             r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
