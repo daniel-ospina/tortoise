@@ -210,7 +210,7 @@ def list_layer(
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
     #
-    # ⚠️ INHERITED RESIDUE, stated rather than implied — SIX delegated helpers
+    # ⚠️ INHERITED RESIDUE, stated rather than implied — SEVEN delegated helpers
     # behind these GETs still resolve through GRAPH.QUERY (`query`), the verb
     # that MINTS a graph which does not exist; this module's OWN calls hold the
     # `ro_query` rule above. `proj.g.query` is the wrapper that dispatches that
@@ -218,7 +218,7 @@ def list_layer(
     # `_dispatch_decided(…, "query", …)`), which is why this is residue and not
     # a style note. Enumerated PER ROUTE rather than counted, because a count
     # with no route beside it is what let this paragraph read two of five, and
-    # then four of five, under two separate reviewers:
+    # then four of five, and then five of six, under three separate reviewers:
     #
     #   * `projection.FalkorProjection._resolve_entity`
     #     (`projection/__init__.py:21099`) — behind every by-id route
@@ -240,12 +240,22 @@ def list_layer(
     #     `_raw_entry_for_point`'s `proj.g.query` at `:38239` and
     #     `resolve_entity_id_same_entity(proj.g, …)` at `:38288`
     #     (`entity_identity.py`'s `g.query`) — so listing only its callee would
-    #     read as one locus where there are three.
+    #     read as one locus where there are three;
+    #   * `TortoiseSDK._uncalibrated_ep_participants` (`sdk.py:43696`, the
+    #     `proj.g.query` inside its per-label loop) — behind EVERY `/belief` that
+    #     has a belief to report, through `sdk.check_confidence` →
+    #     `_get_confidence` → `_ensure_calibrated` (that gate is on by default:
+    #     `_ep_require_calibration_default()` is `True`).
+    #
+    # The unit is ENTRY-POINT HELPERS (seven), over nine query-issuing functions
+    # once the callees named above are counted — stated explicitly because the
+    # sentence that follows is easy to read as a complete census of FUNCTIONS.
     #
     # So "the new GETs cannot mint a graph" is true of the Cypher IN THIS MODULE
-    # and NOT yet of those six resolutions: the object/subject by-id routes
-    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` three
-    # (`_read_node` + `_provenance` + its `_get_point` callee) on top of the
+    # and NOT yet of those seven resolutions: the object/subject by-id routes
+    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` four
+    # (`_read_node` + `_provenance` + its `_get_point` callee +
+    # `_uncalibrated_ep_participants`) on top of the
     # `_resolve_entity` its own resolution already reaches. Fixing them is pre-existing debt in their own
     # homes; it is not a guarantee this module's comment can confer. ⛔ A reader
     # auditing these routes' write-verb exposure takes this paragraph as the

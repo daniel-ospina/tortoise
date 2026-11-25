@@ -15717,6 +15717,43 @@ def _layer_payload(entry: dict) -> dict:
     return props
 
 
+def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
+    """Apply #3998 to a `:Source` that appears in the provenance chain.
+
+    ⛔ THE CALLEE DOES NOT FILTER, SO THE ROUTE MUST. ``TortoiseSDK._provenance``
+    builds its ``delegation`` arm with ``properties(n)`` — the whole node map —
+    for whatever the author is connected to (``sdk.py``: *"MATCH (s:Subject
+    {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)"*). A
+    ``references`` edge from a Point/Subject to a ``:Source`` therefore carried
+    that Source's raw ``text`` back inside an ordinary ``graphs:read`` response —
+    the exact disclosure ``_layer_payload`` and ``_endpoint_preview`` refuse on
+    the same PR's other routes, arriving by a route that never asked for it.
+
+    The rule is applied HERE rather than at the callee because this route owns
+    the claim (the PR's own "a :Source's raw payload never rides the route"), and
+    because ``_provenance`` is reachable through the MCP door as well — fixing it
+    there is a wider behaviour change than this route needs, and is the better
+    home only if the surface owner takes it (filed as a follow-up).
+
+    Only the properties of a ``:Source`` neighbour are touched; every other
+    node's map is returned as stored, so no other arm's payload changes shape.
+    """
+    if not isinstance(provenance, dict):
+        return provenance
+    delegation = provenance.get("delegation")
+    if not isinstance(delegation, list):
+        return provenance
+    from tortoise.projection.entities import filter_source_props
+
+    filtered: list = []
+    for entry in delegation:
+        if isinstance(entry, dict) and entry.get("node_type") == "Source":
+            props, _denied = filter_source_props(dict(entry.get("props") or {}))
+            entry = {**entry, "props": props}
+        filtered.append(entry)
+    return {**provenance, "delegation": filtered}
+
+
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
                                 surface: str) -> dict:
     """Read ONE entity, refusing an id that names a node of another layer.
@@ -16422,6 +16459,7 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if label == "Point":
         provenance = await _read_offload(
             lambda: sdk._provenance(entity_id), op="get_entity_belief.provenance")
+        provenance = _filter_delegation_payloads(provenance)
     return {
         "entity": {
             "id": entity_id,
@@ -16472,9 +16510,12 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         # that window", never "this node never changed". The window bounds the
         # RESULT; it does not bound the store's work (there is no `type` index —
         # see `event_store.LATEST_FOR_NODE_SCAN`), so this is not an O(N) claim.
+        # ⛔ It is NOT named `eventsScanned`: that number is the window's SIZE, and
+        # a graph holding one `ConfidenceChanged` row reported `1000` under that
+        # name — a published count the store does not hold (#14593 review).
         "lastBeliefWriteScan": {
             "eventType": "ConfidenceChanged",
-            "eventsScanned": event_store.LATEST_FOR_NODE_SCAN,
+            "windowRows": event_store.LATEST_FOR_NODE_SCAN,
             "bounds": "retained rows, not the store's scan",
         },
         # ⛔ A NULL `lastBeliefWrite` IS NOT "THIS BELIEF NEVER MOVED", and this

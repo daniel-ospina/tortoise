@@ -699,6 +699,66 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
         assert "RAW BODY THAT MUST NOT LEAK" not in repr(body), body
 
 
+def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
+        tmp_path):
+    """#14593 review P1 (data disclosure, #3998): the SAME rule, a FOURTH door.
+
+    ``/belief`` attaches ``sdk._provenance(id)`` verbatim, and that helper builds
+    its ``delegation`` arm with ``properties(n)`` — the WHOLE node map — for
+    whatever the author ``:Subject`` is connected to. A ``references`` edge to a
+    ``:Source`` therefore handed the Source's raw ``text`` back inside an
+    ordinary ``graphs:read`` response, on a route that never asked for a
+    document body: the exact disclosure ``_layer_payload`` (by-id routes) and
+    ``_endpoint_preview`` (relations) refuse, arriving by the one arm nobody
+    filtered. Measured pre-fix through public doors only — the ``:Source`` and
+    the edge were both created by the SDK — `provenance.delegation[0].props`
+    carried ``"text": "SECRET-..."``.
+
+    ⛔ The assertion is on the WHOLE response, not on one key: the rule is "a
+    Source's raw payload never rides the route", so a future re-shape of the
+    delegation arm must not re-open it by moving the payload somewhere else.
+    """
+    url = "https://example.test/belief-delegation-14593"
+    secret = "RAW DOCUMENT BODY THAT MUST NOT RIDE THIS ROUTE"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            subj = sdk._create_subject("Reviewer", "person")
+            # `_create_source`, not the `extractedFrom` auto-mint: the auto-minted
+            # node is keyed by `url` with no `id`, so `create_edge` cannot resolve
+            # it and silently answers `created: false` (measured while writing this
+            # row — the fixture, not the route, would have been the failure).
+            src = sdk._create_source(url, "web")
+            assert src["id"] == url, src
+            # Below the door on purpose: `_create_source` refuses a caller-supplied
+            # `text`, and the route must not hand back what the write door would
+            # not accept (same construction as the `/v1/sources` sibling above).
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.text = $t",
+                params={"u": url, "t": secret}, read_only=False)
+            edge = sdk._create_edge("references", subj["id"], url)
+            assert edge["created"] is True, (
+                "the fixture could not write the edge it asserts on: "
+                f"{edge}")
+            point = sdk._create_point(
+                "statement", "a claim with a documented author",
+                authoredBy=subj["id"])
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{point['id']}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The fixture really did reach the delegation arm — otherwise this row
+        # would pass while grading nothing (the non-vacuity half of the P1).
+        delegation = body["evidence"]["provenance"]["delegation"]
+        assert [d["node_type"] for d in delegation] == ["Source"], body
+        assert delegation[0]["via"] == "references", body
+        assert delegation[0]["props"].get("url") == url, body
+        assert "text" not in delegation[0]["props"], body
+        assert secret not in repr(body), body
+
+
 # ── GET /v1/entities/{id}/relations ────────────────────────────────────────
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
@@ -760,6 +820,13 @@ def test_relations_pages_and_offset_actually_advances(tmp_path):
                               params={"limit": 1, "offset": offset}).json()
             sizes.append(body["count"])
             seen.extend(r["other"]["name"] for r in body["relations"])
+            # ⛔ #8447's OTHER half, pinned here: a `limit+1` probe is a LOWER
+            # BOUND, never a total. Deleting `exact=False` at the call site (so
+            # the probe's `candidates` is published as `total_available`) left
+            # this whole file green and reported `total_available: 2` for a
+            # 4-edge population — so the marker's own rule needs its own row.
+            if body["truncated"]:
+                assert "total_available" not in body, body
         # The bound is the CALLER's: one row per request.
         assert sizes == [1, 1, 1, 1, 0], sizes
         # …and the window MOVED: five offsets walked all four spokes, no repeats.
@@ -919,7 +986,10 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # The window is PUBLISHED, not hidden: a null last write means "not in
         # this window", never "it never changed".
         assert body["lastBeliefWriteScan"]["eventType"] == "ConfidenceChanged"
-        assert body["lastBeliefWriteScan"]["eventsScanned"] >= 1
+        # ⛔ The window is its SIZE, and says so — a key named `eventsScanned`
+        # reported 1000 on a graph holding one row (#14593 review).
+        assert body["lastBeliefWriteScan"]["windowRows"] >= 1
+        assert "eventsScanned" not in body["lastBeliefWriteScan"], body
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
