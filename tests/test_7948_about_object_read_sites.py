@@ -4101,8 +4101,9 @@ _13_8_ENUMERATION = (
     # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
     # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
     # retired row 32, and 17 -> 18 when #13448 added the `ended.py::build_cypher` row —
-    # NOT #8542, whose merged commit `8a04a96630` does not carry that row), so this
-    # marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
+    # NOT #8542, whose merged commit `8a04a96630` does not carry that row — and
+    # 18 -> 19 when #14592's `entity_reads.py::entity_relations` registered §13 row 46), so
+    # this marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
     "Outside this nineteen, two are default-ON on the ingestion path",
@@ -4234,6 +4235,22 @@ def test_the_extractor_document_agrees_on_the_count():
         "customer-callable readers §13's table carries:\n  - " + "\n  - ".join(missing)
         + "\nA count is only as good as the list under it — the sibling is the "
         "second copy of this ruling, so it must enumerate the same readers."
+    )
+
+    # (c) the EXCLUSION sentence's numeral — the same fact, one sentence further on.
+    # ⚠️ Measured fail-open at `#14671`'s head `5a86688`: the count moved
+    # eighteen -> nineteen in four graded places while this sentence kept
+    # "NOT in this eighteen", so §13.8 contradicted itself two sentences apart
+    # and (a) and (b) both stayed GREEN. Neither can grade it — the sentence sits
+    # AFTER the enumeration's closing marker and names no reader — so the numeral
+    # is asserted here, against the same `word`. It is the SCOPE of the three
+    # exclusions, so it is the same fact as the count and cannot drift from it.
+    assert re.search(rf"\bNOT in this {word}\b", extractor, re.I), (
+        f"§13.8's exclusion sentence no longer reads 'NOT in this {word}' — the "
+        f"three readers it excludes are excluded FROM the {word} customer-callable "
+        "sites, so its numeral IS this count and must move with it. A repair that "
+        "moves the count and leaves this sentence reds here instead of contradicting "
+        "itself two sentences apart."
     )
 
 
