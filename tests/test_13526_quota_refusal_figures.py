@@ -33,6 +33,8 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from tortoise import pricing
@@ -88,10 +90,24 @@ def _single_sample_meter(used: float):
 
     ``repeats`` is None, so the gate takes its single-sample arm and composes the
     refusal this test is about (``… the reading comes from a single sample``).
+
+    ⛔ ``measured_at`` is derived from the CLOCK, never a frozen literal. The gate
+    ages a gauge against ``STALE_AFTER_SECONDS`` (24 h, ``allowance_gate``:276) and
+    SERVES the write — unarmed — when the reading is older than that, which is a
+    different outcome from the refusal every arm below asserts. A hardcoded stamp
+    therefore makes this file a time bomb: it read
+    ``2026-11-24T02:00:00+00:00`` and went red on its own, with no code change, once
+    the clock passed 2026-11-25T02:00Z — measured on 2026-11-25 as three rows
+    failing `assert 'open' == 'closed'` and the gate logging
+    ``allowance unmeasured (cap unarmed, write served) … reason=stale``. One minute
+    old is the deployed shape (a periodic estimate, not a per-write figure) and it
+    is well inside the bound, so the arms still assert the refusal rather than the
+    age of a fixture.
     """
+    measured_at = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     return lambda _org: MeterReading(
         used=used,
-        measured_at="2026-11-24T02:00:00+00:00",
+        measured_at=measured_at,
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )
