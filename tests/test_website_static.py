@@ -5990,6 +5990,18 @@ def _beat_ground_margin_candidates(
     ranked MAXIMALLY specific by `_css_specificity`, i.e. fail-closed;
     `@layer`, `@supports`, inheritance and the RANGE syntax (`height >= 400px`)
     are not modelled (this page uses none).
+
+    ⛔ THE PRICE OF THAT FAIL-CLOSED ARM, named so it is not discovered as a
+    surprise: an unmodelled condition that provably cannot apply on screen is
+    treated as base too, so `@media print { #beat-hero > :first-child {
+    margin-top: 0 } }` reds this reader even though it cannot affect the
+    rendered phone page (measured: RED). That is an OVER-block, which is the
+    arm this guard deliberately sits on — the alternative, exempting media
+    TYPES by parsing them, is a modelled predicate with its own fail-open band
+    (`@media not print`, `@media screen and …`, a future `@media tty`), and the
+    residual it would buy back is a red on a print stylesheet this page does
+    not have. If a print block ever lands, exempt the `print`/`speech` TYPES
+    here and keep every unmodelled FEATURE fail-closed.
     """
     blanked = _css_blanked(html)
     height_spans = _max_height_media_spans(html)
