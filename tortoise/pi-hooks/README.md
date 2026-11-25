@@ -112,6 +112,11 @@ The install step therefore disables the legacy entry before copying this one:
   points at is untouched;
 - a **real directory** is moved to `~/.pi/agent/extensions/.tortoise-capture.disabled`
   **and its entry point is retired inside it** (`index.ts` → `index.ts.disabled`).
+  On the **upgrade** shape — an older install already performed the rename, so
+  `tortoise-capture/` is gone and `.tortoise-capture.disabled/` is what is on
+  disk — the entry point is retired *there*, with no second rename; that step
+  runs **after** the replacement seam is verified, so a failed write never
+  leaves a box with no producer at all.
 
 ⛔ **The dot prefix alone retires NOTHING, and this record claimed it did
 (#14342).** Pi's `discoverExtensionsInDir` applies **no** dot-prefix filter: a
@@ -145,7 +150,10 @@ second, independent extension whose only handler is the `session_shutdown`
 VERIFIED in place (`assert_seam_target`), `_disable_pi_second_producer` renames
 it to `reflect-hook.ts.disabled` — a name Pi's loader does not load (it takes
 top-level `*.ts` / `*.js`, so a `.disabled` suffix is not a loadable extension),
-with the bytes preserved. A retired copy that already exists is RE-ASSERTED
+with the bytes preserved. A **directory** at that name is retired in place
+instead (`index.ts` → `index.ts.disabled` inside it, directory name unchanged):
+a suffixed *directory* is still resolved through its index file, so renaming it
+would retire nothing. A retired copy that already exists is RE-ASSERTED
 when its bytes are identical (the bytes survive at the retired path, so removing
 the live duplicate destroys nothing — and the farm re-materializes this file, so
 that is the steady state), and refused when they differ or when the retired path
