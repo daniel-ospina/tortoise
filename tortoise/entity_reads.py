@@ -178,8 +178,11 @@ def list_layer(
         # `pack_state.kind_namespace_is_approved`: ``None`` means no
         # `:PackInstall` records AND no `:PackSelection` marker (every namespace
         # admitted), while a graph CONFIGURED empty (`set_graph_packs(packs=[])`,
-        # #2728) resolves to ``frozenset()`` and refuses. That is a check on the
-        # namespace, never on the spelling — and nothing else rewrites the value.
+        # #2728) resolves to ``frozenset()`` and refuses — UNLESS its data leg
+        # already carries the namespace (`recorded ∪ data`, #2714 indicator 2, so
+        # a namespace this graph has written stays writable). That is a check on
+        # the namespace, never on the spelling — and nothing else rewrites the
+        # value.
         # Measured: one
         # graph holds `team` and `core:team` side by side. So an EQUALITY filter
         # answered `200 count: 0, truncated: false` for the spelling that

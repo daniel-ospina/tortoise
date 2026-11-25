@@ -16063,9 +16063,16 @@ async def list_sources(
     # `truncated: false` — the silent-drop direction, and the exact class `#5346`
     # names and this PR closes on `/v1/objects`/`/v1/subjects` (which order by
     # `n.name, id(n)`) and pinned there with a planted same-name pair.
-    # The tiebreak is `url`, the Source's IDENTITY (`#4649`), so it is unique per
-    # row and the order is total. `points` is negated to keep the callee's
-    # most-connected-first reading — the ordering is made total, not replaced.
+    # The tiebreak is `url`, the Source's IDENTITY (`#4649`), unique per row in a
+    # graph whose Sources each carry one url (`url` is the MERGE key) — so the
+    # order is total THERE. ⚠️ Not an unconditional claim: `url` is a human key,
+    # and a graph holding two `:Source` nodes with one url (reachable only by a
+    # raw write; the doors MERGE on it) would share a sort key and be back at the
+    # engine's tie order. The sibling route uses `id(n)` for exactly that reason;
+    # using it here would change the `tortoise_list_knowledge(kind='source')` MCP
+    # row shape, which is a surface change and not this route's to make.
+    # `points` is negated to keep the callee's most-connected-first reading — the
+    # ordering is made total, not replaced.
     rows.sort(key=lambda r: (-(r.get("points") or 0), r.get("url") or ""))
     page = rows[offset:offset + limit]
     return _paged("sources", page, candidates=len(rows), offset=offset, exact=True)
