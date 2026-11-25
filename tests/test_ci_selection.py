@@ -9362,6 +9362,8 @@ def _carry_row_claim_violations(positive: dict[str, float], negative: set[str],
     no_row = sorted(name for name in positive if name not in durations)
     has_a_row = sorted(name for name in negative if name in durations)
     return wrong_value, no_row, has_a_row
+
+
 def _row_claims(header: str) -> list[str]:
     """Every test file the block calls a `durations` ROW, in any shape it spells one.
 
@@ -10330,6 +10332,68 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
     assert not rowless, (
         f"the row enumeration calls {rowless} a `durations` row, but the map carries none: the "
         "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
+
+
+#: The ISSUE shorthand an entry of the row enumeration may use — `` `#14560`'s `` — with its path
+#: named beside the word `row` SOMEWHERE ELSE in the block. `[\s#]*` spans the block's comment
+#: wrapping (`\n# `), which `\s*` alone does not: the live paragraph breaks between
+#: `` `#14565`'s `` and its path, and a matcher bound to the unwrapped spelling reads the
+#: enumeration's shorthand as unreachable when it is not (the same one-spelling class this block
+#: keeps re-learning).
+_ROW_ENUMERATION_ISSUE_RE = re.compile(r"`#(?P<issue>\d+)`'s")
+_ROW_ISSUE_SHORTHAND_RE = r"`#%s`'s[\s#]*`tests/(?P<file>[\w/.-]+\.py)`\s*rows?\b"
+
+
+def _issue_shorthand_row_file(unquoted: str, issue: str) -> str | None:
+    """The file `` `#<issue>`'s `<path>` row `` names, or `None` when the block never spells it.
+
+    One resolver, used for the live block AND for the fixture that proves it refuses a shorthand
+    with no path beside it, so the fixture cannot drift into grading something the live arm does
+    not.
+    """
+    match = re.search(_ROW_ISSUE_SHORTHAND_RE % re.escape(issue), unquoted)
+    return match.group("file") if match else None
+
+
+def test_the_row_enumeration_spells_no_row_claim_no_matcher_reaches():
+    """Every entry of the row enumeration must resolve to a file a matcher can reach.
+
+    `#14612` review measured the block saying "Every row item above is therefore spelled with its
+    path beside the word" while three enumeration entries were spelled `` `#14560`'s ``,
+    `` `#14565`'s `` and `` `#14552`'s `` — by ISSUE, with the path named only in the paragraph
+    ABOVE. The enumeration now spells every one of them with its path, so that sentence is true;
+    nothing graded the difference either way, which is the half this arm closes.
+
+    MEASURED on the shorthand form: drop the path beside `` `#14560`'s `` and the enumeration's
+    entry resolves to no file while every existing arm stays GREEN — the same class the block
+    records for `#14415` and `#14597`. Both halves are checked per issue, so a fold that keeps a
+    shorthand and loses its path reds here.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    enumeration = _row_enumeration(header)
+    issues = sorted({m.group("issue") for m in _ROW_ENUMERATION_ISSUE_RE.finditer(enumeration)})
+    assert issues, (
+        "the row enumeration names no issue at all, so this arm grades nothing — re-point "
+        "`_row_enumeration` at the list the block actually writes")
+    unquoted = _unquoted_block(header)
+    claims = set(_row_claims(header))
+    for issue in issues:
+        named_file = _issue_shorthand_row_file(unquoted, issue)
+        assert named_file is not None, (
+            f"the row enumeration says `#{issue}`'s but the block nowhere spells a path beside "
+            f"that issue with the word `row`, so no matcher can reach the file it means — name the "
+            f"path (`#{issue}`'s `tests/….py` row) in the enumeration, or drop the entry")
+        assert named_file in claims, (
+            f"`#{issue}`'s row is spelled `tests/{named_file}` but `_row_claims` does not return "
+            "it, so the enumeration's entry is a row claim graded by nothing")
+    # …and the resolver REFUSES the shape it exists for: the shorthand with its path moved away.
+    # MEASURED on that sentence: `_row_claims` never returns `test_14560_operator_vectors.py`, so
+    # deleting its `durations` row left every arm GREEN — the `#14597` defect, one issue label over.
+    assert _issue_shorthand_row_file(
+        "`#14560`'s row, and `tests/test_14560_operator_vectors.py` named elsewhere", "14560"
+    ) is None, (
+        "the shorthand resolver accepted `` `#14560`'s `` with NO path beside it — it would grade "
+        "a file the block never names in that claim, and the live arm above would stop biting")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
