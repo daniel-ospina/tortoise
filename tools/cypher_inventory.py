@@ -126,6 +126,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import ast
 import json
+import os
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -899,6 +900,53 @@ def check(doc: Path, result: dict) -> int:
     return 0
 
 
+def emit(text: str, stream=None) -> int:
+    """Write one stdout payload; a write that cannot happen is 2, never 1.
+
+    ⛔ `--markdown` IS the appendix table — the one verb a lane pipes (`| head`) or
+    redirects, and the one whose payload is far larger than the stdout buffer. A
+    closed pipe (`BrokenPipeError`) or a full disk (`OSError ENOSPC`) used to escape
+    uncaught and exit **1**, the code this tool reserves for the DRIFT verdict, so a
+    lane read "the pins drifted" and re-cut 25 correct pins. `--render`'s write and
+    `check()`'s read already answer 2 for their own half of this class; this closes
+    the stdout half for every emitting verb.
+
+    The explicit `flush()` is load-bearing: a payload small enough to sit in the
+    buffer raises at interpreter shutdown (exit **120**) instead of here, so without
+    it the smaller verbs would keep answering something that is not "could not run".
+    """
+    out = sys.stdout if stream is None else stream
+    try:
+        out.write(text + "\n")
+        out.flush()
+    except BrokenPipeError:
+        # Python's own advice: re-point fd 1 at devnull so the shutdown flush cannot
+        # re-raise and turn the 2 below into 120. Guarded — a test double has no fd.
+        _detach_stdout(out)
+        print("census: could not write to stdout (closed pipe) — this is 'could not "
+              "run', not drift", file=sys.stderr)
+        return 2
+    except OSError as err:
+        # ⛔ THE SAME DETACH IS OWED HERE, and it is measured, not defensive: the failed
+        # `flush()` leaves its bytes in the buffer, so the interpreter's shutdown flush
+        # retries them and REPLACES the 2 with **120** (a full disk: `>/dev/full`). The
+        # exit code is the whole point of this guard, so a code that says "could not
+        # run" must survive its own teardown.
+        _detach_stdout(out)
+        print(f"census: could not write to stdout: {err} — this is 'could not run', "
+              "not drift", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _detach_stdout(out) -> None:
+    """Re-point a failed stdout at devnull so Python's shutdown flush cannot re-raise."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     # ⛔ STDOUT MUST NOT BE ABLE TO FAIL ENCODING. A non-UTF-8 tracked filename reaches
     # the report/table as a surrogate escape, and under a real UTF-8 locale
@@ -1088,22 +1136,20 @@ def main(argv: list[str] | None = None) -> int:
             "rg_totals": rg,
             "rows": [s.as_row() for s in sorted(result["sites"], key=lambda s: (s.path, s.line))],
         }
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        return emit(json.dumps(payload, indent=2, sort_keys=True))
     if args.markdown:
-        print(markdown_table(result["sites"]))
-        return 0
+        return emit(markdown_table(result["sites"]))
     # ⛔ AND THE BARE VERB ENUMERATES TWICE TOO: `report()` calls `rg_totals()`, which
     # re-reads the index — outside the guard above, so a PARTIAL failure exited 1, the
     # DRIFT code, from the DEFAULT verb (measured with a `git` shim that delegates the
     # first `ls-files` and refuses the second).
     try:
-        print(report(result))
+        text = report(result)
     except (OSError, subprocess.CalledProcessError) as err:
         print(f"census: could not enumerate: {err} — this is 'could not run', not drift",
               file=sys.stderr)
         return 2
-    return 0
+    return emit(text)
 
 
 if __name__ == "__main__":

@@ -362,10 +362,69 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
         raise subprocess.CalledProcessError(128, ["git", "ls-files"])
 
     monkeypatch.setattr(census, "rg_totals", boom_totals)
+    # ⛔ AND DO NOT WALK THE TREE TO GRADE THE SECOND CALL. This arm rides the REQUIRED
+    # `python-ci-gate`, and a real `census()` costs ~7 s, so two of them would add ~14 s
+    # to every PR to prove something that does not depend on the tree — the same reason
+    # the table-shape arm is kept out of the merge gate. The subject is `rg_totals`'s
+    # SECOND call, so the first is stubbed with the shape the verbs read.
+    monkeypatch.setattr(
+        census, "census",
+        lambda *_a, **_k: {
+            "sites": [], "prefixes": ("tortoise",), "files_scanned": 0,
+            "files_with_sites": 0, "non_cypher_door_calls": 0,
+            "partial": 0, "unparsed_files": [], "excluded_test_modules": 0,
+            "ast_door_calls": 0, "unresolved_files": [],
+        },
+    )
     for argv in (["--json"], []):
         assert census.main(argv) == 2, (
             f"`{' '.join(argv) or '(bare census)'}` re-enumerates for `rg_totals` "
             f"(directly, or through `report()`); that second call must answer 2 too")
+
+
+def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift():
+    """A closed pipe or a full disk is 2 (could not run), never 1 (DRIFT) and never 120.
+
+    ⛔ `--markdown` IS the appendix table — the verb a lane pipes (`| head`) or
+    redirects — and it is the one verb whose payload is far larger than the stdout
+    buffer. Measured before the guard: `--markdown | head -3` exited **1** with
+    `BrokenPipeError`, `--markdown >/dev/full` exited **1** with `OSError ENOSPC`, and
+    the smaller BARE verb exited **120**, because its bytes fit the buffer and the
+    failure landed at the interpreter's shutdown flush instead. Three statuses, none of
+    them "could not run", from the failure class a pipe reaches by accident — and a
+    lane reading `1` re-cuts 25 pins that were correct.
+
+    Graded on the writer, not through a subprocess: the point is the returned status,
+    and a subprocess would need a real census (~7 s) inside the REQUIRED gate.
+    """
+
+    class Failing:
+        def __init__(self, err):
+            self.err = err
+
+        def write(self, _text):
+            raise self.err
+
+        def flush(self):  # pragma: no cover - `write` raises first
+            raise self.err
+
+    class Recording:
+        def __init__(self):
+            self.text = ""
+
+        def write(self, text):
+            self.text += text
+
+        def flush(self):
+            pass
+
+    assert census.emit("x", Failing(OSError(28, "No space left on device"))) == 2, (
+        "a full disk on `--markdown`'s 1,327-row payload must answer 2 — 1 is DRIFT")
+    assert census.emit("x", Failing(BrokenPipeError(32, "Broken pipe"))) == 2, (
+        "`--markdown | head` must answer 2 — 1 is DRIFT")
+    ok = Recording()
+    assert census.emit("row", ok) == 0 and ok.text == "row\n", (
+        "the writer still writes when it can")
 
 
 def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
