@@ -84,15 +84,15 @@ version: 1
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
 # against `main` is measurably ZERO here, and it was MEASURED, not reasoned: `fast_pool()` holds
 # 1337 files at this head and every one of them is `main`'s, because this PR adds no test file —
-# the two sides' parsed manifests are identical (255 surface registrations, 1503 `durations` rows,
-# zero differing values), so the comment-only `durations` rewrites on either side move no member of
-# the pool. ⛔ That zero is a READING of this head, never a promise about the next fold:
-# `fast_pool()` takes its inputs from the tree being measured (the manifest, the selector's own
-# constants, and the filesystem under an `on_demand: <dir>/**` subtree, which
-# `on_demand_subtree_files` expands with `rglob("test_*.py")` on purpose — a file added to a
-# non-gating subtree must not silently re-enter the gate), so re-measure the delta on the tree you
-# are merging INTO rather than carrying this sentence's zero. The name lists are what the guard
-# COMPARES against the live emission
+# the two sides' parsed manifests are identical — every surface list, all 1503 `durations` rows and
+# every `durations_floors` entry compared value by value, zero differing — so the comment-only
+# `durations` rewrites on either side move no member of the pool. ⛔ That zero is a READING of this
+# head, never a promise about the next fold: `fast_pool()` takes its inputs from the tree being
+# measured (the manifest, the selector's own constants, and the filesystem under an
+# `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with `rglob("test_*.py")`
+# on purpose — a file added to a non-gating subtree must not silently re-enter the gate), so
+# re-measure the delta on the tree you are merging INTO rather than carrying this sentence's zero.
+# The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
