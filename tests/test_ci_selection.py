@@ -9190,9 +9190,19 @@ _DERIVATION_LOOKAHEAD = 60
 #: Both ADJACENT shapes are read, because a matcher narrowed to one shape is how the same word
 #: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
 #: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
-#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs 0
-#: times, so the second pattern is exercised by the fixture below and NOT by live text; saying
-#: "the spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs
+#: ONCE — at "`tests/test_14592_read_parity.py` row (`core` and `api` — ONE `fast_pool()` entry,
+#: two surfaces, …)" — and that parenthetical holds no `tests/…py`, so it contributes no name;
+#: the second pattern is therefore exercised by the fixture below and by that one live spelling,
+#: and NOT by a live `<file>` list; saying "the spellings the block uses" would be a false claim in
+#: a comment whose job is to be precise.
+#: ⛔ THE POSSESSIVE SHAPE WAS GRADED BY NOTHING (#14612 review round 6, P2). The block described
+#: `tests/test_14407_alert_delivery.py`'s `core` row while the map carries NO `durations` row for
+#: that file, and this matcher required `row` ADJACENT to the path — so `'s `core` ` between them
+#: hid a live, false row claim. MEASURED before the fix: `_row_claims` on that very sentence
+#: returned `[]`, and all five header-block arms stayed GREEN over the block that contained it.
+#: The optional middle group now admits it, and the fixture drives the shape so a re-narrowing
+#: reds.
 #: ⛔ THE CARRY SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
 #: verb there, so neither anchor above could reach it: `… `<file>`, `<file>` and `<file>` carry an
 #: explicit `2.0` `durations` row, while `…` carry NO row`. That is the row-vs-default sentence the
@@ -9226,7 +9236,7 @@ _DERIVATION_LOOKAHEAD = 60
 #: **ROW** (`…`)" left `missing == []` and the arm GREEN, over exactly the false claim it exists to
 #: catch. Markdown emphasis around the word (`**ROW**`) is admitted for the same reason.
 _ROW_CLAIM_AFTER_FILE_RE = re.compile(
-    r"`tests/(?P<file>[\w/.-]+\.py)`[\s*_]+rows?\b", re.IGNORECASE)
+    r"`tests/(?P<file>[\w/.-]+\.py)`(?:\s*'s\s*(?:`[^`]+`)?)?[\s*_]+rows?\b", re.IGNORECASE)
 #: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
 #: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
 #: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
@@ -10038,9 +10048,11 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\", and `#6`'s two `core` rows "
         "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`), `#7`'s "
         "drift-reporter **ROW** (`tests/test_row_claim_upper.py`) — the CAPS spelling this block "
-        "itself uses — `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`, and #9's "
+        "itself uses — `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`, #9's "
         "`tests/test_row_claim_enum_a.py`, #10's `tests/test_row_claim_enum_b.py` and #11's "
-        "`tests/test_row_claim_enum_c.py` carry an explicit `2.0` `durations` row")
+        "`tests/test_row_claim_enum_c.py` carry an explicit `2.0` `durations` row, and #12's "
+        "`tests/test_row_claim_possessive.py`'s `core` row — the POSSESSIVE spelling a matcher "
+        "bound to an adjacent `row` cannot see")
     assert _row_claims(fixture) == [
         "eval/retrieval/test_row_claim_subdir.py",
         "test_row_claim_after.py",
@@ -10051,15 +10063,13 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "test_row_claim_enum_c.py",
         "test_row_claim_list_first.py",
         "test_row_claim_list_second.py",
+        "test_row_claim_possessive.py",
         "test_row_claim_upper.py",
     ], (
         "the row-claim matcher no longer reads every reversion shape (a file then `row`, "
-        "`row (` then the files, `rows:` then the files, and a run of files followed by `carry an "
-        "explicit `N` `durations` row`), or it misses a SUBDIRECTORY row, or "
-        "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
-        "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
-        "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
-        "`row (` then the files, and `rows:` then the files), or it misses a SUBDIRECTORY row, or "
+        "`row (` then the files, `rows:` then the files, the POSSESSIVE `<file>`'s `label` row, "
+        "and a run of files followed by `carry an explicit `N` `durations` row`), or it misses a "
+        "SUBDIRECTORY row, or "
         "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
         "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
         "`registration` as a row, or it grades a QUOTED dead claim as a live one: "

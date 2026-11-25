@@ -78,7 +78,8 @@ version: 1
 # `tests/test_sdk_privatise_sweep.py` at **28.0 s** — a `core` file whose weight is not flat, so do
 # not read that list as "all 2.0 s".
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
-# in `durations` — among the files named above, `#14597`'s, `#14560`'s, `#14565`'s, `#14552`'s,
+# in `durations` — among the files named above, `#14597`'s
+# `tests/test_expansion_fusion_14344.py` row, `#14560`'s, `#14565`'s, `#14552`'s,
 # `#14592`'s `tests/test_14592_operating_model_evidence.py` row and
 # `tests/test_14592_read_parity.py` row, `#14415`'s `tests/test_14219_batch_ingest.py` row and
 # `tests/test_14219_batches_api.py` row, plus the RATCHET's own
@@ -89,8 +90,9 @@ version: 1
 # measures a `fast_pool()` member, so an absence claim here would be false one sweep later with no
 # arm able to see it. What the block asserts about them is the WORD REGISTRATION, which stays true
 # whether or not a row lands beside it. ⛔ `#14415`'s files are named BY PATH here on purpose: the
-# earlier "`#14415`'s batch rows" named them by ISSUE only, so no matcher could reach them and
-# deleting either `durations` row left this block's arm GREEN over a row claim it makes.
+# earlier "`#14415`'s batch rows" — and, before this fix, `#14597`'s — named them by ISSUE only, so
+# no matcher could reach them and deleting that `durations` row left this block's arm GREEN over a
+# row claim it makes. Every row item above is therefore spelled with its path beside the word.
 # Spelling the enumeration without numerals is deliberate — the doctrine sentence below says no pool
 # size and no row count is stated here as a claim about this head, and a spelled-out number is still
 # a count (measured 2026-11-25: an earlier revision said "`#14415`'s two batch rows" and
@@ -131,8 +133,8 @@ version: 1
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
-# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
-# branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
+# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s registrations
+# called this branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
 # describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
 # re-pointed.
@@ -171,14 +173,14 @@ version: 1
 # and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
 # values: read the letter off `--emit-push-matrix` at the head you are citing, and never infer it
 # from a neighbouring row. ⛔ The worked example this paragraph used to carry was ITSELF false: it
-# claimed `tests/test_14407_alert_delivery.py`'s `core` row "sits in a DIFFERENT bin than
+# claimed `tests/test_14407_alert_delivery.py`'s `core` registration "sits in a DIFFERENT bin than
 # `test_notify`'s precisely because a `core` neighbour packs elsewhere". It cannot — `fast_pool()`
 # folds every surface into one `classified` set and returns `sorted(...)` of it
 # (`tools/ci_selection.py`, `fast_pool`), so a file registered on TWO surfaces (`api` beside
 # `test_abuse`, `core` beside `test_notify`) contributes ONE pool entry and therefore ONE bin.
 # ⛔ THAT IS THE WHOLE CLAIM, and it is deliberately bin-free: this sentence used to add "measured at
 # this head both of those files land in the same one", which was TRUE when written and FALSE one
-# fold later (this head packs `test_14407_alert_delivery` and `test_notify` in DIFFERENT bins) —
+# fold later (the fold that landed it found the two in DIFFERENT bins) —
 # the mechanism does not entail co-location with another file, so the empirical half could only rot.
 # A dual registration is exactly the case where a neighbour's bin tells you nothing, which is why the
 # rule is to read the letter off the verb rather than to remember a pairing.
