@@ -72,10 +72,14 @@ version: 1
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
 # is ZERO BY CONSTRUCTION here, and the CONSTRUCTION is what to read: `fast_pool()` is a function of
 # the manifest — both sides CODE, not this branch's data — minus the verb's own `ENV_BROKEN_FILES`
-# exclusion, so the delta can move only when the two sides' manifest rows DIFFER — a row added,
-# removed or reclassified — or when that set is edited; this PR does neither. It adds no test file at
-# all, and `#14592`'s `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head and
-# NOT this PR's. ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
+# exclusion and minus the `on_demand:` lane, so the delta can move only when the two sides' manifest
+# rows DIFFER — a row added, removed or reclassified — when `ENV_BROKEN_FILES` is edited, or when the
+# FILESYSTEM under an `on_demand: <dir>/**` subtree entry changes: `on_demand_subtree_files` expands
+# those (`eval/**`, `longmem_eval/**` here) from DISK with `rglob("test_*.py")` — deliberately, so a
+# file added to a non-gating subtree cannot silently re-enter the gate — so adding or deleting one
+# moves the pool with NO manifest row differing. This PR does none of the three. It adds no test file
+# at all, and `#14592`'s `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head
+# and NOT this PR's. ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
 # EARLIER spelling, quoted only so the rot it suffered is legible — `1333` here against `1332` on
 # `main`, nothing graded it, and it outlived the landing that made it false. A count in this block is
 # re-measured where it LANDED or not written at all, and this sentence's job is the reason the delta is
