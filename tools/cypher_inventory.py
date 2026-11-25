@@ -146,8 +146,10 @@ DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
 #: statement restamp every later row, and every open PR then carried its own
 #: whole-census copy of it, stamped against a different tree. Measured
 #: 2026-11-24 at `939e37f664`: it appeared in 8 of 11 open PRs and in 3 of the
-#: last 20 commits on `main` (reproducible: `git rev-list -20 main` + a
-#: `diff-tree` per commit), and it was in 6 of 6 then-conflicting PRs.
+#: last 20 commits on `main` (reproducible: `git rev-list -20 939e37f664` + a
+#: `diff-tree` per commit — the SHA, not `main`, because the figure is stamped to
+#: that base and `main` has advanced since: the same command reads 2 today), and
+#: it was in 6 of 6 then-conflicting PRs.
 DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
 
 #: Every verb that owns an OUTPUT stream of its own. `main()` refuses a command that
@@ -1179,6 +1181,53 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+
+        # ⛔ GIT METADATA IS NOT A DESTINATION EITHER, and the probe above cannot see
+        # it: `git ls-files` answers "is this path in the INDEX", so `.git/config`,
+        # `.git/index`, `.git/HEAD` and every ref are UNTRACKED by construction and
+        # pass that probe. Measured: `--render .git/config` in a scratch repo read the
+        # source, passed both earlier guards, and exited **0** having written the
+        # document over a 92-byte repository config (144,193 bytes after) — silent
+        # destruction that `git` cannot restore, from a verb §7 tells every lane to
+        # run. So this guard asks git where the metadata LIVES rather than asking the
+        # index: `--git-dir` and `--git-common-dir` one call, because a linked
+        # worktree's `.git` is a FILE (its metadata is elsewhere) and its refs are
+        # shared with the main checkout. Outside a git work tree (`128`) it does not
+        # fire, exactly like the tracked-path probe beside it.
+        try:
+            meta_probe = subprocess.run(
+                ["git", "rev-parse", "--git-dir", "--git-common-dir"],
+                cwd=ROOT, capture_output=True, text=True,
+                encoding="utf-8", errors="surrogateescape",
+            )
+        except OSError as err:
+            print(
+                f"render: could not probe {args.render} for git metadata: {err}",
+                file=sys.stderr,
+            )
+            return 2
+        if meta_probe.returncode == 0:
+            # ⛔ AN EMPTY LINE IS NOT `ROOT`: `Path("")` resolves to the current
+            # directory, so an unanswered probe would refuse EVERY destination —
+            # fail-closed in the wrong direction, and silently.
+            for line in meta_probe.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    meta = (ROOT / line).resolve()
+                except (OSError, RuntimeError):
+                    continue
+                if target == meta or meta in target.parents:
+                    print(
+                        f"refusing to render over GIT METADATA ({args.render}):\n"
+                        f"{target} is inside this repository's git directory "
+                        f"({meta}).\nThat is not a document destination, and git "
+                        "cannot restore what --render writes over. Pick another\n"
+                        "path (the default writes the gitignored `CYPHER-INVENTORY.md`).",
+                        file=sys.stderr,
+                    )
+                    return 2
 
     prefixes: tuple[str, ...] = ("tortoise",)
     if args.all_surface:

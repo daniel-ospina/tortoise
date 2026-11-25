@@ -1070,6 +1070,44 @@ def test_the_renderer_refuses_to_write_over_a_tracked_path(tmp_path, monkeypatch
         "path is the artifact this split exists to prevent")
 
 
+def test_the_renderer_refuses_to_write_over_git_metadata(tmp_path, monkeypatch, capsys):
+    """…and over GIT METADATA, which the tracked-path probe cannot see at all.
+
+    ⛔ THE TRACKED-PATH PROBE IS BLIND HERE BY CONSTRUCTION: it asks `git ls-files`
+    "is this path in the index", and `.git/config`, `.git/index`, `.git/HEAD` and
+    every ref are untracked, so all of them passed it. Measured before this arm was
+    written, in a scratch repo: `--render .git/config` exited **0** having read the
+    source and written 144,193 bytes over the 92-byte repository config — silent
+    destruction of git metadata that no git command can restore, from the verb §7
+    tells every lane to run (#14625 review, P2).
+
+    The target is a THROWAWAY repo's `.git/config`, so a regressed guard destroys
+    `tmp_path`'s config and never this checkout's; the assertion is that the bytes
+    are untouched, which is what "refused before anything was written" means.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / ".git" / "config"
+    assert target.is_file(), (
+        "the premise is that git metadata ALREADY exists at the target: \n"
+        "`git init` wrote it, and a pre-existence check on nothing would prove nothing")
+    before = target.read_bytes()
+    rc = census.main(["--render", ".git/config"])
+    assert rc == 2, f"`--render .git/config` must exit 2, got {rc}"
+    assert target.read_bytes() == before, (
+        "the guard must refuse before writing — `--render` over git metadata is "
+        "unrecoverable, and it exited 0 before this arm existed")
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err, (
+        f"the refusal must say WHICH class it hit, not 'pick an untracked path'; "
+        f"stderr:\n{err}")
+
+
 def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
     """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
 
@@ -3096,6 +3134,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_refuses_a_source_that_carries_the_appendix",
         "test_the_renderer_refuses_to_write_over_the_source",
         "test_the_renderer_refuses_to_write_over_a_tracked_path",
+        # ⛔ THE SIBLING THE TRACKED-PATH PROBE IS BLIND TO (#14625 review, P2):
+        # `.git/config` is untracked by construction, so the probe above passed it
+        # and `--render` exited 0 having overwritten git metadata it cannot restore.
+        "test_the_renderer_refuses_to_write_over_git_metadata",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3176,8 +3218,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 26, (
-        f"expected EXACTLY 26 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 27, (
+        f"expected EXACTLY 27 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3199,8 +3241,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 85, (
-        f"expected EXACTLY 85 test functions in this module; got "
+    assert len(test_functions) == 86, (
+        f"expected EXACTLY 86 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
