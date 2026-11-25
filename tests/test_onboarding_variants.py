@@ -789,19 +789,20 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # Cursor one and `.cursor/mcp.json` expands `${env:NAME}` — the PLAIN
     # `${NAME}` form is Claude Code's `--header` and is NOT expanded by Cursor
     # (cursor.com/docs/mcp; the same split is already recorded below, at the
-    # `CURSOR_MCP_CONFIG_ENV` / `PI_MCP_CONFIG_ENV` wizard pins). A regex that
-    # accepted only the plain form therefore found no snippet at all and redded
-    # a CORRECT document (#5153's guard, red since #5343 wrote it). The `env:`
+    # `CURSOR_MCP_CONFIG_ENV` / `PI_MCP_CONFIG_ENV` wizard pins). The `env:`
     # prefix is optional in the EXTRACTION only — the pin immediately below
     # still grades which form Cursor's snippet must carry.
     # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
     # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
     # ${TORTOISE_API_KEY}"`); the Cursor `env:` row predates that change — it
     # arrived with `24e8388c5f316`, and `01b78913cde4` only dropped
-    # its `"type": "http",`. Do not "restore" the plain snippet to
-    # satisfy a tighter locator: in a JSON header that form resolves once at
-    # process start to an EMPTY `Authorization: Bearer` (SKILL.md:411-414) — the
-    # empty-bearer class this guard exists to prevent.
+    # its `"type": "http",`. So the red is LOCATOR DRIFT on a legitimate
+    # rewrite, NOT a guard that was born broken: this file PASSES 42/42 at
+    # `4b2fba3e^`, where that plain-form snippet still satisfied the un-widened
+    # regex, and reds only from `d20162d21830` onward. Do not "restore" the
+    # plain snippet to satisfy a tighter locator: in a JSON header that form
+    # resolves once at process start to an EMPTY `Authorization: Bearer`
+    # (SKILL.md:411-414) — the empty-bearer class this guard exists to prevent.
     referenced = set(
         re.findall(
             r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
@@ -1686,9 +1687,14 @@ def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
 
 def test_3232_generic_restart_lines_are_exact():
     """The installer's stdout cue and the quickstart line are the two generic,
-    non-per-harness restart statements. Each is pinned against its exact
-    string so an edit that contradicts a harness's own mechanism (a new shell
-    for Pi/Codex CLI, a registry + relaunch for Codex Desktop) is visible."""
+    non-per-harness restart statements. The INSTALLER cue is pinned to its
+    exact string — that is where a harness's own mechanism lives (a new shell
+    for Pi/Codex CLI, a registry + relaunch for Codex Desktop), so an edit that
+    contradicts one is visible. The QUICKSTART half is pinned as an ORDER (the
+    cue, then a tools-appear clause that must not be inverted); its equality
+    pin was retired in #14607's aftermath because it redded a legitimate
+    reword — #3429's lesson, applied here. The `_are_exact` name is historical
+    and now covers only the installer half."""
     src = _installer_text()
     assert ('echo "Next: restart your agent, then confirm the skills are '
             'listed:"') in src, (
@@ -1710,7 +1716,19 @@ def test_3232_generic_restart_lines_are_exact():
     para = next(p for p in quick.split("\n\n") if cue in p)
     flat_para = " ".join(para.split())
     after_cue = flat_para[flat_para.index(cue) + len(cue):]
-    assert re.search(r"\btools\b", after_cue), (
+    # ⛔ THE CLAUSE MUST BE IN THE CUE'S OWN SENTENCE, NOT MERELY SOMEWHERE
+    # LATER IN THE PARAGRAPH. A paragraph-wide search is satisfiable by an
+    # UNRELATED later mention — this paragraph ends "if the tools are missing,
+    # run `tortoise mcp-status`" — so `Confirm the tools are actually there.
+    # Restart your client …` (a PRE-cue confirmation: the #3232 inversion in
+    # its sentence-before form) was GREEN. Measured GREEN before this bound and
+    # RED after it, with every forward phrasing below still GREEN. A COMMA does
+    # not bound it — "Restart your client after changing the config, then
+    # confirm the tools …" is forward and must pass — so only a sentence
+    # terminator does.
+    cue_sentence = re.split(
+        r"[.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
+    assert re.search(r"\btools\b", cue_sentence), (
         "docs/quickstart-cloud.md must keep a tools-appear clause AFTER its "
         "restart cue — 'restart' alone never tells the user what to look for, "
         "and a clause placed before the cue points them at tools the running "
