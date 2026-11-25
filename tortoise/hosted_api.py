@@ -15700,7 +15700,7 @@ async def _resolve_entity_off_loop(org: dict, entity_id: str, *, surface: str
     return sdk, resolved
 
 
-def _layer_payload(entry: dict, layer: str | None = None) -> dict:
+def _layer_payload(entry: dict, layer: str) -> dict:
     """One resolved node's properties, under its layer's own disclosure rule.
 
     A ``:Source`` goes through ``projection.entities.filter_source_props`` — the
@@ -15719,6 +15719,14 @@ def _layer_payload(entry: dict, layer: str | None = None) -> dict:
     (``mcp_server.py``'s #4649 case). ``labels`` is the column
     ``FalkorProjection._resolve_entity`` emits for exactly this question; the
     branch label is the fallback for an older callee, not the rule.
+
+    ⚠️ NAMED RESIDUAL, not a promise: the layer's own KIND property
+    (``LAYER_KIND_PROP``) is re-attached HERE and in ``entity_reads.list_layer``,
+    but **not** in ``TortoiseSDK._get_entity`` — so an MCP
+    ``tortoise_get_entity`` on a hybrid ``(:Object:Source)`` answers without
+    ``objectKind`` while this route serves it (#14659). The withholding direction
+    is the safe one and the gap predates this route, which is why it is stated
+    here and filed rather than widened into a customer-facing MCP payload.
     """
     props = dict(entry.get("properties") or {})
     labels = entry.get("labels")
@@ -15741,9 +15749,15 @@ def _layer_payload(entry: dict, layer: str | None = None) -> dict:
         # `:Source` bag DENIES (`_SOURCE_NODE_PROPS` does not declare it, and
         # `_DOC_RETIRED_KEYS` retires it, D10 B6). `layer` is the declaration the
         # route asked for, and `entity_reads.LAYER_KIND_PROP` is its one home.
+        # ⛔ `layer` is REQUIRED and has no branch fallback, deliberately: a
+        # route always knows which layer it serves, and an optional kwarg would
+        # let a future caller that forgot it silently re-open the Source door to
+        # `objectKind`. (The `is_source` test above keeps its branch fallback —
+        # that one only ever FAILS CLOSED, on a legacy/mock row with no label
+        # set, where the branch label is all there is.)
         from tortoise.entity_reads import LAYER_KIND_PROP
 
-        _kind_prop = LAYER_KIND_PROP.get(layer or entry.get("label") or "")
+        _kind_prop = LAYER_KIND_PROP.get(layer)
         if _kind_prop and _kind_prop in raw and _kind_prop not in props:
             props[_kind_prop] = raw[_kind_prop]
     return props
@@ -54936,7 +54950,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (725 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
