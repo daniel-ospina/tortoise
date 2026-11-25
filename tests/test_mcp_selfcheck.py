@@ -449,7 +449,8 @@ def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
     """Installing the two sentences must not rewrite the user's own AGENTS.md endings."""
     target = project / "AGENTS.md"
-    target.write_bytes(b"# House rules\r\n\r\nKeep this line.\r\n")
+    original = b"# House rules\r\n\r\nKeep this line.\r\n"
+    target.write_bytes(original)
 
     harness_onboard.write_instructions("pi", project)
 
@@ -464,6 +465,8 @@ def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
     assert "\n" not in back.replace("\r\n", ""), f"uninstall flattened to LF:\n{back!r}"
     assert "Keep this line.\r\n" in back, "the user's own line was lost"
     assert harness_onboard.BEGIN_MARK not in back
+    assert back.encode("utf-8") == original, (
+        f"the install/uninstall round trip was not byte-identical:\n{back.encode()!r}")
 
 
 def test_installer_refuses_an_unparseable_config(project):
