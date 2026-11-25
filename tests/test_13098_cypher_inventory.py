@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
 import os
 import re
 import shutil
@@ -722,6 +723,192 @@ def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys)
     rendered = census.render(src, {"sites": []})
     assert prose_row in rendered, (
         "`--render` must append the appendix to a prose-carrying source unchanged")
+
+
+# --------------------------------------------------------------------------- #
+# THE NON-UTF-8 FIVE: every `surrogateescape`/`backslashreplace` arm, graded
+# --------------------------------------------------------------------------- #
+# ⛔ WHY THIS BLOCK EXISTS (#13098 round 7, P2). `tools/cypher_inventory.py` carries
+# five decode/encode tolerances — `surface_files()`'s `surrogateescape`, the
+# `--render` tracking probe's `surrogateescape`, the `--render` write's
+# `backslashreplace`, `main()`'s stdout `reconfigure`, and `--render`'s no-path
+# `const=` default — and at the previous head NONE of them was exercised by any arm:
+# each could be reverted with the whole suite green. They are all instances of this
+# PR's own invariant ("2 is could not run; 1 is the DRIFT verdict"), on the path a
+# lane reaches by accident (a non-UTF-8 filename, a strict locale), so they are graded
+# here against REAL bytes rather than assumed.
+#
+# ⛔ THE SCRATCH REPO IS LOAD-BEARING, not decoration: a stubbed `subprocess.run`
+# returning a `str` decodes nothing, so it would stay green with
+# `errors="surrogateescape"` deleted — exactly the vacuity the round-7 review named.
+# `git ls-files -z` emits RAW filename bytes (measured), which is what makes a strict
+# `text=True` decode raise, and `core.quotePath=false` makes the tracking PROBE's
+# stderr emit them too.
+
+
+def _scratch_repo(tmp_path: Path) -> Path:
+    """A throwaway git work tree that can hold a non-UTF-8 filename.
+
+    `core.quotePath=false` is what puts RAW byte `0xe9` on the probe's stderr; with
+    git's default the path is quoted into ASCII and the decode arm would prove nothing.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "core.quotePath", "false"],
+                   check=True)
+    return repo
+
+
+def _stub_census(sites: list) -> dict:
+    """The `census()` shape `--render`/`--markdown` read — no tree walk, no git."""
+    return {
+        "sites": sites, "prefixes": ("tortoise",), "files_scanned": 0,
+        "files_with_sites": 0, "non_cypher_door_calls": 0, "partial": 0,
+        "unparsed_files": [], "excluded_test_modules": 0, "ast_door_calls": 0,
+    }
+
+
+def test_a_non_utf8_tracked_filename_is_enumerated_not_a_crash(tmp_path, monkeypatch):
+    """`surface_files()` tolerates a tracked filename that is not valid UTF-8.
+
+    ⛔ `git ls-files -z` EMITS RAW FILENAME BYTES, so `text=True` with strict UTF-8
+    raises `UnicodeDecodeError` — a `ValueError`, NOT an `OSError`, so it slipped past
+    both of `main()`'s guards and exited 1 (the DRIFT code) on the DEFAULT verb and on
+    `--check` (measured in a scratch repo with a tracked `caf\xe9.py`). This is the
+    enumeration path EVERY verb uses, and at the previous head no arm touched it.
+
+    Real git, real bytes: the mutant is deleting `errors="surrogateescape"` from
+    `surface_files()`'s `subprocess.run`, and it reds here as a traceback.
+    """
+    repo = _scratch_repo(tmp_path)
+    name = os.fsdecode(b"caf\xe9.py")          # a lone 0xe9 — not UTF-8 decodable
+    (repo / "tortoise").mkdir()
+    (repo / "tortoise" / name).write_text("RETURN 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", f"tortoise/{name}"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+
+    files = census.surface_files(("tortoise",))
+    assert files == [f"tortoise/{name}"], (
+        "a tracked non-UTF-8 filename must be ENUMERATED (surrogate-escaped), not "
+        f"raise a decode error from a verb that has no drift verdict; got {files}")
+    # …and the escaped form still addresses the file, which is the whole point of
+    # `surrogateescape` over dropping the name.
+    assert (repo / files[0]).read_text(encoding="utf-8") == "RETURN 1\n", (
+        "the surrogate-escaped path must still OPEN the file it came from")
+
+
+def test_the_renderer_tolerates_a_non_utf8_tracking_probe(tmp_path, monkeypatch):
+    """The `--render` tracking probe must not fail DECODING its own payload.
+
+    With `core.quotePath=false` in the user's config, `git ls-files --error-unmatch`
+    emits RAW filename bytes on stdout AND stderr, so a strict decode raised
+    `UnicodeDecodeError` — a `ValueError`, not the `OSError` the guard catches — and a
+    plain untracked destination became a traceback and exit 1 (measured with
+    `quotePath false` and a `caf\xe9.md`). The payload is unused, so decoding it must
+    never be able to change the status.
+    """
+    repo = _scratch_repo(tmp_path)
+    # The source/document globals are re-based onto the scratch repo with `ROOT`: the
+    # parser's `const=str(DOC_SRC.relative_to(ROOT))` is computed at `main()` time, so a
+    # `ROOT` that does not contain the real source reds before the probe is reached.
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    name = os.fsdecode(b"caf\xe9.md")
+
+    rc = census.main(["--render", name])
+    assert rc == 0, (
+        f"`--render` to an UNTRACKED non-UTF-8 path answered {rc} — 1 is the DRIFT "
+        "verdict this verb never reports, and the probe's payload is unused")
+    written = repo / name
+    assert written.exists(), "the render must still write its destination"
+    assert "| file:line |" in written.read_text(encoding="utf-8"), (
+        "the rendered document must carry the table header the tool appended")
+
+
+def test_the_renderer_writes_a_surrogate_escaped_path(tmp_path, monkeypatch):
+    """`--render` can WRITE a table row carrying a surrogate-escaped path.
+
+    ⛔ THE TABLE CARRIES A NON-UTF-8 TRACKED FILENAME STRAIGHT FROM THE CENSUS, which
+    strict UTF-8 cannot ENCODE: `write_text` raised `UnicodeEncodeError` — a
+    `ValueError` — leaving an EMPTY file behind. `backslashreplace` renders such a byte
+    as text, so the document is complete and the verb reports success. Reverting that
+    keyword reds here (`rc` becomes 2 and the document is not the table).
+    """
+    site = census.Site(os.fsdecode(b"tortoise/caf\xe9.py"), 12, "f", "query",
+                       "plain", "read", "RETURN 1")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([site]))
+    out = tmp_path / "out.md"
+
+    rc = census.main(["--render", str(out)])
+    assert rc == 0, (
+        f"a document carrying a surrogate-escaped path must still be WRITTEN, got {rc}")
+    text = out.read_text(encoding="utf-8")
+    assert "\\udce9" in text, (
+        "the surrogate byte must be rendered as an escape, not dropped from the row:"
+        f"\n{text[-400:]}")
+
+
+def test_a_strict_stdout_cannot_turn_a_success_into_drift(monkeypatch):
+    """A strict-locale stdout must not turn the tool's SUCCESS into exit 1 (DRIFT).
+
+    ⛔ THE LOCALE DECIDED THE EXIT STATUS. A non-UTF-8 tracked filename reaches the
+    report as a surrogate escape, and under a real UTF-8 locale (`en_US.UTF-8`, macOS's
+    default) `sys.stdout.errors` is `strict`, so the write raised `UnicodeEncodeError`
+    — uncaught, since `emit()` guards only `BrokenPipeError`/`OSError` — and the bare
+    verb exited **1**, the drift code, while the same run under `C.UTF-8` exited 0
+    (measured). `main()`'s `sys.stdout.reconfigure(errors="backslashreplace")` is the
+    fix; delete those two lines and this arm raises instead of returning 0.
+    """
+    site = census.Site(os.fsdecode(b"tortoise/caf\xe9.py"), 12, "f", "query",
+                       "plain", "read", "RETURN 1")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([site]))
+    buf = io.BytesIO()
+    stdout = io.TextIOWrapper(buf, encoding="utf-8", errors="strict", newline="\n")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    rc = census.main(["--markdown"])
+    assert rc == 0, (
+        f"a strict stdout is a LOSSY TERMINAL, not a census failure; got {rc} — 1 is "
+        "the DRIFT verdict, and a locale must never be able to produce it")
+    stdout.flush()
+    assert b"\\udce9" in buf.getvalue(), (
+        "the surrogate must reach the terminal as an escape, not abort the run: "
+        f"{buf.getvalue()[-200:]!r}")
+
+
+def test_the_default_render_target_is_the_gitignored_document(tmp_path, monkeypatch):
+    """`--render` with NO PATH writes `DOC_OUT` — the command §7 step 1 gives every lane.
+
+    ⛔ NO ARM RAN THE BARE `uv run python tools/cypher_inventory.py --render` that
+    `docs/architecture/CYPHER-INVENTORY.src.md` §7 instructs every lane to run: every
+    other `--render` invocation in this suite passes an explicit path, so the `const=`
+    default was pinned by nothing. Authored against `tmp_path` (never the repo) so the
+    REQUIRED gate cannot write into a gitignored path during a test run.
+    """
+    # The default is the GITIGNORED document beside the source — the identity the
+    # name of this arm claims, asserted on the real constants before they are stubbed.
+    assert census.DOC_OUT.relative_to(ROOT) == Path(
+        "docs/architecture/CYPHER-INVENTORY.md"), census.DOC_OUT
+    src = tmp_path / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    monkeypatch.setattr(census, "ROOT", tmp_path)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", out)
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    rc = census.main(["--render"])
+    assert rc == 0, f"`--render` with no path must succeed, got {rc}"
+    assert out.exists(), (
+        "`--render` with NO PATH did not write `DOC_OUT` — the default every lane is "
+        "told to run is then pinned by nothing; files here: "
+        f"{sorted(p.name for p in tmp_path.iterdir())}")
 
 
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
@@ -2406,6 +2593,16 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_check_reports_an_unreadable_document_as_could_not_run",
         "test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift",
         "test_a_hand_authored_prose_row_is_not_read_as_a_census_row",
+        # ⛔ THE NON-UTF-8 FIVE (#13098 round 7, P2). This set is the pin's answer to
+        # "an arm left the module and nothing noticed"; the five behaviours below were
+        # live with NO arm at all, so this set could not name them because they did not
+        # exist. Each is the only executable assertion for one decode/encode tolerance
+        # and for `--render`'s no-path default — the command §7 tells every lane to run.
+        "test_a_non_utf8_tracked_filename_is_enumerated_not_a_crash",
+        "test_the_renderer_tolerates_a_non_utf8_tracking_probe",
+        "test_the_renderer_writes_a_surrogate_escaped_path",
+        "test_a_strict_stdout_cannot_turn_a_success_into_drift",
+        "test_the_default_render_target_is_the_gitignored_document",
     }
     missing = sorted(split_arms - defined)
     assert not missing, (
