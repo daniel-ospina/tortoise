@@ -1071,6 +1071,45 @@ def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
         assert entity["nameTruncated"] is True, entity
         # The neighbour side carries the SAME flag, which is the shared half.
         assert r.json()["relations"][0]["other"]["nameTruncated"] is False
+        # ⛔ AND THE ROOT'S FALSE ARM: without this, `_root_preview` forced to
+        # `nameTruncated: True` unconditionally stays green (measured) — every
+        # root would claim truncation and no row would notice.
+        short = client.get(f"/v1/entities/{far['id']}/relations")
+        assert short.status_code == 200, short.text
+        assert short.json()["entity"]["nameTruncated"] is False, short.json()["entity"]
+
+
+def test_relations_identifies_an_Event_neighbour_by_its_eventId(tmp_path):
+    """⛔ review P3: the `m.eventId` identity fallback had NO pin.
+
+    An `:Event` neighbour carries no `id` — its identity key is `eventId` — so the
+    endpoint-name expression falls back through it. Measured: reverting the ELSE
+    arm to `coalesce(m.name, m.url, m.id)` left the whole suite green, i.e. an
+    Event neighbour would answer `name: None` with nothing noticing. The body
+    (`content`) must not substitute for the identity either — that is the #3998
+    direction the fallback order itself encodes.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        root = client.post("/v1/objects", json={
+            "name": "HOST", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) "
+                "CREATE (e:Event {eventId:$eid, content:$body}) "
+                "CREATE (n)-[:related]->(e)",
+                params={"id": root["id"], "eid": "evt-14592-identity",
+                        "body": "EVENT-CONTENT-BODY-MUST-NOT-BE-THE-NAME"},
+                read_only=False)
+        finally:
+            sdk.close()
+        r = client.get(f"/v1/entities/{root['id']}/relations")
+        assert r.status_code == 200, r.text
+        other = r.json()["relations"][0]["other"]
+        assert other["label"] == "Event", other
+        assert other["id"] == "evt-14592-identity", other
+        assert other["name"] == "evt-14592-identity", other
+        assert "EVENT-CONTENT-BODY-MUST-NOT-BE-THE-NAME" not in r.text, r.text
 
 
 def test_relations_pages_and_offset_actually_advances(tmp_path):
