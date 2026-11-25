@@ -794,6 +794,13 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # a CORRECT document (#5153's guard, red since #5343 wrote it). The `env:`
     # prefix is optional in the EXTRACTION only — the pin immediately below
     # still grades which form Cursor's snippet must carry.
+    # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
+    # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
+    # ${TORTOISE_API_KEY}"`); the Cursor `env:` row has carried its form since
+    # `01b78913cde4` and did not move. Do not "restore" the plain snippet to
+    # satisfy a tighter locator: in a JSON header that form resolves once at
+    # process start to an EMPTY `Authorization: Bearer` (SKILL.md:411-414) — the
+    # empty-bearer class this guard exists to prevent.
     referenced = set(
         re.findall(
             r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
@@ -1701,9 +1708,26 @@ def test_3232_generic_restart_lines_are_exact():
         "read at client start, so a written config is not a loaded one")
     para = next(p for p in quick.split("\n\n") if cue in p)
     flat_para = " ".join(para.split())
-    after_cue = flat_para[flat_para.index(cue):]
+    after_cue = flat_para[flat_para.index(cue) + len(cue):]
     assert re.search(r"\btools\b", after_cue), (
         "docs/quickstart-cloud.md must keep a tools-appear clause AFTER its "
         "restart cue — 'restart' alone never tells the user what to look for, "
         "and a clause placed before the cue points them at tools the running "
         "session cannot have yet (#3232)")
+    # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
+    # Measured on the landed pin: "Restart your client after confirming the
+    # tools are actually there" places `tools` after the cue and is GREEN, while
+    # INVERTING the property this pin exists to enforce — the client reads its
+    # MCP config at START, so a user told to confirm the tools FIRST looks for
+    # tools the running session cannot have loaded yet. No wording is pinned
+    # here: a forward phrasing ("…, then confirm the tools …") still passes, so
+    # #3429's lesson (pin the ORDER, not one reword) survives. Only the cue's
+    # OWN clause is graded — splitting at the first `,`/`.`/`;` keeps "Restart
+    # your client after changing the config, then confirm the tools …" GREEN,
+    # because the inversion does not bind there.
+    cue_clause = re.split(r"[,.;]", after_cue, maxsplit=1)[0]
+    assert not re.search(r"\b(?:after|once|when|if)\b[^.;]*?\btools\b",
+                         cue_clause), (
+        "docs/quickstart-cloud.md inverts its own restart cue: 'restart AFTER "
+        "confirming the tools' asks the user to look for tools this session "
+        "cannot have loaded yet — the restart comes FIRST (#3232, #14676)")
