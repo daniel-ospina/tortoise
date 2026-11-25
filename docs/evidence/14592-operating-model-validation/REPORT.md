@@ -31,9 +31,11 @@ touches the record store.
 | Read (structure) | `tortoise_graph_overview`, `tortoise_check_structure`, `tortoise_list_knowledge`, `tortoise_expand_relationships`, `tortoise_explore_connections`, `tortoise_recall`, `tortoise_check_confidence` — all over MCP stdio | Same. |
 | Isolation proof | `tortoise_graph_overview` **before** any write | Returns `Point 0, Event 0, Subject 0, Object 0, Source 0` — recorded below. |
 
-Reproduce with:
+Reproduce with (the extraction credential is needed by step 1 only — the three
+read-only steps call no model, and `run.sh` requires a key only for `run_ingest.py`):
 
 ```bash
+export DEEPSEEK_API_KEY=…                                                    # step 1 only
 export TORTOISE_DB_URI='docker://:@127.0.0.1:16467/tortoise_test_matrix'   # this lane's container
 ./docs/evidence/14592-operating-model-validation/run.sh \
     docs/evidence/14592-operating-model-validation/run_ingest.py            # 1. write
@@ -41,9 +43,18 @@ export TORTOISE_DB_URI='docker://:@127.0.0.1:16467/tortoise_test_matrix'   # thi
     docs/evidence/14592-operating-model-validation/run_readback.py          # 2. read back
 ./docs/evidence/14592-operating-model-validation/run.sh \
     docs/evidence/14592-operating-model-validation/run_census.py            # 3. structural census
+./docs/evidence/14592-operating-model-validation/run.sh \
+    docs/evidence/14592-operating-model-validation/run_census2.py           # 4. claim / structure reads
+./docs/evidence/14592-operating-model-validation/run.sh \
+    docs/evidence/14592-operating-model-validation/run_census3.py           # 5. relation expansions
 ```
 
-`run.sh` documents the two (measured) reasons it does not use `uv run` on this box — see §7.
+Each phase now carries a verdict: `ok` in its artifact and a non-zero exit when a
+target did not resolve or a relation read returned nothing — so a run whose
+headline evidence is missing cannot be committed as a successful one.
+
+`run.sh` documents the two (measured) reasons it does not use `uv run` on this
+box, and which of them it implements itself — see **§9**.
 
 ---
 
@@ -162,7 +173,7 @@ All five layers exist and each carries corpus facts:
 | **Subject** | 10 | "Marta Reyes", "Dev Patel", "ColdPath Logistics", "NordicFreight", "food safety auditor", "delivery partner" |
 | **Event** | 13 | 5 `sessionCaptured` + decision/friction/milestone events |
 | **Source** | 5 | `session:doc-01` … `session:doc-05`, each `sourceKind: agentSession`, with `points` 8–13 |
-| **Point** | 120 | 96 non-episodic (62 `statement`, 34 `event`) + episodic turns |
+| **Point** | 120 | 62 `statement` + 34 `event` (the 34 episodic turns) + 24 operator Points |
 
 `tortoise_list_knowledge(kind="source")` returns verbatim:
 
@@ -205,7 +216,7 @@ All five layers exist and each carries corpus facts:
 
 Every search result carries `"scores": {"fts": <n>, "vector": null, "structural": null, "rrf": <n>}`.
 The dense leg contributed nothing, because `sentence_transformers`/`torch` are not installed and
-cannot be installed on this box (see §7). **This is an environment limitation, not a product defect:
+cannot be installed on this box (see §9). **This is an environment limitation, not a product defect:
 the numbers above are a FLOOR, not the ceiling.** They do, however, measure what a self-hosted user
 gets when the `embeddings` extra is absent — which `AGENTS.md` says is a keyword-only product.
 
@@ -219,7 +230,8 @@ small number of structural edges. 24 operators total.
 ### The decision's reasoning is captured correctly
 
 `tortoise_expand_relationships(point_id="pt_f0a2b96…")` — "We choose ColdPath Logistics as our
-delivery partner" — returns 7 incoming `IMPL` edges, each traceable to the corpus:
+delivery partner" — returns **8 incoming `IMPL` endpoints over 6 distinct operators**, each
+traceable to the corpus:
 
 ```json
 {"mechanism":"IMPL","related_content":"ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots","direction":"incoming"}
@@ -229,10 +241,16 @@ delivery partner" — returns 7 incoming `IMPL` edges, each traceable to the cor
 {"mechanism":"IMPL","related_content":"The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows","direction":"incoming"}
 {"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments","direction":"incoming"}
 {"mechanism":"IMPL","related_content":"Buying our own refrigerated van needs 48,000 pounds of capital spending","direction":"incoming"}
+{"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments","direction":"incoming"}
 ```
 
-Three options, all three reasons, and the affordability argument carries an extracted **MITIGATION**
-node. This is the part of the answer that is genuinely good.
+⛔ **The reply holds 8 rows, not 8 edges, and not 7.** `out/census3.json` →
+`expand_doc01_decision.reply.result` has **6 distinct `operator_id`s** over **8 rows** — two operators
+return a second endpoint row, so the affordability `[MITIGATION]` appears **twice** (rows 6 and 8
+above), identical in content. The `related_id`s are 8 distinct, which is why the explore reply's "8
+nodes" is defensible while an "8 IMPL edges" reading would not be. An earlier revision of this
+section said "7 incoming `IMPL` edges" and printed seven rows — both wrong. The duplication is a
+within-one-capture minting defect, not a rendering artifact: see **G12**.
 
 ### NAND operators exist
 
@@ -243,7 +261,7 @@ Search returned NAND families over the "viable delivery partner" belief
 
 | required class | present? | evidence |
 |---|---|---|
-| decision → option `IMPL` | ✅ | 7 incoming `IMPL` edges on the doc-01 decision (above) |
+| decision → option `IMPL` | ✅ | 8 `IMPL` endpoint rows over 6 distinct operators on the doc-01 decision (above); the extra two rows are one operator's duplicate endpoint |
 | option ↔ option `NAND` | ✅ | NAND operator families on the delivery-partner belief (`family_size: 2`) |
 | goal → constraint | ✅ (as text + `IMPL`) | "The growth goal depends on the delivery partner keeping morning slots" → `IMPL` → "Every new restaurant account requires a morning delivery slot"; "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees" |
 | source → claim `extractedFrom` | ✅ (structural) | 5 `agentSession` Sources, each with 8–13 Points; `relation_write.edges` shows `related`/`managedBy` written as `structural` |
@@ -273,7 +291,7 @@ date — dropped` is a *drop*, not a fabrication.
 
 | # | element (corpus fact) | present? | correct? | traceable? | evidence |
 |---|---|---|---|---|---|
-| 1 | **Decision** "we choose ColdPath Logistics" | ✅ | ✅ | ✅ `sessionId: doc-01`, `quote` present | Point exists, 7 `IMPL` reasons attached |
+| 1 | **Decision** "we choose ColdPath Logistics" | ✅ | ✅ | ✅ `sessionId: doc-01`, `quote` present | Point exists, 8 `IMPL` endpoint rows (6 operators) attached |
 | 2 | **Option A** stay with NordicFreight | ✅ | ✅ | ✅ | "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots" |
 | 3 | **Option B** switch to ColdPath | ✅ | ✅ | ✅ | "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots" |
 | 4 | **Option C** buy own refrigerated van | ✅ | ✅ | ✅ | Object "our own refrigerated van"; "needs 48,000 pounds of capital spending" |
@@ -310,9 +328,9 @@ The corpus's whole point is that doc-05 refutes doc-01. The graph holds **both a
 ```
 
 `tortoise_expand_relationships` on **both** decision points returns only edges **inside their own
-document**. Doc-01's decision has 7 incoming `IMPL` (all from doc-01). Doc-05's revert has 4 incoming
-`IMPL` (all from doc-05). `tortoise_explore_connections(doc-01 decision, hops=3)` returns **8 nodes,
-all from doc-01** — it never reaches doc-05.
+document**. Doc-01's decision has 8 incoming `IMPL` endpoint rows (6 operators, all from doc-01).
+Doc-05's revert has 4 incoming `IMPL` (all from doc-05). `tortoise_explore_connections(doc-01
+decision, hops=3)` returns **8 nodes, all from doc-01** — it never reaches doc-05.
 
 The extractor *did* extract the refuting facts (the failed audit, the licence clause). What it did not
 do is relate them to the claim they refute. `stats.supersessions: 0` on all five documents, and
@@ -359,12 +377,19 @@ The brief's step 4 asks for "entity/object/subject/source reads". Over MCP:
   query, set kind → all Points of kind"* — returns **0 rows** for `object`, `subject`, `event`,
   `source`
 * `tortoise_query(kind="operator")` returns **0 rows**, though the graph has 24 operators
-* `tortoise_list_knowledge(kind="claim")` returns **0 rows**, though the graph has 62 statement Points
 
-The layers were readable only through `tortoise_graph_overview` (counts) and `tortoise_recall`
-(content). Those two doors work; the direct layer reads do not. **`check_structure` returned
-`{"result": []}`** on a graph that is holding two mutually exclusive live decisions — the structural
-validator sees no problem, which is consistent with G1.
+The Object / Subject / Event layers genuinely have **no enumerating door**. The claim door does, and
+this report previously said otherwise: an earlier revision claimed
+`tortoise_list_knowledge(kind="claim")` → "0 rows", and **`out/census2.json` → `.claims` is that exact
+call** — `args {"kind": "claim", "limit": 200}`, `ok: true`, reply `{"results": [96 rows], "total":
+96, "hasMore": false}`, binned `pointKind` as **62 `statement` + 34 `event`**. The door returns the
+whole statement population and more; nothing in any committed artifact shows a `claim` call returning
+zero rows. That bullet was the sole justification for proposing a fix to a door that works.
+
+The Object / Subject / Event layers were readable only through `tortoise_graph_overview` (counts) and
+`tortoise_recall` (content). Those two doors work; the direct layer reads do not. **`check_structure`
+returned `{"result": []}`** on a graph that is holding two mutually exclusive live decisions — the
+structural validator sees no problem, which is consistent with G1.
 
 ### G6 — the source layer cannot be listed over stdio MCP
 
@@ -410,6 +435,34 @@ re-read verbatim against the corpus. The `quote` field **is** present on most se
 mechanism works — it is the silent subset without a span that matters, and the product counts it in
 `warnings` rather than exposing it as a per-Point flag.
 
+### G12 — one operator is written twice inside a single capture, and the second row is unmarked
+
+`out/census3.json` → `expand_doc01_decision.reply.result` returns the affordability mitigation
+twice, byte-identical:
+
+```json
+{"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments"}
+{"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments"}
+```
+
+Eight rows, eight distinct `related_id`s, but **six distinct `operator_id`s** — so this is not a
+duplicated endpoint on ONE operator, it is the same mitigation re-written through a second operator
+in the same capture. The read side has no signal to tell the caller the two rows are one fact: no
+`operator_id` grouping, no `duplicate_of`, no share count.
+
+This is the same class the report already notices on the goal probe (§4, rank 2–3: *"the same
+mitigation is returned **twice**"*) and it is exactly what the product's own `dedup_hits`/`skipped`
+machinery (§9.3) exists to prevent — which was **not exercised** by this run. It is reported here as
+a gap because §5's edge count depended on it: an earlier revision of this report read the eight rows
+as "7 edges", which is neither the row count nor the operator count.
+
+⚠️ **What the verdict guarantees, and what it does not.** Each phase now returns non-zero and writes
+`ok: false` when its target did not resolve or its relation read came back empty, so the *script*
+cannot report success over a failed read. It cannot stop an operator from committing an artifact a
+failing run wrote — no exit code can. The residual is that a human `git add` of a run whose exit code
+was non-zero is still possible; the `ok` field travels with the artifact so the artifact itself
+carries the contradiction.
+
 ---
 
 ## 8. Improvements — what to change in extraction, each with the evidence
@@ -442,7 +495,8 @@ mechanism works — it is the silent subset without a span that matters, and the
    Event layers over MCP (G5); list `tortoise_recall` in `tools/list` (G8); make
    `check_confidence(topic=…)` filter rather than return `[]` (G9). Each is a case where the product
    holds the data and its own tool cannot return it — which is how this validation had to reach for
-   `graph_overview` + `recall` to answer what the brief asked the layer reads directly.
+   `graph_overview` + `recall` to answer what the brief asked the layer reads directly. ⛔ The claim
+   door is **not** on this list: `list_knowledge(kind="claim")` returns all 96 rows (G5).
 8. **Give v4 a document-corpus door.** Otherwise "validate the extractor on a corpus" is only
    expressible as N session captures, and no customer has a corpus in that shape. *Evidence: G7;
    §1 scoping note.*
@@ -456,13 +510,17 @@ mechanism works — it is the silent subset without a span that matters, and the
    (`failed to lookup address information: Temporary failure in name resolution` for
    `files.pythonhosted.org`, retried over ~1 h across three attempts, while `api.github.com` and
    `api.deepseek.com` both resolve and respond). The worktree's own venv therefore cannot be built;
-   the run uses the main checkout's venv with `PYTHONPATH` pinned at this worktree, which resolves
-   `import tortoise` to the worktree's code (verified). **The code under test is this worktree at
-   `origin/main = 51f444fd088`.**
-2. **No LLM key is exported in the shell.** The product's v4 path reads `DEEPSEEK_API_KEY`
-   (`sdk._session_llm_provider` → `_PROVIDERS`), so `run.sh` exports the box's existing deepseek
-   credential from pi's auth store. One provider was exercised (`deepseek-direct`,
-   `deepseek-v4-flash`); the openrouter/openai/gemini/venice routes were not.
+   the run used the main checkout's venv by setting `TORTOISE_VENV` to it, with `PYTHONPATH` pinned at
+   this worktree, which resolves `import tortoise` to the worktree's code (verified). `run.sh`
+   defaults to `<worktree>/.venv` and reaches any other interpreter only through that variable — the
+   main-checkout path is **documented here and supplied by the caller**, never baked into the script.
+   **The code under test is this worktree at `origin/main = 51f444fd088`.**
+2. **No LLM key was exported in the operator's shell.** The product's v4 path reads
+   `DEEPSEEK_API_KEY` (`sdk._session_llm_provider` → `_PROVIDERS`), so the operator exported it from
+   pi's auth store **before** running the script. `run.sh` reads no credential file: it requires the
+   variable only for `run_ingest.py`, the one phase that makes a model call, so the three read-only
+   phases stay reproducible with no credential at all. One provider was exercised
+   (`deepseek-direct`, `deepseek-v4-flash`); the openrouter/openai/gemini/venice routes were not.
 3. **One corpus, one run, one model.** Five documents, one capture each, no re-run for
    idempotency (the product reports `dedup_hits`/`skipped` machinery for that; not exercised here).
 4. **`tortoise_graph_overview` reported the container also holds `tortoise_test_matrix`** — a
@@ -476,13 +534,34 @@ mechanism works — it is the silent subset without a span that matters, and the
 | path | contents |
 |---|---|
 | `corpus/corpus.json` | the corpus (5 transcripts, ~1,160 tokens) |
-| `run_ingest.py` / `run_readback.py` / `run_census.py` | the three phases, SDK-write + MCP-read only |
-| `run.sh` | the one invocation, with the two measured deviations documented |
+| `run_ingest.py` / `run_readback.py` / `run_census.py` / `run_census2.py` / `run_census3.py` | the five phases, SDK-write + MCP-read only |
+| `run.sh` | the one invocation; the interpreter root is caller-supplied (`TORTOISE_VENV`, default `<worktree>/.venv`) and the LLM credential is required **only** for `run_ingest.py` |
+| `stamp_provenance.py` | grades each artifact against its producer's own `WRITTEN_KEYS` and writes the `provenance` block; `--check` reds a missing or stale one |
 | `out/ingest-receipt.json` | per-document full product result envelope, warnings, `stats.llm` token table |
 | `out/readback.json` | verbatim MCP replies for the 6 search probes, layer reads, entity reads, recall, confidence |
 | `out/census.json`, `out/census2.json`, `out/census3.json` | object/subject/event full-scans, operator census, decision/reversal expansion, source list |
 | `out/tool-surface.json` | the live MCP surface: 39 tools with each tool's own `inputSchema` |
-| `out/events.jsonl` | the SDK event log for the run |
+| ~~`out/events.jsonl`~~ | **not committed** — 391 KB of raw SDK JSONL, scratch and not evidence; this bundle's own `.gitignore` excludes it for that reason. An earlier revision of this table listed it as an artifact. |
+
+### Artifact provenance — read this before quoting a number
+
+Every artifact in `out/` carries a `provenance` block, and **all four of them say
+`produced_by_committed_producer: false`**. They were carried from the 2026-11-25 run, which was made
+before `run_census2.py` / `run_census3.py` existed and before any producer wrote a provenance block,
+and they **cannot be regenerated**: `xv14592_operating_model` lived in this lane's private FalkorDB
+container, which was torn down at the end of the run (§9). The block states that, and it is measured
+rather than asserted — `stamp_provenance.py` reads each producer's own `WRITTEN_KEYS` and records
+what the artifact is missing (`census3.json`: `graph`, `provenance`, `ok`, `resolved`) and any point
+id passed as a call ARGUMENT that appears nowhere in the producer's source (`census3.json`: the two
+`pt_…` ids the old ad-hoc run pasted in). Re-running a producer overwrites its artifact with a
+structurally different file, and `stamp_provenance.py --check` then reds until the block is re-cut.
+
+⛔ `census.json` also carried a key *named* `provenance` that was really a
+`check_confidence(include_provenance=True)` CALL RECEIPT — so the artifact looked self-described while
+holding no provenance block at all. The receipt is kept (under `confidence_provenance_read`, the name
+the fixed producer writes) and the collision is recorded in the block.
+
+---
 
 ---
 

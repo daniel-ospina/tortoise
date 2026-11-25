@@ -61,14 +61,15 @@ version: 1
 # `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row and `#14574`'s drift-reporter row
 # (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s) — plus THIS PR's own row
 # (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s `DEFAULT_FAST_WEIGHT`),
-# the verb packs the pool into two bins: seven shards at 826.0 s (a, f, g, h, i, j, k) and four at
-# 825.9 s (b, c, d, e), so `ceil(826.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# the verb packs the pool into two bins: five shards at 826.2 s (a, g, i, j, k) and six at
+# 826.1 s (b, c, d, e, f, h), so `ceil(826.2/60 x 2)` = 28 m governs (a shard's job-level wall clock
+# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1332 files at this head against 1331 on `main`, and
-# the ONE addition this fold brings is this PR's `tests/test_14560_operator_vectors.py`. ⛔ The
+# is measurable and small: `fast_pool()` holds 1333 files at this head against 1331 on `main`, and
+# the TWO additions this fold brings are this PR's `tests/test_14560_operator_vectors.py` and
+# `tests/test_14592_operating_model_evidence.py` (both flat 2.0 s). ⛔ The
 # other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
 # this PR's: each landed before this fold. The name lists are what the guard COMPARES against the
 # live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
@@ -10191,6 +10192,23 @@ surfaces:
   # (`_skip_unless_live_uri()`), so the module still COLLECTS on a URI-less leg —
   # `uri_requiring` is for modules that skip at IMPORT.
   - test_14560_operator_vectors.py
+  # #14592 phase D: the evidence bundle's numbers and its two selection rules.
+  # `docs/` is in `NON_PYTHON_PREFIXES` and no SOURCE_PATTERNS entry matches
+  # `docs/evidence/`, so a diff that edits `REPORT.md` or a producer resolves
+  # `surfaces: []` — measured at this head,
+  # `--changed-files docs/evidence/14592-operating-model-validation/REPORT.md` ->
+  # `surfaces: []`. That is why this row is paired with a `tier1` entry below:
+  # a docs-only diff takes tier1 ONLY, and the tier1 row is the one that actually
+  # runs there. Without either, the pin runs zero times on the only diff class
+  # that can re-state a figure the bundle already published — and the review that
+  # produced this file found three numbers wrong (an edge count, a "0 rows" door
+  # claim, a layer table that double-counted) with the artifacts beside them
+  # unchanged, which is how they survived two earlier rounds.
+  # Hermetic: five committed JSON/text reads, four producer module imports, one
+  # `bash` invocation of `run.sh` against a throwaway interpreter symlink, and one
+  # subprocess `stamp_provenance.py --check` — no DB, no graph, no network, no
+  # model call, no provider key.
+  - test_14592_operating_model_evidence.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -12592,6 +12610,10 @@ tier1:
 # rides the URI-less tier1 legs. Pinned by
 # tests/test_ci_selection.py::test_the_residency_gate_runs_on_a_migration_only_diff
 - test_9559_blocked_release_conditions.py
+# #14592 phase D: the TIER1 half of the row above (`core`). A docs-only diff
+# selects NO surface, so the `core` registration cannot run the pin on the one
+# diff class that re-points a published figure — tier1 is what runs there.
+- test_14592_operating_model_evidence.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
@@ -15944,6 +15966,7 @@ durations:
   # rehearsal arms that must not). No docker, no DB, no graph, no model call.
   # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
   test_14559_reaper_schedule.py: 2.0
+  test_14592_operating_model_evidence.py: 2.0  # new in #14592 phase D (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (committed JSON/text reads, four producer module imports, one `bash` invocation of `run.sh` against a throwaway interpreter symlink, one `stamp_provenance.py --check` subprocess — no DB, no graph, no network, no model call, no provider key): the identity selection rule over every input ORDER (the pre-fix ranking chose the wrong row in 18 of 24 permutations of the real 4-way tie), the REFUSAL of a near-miss instead of expanding it, the retired `startswith` preference reddening on a lookalike row, §5's 8 rows / 6 operators / duplicated mitigation, G5's 96-row claim door with its 62+34 bins, §3's 120 = 62 + 34 + 24, the stale sentences asserted ABSENT from the report, every artifact's truthful `produced_by_committed_producer: false` block, the refusal to stamp over a producer-written block, the read-only recipe running with NO credential while `run_ingest.py` demands one, and a non-zero exit for an empty relation read (with an AST pin on the wiring). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13220_record_label_embeddings.py: 1.8
   test_13224_cold_embedder_write_bound.py: 78.8
   test_13302_ended_read.py: 2.5
