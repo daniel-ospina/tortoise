@@ -1425,12 +1425,19 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # live file with `sed -n "<n>p"`, never nudged by a constant — the three rows did
     # move by the same delta this time, which is a measurement, not an assumption.
     # The SYMBOLS are unchanged; only the numbers moved.
-    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21042`"),
-    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
-     "`:21485`"),
-    ("tortoise/projection/__init__.py", 21927,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
+    # ⛔ RE-DERIVED AGAIN (main-red, un-red lane, #12604): TWO commits moved all three
+    # rows and re-pointed neither — #14596 (`3bbe5567df24`) inserted 25 net lines above
+    # them and #14567 (`939e37f664e5`) inserted 124, so the pin and §1 of the brief were
+    # +149 behind the tree and `test (c)`/`test (h)` reddened on every PR. Re-derived
+    # against the live file by SYMBOL SEARCH at `a29b5f24ce95`, never by arithmetic: the
+    # symbols moved by the same delta this time (a measurement, not an assumption), and
+    # the SYMBOLS are unchanged — only the numbers moved.
+    ("tortoise/projection/__init__.py", 21191, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21191`"),
+    ("tortoise/projection/__init__.py", 21634, "def _create_fulltext_index(",
+     "`:21634`"),
+    ("tortoise/projection/__init__.py", 22076,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22076`"),
 )
 
 

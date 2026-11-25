@@ -113,14 +113,14 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,647** across **112** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,653 / 113**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,647 / 112 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,648** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,654 / 113**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,648 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 313 files>` → **2,385** across **149** files, while the tool
-reports 2,398 / 150. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 313 files>` → **2,388** across **149** files, while the tool
+reports 2,401 / 150. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -132,28 +132,28 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 313 files finds exactly 13 — the verb-at-end-of-line scan alone finds **184**,
+predicate over the same 313 files finds exactly 13 — the verb-at-end-of-line scan alone finds **185**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
-enumerated, and the other **171** are a COMMENT or docstring line that simply ENDS on the word (“any
+enumerated, and the other **172** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
 “(#13330 post-merge” that `#13399` added, …) with nothing following, which the case-insensitive
 predicate counts and which is why the predicate has to be stated — `tortoise/ended.py` carries none of
-the 184, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
+them, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
 split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,112, and `-i` without the exclusion 2,468 — ⛔ both over
+(A bare case-sensitive `rg` gives 2,117, and `-i` without the exclusion 2,478 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 313
-`.py` files the same two predicates read **2,111** and **2,385**; with `-t py` and the test-module
-exclusion dropped they read **2,111** and **2,386**. The 82-occurrence 2,386→2,468 gap is entirely
+`.py` files the same two predicates read **2,114** and **2,388**; with `-t py` and the test-module
+exclusion dropped they read **2,116** and **2,391**. The 87-occurrence 2,391→2,478 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
-`tortoise/pi-hooks/tortoise-capture.test.ts` 27, `tortoise/pi-hooks/store-sync.test.mjs` 3,
+`tortoise/pi-hooks/tortoise-capture.test.ts` 32, `tortoise/pi-hooks/store-sync.test.mjs` 3,
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
-the **= 1,589 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,594 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -217,7 +217,7 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **872** | read=588, write=284 |
+| `plain` | **875** | read=589, write=286 |
 | `adjacency` | **293** | read=192, write=101 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
@@ -245,8 +245,8 @@ where the folded part was.
 
 | sites | file |
 |---|---|
-| 386 | `tortoise/sdk.py` |
-| 242 | `tortoise/hosted_api.py` |
+| 387 | `tortoise/sdk.py` |
+| 244 | `tortoise/hosted_api.py` |
 | 93 | `tortoise/projection/__init__.py` |
 | 54 | `tortoise/projection/entities.py` |
 | 42 | `tortoise/projection/edges.py` |
@@ -267,9 +267,9 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 588 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 588 |
-| 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 284 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 589 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 589 |
+| 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 286 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 330 |
 
 ### The first candidate, measured
@@ -527,6 +527,73 @@ WHY THE FINAL MERGE MUST RE-CUT THEM AGAIN IF `main` MOVES.** §7's rule above i
 and `--check` on the merge will report the difference. That is the documented procedure's step 1, not a
 defect in this cut — but it is stated here rather than left for the merge to discover, because a pin
 that reads green at a branch head and red at the merge is the failure this section exists to name.
+
+**The cut this PR (#13450, `fix/13450-ep-position-axis`) makes — NO census pin moves at all, and the
+work here is a re-derivation plus one merge-time rollback repaired — re-derived by RUNNING the tool at
+the tree merged with `origin/main` `a29b5f24ce95`, never by arithmetic on the markers.** The branch's
+`tortoise/ep.py` / `tortoise/live.py` change adds, removes and re-classifies no Cypher statement and
+no door call, so `--check` prints `25 pinned counts match` at the merged tree and the tool's `--json`
+reads `files_scanned` **313**, `sites` **1327**, `files` **102**, `plain` **875** (read **589**, write
+**286**), `partial` **321**, `unresolved` **105**, `candidates` **589**, `non_cypher_door_calls`
+**267** and `ast_door_calls` **1594** — every one of them the pin the `#14552` cut above corrected.
+Appendix A is regenerated with `--markdown` HERE, so its `ep.py`, `live.py`, `sdk.py` and
+`github_indexer.py` rows move by the insertions above them and nothing else, and §1 is re-measured
+here by command rather than carried: over the same 313 `py_files`, door **1,648 / 112** whole-text
+(bare `rg … tortoise/` **1,654 / 113**), verb **2,388 / 149** line-based against the tool's **2,401 /
+150** — the 13-occurrence WHOLE-TEXT gap §1 enumerates. ⛔ This is the per-tree rule §1 states, from
+the direction that costs a reader most: a merge restored an earlier cut's **1,647 / 1,653** (and
+**1,589** for the door-call line) while the block above it still printed **1,648** and **1,594**, so
+§1's own subtraction no longer closed. A figure is a reading of the tree that SHIPS it — re-take it,
+never inherit it.
+
+**The cut this PR (#14552, `feat/14552-point-writers`) makes — ONE non-Cypher door call and NOT a
+single Cypher statement — re-derived by RUNNING the tool at the tree merged with `origin/main`
+`6a1190f5590`, never by arithmetic on the markers.** `tortoise/record_read.py::point_vector_keys` (the
+per-id record ask the `:Point` write gate needed) issues
+`cursor.execute(f"SELECT node_key FROM public.{POINT_TABLE} …")` — a statement built by an f-string,
+which the census's static resolver folds to `non_cypher_door_calls` (`SQL_VETO`, the same arm
+`#14002`'s presence read landed in). So `non_cypher_door_calls` 266→**267** and `ast_door_calls`
+1593→**1594** (= `1327` classified + `267`), and ⛔ **every other pin is unchanged, because no graph
+statement was added, removed, re-classified or re-shaped**: `sites` **1327**, `files` **102**,
+`files_with_sites` **102**, `files_scanned` **313**, `partial` **321**, `unresolved` **105**,
+`candidates` **589**, and every shape and shape-role pin — which is why the migration metric §0 is
+about does not move.
+
+⚠️ **Two things the counts do NOT show, stated rather than left to the reader.** (1) `record_read.py` carries NO statement site — it is not one of the 102 in Appendix A — and a
+non-Cypher door call never becomes a site, so `files` and `files_with_sites` cannot move however many
+door calls that file gains; that is why they are unmoved while the door-call pin is not. (2) Appendix A's ROW SET is
+unchanged (1327 rows, none added, none removed), but **534 of them moved positionally** because this
+PR edits, above sites those files carry, `tortoise/sdk.py` (**386** rows),
+`tortoise/projection/__init__.py` (**93**), `tortoise/projection/entities.py` (**54**) and
+`tortoise/record_vector.py` (**1**). ⛔ THE MECHANISM IS THE CUMULATIVE INSERTION ABOVE THE ROW, NOT
+the file's net line delta — a row moves by the number of lines inserted above IT between
+`6a1190f5590` and this head, so only the rows below every insertion move by the net delta. Measured
+per file, and stated in full because §7's own paragraph 30 lines above says the same thing: sdk.py
+**+40** for 384 of its 386 moved rows (**+31** for 2 that sit above a later insertion, **1** unmoved)
+against a net **+40**; `projection/__init__.py` **+124** for 65 rows, **+55** for 20, **+54** for 8,
+net **+124**; `entities.py` **+23** for all 54, net **+23**; `record_vector.py` **+8** for its 1, net
+**+8** — 386 + 93 + 54 + 1 = **534**. ⛔ The checkable form is the RULE, not these buckets — and the command has to be one that
+carries hunk POSITIONS: `git diff -U0 6a1190f5590 HEAD -- tortoise/<file> | grep '^@@'` gives each
+hunk's `-a,b +c,d` pair, whose cumulative `+` total ABOVE a row is that row's shift (measured: this
+reproduces 384/2/1 at +40/+31/+0 for `sdk.py`, and each of the other files' buckets
+(`projection/__init__.py`'s three included)). ⚠️
+`git diff --numstat 6a1190f5590 HEAD -- tortoise/` CANNOT answer it: it prints one `added deleted
+path` line per FILE — so it confirms the four NETs (`+40`, `+124`, `+23`, `+8`) and says nothing
+about where the insertions sit, which is exactly the distinction this paragraph exists to draw. The table is regenerated with `--markdown` at this tree and is byte-identical to the tool's output, which
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` pins. (3) FOUR COUNT SURFACES BELOW §0 WERE ALREADY STALE AT THE MERGE BASE, and are re-cut to the
+tool here because this PR is the cut that touches the file: §3's `plain` shape row read **872**
+(read=588, write=284) against the tool's **875** (589/286) — a table that summed to 1324 against the
+pinned `sites` 1327 — §2's blast-radius table listed `tortoise/sdk.py` at **386** (now 387) and
+`tortoise/hosted_api.py` at **242** (now 244), and §4 — which derives its sizes from §3 — repeated
+the pre-cut **588** twice and **284** once. None of the four is pinned by `--check`, which reads
+only §0's scalars and the HTML-comment markers, so no arm had re-derived them since the cuts §7 below
+records; they are fixed here rather than left as a contradiction a reader can compute without the
+tool. (§1's `--all-surface` row is deliberately NOT in this set: it states the tree it was measured
+at and moves on any test edit.) ⛔ The
+`differential` job is the arm that caught this cut as missing: it reported
+`DRIFT ast_door_calls: doc=1593 tool=1594` / `DRIFT non_cypher_door_calls: doc=266 tool=267` on the
+pushed head, which is exactly the "a pin green at a branch head is red at the merge" case §7 names —
+here the branch itself added the call.
 
 **This PR's cut (#12244):** `origin/main` **`1b1d108ca423`**, forward-merged into
 `fix/12244-merge-collapse` — re-derived by RUNNING the tool on the merged tree, never by arithmetic on
@@ -2362,3 +2429,4 @@ one.
 | `tortoise/why_snapshot.py:147` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/why_snapshot.py:151` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/why_snapshot.py:563` | `precompute_for_dream` | plain | read | candidate:SQL-shaped | `MATCH (s:ContextSubscription) WHERE s.disabled_at IS NULL RETURN cou…` |
+
