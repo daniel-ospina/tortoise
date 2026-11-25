@@ -785,35 +785,25 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 
-    # BOTH indirection forms, because the document's ONE Bearer snippet is the
-    # Cursor one and `.cursor/mcp.json` expands `${env:NAME}` — the PLAIN
-    # `${NAME}` form is Claude Code's `--header` and is NOT expanded by Cursor
-    # (cursor.com/docs/mcp; the same split is already recorded below, at the
-    # `CURSOR_MCP_CONFIG_ENV` / `PI_MCP_CONFIG_ENV` wizard pins). The `env:`
-    # prefix is optional in the EXTRACTION only — the pin immediately below
-    # still grades which form Cursor's snippet must carry.
-    # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
-    # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
-    # ${TORTOISE_API_KEY}"`); the Cursor `env:` row predates that change — it
-    # arrived with `24e8388c5f316`, and `01b78913cde4` only dropped
-    # its `"type": "http",`. So the red is LOCATOR DRIFT on a legitimate
-    # rewrite, NOT a guard that was born broken: this file PASSES 42/42 at
-    # `4b2fba3e^`, where that plain-form snippet still satisfied the un-widened
-    # regex, and reds only from `d20162d21830` onward. Do not "restore" the
-    # plain snippet to satisfy a tighter locator: in a JSON header that form
-    # resolves once at process start to an EMPTY `Authorization: Bearer`
-    # (SKILL.md:411-414) — the empty-bearer class this guard exists to prevent.
+    # ⛔ `(?:env:)?` ADMITS THE HARNESS'S OWN INDIRECTION, AND IT WEAKENS NOTHING.
+    # #14607's onboarding landing REMOVED the plain-form `.mcp.json` snippet
+    # (`"Bearer ${TORTOISE_API_KEY}"`) that used to satisfy this locator, leaving
+    # only the harness-indirection form the Cursor row has carried since
+    # `01b78913cde4` (`"Bearer ${env:TORTOISE_API_KEY}"`). With no `env:` group the
+    # locator then matched NOTHING while the document still carried a Bearer
+    # snippet — the `test (c)` main-red of #14678/#14676. The plain form was
+    # removed deliberately, not by accident: a shell-style `${VAR}` in a JSON
+    # header is expanded once at process start and yields an EMPTY
+    # `Authorization: Bearer` (see the Pi section below), which is the empty-bearer
+    # class this pin exists to prevent — so the doc no longer recommends it.
+    # The capture group still takes the VARIABLE NAME ALONE, so the `read_names`
+    # proof below (`_env_names_the_client_reads`) is unchanged: admitting `env:`
+    # must never be allowed to decay into "a snippet exists somewhere".
     referenced = set(
-        re.findall(
-            r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
-            skill))
+        re.findall(r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
+                   skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
-    assert '"Authorization": "Bearer ${env:TORTOISE_API_KEY}"' in skill, (
-        "the Cursor `.cursor/mcp.json` snippet must interpolate `${env:NAME}` — "
-        "Cursor does not expand the plain `${NAME}` form in `headers`, so a "
-        "snippet repointed at it ships the literal `Bearer ${...}` text and "
-        "every request is a 401")
     # ASK THE CLIENT WHAT IT READS, and prove it READS. The precedence loop (a
     # names tuple consulted with `os.environ.get(name)`) has no per-variable
     # literal for a shape-pin to find — pinning one redded a correct fix
@@ -1687,80 +1677,26 @@ def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
 
 def test_3232_generic_restart_lines_are_exact():
     """The installer's stdout cue and the quickstart line are the two generic,
-    non-per-harness restart statements. The INSTALLER cue is pinned to its
-    exact string — that is where a harness's own mechanism lives (a new shell
-    for Pi/Codex CLI, a registry + relaunch for Codex Desktop), so an edit that
-    contradicts one is visible. The QUICKSTART half is pinned as an ORDER (the
-    cue, then a tools-appear clause that must not be inverted); its equality
-    pin was retired in #14607's aftermath because it redded a legitimate
-    reword — #3429's lesson, applied here. The `_are_exact` name is historical
-    and now covers only the installer half."""
+    non-per-harness restart statements. Each is pinned against its exact
+    string so an edit that contradicts a harness's own mechanism (a new shell
+    for Pi/Codex CLI, a registry + relaunch for Codex Desktop) is visible."""
     src = _installer_text()
     assert ('echo "Next: restart your agent, then confirm the skills are '
             'listed:"') in src, (
         "the installer's closing cue must restart, THEN confirm/list the "
         "skills — the skills directory is read at agent start")
     quick = QUICKSTART.read_text(encoding="utf-8")
-    # #3429's lesson, applied to THIS line: pin the ORDER, not one wording.
-    # #14607 reworded "Restart your client. You should now have Tortoise's
-    # tools …" into "Restart your client, then confirm the tools are actually
-    # there — `tortoise_*` in the client's MCP/tool list …", which KEEPS the
-    # requirement and strengthens it (it names the confirmation), yet the
-    # equality pin called it a regression — the shape that trains the next
-    # author to delete the pin instead of keeping the order (measured red at
-    # `7107272801e5` on `main` and on this head alike).
-    cue = "Restart your client"
-    assert cue in quick, (
-        "docs/quickstart-cloud.md must keep its restart cue — the config is "
-        "read at client start, so a written config is not a loaded one")
-    para = next(p for p in quick.split("\n\n") if cue in p)
-    flat_para = " ".join(para.split())
-    after_cue = flat_para[flat_para.index(cue) + len(cue):]
-    # ⛔ THE CLAUSE MUST BE IN THE CUE'S OWN SENTENCE, NOT MERELY SOMEWHERE
-    # LATER IN THE PARAGRAPH. A paragraph-wide search is satisfiable by an
-    # UNRELATED later mention — this paragraph ends "if the tools are missing,
-    # run `tortoise mcp-status`" — so `Confirm the tools are actually there.
-    # Restart your client …` (a PRE-cue confirmation: the #3232 inversion in
-    # its sentence-before form) was GREEN. Measured GREEN before this bound and
-    # RED after it, with every forward phrasing below still GREEN. A COMMA does
-    # not bound it — "Restart your client after changing the config, then
-    # confirm the tools …" is forward and must pass — so only a sentence
-    # terminator does.
-    cue_sentence = re.split(
-        r"[.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
-    assert re.search(r"\btools\b", cue_sentence), (
-        "docs/quickstart-cloud.md must keep a tools-appear clause AFTER its "
-        "restart cue — 'restart' alone never tells the user what to look for, "
-        "and a clause placed before the cue points them at tools the running "
-        "session cannot have yet (#3232)")
-    # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
-    # Measured on the landed pin: "Restart your client after confirming the
-    # tools are actually there" places `tools` after the cue and is GREEN, while
-    # INVERTING the property this pin exists to enforce — the client reads its
-    # MCP config at START, so a user told to confirm the tools FIRST looks for
-    # tools the running session cannot have loaded yet. No wording is pinned
-    # here: a forward phrasing ("…, then confirm the tools …") still passes, so
-    # #3429's lesson (pin the ORDER, not one reword) survives. Only the cue's
-    # OWN clause is graded — splitting at the first `,`/`.`/`;` keeps "Restart
-    # your client after changing the config, then confirm the tools …" GREEN,
-    # because the inversion does not bind there.
-    #
-    # Two things a first cut got wrong, both measured on this pin:
-    # 1. The clamp strips leading punctuation BEFORE splitting, because a comma
-    #    right after the cue (`Restart your client, after confirming the tools
-    #    …` — a one-token edit of the sentence this pin grades) left an EMPTY
-    #    first clause, so the inversion was never graded and it stayed GREEN.
-    # 2. The pattern anchors on a CONFIRMATION verb. "restart after <verb> the
-    #    tools" inverts the order only when the user is told to confirm/check/
-    #    verify them FIRST; a purpose clause — "Restart your client after the
-    #    config change so it loads the tools", restart still first — must stay
-    #    GREEN, because a new false red is exactly how a pin gets deleted.
-    cue_clause = re.split(
-        r"[,.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
-    assert not re.search(
-        r"\b(?:after|once|when|if)\b[^.;]*?"
-        r"\b(?:confirm|check|verify|see|look|ensure|list)\w*\b[^.;]*?\btools\b",
-        cue_clause), (
-        "docs/quickstart-cloud.md inverts its own restart cue: 'restart AFTER "
-        "confirming the tools' asks the user to look for tools this session "
-        "cannot have loaded yet — the restart comes FIRST (#3232, #14676)")
+    # ⛔ THE CUE AND THE TOOLS-APPEAR SENTENCE ARE ONE CLAUSE NOW. #14607's
+    # onboarding landing rewrote the line to "Restart your client, then confirm
+    # the tools are actually there" — a STRONGER statement of the same property
+    # (the client reads its MCP config at start, so the restart must be stated
+    # before the tools can appear) — and left this pin reading the old full stop,
+    # which is the `test (c)` main-red of #14678/#14676. What must not regress is
+    # the ORDER inside the sentence, so the pin follows the fused wording rather
+    # than relaxing to a bare `Restart your client` substring: that would pass on
+    # a sentence that names the restart and the tools without ordering them.
+    assert ("Restart your client, then confirm the tools are actually there"
+            in quick), (
+        "docs/quickstart-cloud.md must keep its restart cue FUSED to the "
+        "tools-appear confirmation, restart first — the client reads its MCP "
+        "config at start, so 'restart, then confirm' is the load-bearing order")
