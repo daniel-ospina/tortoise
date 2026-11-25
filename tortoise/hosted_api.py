@@ -16056,9 +16056,9 @@ async def list_sources(
     ⚠️ A row's address is its ``url`` (``{url, sourceKind, points}``): a
     provenance Source is keyed by ``url`` in the graph, and ``GET
     /v1/sources/{id}`` resolves it by that value. Ordering is ``points`` DESC
-    with ``url`` as the tiebreak — a TOTAL order, because ``points`` alone is not
-    one (#5346, see the sort below) — and a truncated page carries
-    ``total_available``.
+    with ``url`` as the tiebreak — a total order while each Source carries its
+    OWN url (``url`` is the MERGE key; the note beside the sort says why this is
+    not unconditional) — and a truncated page carries ``total_available``.
     """
     _require_scope(org, "graphs:read", "list_sources")
     sdk = await _data_sdk_offloaded(org, attach_projection=True)

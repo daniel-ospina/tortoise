@@ -210,7 +210,7 @@ def list_layer(
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
     #
-    # ⚠️ INHERITED RESIDUE, stated rather than implied — FIVE delegated helpers
+    # ⚠️ INHERITED RESIDUE, stated rather than implied — SIX delegated helpers
     # behind these GETs still resolve through GRAPH.QUERY (`query`), the verb
     # that MINTS a graph which does not exist; this module's OWN calls hold the
     # `ro_query` rule above. `proj.g.query` is the wrapper that dispatches that
@@ -233,13 +233,20 @@ def list_layer(
     #     `_get_confidence` → `ep.compute_confidence`;
     #   * `TortoiseSDK._get_point` (`sdk.py:30632`, the cache arm's
     #     `_cache_handle().g.query` at `:30717`) — behind `/belief`'s evidence
-    #     arm for a Point, through `sdk._provenance`.
+    #     arm for a Point, through `sdk._provenance`;
+    #   * `TortoiseSDK._provenance` itself (`sdk.py:38256`) — the CALLER of
+    #     `_get_point` above, and its own minting reads are the Subject arm at
+    #     `:38292` and the delegation rels at `:38315`, on top of
+    #     `_raw_entry_for_point`'s `proj.g.query` at `:38239` and
+    #     `resolve_entity_id_same_entity(proj.g, …)` at `:38288`
+    #     (`entity_identity.py`'s `g.query`) — so listing only its callee would
+    #     read as one locus where there are three.
     #
     # So "the new GETs cannot mint a graph" is true of the Cypher IN THIS MODULE
-    # and NOT yet of those five resolutions: the object/subject by-id routes
-    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` two
-    # (`_read_node` + `_get_point`) on top of the `_resolve_entity` its own
-    # resolution already reaches. Fixing them is pre-existing debt in their own
+    # and NOT yet of those six resolutions: the object/subject by-id routes
+    # inherit one, `entity_relations` one, `/v1/sources` one, and `/belief` three
+    # (`_read_node` + `_provenance` + its `_get_point` callee) on top of the
+    # `_resolve_entity` its own resolution already reaches. Fixing them is pre-existing debt in their own
     # homes; it is not a guarantee this module's comment can confer. ⛔ A reader
     # auditing these routes' write-verb exposure takes this paragraph as the
     # COMPLETE residual, so an enumeration that is short by even one is a false
