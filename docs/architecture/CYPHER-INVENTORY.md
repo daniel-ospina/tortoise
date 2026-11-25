@@ -435,19 +435,26 @@ site, and every `file:line` row after the edit re-derived.** `tortoise/record_al
 (`cur.execute(JOURNAL_COUNT_SQL, (org_id, graph_id))`, the derived enumeration floor the hook refuses
 to assume) — a Postgres statement named by a module constant, exactly the shape this section folds to
 `non_cypher_door_calls` (§1's non-Cypher arm, not the `unresolved` over-report arm). So
-`non_cypher_door_calls` 266→**267** and `ast_door_calls` 1593→**1594** (= 1327 + 267);
+`non_cypher_door_calls` 267→**268** and `ast_door_calls` 1594→**1595** (= 1327 + 268);
 `sites` **1327**, `files` **102**, `files_scanned` **313**, `unresolved` **105**, `candidates` **589**,
 `partial` **321**, `plain` **875** (read **589** / write **286**) and every other shape are unchanged —
 the new call is not a statement site, so the migration metric §0 is about does not move. §1's door
-predicate moves by exactly that one occurrence (**1,647**→**1,648** over **112** files, bare
-**1,653 / 113**→**1,654 / 113**, on call lines **1,593**→**1,594** with the **−54** unchanged).
-⚠️ **The verb figures also moved (2,398→2,400 whole-text, 2,385→2,387 line-based) and that is NOT
-this cut's:** `git diff origin/main HEAD -- tortoise/ | grep -icE '^\+.*\b(MATCH|MERGE)'` reads **0**
-— this branch adds no `MATCH`/`MERGE` line — so those two are `main`'s own advance landing without a
-re-cut, re-measured here because §1 states them. The end-of-line scan moved with them (**184**→**185**,
+predicate moves by exactly that one occurrence (**1,648**→**1,649** over **112** files, bare
+**1,654 / 113**→**1,655 / 113**, on call lines **1,594**→**1,595** with the **−54** unchanged).
+⚠️ **The verb figures also moved (2,399→2,401 whole-text, 2,388 line-based, UNCHANGED) and that is
+NOT this cut's:** `git diff origin/main HEAD -- tortoise/ | grep -icE '^\+.*\b(MATCH|MERGE)'` reads
+**2** — both hits are the English word "matches" in comments (`# matches no row`), not a
+`MATCH`/`MERGE` clause, so this branch still adds no such line — those two are `main`'s own advance
+landing without a re-cut, re-measured here because §1 states them. The end-of-line scan moved with them (**184**→**185**,
 the non-cross-line remainder **171**→**172**) while the 13 cross-line matches, the one-file gap and the
-**−54** did not. Re-measured at this head: bare case-sensitive **2,116**, `-i` without the exclusion
-**2,477**, over the 313 files **2,113** / **2,387**, exclusion dropped **2,115** / **2,390** — the
+**−54** did not. ⛔ **The verb figures in this paragraph were measured at an earlier head of this
+branch and are ONE LOW against this tree — §1 above is authoritative at this head** (bare
+case-sensitive **2,117**, `-i` without the exclusion **2,478**, over the 313 files **2,114** /
+**2,388**, exclusion dropped **2,116** / **2,391**). They are stated here rather than re-cut because
+§1's numbers are the unpinned-prose class a recorded decision (#13098) declined to pin, and the drift
+they accumulate is tracked as tortoise#14616; re-deriving them by hand in a second place is how they
+went wrong the first time. The **graded** figures in this paragraph — the two pins above — are the
+re-derived ones, and they agree with `cypher_inventory.py --check`'s **25 pinned counts match**. The
 gap is **87** and its enumeration is unchanged except `tortoise-capture.test.ts` **27**→**32**. Appendix
 A is regenerated with `--markdown` at the merged tree: **338 rows re-derived**, every one of them a
 `file:line` (this branch edits `tortoise/hosted_api.py` and `tortoise/record_writer.py` above sites
