@@ -3042,6 +3042,15 @@ _UNCUT_OBSERVATIONS = 0
 #: gap this registry exists to surface. Both states stay visible on their own keys
 #: ('armed_but_halted' vs 'armed_but_uncut'), so nothing is hidden by the split;
 #: do NOT "fix" the asymmetry by folding `seeded` out of `armed_but_uncut`.
+#:
+#: ⛔ AND A GRAPH SITS IN AT MOST ONE OF THE TWO MAPS (#14587 review P3): the
+#: NEWEST observation decides which. A halt retracts an earlier uncut entry (a
+#: sanctioned halt is not a gap), and a later REFUSAL retracts the halt label and
+#: publishes the graph as uncut — because `provision_failed` or a
+#: `provision_refused:*` observation means something is WRONG, not merely stopped,
+#: and that is the fact `/health` owes at that moment. So a `halted` row can be
+#: published as uncut, and when it is, that red is TRUE; what the paragraph above
+#: forbids is counting it in BOTH, which is what made the old state incoherent.
 _UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
@@ -3200,6 +3209,14 @@ def armed_but_uncut() -> dict[str, int]:
     `armed_but_halted_untracked_observations` is its overflow count (lifetime, not
     folded, for the reasons above), so a population past the cap is still COUNTED
     even where it cannot be named.
+
+    ⛔ THE TWO COUNTS ARE MUTUALLY EXCLUSIVE PER GRAPH, AND THE NEWEST OBSERVATION
+    DECIDES (#14587 review P3) — so "separate population" means "never counted in
+    both", not "a halted graph can never appear in the uncut count". It can, when
+    the graph is observed REFUSING after the halt (`provision_failed`, a
+    `provision_refused:*`); that observation is the newer fact, the halt label is
+    retracted, and the resulting red is TRUE. A halt that nothing later
+    contradicts still never folds into `ok`.
     """
     with _UNCUT_GUARD:
         return {

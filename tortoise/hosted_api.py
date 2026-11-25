@@ -8920,6 +8920,14 @@ def _record_health() -> dict:
     # permanently, and a halt does not clear on its own, so that red would be
     # indistinguishable from a real one. It is still PUBLISHED, on its own key.
     #
+    # ⛔ AND THE TWO MAPS ARE MUTUALLY EXCLUSIVE PER GRAPH, NEWEST WINS (#14587
+    # review P3): a `halted` row CAN appear in `armed_but_uncut` — when the graph
+    # is observed REFUSING after the halt (`provision_failed`, a
+    # `provision_refused:*`), the halt label is retracted and the graph is
+    # published here, so this fold reds `ok`. That is the point: a refusal is a
+    # "something is wrong" fact, not a "somebody stopped it" fact, and the halt
+    # rationale above covers only the graph whose last observation IS the halt.
+    #
     # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE PER ITEM (#14587 review P1). `ok`
     # therefore follows ONLY `armed_but_uncut` — the tracked map, which every
     # repair retracts graph by graph (`clear_uncut_graph`). It must NOT sum the

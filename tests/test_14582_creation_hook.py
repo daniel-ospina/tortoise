@@ -1409,7 +1409,7 @@ def test_a_re_provisioned_halted_graph_keeps_its_published_entry(monkeypatch):
         rw._uncut_warned_at.clear()
 
 
-def test_a_halt_retracts_an_earlier_uncut_observation():
+def test_a_halt_retracts_an_earlier_uncut_observation(monkeypatch):
     """⛔ A SANCTIONED HALT MUST NOT PIN `ok: false` (#14587 review P3).
 
     A graph is published on the UNCUT key when it was observed unusable
@@ -1452,6 +1452,22 @@ def test_a_halt_retracts_an_earlier_uncut_observation():
             f"`armed_but_halted` while counting as uncut too: {block}")
         assert rw.armed_but_uncut_reasons() == {
             "provision_refused:divergence": 1}, rw.armed_but_uncut_reasons()
+
+        # …AND THE CONSEQUENCE ON THE CHANNEL THE CLAIM IS ABOUT, through
+        # `_record_health` rather than the maps: the halt alone stays GREEN, and
+        # the refusal that superseded it REDS — a claim about `/health` that never
+        # reads `/health` cannot catch a fold that stops folding.
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        assert _health(monkeypatch, dsn=dsn)["ok"] is False, (
+            "a graph observed REFUSING after a halt is a real gap, so `ok` must "
+            "be false — the halt rationale covers only the graph whose last "
+            "observation IS the halt")
+        rw.note_uncut_graph("org-14582", "graph-1", reason="mode_halted")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["armed_but_halted"] == 1 and block["armed_but_uncut"] == 0, block
+        assert block["ok"] is True, (
+            "a halt that nothing later contradicted must not red the deployment "
+            "— that is the permanent false red the key split exists to prevent")
     finally:
         rw.reset_uncut_graphs()
 
