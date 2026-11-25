@@ -16070,8 +16070,13 @@ async def list_objects(
     ``tortoise.entity_reads``), so on an armed deployment it can answer
     ``{"residency": "not-hot", …}`` or ``{}`` rather than the stored
     properties. Either way a caller reading ``status`` in the payload can see
-    the row is ended. Measured both ways: a retracted Object answers 200 here
-    and 404 on ``/v1/points/{id}``.
+    the row is ended. Measured: a retracted Object answers 200 here with
+    ``status: "retracted"`` in the payload, while ``GET /v1/points/{id}`` refuses
+    a retracted POINT by name (``get_point``'s ``status == "retracted"`` arm,
+    #432/#689). ⛔ That 404 is NOT evidence about an Object: ``/v1/points/{id}``
+    resolves ``:Point`` only, so it answers 404 for EVERY Object, ended or not —
+    the two contracts are stated separately rather than inferred from one
+    measurement.
 
     Delegates to :func:`tortoise.entity_reads.list_layer`. See
     ``/v1/objects/{id}`` for the single-node read.

@@ -299,9 +299,9 @@ def _endpoint_preview(row: Any) -> dict:
 
     ⛔ THE NAME COALESCE IS LABEL-AWARE, NOT PAYLOAD-FREE BY CONSTRUCTION — which
     is the distinction that makes point (2) true rather than merely intended. A
-    ``:Source``'s text is its ``url`` (or its declared ``name``), NEVER its
-    ``content``, because ``projection.entities._SOURCE_NODE_PROP_NAMES`` drops
-    ``content`` from every `:Source` read bag (#3998 / D30, #5196). Coalescing
+    ``:Source``'s text is its declared ``name`` (or, failing that, its ``url``),
+    NEVER its ``content``, because ``projection.entities._SOURCE_NODE_PROP_NAMES``
+    drops ``content`` from every `:Source` read bag (#3998 / D30, #5196). Coalescing
     ``m.content`` into a neighbour's name inside Cypher would put that raw text
     on a route that never asked for it, so the query selects the Source arm
     first (see ``entity_relations``). Everything else answers

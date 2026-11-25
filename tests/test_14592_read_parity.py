@@ -235,7 +235,17 @@ def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
 
 def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
     """The `/v1/points` tombstone contract, one layer over: ended rows leave the
-    listing surface and stay retrievable BY ID."""
+    listing surface and stay retrievable BY ID.
+
+    ⛔ AND THE BY-ID HALF IS DELIBERATELY *NOT* THE SAME, which is the part no
+    prose can protect: a ``retracted`` Object answers 200 here (the payload's
+    own ``status`` is the disclosure) while ``GET /v1/points/{id}`` 404s a
+    retracted POINT by name (#432/#689). Both arms are graded below, because
+    the tempting "make them uniform" edit is otherwise green — and because a
+    retracted OBJECT 404s on ``/v1/points/{id}`` for a different reason (that
+    route resolves ``:Point`` only), so the Object's 404 there proves nothing
+    about retraction.
+    """
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         node = client.post(
             "/v1/objects", json={"name": "OLD", "objectKind": "goal"}).json()
@@ -251,6 +261,34 @@ def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
             listed = client.get("/v1/objects").json()
             assert [o["name"] for o in listed["objects"]] == [], listed
             assert client.get(f"/v1/objects/{node['id']}").status_code == 200
+
+            # `retracted` is the word `/v1/points/{id}` refuses BY NAME, and this
+            # route keeps answering it: the two by-id contracts differ on purpose.
+            sdk._get_proj().g._query(
+                "MATCH (o:Object {id:$id}) SET o.status = 'retracted'",
+                params={"id": node["id"]}, read_only=False)
+            assert client.get("/v1/objects").json()["objects"] == []
+            retracted_object = client.get(f"/v1/objects/{node['id']}")
+            assert retracted_object.status_code == 200, retracted_object.text
+            assert retracted_object.json()["status"] == "retracted"
+
+            # …while the Point route refuses the same word on a Point.
+            point = client.post("/v1/points", json={
+                "content": "a claim that will be retracted",
+                "extractedFrom": "https://example.test/tombstone-14592"})
+            ref = point.json()["id"]
+            sdk._get_proj().g._query(
+                "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
+                params={"id": ref}, read_only=False)
+            refused = client.get(f"/v1/points/{ref}")
+            assert refused.status_code == 404, refused.text
+            # The refusal's shape depends on whether the record seam is armed
+            # (a plain string on the OFF shape, an attributed dict otherwise) —
+            # both say the same thing, so the assertion reads through it.
+            detail = refused.json()["detail"]
+            assert (detail if isinstance(detail, str)
+                    else detail["message"]) == "Point not found", refused.text
+            assert client.get("/v1/points").json()["points"] == []
         finally:
             sdk.close()
 
