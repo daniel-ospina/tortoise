@@ -347,19 +347,37 @@ def read_entry(harness: str, *, project_dir: Path | None = None
             layers.append((str(path), entry))
     if not layers:
         return None, None, read, ENTRY_ABSENT
-    # Most specific layer first; the LAST one is the base.
+    # Merge the way `mergeMcpLayers` does, most specific layer first.
+    #
+    # ⛔ A FIELD-WISE `dict.update` IS NOT THIS MERGE, and it is not a near miss: the
+    # harness DELETES the other transport's fields when a layer declares one. When the
+    # repo layer declares `command`, `url`/`headers`/`oauth` are dropped from the
+    # base (`mcp-client/index.ts`: `for (const field of HTTP_TRANSPORT_FIELDS) delete
+    # carry[field]`), and a layer declaring BOTH `url` and `command` is ignored
+    # whole. Plain inheritance kept the base's `headers` on top of the shipped
+    # bridge, so this verifier graded a header the CHILD NEVER RECEIVES: measured on
+    # this worktree it reported `env-unset` about a `${VAR}` in an http header while
+    # the effective entry was the credential-free stdio bridge — a false DOWN naming
+    # the good file as `source` and prescribing the install the user already has —
+    # and, with the variable set, `resolves-unprobed` for a `stdio` entry, so the
+    # stdio checks never ran and `check(live=True)` could green it.
+    HTTP_TRANSPORT_FIELDS = ("url", "headers", "oauth")
+    STDIO_TRANSPORT_FIELDS = ("command", "args", "env", "cwd")
     merged: dict = {}
     for _source, entry in reversed(layers):
-        merged.update(entry)     # repo wins each field it SETS; omitted keys inherit
-    # `env`/`headers` are maps a layer may extend rather than replace.
-    for key in ("env", "headers"):
-        combined: dict = {}
-        for _source, entry in reversed(layers):
-            value = entry.get(key)
-            if isinstance(value, dict):
-                combined.update(value)
-        if combined:
-            merged[key] = combined
+        declares_http = bool(entry.get("url"))
+        declares_stdio = bool(entry.get("command"))
+        if declares_http and declares_stdio:
+            # Ambiguous delta: the harness ignores it whole rather than guessing.
+            continue
+        carry = dict(entry)
+        if declares_stdio:
+            for field in HTTP_TRANSPORT_FIELDS:
+                merged.pop(field, None)
+        elif declares_http:
+            for field in STDIO_TRANSPORT_FIELDS:
+                merged.pop(field, None)
+        merged.update(carry)
     return layers[0][0], merged, read, OK
 
 
@@ -425,6 +443,17 @@ def credentials_present(project_dir: Path | None = None) -> list[str]:
         if isinstance(key, str) and key.strip():
             found.append(f"file:{path}")
     return found
+
+
+def _looks_like_python(command: str) -> bool:
+    """True when `command` is a Python INTERPRETER, so `-c "import …"` means anything.
+
+    `uv`, `poetry`, `npx` and friends are WRAPPERS: they take `-m` themselves and
+    can never answer an import probe, so probing them produces a confident verdict
+    about the wrong program.
+    """
+    name = Path(command).name.lower()
+    return bool(re.fullmatch(r"python(\d+(\.\d+)*)?(\.exe)?", name))
 
 
 def _missing_module(command: str, module: str) -> str:
@@ -498,8 +527,16 @@ def classify(harness: str, *, project_dir: Path | None = None
     for _path, value in leaves:
         _, missing = _expand(value)
         unset.extend(m for m in missing if m not in unset)
-    transport = "http" if (entry.get("type") in ("http", "streamable-http")
-                           or entry.get("url")) else "stdio"
+    # ⛔ PRESENCE, not `type or url`: an inherited `url` must not beat an explicit
+    # `type: stdio`, and after the merge the transport is decided by what the
+    # effective entry can actually spawn or dial.
+    if entry.get("command"):
+        transport = "stdio"
+    elif entry.get("url"):
+        transport = "http"
+    else:
+        transport = ("http" if entry.get("type") in ("http", "streamable-http")
+                     else "stdio")
     if unset:
         names = ", ".join(f"${n}" for n in unset)
         blank_credential = any(
@@ -563,7 +600,13 @@ def classify(harness: str, *, project_dir: Path | None = None
         if isinstance(args, list) and "-m" in args:
             module = args[args.index("-m") + 1:] if len(args) > args.index("-m") + 1 else []
             module_name = module[0] if module and isinstance(module[0], str) else ""
-            if module_name.startswith("tortoise"):
+            # ⛔ Only a PYTHON-like command can answer `-c "import x"`. Measured:
+            # `{"command": "uv", "args": ["run","python","-m","tortoise.mcp_bridge"]}`
+            # was reported `python-lacks-tortoise` ("`uv -m …` cannot run:
+            # For more information, try '--help'") — a wrapper, not an interpreter,
+            # and the wrong layer for the reader. A wrapper falls through to
+            # `resolves-unprobed`, which is the honest answer.
+            if module_name.startswith("tortoise") and _looks_like_python(cmd):
                 missing = _missing_module(cmd, module_name)
                 if missing:
                     return Verdict(

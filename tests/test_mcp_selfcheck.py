@@ -108,20 +108,32 @@ def test_missing_cwd_is_its_own_class(project):
     assert verdict.status == mcp_selfcheck.CWD_MISSING
 
 
-def test_interpreter_without_tortoise_importable_is_its_own_class(project):
+def test_interpreter_without_tortoise_importable_is_its_own_class(project, tmp_path):
     """A command that EXISTS and whose module does not import: a distinct layer.
 
     This is why the written entry names a portable `python3` instead of the
     installer's own virtualenv path — and why the resulting failure had to be
     given a name rather than reported as "command missing".
+
+    ⛔ The command must actually BE a Python interpreter, by name: `/bin/false -c
+    "import x"` also exits non-zero, but calling that `python-lacks-tortoise`
+    describes the wrong program. `_looks_like_python` now gates the probe, so the
+    stub below is named `python3` and refuses the import the way an interpreter
+    without the package does.
     """
+    fake = tmp_path / "python3"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "ModuleNotFoundError: No module named \'tortoise\'" >&2\n'
+        "exit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
     _write_config(project, {
         "type": "stdio",
-        "command": "/bin/false",
+        "command": str(fake),
         "args": ["-m", "tortoise.mcp_bridge"],
     })
     verdict = mcp_selfcheck.classify("pi", project_dir=project)
-    assert verdict.status == mcp_selfcheck.PYTHON_LACKS_TORTOISE
+    assert verdict.status == mcp_selfcheck.PYTHON_LACKS_TORTOISE, verdict.line()
     assert "spawn SUCCEEDS" in verdict.detail
 
 
@@ -1083,3 +1095,77 @@ def test_the_claude_code_alias_finds_the_claude_seam(project, monkeypatch):
                                      dry_run=True)
     assert not [r for r in result.refusals if "seam" in r], (
         "a seam that IS the right artifact must not be refused by alias")
+
+
+# ── the merge must DELETE the other transport's fields, not inherit them ──
+
+def test_a_repo_entry_declaring_stdio_does_not_inherit_the_base_http_headers(
+        tmp_path, monkeypatch):
+    """The harness deletes `url`/`headers`/`oauth` when a layer declares `command`.
+
+    Measured before this arm: the shipped bridge in the repo layer on top of an
+    http hub base reported `env-unset` about a `${VAR}` in a header the CHILD NEVER
+    RECEIVES — a false DOWN naming the good file as `source` and prescribing the
+    install the user already has.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp/",
+                     "headers": {"Authorization": "Bearer ${TORTOISE_MCP_API_KEY}"}}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "type": "stdio", "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/"}}}}),
+        encoding="utf-8")
+
+    _source, entry, _read, _status = mcp_selfcheck.read_entry("pi", project_dir=repo)
+    assert "headers" not in entry and "url" not in entry, entry
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.transport == "stdio", verdict.line()
+    assert verdict.status != mcp_selfcheck.ENV_UNSET, verdict.line()
+
+
+def test_a_stdio_entry_over_an_http_base_is_still_checked_for_its_command(
+        tmp_path, monkeypatch):
+    """No inherited `url` may beat an explicit `type: stdio`."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".pi/agent").mkdir(parents=True)
+    (home / ".pi/agent/.mcp.json").write_text(json.dumps({"mcpServers": {
+        "tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp/"}}}),
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "type": "stdio", "command": "/nonexistent/14607/python3",
+        "args": ["-m", "tortoise.mcp_bridge"]}}}), encoding="utf-8")
+    verdict = mcp_selfcheck.classify("pi", project_dir=repo)
+    assert verdict.status == mcp_selfcheck.COMMAND_MISSING, verdict.line()
+
+
+def test_a_wrapper_command_is_not_import_probed():
+    """`uv run python -m …` is a wrapper; probing it graded the wrong program."""
+    assert not mcp_selfcheck._looks_like_python("uv")
+    assert not mcp_selfcheck._looks_like_python("/usr/local/bin/npx")
+    assert mcp_selfcheck._looks_like_python("python3")
+    assert mcp_selfcheck._looks_like_python("/opt/venv/bin/python3.12")
+
+
+def test_the_instruction_block_lands_at_the_repo_root(tmp_path):
+    """Split from the config, the install wrote a nested AGENTS.md nobody reads."""
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    nested = root / "tortoise"
+    nested.mkdir()
+    (root / "AGENTS.md").write_text("# root\n\nuser text\n", encoding="utf-8")
+    result = harness_onboard.write_instructions("pi", nested)
+    assert result.wrote == [str(root / "AGENTS.md")], result.wrote
+    assert not (nested / "AGENTS.md").exists()
+    assert harness_onboard.BEGIN_MARK in (root / "AGENTS.md").read_text()

@@ -33,6 +33,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -412,10 +413,30 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         # to someone who never asked for it (measured: this installer left one).
         backup = path.with_suffix(path.suffix + ".bak-14607")
         try:
-            backup.write_text(before, encoding="utf-8")
-            out.actions.append(f"{path}: previous content saved to {backup.name}")
-        except OSError:
-            pass                          # a failed backup never blocks the write
+            # ⛔ A USER-scope config is 0600 because it carries key material
+            # (`env`, prompt history). `write_text` creates at `0666 & ~umask`, so
+            # a measured backup of a `0600 ~/.claude.json` landed at **0644** with
+            # the secrets inside — the installer widening the permissions of a file
+            # it was only reading. Copy the SOURCE mode, and create exclusively so
+            # an existing backup is never silently overwritten.
+            mode = stat.S_IMODE(path.stat().st_mode)
+            fd = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(before)
+            os.chmod(backup, mode)
+            out.actions.append(
+                f"{path}: previous content saved to {backup.name} (mode "
+                f"{oct(mode)}) — delete it yourself once the install looks right")
+        except FileExistsError:
+            out.actions.append(
+                f"{path}: a backup already exists at {backup.name} — left as is")
+        except OSError as exc:
+            # Refuse rather than write a backup we could not protect: a 0644 copy
+            # of a 0600 config is worse than no backup at all.
+            out.refusals.append(
+                f"{path}: could not create a protected backup ({exc}) — the config "
+                f"was NOT rewritten; back it up yourself and re-run")
+            return out
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(after, encoding="utf-8")
     out.wrote.append(str(path))
@@ -486,6 +507,20 @@ def _strip_block(text: str) -> str:
     return "".join(out).rstrip("\n") + "\n" if out else ""
 
 
+def _instruction_path(project_dir: Path, name: str) -> Path:
+    """The instruction file to write, resolved the way `read_entry` resolves config.
+
+    ⛔ Writing `<project_dir>/<name>` while the CONFIG is resolved up to the git
+    top-level split the install in two: measured from `<repo>/tortoise`, the config
+    landed at `<repo>/.mcp.json` (correct) but the two sentences created a NEW
+    `<repo>/tortoise/AGENTS.md`, and `--uninstall` run from `<repo>` then reported
+    "nothing to remove". The agent in that subdirectory reads the new file; the one
+    at the root never sees the sentences.
+    """
+    return (mcp_selfcheck._project_layer(project_dir, name)
+            or (mcp_selfcheck._repo_root(project_dir) or project_dir) / name)
+
+
 def write_instructions(harness: str, project_dir: Path, *,
                        dry_run: bool = False) -> InstallResult:
     """Write the two sentences idempotently; show the diff; add nothing twice."""
@@ -496,7 +531,7 @@ def write_instructions(harness: str, project_dir: Path, *,
             f"{harness}: no instruction file known — the two sentences were NOT "
             f"written; add them to this harness's instruction file by hand")
         return out
-    path = project_dir / name
+    path = _instruction_path(project_dir, name)
     before = path.read_text(encoding="utf-8") if path.exists() else ""
     ok, why = _markers_well_formed(before)
     if not ok:
@@ -543,7 +578,7 @@ def remove_instructions(harness: str, project_dir: Path, *,
         out.refusals.append(
             f"{harness}: no instruction file known — nothing was removed")
         return out
-    path = project_dir / name
+    path = _instruction_path(project_dir, name)
     if not path.exists():
         out.planned.append(str(path))
         return out

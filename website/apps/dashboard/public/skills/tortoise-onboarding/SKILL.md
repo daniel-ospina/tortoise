@@ -461,12 +461,20 @@ protocol below BEFORE writing):
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 
-> **Resolution order — a project `.mcp.json` SHADOWS the home config.** Pi
-> walks up from the current directory (to the git top-level) and takes the
-> FIRST `.mcp.json` it finds, falling back to `~/.pi/agent/.mcp.json`
-> (`resolveMcpJsonPath`, agent-infra #104). Writing only
-> `~/.pi/agent/.mcp.json` is therefore a silent no-op inside any repo that
-> has its own `.mcp.json` — write the PROJECT file.
+> **Resolution order — BOTH layers are read, and they MERGE PER FIELD.** Pi
+> walks up from the current directory to the git top-level for the repo's
+> `.mcp.json`, AND reads `~/.pi/agent/.mcp.json` as the hub's base layer
+> (`resolveMcpConfigPaths` + `mergeMcpLayers`, agent-infra #104/#3612 — the
+> older "first file wins" shim `resolveMcpJsonPath` is a BACK-COMPAT SHIM whose
+> own docstring says it is "exactly the shape that made the base inert").
+> **The repo wins each field it SETS and inherits each field it omits**, so a
+> repo entry that sets only `timeoutMs` keeps the base's `url`/`headers`/`env`.
+> Two rules follow: (a) writing only `~/.pi/agent/.mcp.json` IS inert inside a
+> repo that declares its own `tortoise` transport field — write the PROJECT
+> file; (b) declaring a transport drops the other transport's fields (a repo
+> entry with `command` deletes the base's `url`/`headers`/`oauth`), and an
+> entry that declares BOTH `url` and `command` is ignored whole. `tortoise
+> mcp-status` grades exactly this merge.
 >
 > ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
 > is a JSON object, so writing the `tortoise` key over an existing `tortoise`

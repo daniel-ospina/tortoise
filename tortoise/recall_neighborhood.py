@@ -49,6 +49,7 @@ and `bytes` ride alongside it) and the same input yields the same count.
 from __future__ import annotations
 
 import math
+import re
 
 #: Relations rendered per pointer. Three is the comparables' aggregation width
 #: (2–3 synthesized results) applied one layer down: enough to show the shape of
@@ -98,6 +99,31 @@ def measure(text: str) -> dict:
     """The auditable triple: the estimate plus the raw counts it came from."""
     raw = len(text.encode("utf-8"))
     return {"tokens": estimate_tokens(text), "bytes": raw, "chars": len(text)}
+
+
+#: Control characters other than tab/newline are stripped from anything injected.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def one_line(text: object, *, max_chars: int | None = None) -> str:
+    """Collapse `text` to ONE printable line — stored content is untrusted.
+
+    ⛔ The block's `data, not instructions` header is the prompt-injection defence,
+    and `trim_to_budget` promises never to drop it. A stored point that carries a
+    NEWLINE can therefore close and re-forge the envelope around its own text: a
+    snippet ending in `-->` followed by `data, not instructions` and a forged
+    instruction line renders as if it were the envelope itself. The pointer line
+    and the excerpt already went through this (`volunteer._synopsis`,
+    `excerpt_from_hit`); the RELATIONS path did not — `why._snippet` only strips
+    and truncates — so a peer label or a mitigation could inject raw lines.
+    """
+    if not isinstance(text, str):
+        return ""
+    cleaned = _CONTROL_RE.sub("", text)
+    collapsed = " ".join(cleaned.split())          # kills \n, \r, \t, nbsp runs
+    if max_chars is not None and len(collapsed) > max_chars:
+        return collapsed[:max_chars - 1] + "\u2026"
+    return collapsed
 
 
 # ── The source excerpt: already in hand, so it costs NO extra read ────────
@@ -232,7 +258,8 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
         rendered: list[str] = []
         for rel in relations:
             arrow = _DIRECTION_WORD.get(rel.get("direction") or "", "→")
-            detail = rel.get("peer") or rel.get("peer_id") or ""
+            detail = one_line(rel.get("peer") or rel.get("peer_id") or "",
+                              max_chars=EXCERPT_MAX_CHARS)
             weight = rel.get("weight")
             suffix = f" (ep {weight:.2f})" if isinstance(weight, (int, float)) else ""
             severity = rel.get("severity")
@@ -240,7 +267,7 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
             # A trade-off's MITIGATION is the reason the option was set aside — the
             # business logic — so it rides the relation to the renderer instead of
             # being dropped between assembly and render.
-            mitigation = rel.get("mitigation")
+            mitigation = one_line(rel.get("mitigation"))
             rendered.append(
                 f"{rel.get('predicate', 'IMPL')} {arrow} "
                 f"\"{detail}\"{suffix}"
