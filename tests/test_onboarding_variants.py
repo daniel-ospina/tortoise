@@ -1703,8 +1703,10 @@ _INVERSION_FORMS = (
     #     see the tools", "… once the tools stop appearing" and "… after
     #     upgrading then confirm the tools …" are NOT graded (each measured a
     #     FALSE RED on the wider first cut of this form).
+    #     The auxiliary is spelled out AND contracted: "… after you've verified
+    #     the tools …" was GREEN (measured) while the uncontracted twin was RED.
     _inversion_form(
-        r"\b(?:after|once|when|if)\s+(?:you\s+(?:have\s+)?|having\s+)?"
+        r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         + _CONFIRM_PREDICATE
         + r"[^.;]*?\btools\b"
     ),
@@ -1732,8 +1734,12 @@ _INVERSION_FORMS = (
     #     "… once the tools appear". The predicate is REQUIRED and restricted to
     #     a presence sense — a bare `once the tools` reddened "… once the tools
     #     stop appearing", which is a remedy with the restart first (measured).
+    #     A determiner/modifier other than a bare `the` is still the same shape:
+    #     "once your tools appear" / "once all the tools appear" were GREEN
+    #     (measured) while "once the tools appear" was RED — the modifier is
+    #     bounded to two words so the pattern cannot wander.
     _inversion_form(
-        r"\b(?:only\s+)?once\s+(?:the\s+)?tools\s+"
+        r"\b(?:only\s+)?once\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
         r"(?:are|is|have|has|appear|show|exist|load|listed|visible)\b"
     ),
     # (f) the same inversion stated one sentence EARLIER — a pre-cue imperative
@@ -1747,6 +1753,8 @@ _INVERSION_FORMS = (
         r"[^.;]*?\btools\b"
     ),
 )
+# Form (f) is the ONLY pre-cue-only form: see `_restart_cue_order_violation`.
+_PRE_CUE_FORM = 5
 # A config-side noun: the config is a FILE, readable without a restart.
 _CONFIG_NOUN_RE = re.compile(r"\b(?:configs?|settings|installer|\.mcp\.json)\b",
                              re.IGNORECASE)
@@ -1801,18 +1809,42 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     whose confirmation scopes the config (see above). Rephrasings outside that
     set are out of scope BY DESIGN; this function grades what it claims and
     claims only what it grades.
+
+    ⛔ THE TWO SIDES ARE NOT GRADED THE SAME WAY, because they are not the same
+    statement:
+    * BEFORE the cue, only the clause that GOVERNS the cue is graded (the last
+      one). Grading every earlier clause read an ordinary concessive as a
+      deferral — "Even if you confirmed the tools in an earlier session, a
+      changed config is not picked up until the process reloads. Restart your
+      client, then confirm the tools …" was RED (measured) while nothing in it
+      defers the restart.
+    * AFTER the cue, form (f) is NOT applied: a confirmation that follows the
+      cue is the very order this pin REQUIRES. Applying (f) to both sides
+      redded the table's own shipped sentence the moment its comma became a
+      full stop — "Restart your client. Confirm the tools are actually there."
+      (measured RED, with an assert message claiming the opposite of what the
+      copy says).
     """
     para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
     flat = " ".join(para.split())
     cue_at = flat.index(_RESTART_CUE)
-    segments = (flat[:cue_at], flat[cue_at + len(_RESTART_CUE):])
-    for segment in segments:
-        for clause in re.split(r"[,.;]", segment.lstrip(" \t,.;:—–-")):
-            if _confirmation_scopes_the_config(clause):
+    before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
+    pre_clauses = [c for c in re.split(r"[,.;]", before.lstrip(" \t,.;:—–-"))
+                   if c.strip()][-1:]
+    for clause in pre_clauses:
+        if _confirmation_scopes_the_config(clause):
+            continue
+        for pattern in _INVERSION_FORMS:
+            if pattern.search(clause):
+                return clause
+    for clause in re.split(r"[,.;]", after.lstrip(" \t,.;:—–-")):
+        if _confirmation_scopes_the_config(clause):
+            continue
+        for index, pattern in enumerate(_INVERSION_FORMS):
+            if index == _PRE_CUE_FORM:
                 continue
-            for pattern in _INVERSION_FORMS:
-                if pattern.search(clause):
-                    return clause
+            if pattern.search(clause):
+                return clause
     return None
 
 
@@ -1884,10 +1916,11 @@ def test_3232_generic_restart_lines_are_exact():
     # pass — so only a sentence terminator does. Note the leading `lstrip`
     # removes a terminator that directly follows the cue, so "the cue's
     # sentence" here means the cue's own sentence OR the one immediately after
-    # it; the paragraph's sentence-before shape ("Confirm the tools are actually
-    # there. Restart your client …") is NOT what this bound catches — it is
-    # graded by form (f) and the pre-cue segment in
-    # `_restart_cue_order_violation`, which is where that class is measured.
+    # it. The paragraph's sentence-before shape ("Confirm the tools are actually
+    # there. Restart your client …") is graded by form (f) only when the cue's
+    # own or next sentence ALSO names the tools; when it does not, THIS bound
+    # fails first, with the tools-appear message below rather than the
+    # inversion one (measured both ways).
     cue_sentence = re.split(
         r"[.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
     assert re.search(r"\btools\b", cue_sentence), (
@@ -1985,6 +2018,24 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client once the tools stop appearing.", False),
     ("Restart your client after upgrading then confirm the tools are actually "
      "there.", False),
+    # the shipped sentence with its comma turned into a full stop — form (f) must
+    # NOT grade a confirmation that follows the cue, or the pin reds the very
+    # order it requires (measured RED before form (f) was made pre-cue-only):
+    ("Restart your client. Confirm the tools are actually there.", False),
+    ("Restart your client. Check the tool list for the `tortoise_*` tools.", False),
+    # a concessive BEFORE the cue is not a deferral of it (measured RED when the
+    # pre-cue side graded every earlier clause):
+    ("The config is read once, at client start. Even if you confirmed the tools "
+     "in an earlier session, a changed config is not picked up until the process "
+     "reloads. Restart your client, then confirm the tools are actually there.",
+     False),
+    # ── inversions the previous cut passed ─────────────────────────────────
+    # contracted auxiliary: the uncontracted twin was graded, this was not:
+    ("Restart your client after you've verified the tools are actually there.",
+     True),
+    # a determiner/modifier other than a bare `the` in form (e):
+    ("Restart your client once all the tools appear.", True),
+    ("Restart your client once your tools appear.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
