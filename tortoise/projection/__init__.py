@@ -21093,18 +21093,27 @@ class FalkorProjection(
         union_q = " UNION ".join(
             f"MATCH (n:{label}) WHERE n.{prop} = $id "
             f"RETURN '{label}' AS label, '{prop}' AS key, n.{prop} AS value, "
-            f"properties(n) AS props LIMIT 1"
+            f"properties(n) AS props, labels(n) AS nodeLabels LIMIT 1"
             for label, prop in branches
         )
         rows = self.g.query(union_q, params={"id": id_val}).result_set
         seen: set[str] = set()
         out: list[dict] = []
-        for label, key, value, props in rows:
+        for row in rows:
+            # ⛔ `labels` is the NODE'S label set, not the matched branch: a
+            # hybrid `(:Object:Source)` is answered by the `Object` branch, so a
+            # consumer that gates the #3998 / D30 `:Source` denial on the branch
+            # label lets that node's DENIED `content` back out (measured on this
+            # PR's belief route). A 4-column row is a legacy/mock shape and falls
+            # back to the branch label, which is the pre-existing behaviour.
+            label, key, value, props = row[0], row[1], row[2], row[3]
+            node_labels = row[4] if len(row) > 4 else [label]
             ident = props.get("id") or props.get("eventId") or props.get("url")
             if ident in seen:
                 continue
             seen.add(ident)
             out.append({"label": label, "key": key, "value": value,
+                        "labels": tuple(node_labels or (label,)),
                         "properties": dict(props)})
         # Defense-in-depth (issue #327 security review): consumers interpolate
         # label/key into Cypher patterns. Fail loudly here if this producer ever

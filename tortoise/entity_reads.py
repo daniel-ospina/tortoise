@@ -304,9 +304,14 @@ def _endpoint_preview(row: Any) -> dict:
     drops ``content`` from every `:Source` read bag (#3998 / D30, #5196). Coalescing
     ``m.content`` into a neighbour's name inside Cypher would put that raw text
     on a route that never asked for it, so the query selects the Source arm
-    first (see ``entity_relations``). Everything else answers
-    ``coalesce(m.name, m.content, m.url)`` — its ``name`` first, then its
-    ``content`` (a ``:Point``'s body), then the identity keys.
+    first (see ``entity_relations``). The two arms are therefore
+    ``coalesce(m.name, m.url)`` for a `:Source` and
+    ``coalesce(m.name, m.content, m.url)`` for everything else — never "name,
+    then body, then identity keys" in the abstract, because the third term is the
+    ``url`` ALONE. ⛔ The ROOT's arm is not identical to a neighbour's: it also
+    falls back to ``eventId`` (a ``:Point`` carries an eventId and no url),
+    so a root answers ``name`` → ``url`` → ``eventId`` and a non-`:Source`
+    root ``name`` → ``content`` → ``url`` → ``eventId``.
     """
     labels = row[1] or []
     return {

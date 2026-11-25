@@ -16158,6 +16158,16 @@ async def list_sources(
     rows = await _read_offload(
         lambda: sdk.list_knowledge(kind="source"), op="list_sources")
     rows = list(rows or [])
+    # ⛔ THE ORDER MUST BE TOTAL BEFORE IT IS PAGED (#5346) — the same rule
+    # ``entity_reads.list_layer`` states for its own `SKIP`/`LIMIT`. The callee
+    # orders by ``points`` DESC with no tiebreak, and Sources routinely tie on it
+    # (several at 0), so two requests a moment apart can order the tied rows
+    # differently and a walk over ``offset`` repeats or skips one while
+    # ``truncated`` still reports the enumeration complete. The url is the
+    # node's own unique key, so it is the tiebreak; the sort is here, in the
+    # route, because the ordering is this read's contract and no Cypher belongs
+    # in a route (``entity_reads``' module rule).
+    rows.sort(key=lambda r: (-(r.get("points") or 0), r.get("url") or ""))
     page = rows[offset:offset + limit]
     return _paged("sources", page, candidates=len(rows), offset=offset, exact=True)
 
@@ -16393,6 +16403,14 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     if not any(entry.get("label") for entry in resolved):
         raise HTTPException(status_code=404, detail="Entity not found")
     label = resolved[0].get("label")
+    # ⛔ `labels` is the NODE'S label set; `label` is the branch that matched it,
+    # so a hybrid `(:Object:Source)` arrives as `label == "Object"`. The denied
+    # `:Source` properties (#3998 / D30) are decided by membership, not by the
+    # branch, or the denial is a property of the label name rather than of the
+    # node (measured: a `(:Object:Source)` root's raw `content` came back as this
+    # route's `entity.name`). A resolver that cannot answer the set falls back to
+    # the branch label, which is the pre-existing behaviour.
+    entity_labels = tuple(resolved[0].get("labels") or (label,))
     entity = resolved[0].get("properties") or {}
     # ⛔ IS THERE A BELIEF TO REPORT? Ask the NODE first, and only then ask EP.
     # EP's `_read_node` coalesces ABSENT params to Beta(1,1), so an Object, a
@@ -16529,7 +16547,7 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             # one route that also answers `/v1/sources/{id}`'s own node: measured,
             # the by-id route withheld it while this route served it.
             "name": ((entity.get("name") or entity.get("url")
-                      or entity.get("eventId")) if label == "Source" else
+                      or entity.get("eventId")) if "Source" in entity_labels else
                      (entity.get("name") or entity.get("content")
                       or entity.get("url") or entity.get("eventId"))),
         },
@@ -54866,7 +54884,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -903,6 +903,107 @@ def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
     assert _filter_delegation_payloads(None) is None
 
 
+def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_path):
+    """⛔ THE DENIAL IS DECIDED BY THE NODE'S LABEL SET, NOT BY THE MATCHED BRANCH.
+
+    A hybrid `(:Object:Source)` is resolved by the `Object` branch and answered
+    as `Object`, so gating the #3998 / D30 `:Source` filter on the branch label
+    let the node's DENIED `content` back out as the root's `name` on BOTH of this
+    PR's root-shaped routes — while `/v1/sources/{url}` withheld it, so the same
+    node read two ways disagreed.
+
+    ⛔ MUTANTS, either one reds this: (a) `navigation._resolve_root` deciding the
+    filter by `label == "Source"` instead of the `labels(n)` membership, and
+    (b) `hosted_api.get_entity_belief` gating its name coalesce on
+    `label == "Source"` instead of the resolved `labels`.
+    """
+    url = "https://example.test/hybrid-root-14592"
+    raw = "HYBRID RAW PAYLOAD THAT MUST NOT LEAK"
+    hyb = "hybrid-14592"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # Below the write door: nothing in the SDK mints a two-label node,
+            # and this is the shape a legacy payload Source converges into.
+            sdk._get_proj().g._query(
+                # No `name`: the name IS what the coalesce reaches for, so a
+                # named node would answer its name and mask the leak entirely.
+                "CREATE (n:Object:Source {id:$i, url:$u, content:$t, "
+                "objectKind:'goal'})",
+                params={"i": hyb, "u": url, "t": raw},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        # The by-id read denies the payload …
+        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
+        assert "content" not in denied, denied
+        assert raw not in repr(denied), denied
+
+        # … and so do both root arms: the relations preview …
+        relations = client.get(f"/v1/entities/{hyb}/relations")
+        assert relations.status_code == 200, relations.text
+        assert relations.json()["entity"]["name"] == url, relations.text
+        assert raw not in repr(relations.json()), relations.json()
+
+        # … and the belief route.
+        belief = client.get(f"/v1/entities/{hyb}/belief")
+        assert belief.status_code == 200, belief.text
+        assert belief.json()["entity"]["name"] == url, belief.text
+        assert raw not in repr(belief.json()), belief.json()
+
+
+def test_sources_paging_is_over_a_total_order(tmp_path):
+    """⛔ `SKIP`/`LIMIT` needs a TOTAL order (#5346), and Sources TIE on it.
+
+    The callee orders by ``points`` DESC with no tiebreak, so the order of TIED
+    rows is whatever the store hands back — and a walk over ``offset`` then
+    repeats or skips a row while ``truncated`` still reports the enumeration
+    complete. The route's ``rows.sort`` gives the ties a total order (points
+    DESC, then ``url`` ASC), which is what the assertions below pin.
+
+    ⛔ MUTANT, and the fixture is built to make it VISIBLE: the Sources are
+    created in DESCENDING url order, so a store that answers in insertion order
+    (which the engine does — measured) produces a list that is not url-sorted.
+    Dropping the route's sort therefore reds the first assertion, and it is the
+    only assertion that can: the partition walk below holds on any single-process
+    order.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # Descending, so insertion order is the reverse of the tiebreak.
+            for i in reversed(range(5)):
+                u = f"https://example.test/tie-{i}-14592"
+                sdk._create_point("statement", "extracted", extractedFrom=u)
+                sdk._get_proj().g._query(
+                    "MATCH (s:Source {url:$u}) SET s.points = 1",
+                    params={"u": u}, read_only=False)
+        finally:
+            sdk.close()
+
+        whole = client.get("/v1/sources", params={"limit": 100}).json()
+        urls = [r["url"] for r in whole["sources"]]
+        assert urls == sorted(urls), urls
+
+        # …and a walk past the end terminates: 5 rows, 2 per page.
+        seen: list[str] = []
+        truncs: list[bool] = []
+        for offset in (0, 2, 4, 6):
+            body = client.get("/v1/sources", params={
+                "limit": 2, "offset": offset}).json()
+            # `exact=True` on this route, so a truncated page states the total
+            # and a terminal one omits it (the contract's own shape).
+            if body["truncated"]:
+                assert body["total_available"] == 5, body
+            else:
+                assert "total_available" not in body, body
+            truncs.append(body["truncated"])
+            seen.extend(r["url"] for r in body["sources"])
+        assert truncs == [True, True, False, False], truncs
+        assert seen == sorted(urls), seen
+
+
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         a = client.post("/v1/objects", json={"name": "ALPHA", "objectKind": "goal"}).json()

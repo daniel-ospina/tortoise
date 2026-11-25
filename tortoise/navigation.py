@@ -88,7 +88,8 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]
     """
     union_q = " UNION ".join(
         f"MATCH (n:{label}) WHERE n.{prop} = $eid "
-        f"RETURN '{label}' AS label, properties(n) AS props, '{prop}' AS key "
+        f"RETURN '{label}' AS label, properties(n) AS props, '{prop}' AS key, "
+        f"labels(n) AS nodeLabels "
         f"LIMIT 1"
         for label, prop in _ROOT_BRANCHES
     )
@@ -101,8 +102,18 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]
     # key is then unknowable from the row, and "id" is what every one of those
     # callers matched, so it preserves their behavior exactly.
     key = row[2] if len(row) > 2 else "id"
+    # ⛔ THE DENIAL IS DECIDED BY THE NODE'S LABEL SET, NOT BY THE BRANCH THAT
+    # MATCHED IT. The UNION's first column is the BRANCH label, so a hybrid
+    # `(:Object:Source)` is matched by the `Object` branch and answered as
+    # `Object` — and gating the #3998 filter on `label == "Source"` therefore let
+    # a hybrid root's DENIED `content` back out (measured: a `(:Object:Source)`
+    # with `content` returned it as the root's `name` on the relations preview,
+    # while the same node's by-id read withheld it). `labels(n)` is carried for
+    # exactly this test; a 3-column row is a legacy/mock shape and falls back to
+    # the branch label, which is the pre-existing behaviour.
+    node_labels = row[3] if len(row) > 3 else None
     parsed = dict(props)
-    if label == "Source":
+    if "Source" in (node_labels if node_labels is not None else (label,)):
         # #3998 (D30): the ROOT is a read path too. `_parse_node` filters the
         # CONNECTED nodes; filtering only there left the same `:Source` root
         # handing its raw payload straight back — measured, a document created

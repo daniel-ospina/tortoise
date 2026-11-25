@@ -688,10 +688,14 @@ def declared_relation_packs() -> dict[str, tuple[str, ...]] | None:
 
     ⛔ The distinction is drawn on the WHOLE row set, not per row, and that is
     deliberate: one malformed row among many valid ones is skipped (it can only
-    fail to ATTRIBUTE, and the other packs' rows still answer), while a row set
-    that produced nothing usable is indistinguishable from an unreadable registry
-    and is reported as such — the fail-closed direction, because the destructive
-    claim here is "this predicate is declared by nobody". A row that declares a
+    fail to ATTRIBUTE, and the other packs' rows still answer), while a
+    NON-EMPTY row set that produced nothing usable is indistinguishable from an
+    unreadable registry and is reported as such — the fail-closed direction,
+    because the destructive claim here is "this predicate is declared by
+    nobody". ⛔ An EMPTY row set is NOT that case: nothing was declared, so it
+    answers ``{}`` (every predicate reads ``[]``) rather than ``None`` — the
+    guard is ``if rows and not usable``, and a written "a row set" would have a
+    reader believe an unpacks-installed graph is an unreadable one. A row that declares a
     predicate but names NO pack keeps its key with an empty tuple: the predicate
     IS declared, and it is a true statement that no pack is named for it.
 
