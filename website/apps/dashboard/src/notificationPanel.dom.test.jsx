@@ -365,6 +365,26 @@ test('#14686: Escape from inside the panel restores focus to the bell', () => {
   assert.equal(document.activeElement, bell(container))
 })
 
+test('#14686: Escape from the DETAIL view returns to the ledger and keeps focus findable', () => {
+  // Lost once in the concurrent-lane merge, re-applied: with the handler bound only
+  // inside the panel, a keydown that started outside its subtree never reached it, so
+  // Escape from a detail view did nothing and focus sat on <body>.
+  const { container } = renderBell({ alerts: [alert({ message: 'detail escape' })] })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.ok(container.querySelector('.notif-detail'))
+  const back = container.querySelector('.notif-back')
+  back.focus()
+  fireEvent.keyDown(back, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-detail'), null, 'back to the ledger')
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+  // …and Escape still closes from there.
+  fireEvent.keyDown(document, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-panel'), null)
+  assert.equal(document.activeElement, bell(container))
+})
+
 test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
   // `registerOf` fail-quiets an unknown register into the activity register, so a
   // two-valued chip labelled an unclassified row "activity" — a measurement that
