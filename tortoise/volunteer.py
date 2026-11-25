@@ -61,6 +61,12 @@ import logging
 import re
 
 from .live import TERMINAL_EXCLUDED_STATUSES
+from .recall_neighborhood import (
+    excerpt_from_hit,
+    neighborhood,
+    render_pointer_lines,
+    trim_to_budget,
+)
 from .why import assemble_why_blocks
 
 logger = logging.getLogger(__name__)
@@ -576,7 +582,8 @@ def _pointer_flag(cand: dict) -> str:
 
 
 def build_block(pointers: list[dict], surfaced: list[dict],
-                flags: list[str] | None = None) -> str:
+                flags: list[str] | None = None,
+                neighborhoods: dict[str, dict] | None = None) -> str:
     """Deterministic injectable markdown (§3.4 shape — gbrain ADAPT).
 
     Detect + point, never auto-dump bodies; the anti-hallucination
@@ -585,6 +592,12 @@ def build_block(pointers: list[dict], surfaced: list[dict],
     the pointer line (``flags``, one per pointer — see ``_pointer_flag``;
     plan §E2E-9 1a pins the ``block`` half, not only ``why``). Truncated
     deterministically to ≤ 8 KB.
+
+    ``neighborhoods`` (#14607) is the DEPTH half: for each pointer id, its
+    immediate relations with their predicates and the source excerpt it came
+    from. Absent or empty ⇒ the output is BYTE-IDENTICAL to the pre-#14607 block
+    (pinned by the contract suite), so a caller that has not opted in cannot
+    change.
     """
     if not pointers:
         return ""
@@ -595,14 +608,26 @@ def build_block(pointers: list[dict], surfaced: list[dict],
         "Follow a pointer before treating a detail as settled.",
         "",
     ]
-    lines = list(header)
+    bullets: list[list[str]] = []
     for i, ptr in enumerate(pointers):
         flag = flags[i] if flags and i < len(flags) else ""
-        lines.append(
+        bullet = [
             f"- **{ptr['label']}** → point/{ptr['id']}{flag} — "
             f"{ptr['synopsis']}"
-            " (read supports before relying on details)")
-    lines.append("")
+            " (read supports before relying on details)"]
+        hood = (neighborhoods or {}).get(ptr["id"])
+        if hood:
+            bullet.extend(render_pointer_lines(ptr, hood))
+        bullets.append(bullet)
+    if neighborhoods:
+        # #14607: the expansion has its OWN documented token budget
+        # (`recall_neighborhood.NEIGHBORHOOD_TOKEN_BUDGET`, estimate-based and
+        # measured p50/p95 by `tools/measure_recall_tokens.py`). Trim the lowest
+        # signal first, deterministically — never mid-line.
+        return trim_to_budget(header, bullets)
+    lines = list(header)
+    for bullet in bullets:
+        lines.extend(bullet)
     block = "\n".join(lines)
     # Deterministic byte cap (gbrain TURN_CONTEXT_DEFAULT_MAX_BYTES analog —
     # issue §6.2 "≤ 8 KB assembled markdown, asserted by S9"). Trim bullets
@@ -865,11 +890,24 @@ def run_volunteer_pipeline(
             flags.append(_pointer_flag(cand))
             if why:
                 why_entries.append(why_entry(cand["block"]))
+
+        # ── Stage 7b: the NEIGHBOURHOOD (#14607). The why-block read above
+        # already holds each candidate's supports, NANDs and trade-offs, and the
+        # RESOLVE hit already carries the stored `quote` — so the whole expansion
+        # costs ZERO extra graph reads (⛔ a second query for `quote` was
+        # measured pushing the hosted reflex past its 300 ms ceiling into
+        # `degraded_reason: "timeout"`). What it buys is the depth the owner
+        # asked for: relations WITH their predicates, plus the excerpt the item
+        # came from. The budget that bounds it lives in `recall_neighborhood`.
+        neighborhoods: dict[str, dict] = {}
+        for cand in selected:
+            neighborhoods[cand["id"]] = neighborhood(
+                cand["block"], excerpt_from_hit(by_id.get(cand["id"])))
         return {
             "pointers": pointers,
             "why": why_entries,
             "surfaced": surfaced,
-            "block": build_block(pointers, surfaced, flags),
+            "block": build_block(pointers, surfaced, flags, neighborhoods),
             "degraded_reason": None,
         }
     except _UnboundSearchError:
