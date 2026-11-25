@@ -2761,7 +2761,8 @@ cannot be restricted either: a `type(r) IN [...]` filter would answer only for t
 build knows and would hide every edge it does not name, which is the opposite of what a relations
 preview is for. The facts that bound it are stated on the row (one hop from one identity-resolved
 root, `CALL { … } … SKIP/LIMIT` paging, the `id(m) <> id(n)` self-loop exclusion on the reverse arm,
-and the `:Source` coalesce arm that withholds the denied `content`).
+and the `_RELATION_ENDPOINT_NAME` arm that never reaches a `:Source`'s denied `content` — it selects
+`m.url` for a `:Source`, and the preview is cut to `_ENDPOINT_NAME_MAX` with a `nameTruncated` flag).
 
 **Both documents re-derive every figure the row moves** — the section states these twice each, and
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:

@@ -3477,23 +3477,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: `_rows()` / `_doors()` / `_door_reaches()` rather than assumed. ⚠️ The worst-row
 #: ceiling is deliberately NOT moved with it: its note below says it is a BOUND, and the
 #: measured worst row is 3 against that ceiling of 4.
-#: ⛔ 27 -> 28 at `#14592`'s head (`cy-14593`), and this RISE is TABLE GROWTH, not a
-#: loosened relation — verified rather than assumed, because the arm's rule says a rise
-#: means the relation loosened and the relation, not the ceiling, is what gets fixed.
-#: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, this PR's
-#: relations preview, which walks every relationship type) and ONE door (its own
-#: `REST GET /v1/entities/{entity_id}/relations`), so 19 CUSTOMER-CALLABLE rows x 16
-#: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
-#: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
-#: filters `_rows()` to `_reach(row) == "customer-callable"` and counts the doors over
-#: THAT set, so quoting the whole table here (44 x 16) would state a denominator no arm
-#: measures — an earlier cut of this note did, and another read 45 in a third frame.
-#: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
-#: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved
-#: (the 18 older customer-callable rows still account for 27 of the 28). Worst row is
-#: UNCHANGED at 3
-#: (rows 1, 2, 17, 22, 24, 45 hold the multi-door cells), so the 4-ceiling is untouched.
-_ACCEPTED_PAIRS_AT_THIS_HEAD = 28
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 27
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
 #: more of a larger set. It is the same relation over a larger population, not a
@@ -4114,12 +4098,10 @@ _13_8_ENUMERATION = (
     # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
     # retired row 32, and 17 -> 18 when #13448 added the `ended.py::build_cypher` row —
     # NOT #8542, whose merged commit `8a04a96630` does not carry that row), so this
-    # marker tracks it. 18 -> 19 at `#14592`'s head (`cy-14593`): `entity_reads.py::entity_relations`
-    # is §13 row 46, a customer-callable reader behind `GET /v1/entities/{entity_id}/relations`.
-    # The numeral is a LOCATOR, not the figure under test: the figure is
+    # marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
-    "Outside this nineteen, two are default-ON on the ingestion path",
+    "Outside this eighteen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.
@@ -5737,15 +5719,8 @@ def test_the_module_filter_admits_a_split_traversal():
     # carries in those files — `_export_graph_snapshot`,
     # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
     # is PRE-EXISTING, so P7 added none of them.
-    # ⛔ 29/43 -> 30/45 at `#14592`'s head (`cy-14593`): `tortoise/entity_reads.py`
-    # arrived with ONE symbol (`entity_relations`, the relations preview) carrying the
-    # SAME untyped hop in BOTH directions — `-[r]->` and its `UNION ALL` reverse — so the
-    # corpus gains exactly ONE key and TWO rows. It is declared as a §13 ROW (row 46)
-    # rather than an `EMPTY_PATTERN` entry for row 42's reason: the walk DOES read the
-    # edge for a referent (the mechanism IS part of the answer), so the honest
-    # declaration is a row, and the entry form would assert a fact that is not true.
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (30, 45), (
-        "the empty-pattern derivation moved off 30 symbol keys / 45 site rows "
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (29, 43), (
+        "the empty-pattern derivation moved off 29 symbol keys / 43 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "
