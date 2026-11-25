@@ -9220,10 +9220,29 @@ _DERIVATION_LOOKAHEAD = 60
 #: CARRY run (`#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` — the
 #: paragraph that sorts the block's named files into rows and registrations uses this one, with the
 #: files several tokens away from the word). MEASURED at this head: `_row_claims` returns every
-#: row-carrying file the block names, each one carries a `durations` row, and deleting the row for
-#: ANY of them reds this arm — including `tests/test_sdk_privatise_sweep.py` (the `#14548` residue
-#: RATCHET), `tests/test_14559_reaper_schedule.py` (`#14565`) and `#14415`'s files, which earlier
-#: revisions of the block or of this arm could not reach at all. The CARRY sentence's ABSENCE half
+#: row-carrying file the block names IN ONE OF THOSE FOUR SHAPES, each one carries a `durations`
+#: row, and deleting the row for any of them reds this arm — including
+#: `tests/test_sdk_privatise_sweep.py` (the `#14548` residue RATCHET),
+#: `tests/test_14559_reaper_schedule.py` (`#14565`) and `#14415`'s files, which earlier revisions of
+#: the block or of this arm could not reach at all.
+#: ⛔ THE STATED RESIDUAL — one row claim in the block is in NO shape this arm reads, and it is
+#: DECLARED rather than left to be rediscovered. The `#14544` paragraph says of
+#: `tests/test_dod_5090_probe.py`: "the weight comes from the file's own `durations` row, not from
+#: either registration". That is a row claim, it is TRUE (the map carries
+#: `test_dod_5090_probe.py: 90.0`), and deleting that row leaves THIS arm GREEN — measured, not
+#: inferred: the path and the word `row` are separated by `… the file's own `durations` `, so no
+#: anchor here reaches it, and `--integrity`'s coverage check is a 0.90 RATIO that cannot see one
+#: missing row either.
+#: ⛔ It is nonetheless GRADED, indirectly, and the difference is worth stating rather than hiding
+#: behind "the arm reads four shapes": a `durations` row is also a SHARD-LAYOUT input, so a weight
+#: large enough to move a bin reds `states_the_measured_emission` when it disappears. MEASURED for
+#: this one: dropping `test_dod_5090_probe.py`'s `90.0` row repacks the pool to 819.1/819.0 with
+#: different shard groupings against the stated 827.1/827.0, so that arm reds. That is NOT a
+#: guarantee this arm can offer — a row whose removal moves no bin (the flat 2.0 s majority) would
+#: vanish unseen. A fifth matcher for `<path>` … `'s `durations` ` row` is the shape that would grade
+#: the claim DIRECTLY; until one is written, this paragraph is the only record that it is ungraded
+#: HERE, so do not reword it into a coverage claim.
+#: The CARRY sentence's ABSENCE half
 #: is graded separately (`test_the_fast_shards_header_block_grades_the_carry_row_spelling`), because
 #: handing a file the block says has NO row to an arm that reds on absence would invert its meaning.
 #: ⛔ NO COVERAGE COUNT IS STATED HERE: a number of graded files written as a figure goes stale the
