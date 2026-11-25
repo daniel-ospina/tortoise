@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14582-1795557475-p667777-af3b280e",
+  "_sha": "d2fbeef18e7bd4b839a4e45e4c0ae5c7b5b41334",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14582.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/14582-provision-graph-record"
+    },
+    {
+      "kind": "sha",
+      "value": "76c7eb49a7c127b9e6bd80424f7e3c922a73843d"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14582-creation-hook"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 15000,
+  "duration_s": 14409,
+  "ended_at": 1795571884,
+  "exit_code": 143,
+  "heartbeat_at": 1795571884,
+  "host": "cmux",
+  "issue": 14582,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14582-1795557475-p667777-af3b280e",
+  "lease_until": 1795586884,
+  "pid": 667777,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795557475,
+  "state": "FAILED",
+  "tag": "14582",
+  "worktree": "/home/cmux/tortoise/.worktrees/14582-creation-hook"
+}
