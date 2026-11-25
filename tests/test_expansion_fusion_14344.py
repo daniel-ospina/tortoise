@@ -217,13 +217,30 @@ def test_pure_function_of_the_two_lists_and_of_nothing_else():
           (its ``{**dict(second), **dict(first)}`` mutant reds);
       (ii) the caller's leg lists must come back untouched — a merge that sorts
            or consumes a caller list in place reds here."""
-    pass1 = [(f"p{i}", 1.0 - i / 100) for i in range(7)]
+    # ⛔ THE FIXTURE MUST NOT ALREADY BE IN SORTED ORDER (#14642, measured). It
+    # used to be `p0..p6`, which is exactly what `list.sort()` produces, so the
+    # `sort()` mutant the arm below names was a NO-OP: it left every row green,
+    # including the in-place arm, because sorting an already-sorted list changes
+    # neither the caller's list nor the fused order. ONE OUT-OF-ORDER PAIR is
+    # what makes the mutation observable — `sorted()` moves `p0` back above
+    # `p1`, which reds BOTH the expected order below and the in-place arm. The
+    # precondition is asserted rather than assumed, for the same reason: a
+    # fixture quietly restored to ascending order would re-inert the arm.
+    pass1 = [(f"p{i}", 1.0 - i / 100) for i in (1, 0, 2, 3, 4, 5, 6)]
     expanded = [(f"x{i}", 1.0 - i / 100) for i in range(7)]
     pass1_before, expanded_before = list(pass1), list(expanded)
+    assert pass1 != sorted(pass1), (
+        "the pass-1 fixture is already in sorted order, so a `sort()` mutant is "
+        "undetectable here — one out-of-order pair is what makes this arm "
+        "discriminating")
 
     first = _ids(fuse_expansion_pass(pass1, expanded))
 
-    assert first == [pid for i in range(7) for pid in (f"p{i}", f"x{i}")], (
+    # Every p/x pair sits at the same rank, so each pair TIES on its RRF term and
+    # `(-score, id)` decides it — `p` before `x`, at every rank, including the
+    # swapped one.
+    assert first == ["p1", "x0", "p0", "x1", "p2", "x2", "p3", "x3",
+                     "p4", "x4", "p5", "x5", "p6", "x6"], (
         "the fused order must be the rank order with the (-score, id) tiebreak "
         f"resolving each equal rank — got {first}")
     assert pass1 == pass1_before and expanded == expanded_before, (
