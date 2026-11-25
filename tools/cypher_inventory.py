@@ -372,9 +372,17 @@ def surface_files(prefixes: tuple[str, ...]) -> list[str]:
     `git ls-files` reads the index, so this never walks `.worktrees/`,
     `node_modules/` or a build tree: the search-guard rule and the load policy.
     """
+    # ⛔ `-z` EMITS RAW FILENAME BYTES, so `text=True` (strict UTF-8) RAISES on a
+    # tracked name that is not valid UTF-8 — a `UnicodeDecodeError`, which is a
+    # `ValueError`, NOT an `OSError`, so it slips through both of `main()`'s guards and
+    # exits 1 (the DRIFT code) on the DEFAULT verb and on `--check`. Measured in a
+    # scratch repo with a tracked `caf\xe9.py`: bare verb and `--check` both rc 1.
+    # `surrogateescape` round-trips those bytes, so `ROOT / relpath` still opens the
+    # file and the census reads it like any other.
     out = subprocess.run(
         ["git", "ls-files", "-z", "--", *prefixes],
         cwd=ROOT, capture_output=True, text=True, check=True,
+        encoding="utf-8", errors="surrogateescape",
     ).stdout
     files = [p for p in out.split("\0") if p.endswith(".py")]
     return sorted(files)
@@ -956,8 +964,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         try:
+            # `ROOT.resolve()` is inside the guard too: a symlink loop on the tree root
+            # raises `RuntimeError` here, and only `ValueError` (path outside ROOT) was
+            # ever caught.
             rel = target.relative_to(ROOT.resolve()).as_posix()
-        except ValueError:
+        except (ValueError, OSError, RuntimeError):
             rel = None
         if rel is not None:
             # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent
