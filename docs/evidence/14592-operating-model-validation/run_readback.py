@@ -34,6 +34,16 @@ GRAPH = "xv14592_operating_model"
 
 #: One probe per element of the operating model the owner asked about. `expect`
 #: names the corpus fact a correct graph must be able to answer with.
+#: The corpus decision this probe must land on. A raw episodic turn also carries the
+#: word "Decision" (`[assistant] Decision: we revert to NordicFreight…`), so a
+#: substring scan over the hits is NOT a selection rule. In the committed run it
+#: settled on `doc-05_t5` — an episodic turn id — and `expand`/`explore` then
+#: answered `[]` for a graph that holds 8 IMPL rows on the real decision point.
+#: `pick_decision_point` is the rule and `decision_probe_findings` is the guard:
+#: the guard's verdict is recorded in the artifact, so an empty relation read can
+#: never again be committed as a successful one.
+DECISION_MARKER = "choose coldpath"
+
 PROBES = [
     ("decision", "Which delivery partner did we choose, and why did we choose them?",
      "ColdPath Logistics — 9pm cutoff meets the morning restaurant slots and it "
@@ -52,6 +62,81 @@ PROBES = [
     ("naming", "What companies and people are involved?",
      "NordicFreight, ColdPath Logistics, Marta Reyes, Dev Patel, Priya Nair"),
 ]
+
+
+def reply_rows(reply, keys=("result", "results", "relationships", "nodes", "items")):
+    """Normalise an MCP reply to a list of rows.
+
+    The server answers in three shapes for the same family of call — a dict with
+    a row list under one key, a list of row dicts, or a list holding ONE JSON
+    string (fastmcp's text content). This unwraps all three, and returns `[]`
+    for anything else, so a caller cannot mistake "no rows" for "no answer"
+    without the guard below.
+    """
+    if isinstance(reply, str):
+        try:
+            return reply_rows(json.loads(reply), keys)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(reply, dict):
+        for key in keys:
+            if isinstance(reply.get(key), list):
+                return reply[key]
+        return []
+    if isinstance(reply, list):
+        if len(reply) == 1 and isinstance(reply[0], str):
+            return reply_rows(reply[0], keys)
+        return [row for row in reply if isinstance(row, dict)]
+    return []
+
+
+def pick_decision_point(rows):
+    """The EXTRACTED decision statement from a search reply.
+
+    Ranked, so the answer does not depend on the search's order: a statement
+    whose content STARTS WITH the marker wins over one that merely contains it,
+    and a `statement` always wins over a raw turn — the marker in a turn is the
+    transcript's own `Decision:` prefix, not the extracted decision
+    (`doc-05_t5`, the id the previous revision settled on).
+    """
+    best: dict | None = None
+    best_rank = -1
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "").lower().strip()
+        if DECISION_MARKER not in content:
+            continue
+        kind = str(row.get("pointKind") or row.get("point_kind") or "").lower()
+        rank = (2 if content.startswith(DECISION_MARKER) else 0) + (
+            1 if kind == "statement" else 0)
+        if rank > best_rank:
+            best, best_rank = row, rank
+    return best
+
+
+def decision_probe_findings(decision_point, expand, explore, surfaced_by_probe=None):
+    """What is WRONG with this relation read — empty list means it read something.
+
+    `expand_relationships` answering `[]` is a failed read, not a finding about
+    the graph: it is exactly how the committed run recorded "the decision has no
+    relations" when the id it asked about (`doc-05_t5`) was an episodic turn and
+    never a Point.
+    """
+    issues: list[str] = []
+    if surfaced_by_probe is False:
+        issues.append(
+            "the decision probe's own hits did not surface the decision statement "
+            "(the targeted follow-up search did — record both reads)")
+    if not decision_point:
+        issues.append("no decision point was selected — expand/explore never ran")
+    if not reply_rows((expand or {}).get("reply")):
+        issues.append(f"expand_relationships({decision_point or ''}) returned no relations")
+    if not reply_rows((explore or {}).get("reply"),
+                      keys=("result", "relationships", "nodes")):
+        issues.append(
+            f"explore_connections({decision_point or ''}) returned no connected nodes")
+    return issues
 
 
 async def _call(client, tool, args):
@@ -133,20 +218,25 @@ async def run() -> int:
             print(json.dumps(r.get("reply", r), indent=1, default=str)[:3000])
 
         # ── (d) relations: expand the decision point in full ─────────────
-        dec = None
-        for item in (report["search"][0].get("reply") or {}).get("result", []) \
-                if isinstance(report["search"][0].get("reply"), dict) else []:
-            if "decision" in str(item.get("content", "")).lower() or \
-               "choose ColdPath" in str(item.get("content", "")):
-                dec = item
-                break
+        # The decision probe's OWN hits are the first source. If they do not
+        # surface the decision statement — §4's result for this run — the driver
+        # asks for that sentence directly and records BOTH reads; it never
+        # falls back to `graph_overview`'s `recent` list (the previous revision's
+        # second arm) nor to a pasted id.
+        dec = pick_decision_point(reply_rows(
+            (report["search"][0] or {}).get("reply")))
+        surfaced_by_probe = dec is not None
         if dec is None:
-            for item in (report["layers"].get("tortoise_graph_overview", {})
-                         .get("reply") or {}).get("recent", []) or []:
-                dec = item
-                break
+            report["decision_search"] = await _call(
+                client, "tortoise_search",
+                {"query": "we choose ColdPath Logistics as our delivery partner",
+                 "limit": 8})
+            dec = pick_decision_point(
+                reply_rows(report["decision_search"].get("reply")))
         dec_id = (dec or {}).get("id") or (dec or {}).get("point_id")
         report["decision_point"] = dec_id
+        report["decision_point_kind"] = (
+            (dec or {}).get("pointKind") or (dec or {}).get("point_kind"))
         report["expand"] = await _call(
             client, "tortoise_expand_relationships", {"point_id": dec_id or ""})
         print("\n=== expand_relationships (the decision point) ===")
@@ -158,6 +248,14 @@ async def run() -> int:
             if dec_id else {"skipped": "no decision point id"}
         print("\n=== explore_connections (decision, 2 hops) ===")
         print(json.dumps(report["explore"], indent=1, default=str)[:5000])
+
+        # The guard, recorded IN the artifact: an empty relation read must never
+        # again be written down as a successful one.
+        report["decision_probe_findings"] = decision_probe_findings(
+            dec_id, report["expand"], report["explore"],
+            surfaced_by_probe=surfaced_by_probe)
+        for issue in report["decision_probe_findings"]:
+            print(f"!! DECISION PROBE INCOMPLETE: {issue}")
 
         # ── (e) confidence / EP per contested probe ──────────────────────
         report["confidence"] = []
