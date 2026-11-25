@@ -496,6 +496,80 @@ def test_declared_endpoint_is_none_for_a_bare_stdio_entry(project):
     assert mcp_selfcheck.declared_endpoint("pi", project_dir=project) is None
 
 
+def test_a_local_stdio_server_is_not_proved_by_an_http_call(
+        project, auth_endpoint, monkeypatch):
+    """⛔ A LOCAL stdio SERVER IS NOT THE BRIDGE — a green here is about another host.
+
+    `declared_endpoint` is None for EVERY bare stdio entry, so the probe fell back
+    to the CLIENT-resolved endpoint in the operator's shell: a self-hosted entry
+    (`python -m tortoise.mcp_server`, whose own server may point at a dead port)
+    came back `OK (…, stdio): live call succeeded`, graded about an endpoint the
+    entry never contacts. `onboard` reads `verdict.exit_code`, so that green also
+    licensed writing the "reads go through the MCP" sentences on an install
+    nothing proved. Only the bridge is a stdio→HTTP shim an HTTP call can grade.
+    """
+    monkeypatch.setenv("TORTOISE_MCP_URL", auth_endpoint)
+    monkeypatch.setenv("TORTOISE_API_KEY", RIGHT_KEY_14607)
+    # The static pass must reach `resolves-unprobed` for this test to exercise the
+    # LIVE-upgrade decision, so the interpreter check is stubbed to "imports fine"
+    # (this box's own `tortoise.mcp_server` cannot import — `fastmcp` is absent — and
+    # that is a DIFFERENT, correct verdict: `server-error`, pinned separately below).
+    monkeypatch.setattr(mcp_selfcheck, "_missing_module", lambda *a, **k: "")
+    _write_config(project, {
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_server"],
+        "env": {"TORTOISE_DB_URI": "docker://:pw@127.0.0.1:1/none"},
+    })
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.status == mcp_selfcheck.RESOLVES_UNPROBED, verdict.line()
+    assert verdict.exit_code == 3, (
+        "a local stdio server cannot be proved by an HTTP call, so this must be "
+        "an abstention — never a green: " + verdict.line())
+    assert not verdict.ok
+
+
+def test_an_import_failure_that_is_not_a_missing_module_is_not_told_to_install(
+        project, monkeypatch):
+    """⛔ NOT EVERY IMPORT FAILURE IS A MISSING PACKAGE.
+
+    `python -c "import tortoise.mcp_server"` exits non-zero on an interpreter that
+    HAS tortoise whenever the module refuses to load at import time (measured: the
+    local stdio server raises on a hosted `TORTOISE_API_KEY`; on this box it raises
+    because `fastmcp` is absent). Reporting that as `python-lacks-tortoise` and
+    prescribing "install tortoise" sent the reader to install a package they
+    already had — the wrong-layer remedy this module exists to remove.
+    """
+    monkeypatch.setattr(mcp_selfcheck, "_missing_module",
+                        lambda *a, **k: "RuntimeError: TORTOISE_API_KEY is the "
+                                        "hosted/cloud key — it is not used by local stdio MCP")
+    _write_config(project, {
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_server"],
+    })
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.SERVER_ERROR, verdict.line()
+    assert "install tortoise" not in verdict.line(), (
+        "the interpreter has tortoise; this remedy is for a different failure: "
+        + verdict.line())
+    assert "hosted/cloud key" in verdict.line(), (
+        "the child's own cause must be carried through: " + verdict.line())
+
+
+def test_the_bridge_is_still_proved_by_an_http_call(
+        project, auth_endpoint, monkeypatch):
+    """The other half: the bridge IS a stdio→HTTP shim, so the probe still grades it."""
+    monkeypatch.setenv("TORTOISE_API_KEY", RIGHT_KEY_14607)
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    _write_config(project, {
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": auth_endpoint},
+    })
+    assert mcp_selfcheck._forwards_over_http("pi", project_dir=project) is True
+    verdict = mcp_selfcheck.check("pi", project_dir=project, live=True)
+    assert verdict.ok, verdict.line()
+
+
 # ── 7 · the probe runs under the CHILD'S environment, not the shell's ────
 #
 # The installed shape is: the harness spawns `python3 -m tortoise.mcp_bridge`
@@ -971,6 +1045,33 @@ def test_an_unset_cwd_variable_is_not_described_as_an_empty_bearer(project, monk
     assert "Bearer" not in verdict.line(), (
         "this entry has no Authorization header, so a sentence about an empty "
         "bearer names a layer it never uses: " + verdict.line())
+
+
+def test_a_literal_bearer_with_an_unset_other_header_is_not_an_empty_bearer(
+        project, monkeypatch):
+    """The guard is the INTERSECTION: an `Authorization` leaf AND this unset name.
+
+    Two earlier revisions of it were wrong in opposite directions: it fired for a
+    stdio entry whose unset variable was a `cwd`, then for an entry whose
+    `Authorization` value is a LITERAL bearer while the unset name belonged to a
+    different header. Here the bearer in the file is non-empty and the unset name
+    is somebody else's — so a sentence about `Authorization: Bearer ` (empty) is a
+    claim about a header this entry does not have.
+    """
+    monkeypatch.delenv("RV14607_UNSET", raising=False)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_present-14607")
+    _write_config(project, {
+        "type": "http",
+        "url": "https://api.premiselabs.co/mcp/",
+        "headers": {"Authorization": "Bearer tt_literal_in_file",
+                    "X-Org-Id": "${RV14607_UNSET}"},
+    })
+    verdict = mcp_selfcheck.classify("pi", project_dir=project)
+    assert verdict.status == mcp_selfcheck.ENV_UNSET, verdict.line()
+    assert "RV14607_UNSET" in verdict.line()
+    assert "Bearer ` (empty)" not in verdict.line(), (
+        "the bearer in this file is a literal; the unset name is a different "
+        "header, so the empty-bearer sentence is a wrong-layer claim: " + verdict.line())
 
 
 def test_a_missing_credential_still_carries_a_remedy():

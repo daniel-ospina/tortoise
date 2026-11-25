@@ -569,6 +569,19 @@ def _missing_module(command: str, module: str) -> str:
     return last[:200]
 
 
+def _is_missing_module(reported: str) -> bool:
+    """Is this child's failure a MISSING PACKAGE (vs the module refusing to load)?
+
+    Only `ModuleNotFoundError` / `No module named` justifies
+    `python-lacks-tortoise` and an "install tortoise" remedy; an import that
+    raises anything else means the package is THERE and broken or misconfigured
+    for this entry (measured: the local stdio server raises on a hosted
+    `TORTOISE_API_KEY`), where "install tortoise" is a wrong-layer remedy.
+    """
+    lowered = reported.lower()
+    return "modulenotfounderror" in lowered or "no module named" in lowered
+
+
 def _header_carries_credential(entry: dict) -> bool:
     headers = entry.get("headers")
     if not isinstance(headers, dict):
@@ -637,15 +650,17 @@ def classify(harness: str, *, project_dir: Path | None = None
             source=source, transport="stdio", configs_read=read)
     if unset:
         names = ", ".join(f"${n}" for n in unset)
-        # ⛔ THE EMPTY-BEARER SENTENCE IS ABOUT A HEADER, so it is emitted only when
-        # the unset variable is IN one. It used to fire on
-        # `any("author" in path) or not credentials_present(...)`, and the second
-        # disjunct sent a stdio entry whose unset variable is a WORKING DIRECTORY
-        # (`"cwd": "${WORKDIR_14607}"`) a story about `Authorization: Bearer ` and
-        # `-32001` — a layer that entry never uses, which is the same wrong-layer
-        # claim this module exists to remove. The genuine capture is always the
-        # first disjunct: the variable's leaf path runs through `headers`.
-        blank_credential = any("author" in p.lower() for p, _v in leaves)
+        # ⛔ THE EMPTY-BEARER SENTENCE IS ABOUT A HEADER, and about THIS unset
+        # variable being IN one. Three earlier revisions of this guard were each
+        # answered by a review: `or not credentials_present(...)` fired it for a
+        # stdio entry whose unset variable was a WORKING DIRECTORY; then
+        # `any("author" in path)` fired it for an entry whose `Authorization` value
+        # is a LITERAL bearer while the unset name belonged to a different header
+        # (`X-Org-Id`). So the test is the intersection of the two facts: the leaf
+        # sits under an `Authorization` key AND the unset name is one it interpolates.
+        blank_credential = any(
+            "author" in p.lower() and set(_expand(v)[1]) & set(unset)
+            for p, v in leaves)
         detail = (f"the entry interpolates {names}, which the harness "
                   f"environment does not set — an unset variable expands to an "
                   f"empty string")
@@ -712,7 +727,7 @@ def classify(harness: str, *, project_dir: Path | None = None
             # `resolves-unprobed`, which is the honest answer.
             if module_name.startswith("tortoise") and _looks_like_python(cmd):
                 missing = _missing_module(cmd, module_name)
-                if missing:
+                if missing and _is_missing_module(missing):
                     return Verdict(
                         status=PYTHON_LACKS_TORTOISE,
                         detail=(f"`{cmd} -m {module_name}` cannot run: {missing} "
@@ -721,6 +736,27 @@ def classify(harness: str, *, project_dir: Path | None = None
                         fix=(f"install tortoise for `{cmd}`, or pin this box's "
                              f"interpreter: `tortoise onboard --harness "
                              f"{harness}` from the environment that has it"),
+                        source=source, transport=transport, configs_read=read)
+                if missing:
+                    # ⛔ NOT EVERY IMPORT FAILURE IS A MISSING MODULE. `python -c
+                    # "import tortoise.mcp_server"` on an interpreter that HAS
+                    # tortoise exits non-zero when the module refuses to load at
+                    # import time — measured: with `TORTOISE_API_KEY` exported (the
+                    # normal hosted install), the LOCAL stdio server raises
+                    # `TORTOISE_API_KEY is the hosted/cloud key — it is not used by
+                    # local stdio MCP`. Reporting that as `python-lacks-tortoise`
+                    # and prescribing "install tortoise" sent the reader to install
+                    # a package they already had. The class says the server will not
+                    # start; the fix names the child's own cause.
+                    return Verdict(
+                        status=SERVER_ERROR,
+                        detail=(f"`{cmd} -m {module_name}` fails at import: {missing} "
+                                f"— the interpreter HAS tortoise, so this is not a "
+                                f"missing package: the module refuses to load"),
+                        fix=("fix the cause the child reports above — e.g. a hosted "
+                             "`TORTOISE_API_KEY` exported into a LOCAL stdio server's "
+                             "environment (unset it for that server), or a broken "
+                             "install of this interpreter"),
                         source=source, transport=transport, configs_read=read)
         return Verdict(
             status=RESOLVES_UNPROBED,
@@ -888,6 +924,23 @@ def declared_endpoint(harness: str, *, project_dir: Path | None = None
         if expanded.strip():
             return expanded.strip()
     return None
+
+
+def _forwards_over_http(harness: str, project_dir: Path | None = None) -> bool:
+    """Does this stdio entry SHIM to an HTTP endpoint (i.e. is it the bridge)?
+
+    The bridge (`python3 -m tortoise.mcp_bridge`) is a stdio→HTTP shim, so a live
+    HTTP call is a fair proof of it. `python3 -m tortoise.mcp_server` is a LOCAL
+    server that speaks stdio only: an HTTP call grades an endpoint it never
+    contacts, which is how a self-hosted entry pointing at a dead port came back
+    green. Identified by the entry's own argv, the one thing the harness spawns.
+    """
+    _source, entry, _read, _status = read_entry(harness, project_dir=project_dir)
+    if not entry:
+        return False
+    argv = [str(a) for a in (entry.get("args") or []) if isinstance(a, (str, int))]
+    argv.append(str(entry.get("command") or ""))
+    return any("tortoise.mcp_bridge" in token for token in argv)
 
 
 def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict:
@@ -1065,6 +1118,27 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
             detail=("the entry is http but declares no readable endpoint, so there "
                     "is nothing to probe — an abstention, not a pass"),
             fix="re-register it: `tortoise onboard --harness " + harness + "`",
+            source=static.source, transport=static.transport,
+            configs_read=static.configs_read)
+    if endpoint is None and not _forwards_over_http(harness, project_dir):
+        # ⛔ A LOCAL stdio SERVER IS NOT THE BRIDGE, and an HTTP call proves nothing
+        # about it. `declared_endpoint` is None for EVERY bare stdio entry, so the
+        # probe fell back to the CLIENT-resolved endpoint in the operator's shell —
+        # and a self-hosted entry (`python -m tortoise.mcp_server`, whose own server
+        # may point at a dead port) came back `OK (…, stdio): live call succeeded`,
+        # graded about an endpoint that entry never contacts. `onboard` reads
+        # `verdict.exit_code`, so that green also licensed writing the two
+        # "reads go through the MCP" sentences on an install nothing proved. The
+        # bridge is the one stdio shape an HTTP probe DOES grade (it is a
+        # stdio→HTTP shim), and it is identified by the entry's own argv.
+        return Verdict(
+            status=RESOLVES_UNPROBED,
+            detail=("the entry starts a LOCAL stdio server (not the HTTP bridge), so "
+                    "no HTTP call can prove it loads — start it the way the harness "
+                    "does and read its output; this is an abstention, not a pass"),
+            fix=("prove it end-to-end (`tortoise mcp-status --live` once the harness "
+                 "has restarted), or register the hosted bridge instead: "
+                 f"`tortoise onboard --harness {harness}`"),
             source=static.source, transport=static.transport,
             configs_read=static.configs_read)
     probed = probe(project_dir=project_dir, url=endpoint)

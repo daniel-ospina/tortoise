@@ -407,9 +407,13 @@ by walking **up from the current directory**. Both have silent failure modes.
 Follow these four steps in order — each one is load-bearing, the first two are
 yours to execute, step 3 is a handoff to the user, and step 4 is the check.
 
-**1. Export the key to your shell profile.** Pi expands `${VAR}` from
-`process.env` **at process start**, so a missing export produces an empty
-bearer token (`Authorization: Bearer`) and a 401 — not a config error:
+**1. Export the key to your shell profile.** The **bridge reads the key from the
+environment on every request**, and a missing one is its own named refusal
+(`MCP-KEY-EMPTY`, listing the sources it read) — not a silent empty bearer. The
+old `${VAR}`-in-a-header config DID capture it at process start and send
+`Authorization: Bearer` (empty), and that mechanism is why the recipe below no
+longer uses one. Export it because every entry point reads it, not because the
+config expands it:
 
 ```bash
 # Idempotent: a bare `>>` stacks a second export on every re-run.
@@ -427,11 +431,11 @@ that alias and is still OPEN, so it is landed by the #10605 fix in
 `tortoise/mcp_client.py` and not by a change of its own — because the fleet host
 exports that name; the recipes below do not rely on it, so nothing
 here changes. Giving the MCP credential a
-different name is a legitimate policy choice (#3615) — but the committable
-`.mcp.json` (project scope) expands `${TORTOISE_API_KEY}` from `process.env`, so a
-differently-named credential that is NOT also aliased sends an empty Bearer and
-401s while every entry point above goes unauthenticated — a config-name
-mismatch that reads as an auth failure (#5153). If the profile names it
+different name is a legitimate policy choice (#3615) — but `TORTOISE_API_KEY` is the
+name the client resolves (`mcp_client.py`), so a differently-named credential that
+is NOT also aliased is simply not found: the bridge refuses by name
+(`MCP-KEY-EMPTY`) while every entry point above goes unauthenticated — a
+config-name mismatch that reads as an auth failure (#5153). If the profile names it
 separately, alias it:
 
 ```bash
@@ -581,8 +585,8 @@ records the defect it came from.
 
 **3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
 process cannot restart itself). Not `/reload`, and not a restart of an
-already-open terminal: expansion reads the **launching shell's** env, so a
-reload (or a restart that reuses the old process env) silently keeps the
+already-open terminal: the bridge **child inherits the launching process's env**,
+so a reload (or a restart that reuses the old process env) silently keeps the
 stale or absent value. Tell the user: quit Pi, open a new terminal, and start
 Pi again from it.
 
