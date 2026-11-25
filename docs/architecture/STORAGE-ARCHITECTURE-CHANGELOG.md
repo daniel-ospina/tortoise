@@ -2783,7 +2783,7 @@ hand-edited. `test_the_export_scan_cites_open_on_the_statements_they_name` redde
 `35810` and is green on the re-derived triple.
 
 **Gates at this change.** `tests/test_7948_about_object_read_sites.py` 61 passed ·
-`tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs` + `test_12184_shifted_cites`
-+ `test_substrate_map` + `test_7949_capstone_measure` + `test_13098_cypher_inventory` (DOC_PIN=1) +
+`tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs`, `test_12184_shifted_cites`,
+`test_substrate_map`, `test_7949_capstone_measure`, `test_13098_cypher_inventory` (DOC_PIN=1) and
 `test_ci_selection` 947 passed, 1 skipped · `tools/cypher_inventory.py --check` 25 pins ·
 `tools/hosted_api_cite_census.py --check` every stated figure · `tools/ci_selection.py --integrity` clean.
