@@ -176,7 +176,7 @@ async def run() -> int:
         (OUT / "tool-surface.json").write_text(json.dumps(
             {n: {"description": (t.description or "")[:400],
                  "required": (t.inputSchema or {}).get("required", []),
-                 "params": list(((t.inputSchema or {}).get("properties") or {}))}
+                 "params": list((t.inputSchema or {}).get("properties") or {})}
              for n, t in sorted(tools.items())}, indent=2) + "\n")
         report["tool_surface"] = {"count": len(tools), "names": sorted(tools)}
         print(f"=== MCP tool surface: {len(tools)} tools ===")

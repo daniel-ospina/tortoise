@@ -149,7 +149,7 @@ async def run() -> int:
         r = await _call(client, "tortoise_query",
                         {"kind": "operator", "limit": 200})
         out["query_operators"] = r
-        print(f"\n=== tortoise_query kind=operator ===")
+        print("\n=== tortoise_query kind=operator ===")
         print(json.dumps(r, indent=1, default=str)[:1500])
 
         # ── 3. per-object EP + degree, via recall (graph beliefs) ───────
