@@ -87,8 +87,16 @@ def _document_text() -> str:
 # --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
 # --------------------------------------------------------------------------- #
-# The arms below marked `@requires_doc_pin` compare the RENDERED census document
-# against the live tree. Any product commit can move those counts, so in the
+# The arms below marked `@requires_doc_pin` grade the census against the live tree,
+# and they split by WHAT they read (#13098): SIX read the tracked SOURCE — three the
+# 25 pins (`--check`, the drift arm, the `files_scanned` arm), three its published
+# prose (the decomposition, the narrative pin, the anchored-arm coverage) — and
+# THREE involve a render (the two appendix arms render to `tmp_path` through a
+# subprocess; the table-shape arm renders in-process). ⛔ NOT "the committed
+# document": after the split there is none, and the two SOURCE halves are not
+# interchangeable — `check()` reads only the HTML pins, so the prose arms are the
+# only grading §0/§1's prose tables get. Any product commit can move those counts,
+# so in the
 # pre-merge matrix (where this file is `core`-registered and rides the REQUIRED
 # `python-ci-gate`) each of them redded PRs that touched neither the census tool
 # nor its doc — #14296 reconciled NINE open PRs / 115 files over exactly this and
@@ -1995,10 +2003,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # diff a reviewer sees; what is invisible is the ENV disappearing, which is above.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
-    # is 18 at this head — the 9 decorator lines PLUS 9 prose/format mentions (the
-    # module docstring, the block comment above the imports, three arm/helper
-    # docstrings, one f-string and the two literals of this very assertion, plus this
-    # comment). Measured, not assumed: under the previous `>= 8` form, deleting SEVEN
+    # is 18 at this head — 9 decorator lines PLUS 9 prose/format mentions: FIVE in
+    # four docstrings (one of them names it twice), TWO in block comments (this one
+    # included), ONE in an f-string and ONE in an assertion literal. ⛔ Re-measure
+    # rather than trusting these numbers: `#13098`'s own review rounds added mentions
+    # faster than the sentence describing them was re-read. Measured, not assumed: under the previous `>= 8` form, deleting SEVEN
     # of the eight gated arms left the count at `1 decorator + 7 prose = 8` and this
     # row stayed GREEN, so the arm it claims to protect ("the arms this pin exists for
     # are gone") did not fire until seven eighths of them were gone. The AST cannot
@@ -2019,6 +2028,31 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "expected EXACTLY 9 `@requires_doc_pin` arms (8 single + 1 parametrized); got "
         f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
         "delete this pin with them, or restore them")
+    # AND THE UNGATED HALF. The count above sees only DECORATED arms; the arms that
+    # carry #13098's own split invariants are deliberately UNGATED (they cost no tree
+    # walk and must ride the required gate), so deleting one would leave no red
+    # anywhere — the invisible-deletion class this pin exists for, one set over.
+    # Pinned by NAME, because each name states the invariant it protects: the document
+    # is untracked, the appendix cannot be pasted back into the source, the render
+    # target cannot be the source or any other tracked path, and a rendered document
+    # cannot contradict its own pins.
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    split_arms = {
+        "test_the_rendered_document_is_not_tracked",
+        "test_the_renderer_refuses_a_source_that_carries_the_appendix",
+        "test_the_renderer_refuses_to_write_over_the_source",
+        "test_the_renderer_refuses_to_write_over_a_tracked_path",
+        "test_the_renderer_refuses_the_all_surface_combination",
+    }
+    missing = sorted(split_arms - defined)
+    assert not missing, (
+        f"the #13098 split's own invariant arms are GONE: {missing} — they are "
+        "ungated on purpose (so they ride the required gate) and NOTHING else "
+        "asserts what they carry; restore them")
 
 
 def _psql_install_run() -> str:

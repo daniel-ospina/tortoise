@@ -225,7 +225,7 @@ jobs:
           # env.CARVE_OUT }}`.
           TORTOISE_TEST_CARVE_OUT: "1"
         run: uv run python -m pytest tests/test_13098_cypher_inventory.py -q -p no:cacheprovider
-      - name: census pins match the doc (LAST of the checks — a base-drift pin must not mask the runs above)
+      - name: census pins match the SOURCE (LAST of the checks — a base-drift pin must not mask the runs above)
         run: uv run python tools/cypher_inventory.py --check
       # ⛔ BOTH TEARDOWNS ARE UNCONDITIONAL (`if: always()`), and they are the
       # LAST steps: a failed or cancelled job must not leave a container holding
