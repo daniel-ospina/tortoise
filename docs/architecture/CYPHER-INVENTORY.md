@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 105 |
-| non-Cypher door calls (excluded from every shape total) | 268 |
-| **AST door calls** = census + non-Cypher | **1595** |
+| non-Cypher door calls (excluded from every shape total) | 269 |
+| **AST door calls** = census + non-Cypher | **1596** |
 
 > **The finding, with its count: 589 of 1327 product statements (44.4 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,649 occurrences of the door predicate across 112 files
+1,650 occurrences of the door predicate across 112 files
 2,401 occurrences of the verb predicate across 150 files   (upper-bound shape, see below)
 
-1,649  regex door-pattern occurrences
+1,650  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,595  occurrences on a line carrying a door CALL          [measured]
+= 1,596  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,595  AST door calls
-= 1327  classified Cypher statements + 268 non-Cypher door calls
+= 1,596  AST door calls
+= 1327  classified Cypher statements + 269 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -527,6 +527,33 @@ WHY THE FINAL MERGE MUST RE-CUT THEM AGAIN IF `main` MOVES.** §7's rule above i
 and `--check` on the merge will report the difference. That is the documented procedure's step 1, not a
 defect in this cut — but it is stated here rather than left for the merge to discover, because a pin
 that reads green at a branch head and red at the merge is the failure this section exists to name.
+
+**The cut this PR (#14582, `feat/14582-provision-graph-record`) makes — ONE non-Cypher door call and
+NOT a single Cypher statement, added by its review round rather than by its feature.**
+`tortoise/record_writer.py::_bound_provision_statements` (the #14587 review's P3-2: the creation
+hook's advertised bound covered the CONNECT only, so a record that accepts and then hangs stalled a
+sync call inside an `async` endpoint with no bound at all) issues
+`cursor.execute("SELECT set_config('statement_timeout', %s, true)", ...)`. That is a Postgres
+statement through a door, so it takes the same `SQL_VETO` arm `#14002`'s presence read and `#14552`'s
+`point_vector_keys` did: `non_cypher_door_calls` 268→**269**, `ast_door_calls` 1595→**1596**
+(= `1327` classified + `269`). ⛔ **Every other pin is unchanged, because no graph statement was
+added, removed, re-classified or re-shaped**: `sites` **1327**, `plain` **875** (read **589**, write
+**286**), `candidates` **589**, `partial` **321**, `unresolved` **105**, `adjacency` **293**, `ep`
+**32**, `ddl` **17**, `traversal` **3**, `fulltext` **2**, `files` **102**, `files_scanned` **313**.
+
+⚠️ **Appendix A is unchanged at this cut — no row added, none removed, NONE MOVED — and that is the
+non-obvious half.** This PR inserts ~36 lines into `tortoise/record_writer.py` above line 700, which
+would move every row below them if that file carried any: it carries **no census-visible statement
+SITE** (its statements are handed to `cursor.execute` as non-Cypher strings, and the one `.execute(`
+site this cut adds is exactly such a call), so `files` and `files_with_sites` cannot move however many
+door calls the file gains. The table is still REGENERATED with `--markdown` at this tree rather than
+carried — a row set that happens not to move is a measurement, not an assumption — and it is
+byte-identical to the tool's output, which
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` pins. §1's `rg`
+reconciliation moves by exactly that call: door **1,649**→**1,650** across the same **112** files (it
+carries a door call, so the `−54` in-section subtraction does not move), while the verb figures
+(**2,401 / 150**) do not move at all — the bound is a `SELECT set_config(...)`, and a non-Cypher
+door call carries no `MATCH`/`MERGE`.
 
 **The cut this PR (#14552, `feat/14552-point-writers`) makes — ONE non-Cypher door call and NOT a
 single Cypher statement — re-derived by RUNNING the tool at the tree merged with `origin/main`
@@ -1074,8 +1101,8 @@ one.
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 105 -->
-<!-- cypher-inventory:non_cypher_door_calls = 268 -->
-<!-- cypher-inventory:ast_door_calls = 1595 -->
+<!-- cypher-inventory:non_cypher_door_calls = 269 -->
+<!-- cypher-inventory:ast_door_calls = 1596 -->
 <!-- cypher-inventory:partial = 321 -->
 
 ---
