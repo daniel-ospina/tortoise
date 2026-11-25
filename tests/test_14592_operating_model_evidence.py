@@ -596,20 +596,18 @@ def test_census2_computes_the_verdict_it_declares_and_exits_on_it():
     census2 = _real_driver("run_census2.py")
     assert "ok" in census2.WRITTEN_KEYS, "`ok` must stay declared AND be written"
 
-    def receipt(key, reply, ok=True):
-        return {key: {"tool": "t", "args": {}, "ok": ok, "reply": reply}}
+    def receipt(reply, ok=True):
+        return {"tool": "t", "args": {}, "ok": ok, "reply": reply}
 
-    good = {}
-    for key, reply in (("claims", {"results": [{"id": "a"}], "total": 1}),
-                       ("conf_one", {"result": [{"id": "b"}]}),
-                       ("structure", {"result": []})):
-        good.update(receipt(key, reply))
+    good = {
+        "claims": receipt({"results": [{"id": "a"}], "total": 1}),
+        "conf_one": receipt({"result": [{"id": "b"}]}),
+        "structure": receipt({"result": []}),
+    }
     assert census2.verdict(good) == 0, (
         "an empty `structure` reply is the validator answering NOTHING TO REPORT")
-    assert census2.verdict({**good, "claims": {"ok": False, "reply": None,
-                                              "tool": "t", "args": {}}}) == 1
-    assert census2.verdict({**good, "conf_one": {"ok": True, "reply": [],
-                                                "tool": "t", "args": {}}}) == 1
+    assert census2.verdict({**good, "claims": receipt(None, ok=False)}) == 1
+    assert census2.verdict({**good, "conf_one": receipt([])}) == 1
     assert census2.verdict({key: good[key] for key in ("claims", "conf_one")}) == 1, (
         "a phase that never ran is not a phase that succeeded")
 
