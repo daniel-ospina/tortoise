@@ -1855,25 +1855,29 @@ def _pi_entry_is_loadable(path: Path) -> bool:
     as retired, while Pi kept loading it — a guard that leaves both producers
     registered is the duplication it was written to remove (#14342).
 
-    Unreadable/absent ⇒ ``False`` from this reader; callers that must not
-    assume then use :func:`_assert_pi_entry_not_loadable`, which fails closed.
+    ABSENT ⇒ ``False``; UNREADABLE ⇒ ``True``. The asymmetry is deliberate: an
+    absent path registers nothing, while a path this reader cannot read may
+    register anything, and a retired entry that might still load must fail
+    closed (:func:`_assert_pi_entry_not_loadable`).
     """
     try:
         if not os.path.lexists(path):
             return False
         if path.is_dir():
+            # `readPiManifest` accepts ONLY an array of strings, and
+            # `resolveExtensionEntries` takes the manifest branch only when it
+            # is NON-EMPTY — otherwise it falls through to index.ts/index.js.
+            # A manifest that merely *looks* like an extensions list is not one.
             manifest = path / "package.json"
             if manifest.is_file():
                 try:
                     declared = json.loads(manifest.read_text("utf-8"))
                 except (OSError, ValueError):
-                    # An unreadable manifest may declare entries — treat the
-                    # directory as loadable rather than guess it away.
+                    return True  # may declare entries; never guess it away
+                pi_section = declared.get("pi") if isinstance(declared, dict) else None
+                entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
+                if isinstance(entries, list) and entries:
                     return True
-                if isinstance(declared, dict):
-                    pi_section = declared.get("pi")
-                    if isinstance(pi_section, dict) and pi_section.get("extensions"):
-                        return True
             return (path / "index.ts").is_file() or (path / "index.js").is_file()
         return path.name.endswith(".ts") or path.name.endswith(".js")
     except OSError:
@@ -1895,6 +1899,13 @@ def _retire_pi_entry(path: Path) -> str | None:
       not this installer's.
     """
     try:
+        # ⛔ A SYMLINK IS RETIRED BY RENAMING THE LINK, NEVER BY EDITING THROUGH
+        # IT: `path.is_dir()` follows the link, so the directory branch below
+        # would rename files inside someone else's checkout (an agent-infra
+        # working tree) while the installer's scope is `~/.pi/agent/extensions`.
+        if path.is_symlink():
+            path.rename(path.with_name(f"{path.name}.disabled"))
+            return None
         if path.is_dir():
             manifest = path / "package.json"
             if manifest.is_file():
@@ -1905,7 +1916,8 @@ def _retire_pi_entry(path: Path) -> str | None:
                             "declared entries cannot be verified, so it is not "
                             "retired by this installer. Move it aside by hand.")
                 pi_section = declared.get("pi") if isinstance(declared, dict) else None
-                if isinstance(pi_section, dict) and pi_section.get("extensions"):
+                entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
+                if isinstance(entries, list) and entries:
                     return (f"{path} declares `pi.extensions` in package.json; "
                             "renaming its files would leave that manifest "
                             "pointing at nothing. Move the directory aside by "
@@ -1955,8 +1967,22 @@ def _disable_pi_second_producer(
         # Something is there, but Pi does not register it — nothing to disable.
         return False, [], None
     if os.path.lexists(retired):
+        # ⛔ THE PRESERVATION TARGET MUST BE A REAL, DISTINCT FILE BEFORE ANY
+        # DELETE IS JUSTIFIED. `_sha256_file` FOLLOWS symlinks, so a `retired`
+        # that is a LINK TO `active` yields two equal digests read from ONE
+        # file — and unlinking `active` then destroys the only copy while the
+        # receipt claims the bytes are preserved (measured: the surviving
+        # `retired` resolved to nothing). A symlink here is not exotic in this
+        # fleet (agent-infra's `cell-install.sh` harnesses dangling links at
+        # extension names), so this is refused, never guessed at.
+        if retired.is_symlink() or not retired.is_file():
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} exists and is not a regular file (a symlink or a "
+                "directory). Renaming or removing either could destroy the "
+                "only copy, so nothing was touched — move one aside by hand.")
         live_digest = _sha256_file(active) if active.is_file() else None
-        retired_digest = _sha256_file(retired) if retired.is_file() else None
+        retired_digest = _sha256_file(retired)
         if live_digest is None or live_digest != retired_digest:
             return False, [], (
                 f"cannot disable the second capture producer {active}: "
@@ -2120,44 +2146,9 @@ def _install_pi(
                     f"[dry-run] would rename {legacy} → {legacy_disabled}")
             else:
                 legacy.rename(legacy_disabled)
-                # ⛔ THE RENAME ALONE RETIRES NOTHING (#14342). Pi's
-                # `discoverExtensionsInDir` applies NO dot-prefix filter: every
-                # subdirectory is resolved through `resolveExtensionEntries`, so
-                # `.tortoise-capture.disabled/index.ts` was still a LOADED
-                # extension and the guard left both producers registered — the
-                # duplication it exists to remove. Retire the ENTRY POINT too,
-                # by the loader's own rule, and verify the result.
-                retire_error = _retire_pi_entry(legacy_disabled)
-                if retire_error:
-                    return InstallResult(harness, changed=True,
-                                         actions=tuple(actions) + (
-                                             f"disabled legacy capture "
-                                             f"extension: renamed {legacy} → "
-                                             f"{legacy_disabled} (files "
-                                             f"preserved)",),
-                                         changed_artifacts=_written(), error=(
-                                             f"the legacy capture extension was "
-                                             f"renamed aside but is STILL an "
-                                             f"extension Pi loads "
-                                             f"({retire_error}), so both "
-                                             f"producers stay registered. "
-                                             f"Move {legacy_disabled} out of "
-                                             f"the extensions directory by "
-                                             f"hand and re-run."))
-                still_loaded = _assert_pi_entry_not_loadable(legacy_disabled)
-                if still_loaded:
-                    return InstallResult(harness, changed=True,
-                                         actions=tuple(actions) + (
-                                             f"disabled legacy capture "
-                                             f"extension: renamed {legacy} → "
-                                             f"{legacy_disabled} (files "
-                                             f"preserved)",),
-                                         changed_artifacts=_written(),
-                                         error=still_loaded)
                 actions.append(
                     f"disabled legacy capture extension: renamed {legacy} "
-                    f"→ {legacy_disabled} (files preserved; entry point "
-                    f"retired so Pi no longer loads it)")
+                    f"→ {legacy_disabled} (files preserved)")
             changed = True
 
         if not _is_regular_unchanged(dst, payload):
@@ -2224,6 +2215,50 @@ def _install_pi(
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions),
                                  changed_artifacts=_written(), error=divergence)
+
+    # ⛔ #14342, AND ONLY NOW: THE RENAME ABOVE RETIRES NOTHING. Pi's
+    # `discoverExtensionsInDir` applies NO dot-prefix filter — every
+    # subdirectory is resolved through `resolveExtensionEntries`, so
+    # `.tortoise-capture.disabled/index.ts` was a LOADED extension and the
+    # #3713 guard left both producers registered, which is the duplication it
+    # exists to remove. The ENTRY POINT is retired here, by the loader's own
+    # rule, and asserted.
+    #
+    # ⛔ AND HERE — not in the rename block above — BECAUSE OF THE ORDERING
+    # RULE (#14342 review): retiring the old producer before the replacement is
+    # verified would leave a box with NO producer at all if the seam write
+    # failed, which is strictly worse than the duplication. A bare rename is
+    # safe to do early precisely BECAUSE the dot directory still loads; the
+    # step that actually stops capture is this one, so it comes after the
+    # proof. It also HEALS a box carrying a dot directory from an older install.
+    legacy_retirable = _pi_entry_is_loadable(legacy_disabled) if (
+        os.path.lexists(legacy_disabled)) else False
+    if legacy_retirable:
+        if dry_run:
+            actions.append(
+                f"[dry-run] would retire the entry point inside "
+                f"{legacy_disabled} (Pi still loads it)")
+            changed = True
+        else:
+            legacy_error = _retire_pi_entry(legacy_disabled)
+            if legacy_error is None:
+                legacy_error = _assert_pi_entry_not_loadable(legacy_disabled)
+            if legacy_error:
+                return InstallResult(harness, changed=changed,
+                                     actions=tuple(actions),
+                                     changed_artifacts=_written(), error=(
+                                         f"the legacy capture extension was "
+                                         f"renamed aside but is STILL an "
+                                         f"extension Pi loads ({legacy_error}), "
+                                         f"so both producers stay registered. "
+                                         f"Move {legacy_disabled} out of the "
+                                         f"extensions directory by hand and "
+                                         f"re-run."))
+            actions.append(
+                f"retired the legacy extension's entry point inside "
+                f"{legacy_disabled} (a dot-prefixed directory is still LOADED "
+                f"by Pi; files preserved)")
+            changed = True
 
     # #3512 / the one-producer invariant: agent-infra installs a SECOND capture
     # producer (``reflect-hook.ts``) that writes every quit session to

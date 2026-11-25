@@ -1069,8 +1069,11 @@ def _registered_producers(ext_dir: Path) -> list[str]:
                     found.append(f"{entry.name}/{index}")
         elif entry.name.endswith((".ts", ".js")):
             found.append(entry.name)
+    # `lstrip(".")` because a dot-prefixed directory is still LOADED — the
+    # stem match must not be defeated by the dot a guard adds.
     return [f for f in found
-            if any(f.split("/")[0].startswith(stem) for stem in _PRODUCER_STEMS)]
+            if any(f.split("/")[0].lstrip(".").startswith(stem)
+                   for stem in _PRODUCER_STEMS)]
 
 
 def test_pi_install_leaves_exactly_one_registered_capture_producer(home):
@@ -1124,6 +1127,32 @@ def test_pi_install_re_asserts_a_farm_recreated_identical_second_producer(home):
         capture_install.PI_EXTENSION_NAME]
 
 
+def test_pi_install_refuses_a_symlinked_preservation_target(home):
+    """The re-assert path deletes the live copy, so the PRESERVATION TARGET must
+    be a real, distinct file. `_sha256_file` follows symlinks: a `retired` that
+    is a LINK TO the live file yields two equal digests read from ONE file, and
+    unlinking the live copy then destroys the only copy while the receipt says
+    the bytes were preserved (#14342 review round 2, measured).
+
+    Mutation: drop the `is_symlink()` / `is_file()` guard on `retired` — the
+    install reports ok over deleted bytes.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// the producer\nexport default 1\n"
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(live)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    assert "not a regular file" in res.error, res.error
+    assert live.read_text() == body, "the only copy of the producer was deleted"
+    assert retired.is_symlink(), "the preservation target was rewritten"
+
+
 def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
     """A re-created copy that DIFFERS is not a farm sync of the same bytes — a
     human or another tool changed it, and deleting it would destroy that. Refuse.
@@ -1143,7 +1172,7 @@ def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
     assert recreated.read_text() == "// a DIFFERENT producer, edited by hand\n"
 
 
-def test_pi_install_retires_a_second_producer_that_is_a_package_directory(home):
+def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
     """A directory at ``reflect-hook.ts`` declaring ``pi.extensions`` is
     loadable AND cannot be retired by renaming its files (the manifest would
     point at nothing), so the install must refuse rather than rename a
@@ -1163,7 +1192,15 @@ def test_pi_install_retires_a_second_producer_that_is_a_package_directory(home):
     assert not res.ok
     assert "pi.extensions" in res.error, res.error
     assert producer.is_dir(), "a directory producer was renamed by the installer"
-    assert "reflect-hook" in _registered_producers(ext_dir)[0] or True
+    assert (producer / "index.ts").exists(), (
+        "the refusal half-retired the directory: its entry point was renamed "
+        "even though the install reported failure")
+    assert not (producer / "index.ts.disabled").exists()
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "a directory was renamed to a name Pi still loads as a subdirectory")
+    assert "reflect-hook.ts/index.ts" in _registered_producers(ext_dir), (
+        f"the producer is no longer loaded, so the box may have stopped "
+        f"capturing: {_registered_producers(ext_dir)}")
 
 
 def test_pi_legacy_obstacle_names_the_second_producers_collision(home):
@@ -1803,11 +1840,24 @@ def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
         res.actions)
     assert any("backed up" in a for a in res.actions), res.actions
     assert "NOT fully installed" in res.error, res.error
-    # The state those actions describe really is on disk — and #14342's lesson
-    # applies here too: the directory is moved aside AND its entry point is
-    # retired, because a dot-prefixed directory is still loaded by Pi.
-    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME
-            / "index.ts.disabled").exists()
+    # The state those actions describe really is on disk: the legacy directory
+    # WAS moved aside. Its entry point is deliberately NOT retired yet — the
+    # write that would have replaced it failed, so retiring it here would leave
+    # the box with NO capture producer at all (#14342 review round 2). The
+    # rename alone stops nothing, because a dot-prefixed directory is still
+    # loaded by Pi; that is exactly why it is the safe early step.
+    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists(), (
+        "a failed install stopped capturing: it retired the only working "
+        "producer before the replacement was verified")
+    # Capture still works after the failed install: the pre-existing (stale but
+    # real) seam is untouched, AND the legacy producer is still loaded — the
+    # rename stopped nothing. That is the ordering property, read end to end.
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME,
+        f"{capture_install.PI_DISABLED_DIRNAME}/index.ts",
+    }, (
+        f"capture stopped on a failed install — loaded producers: "
+        f"{_registered_producers(ext_dir)}")
     assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
 
 

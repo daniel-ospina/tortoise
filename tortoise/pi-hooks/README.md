@@ -145,7 +145,11 @@ second, independent extension whose only handler is the `session_shutdown`
 VERIFIED in place (`assert_seam_target`), `_disable_pi_second_producer` renames
 it to `reflect-hook.ts.disabled` — a name Pi's loader does not load (it takes
 top-level `*.ts` / `*.js`, so a `.disabled` suffix is not a loadable extension),
-with the bytes preserved and a loud refusal if that name already exists. The
+with the bytes preserved. A retired copy that already exists is RE-ASSERTED
+when its bytes are identical (the bytes survive at the retired path, so removing
+the live duplicate destroys nothing — and the farm re-materializes this file, so
+that is the steady state), and refused when they differ or when the retired path
+is not a regular file. The
 ORDERING is the safety property, not a style choice: disabling the other
 producer before the replacement is verified would open a window with NO producer
 at all, and capture silently stopping is worse than the duplication. A seam that
@@ -184,7 +188,11 @@ copy keeps its own. The durable removal is the #3512 decision above (reduce
 agent-infra's copy to a shim of `tortoise/pi-hooks/`, carrying no capture code
 of its own), which is `daniel-ospina/agent-infra#1671`. Until that lands, the
 installer's guard is the product-side answer and the farm is the reason it can
-regress.
+regress. The harder half, stated: any agent-infra release that EDITS
+`reflect-hook.ts` lands new bytes, which the guard refuses (it will not delete
+bytes it cannot prove are preserved) — so `tortoise install pi` fails on every
+box until a human moves the retired copy aside, one box at a time. That is a
+designed fail-closed choice, not a data-safety defect.
 
 #### What this costs, stated — the `#10017` census authority
 
@@ -211,9 +219,20 @@ moves it aside.
 Not covered, and named so it is not mistaken for coverage: a *variant* name
 inside the extensions directory (`reflect-hook.ts.bak.ts`,
 `reflect-hook.old/index.ts`) is a producer Pi loads, and neither guard touches
-it. The fleet's own extension-hygiene check refuses those by pattern in
-`agent-infra`'s `pi-bootstrap/cell-install.sh` (`denied_extension_stem`); this
-installer does not.
+it. `agent-infra`'s `pi-bootstrap/cell-install.sh` has a by-pattern deny for
+extension VARIANTS (`denied_extension_stem`) — and its deny list is
+`(cmux-session.ts tortoise-capture)`, so it does **not** cover a
+`reflect-hook*` variant either. Nothing currently refuses those: the hole is
+named here so it is not mistaken for coverage.
+
+#### Other records still describe the pre-install state
+
+`docs/architecture/PI-CAPTURE-ARCHITECTURE.md` and the onboarding skills
+(`tortoise/onboarding/SKILL.md`, mirrored under
+`website/apps/dashboard/public/skills/`) describe `reflect-hook` as a live
+producer. Those are dated measurements of a machine in its BOTH-producers state,
+and they remain accurate about it — but on a box where this seam is installed
+the producer is retired, so read them as the precondition this section removes.
 
 #### The backlog is a decision, not a delete
 
