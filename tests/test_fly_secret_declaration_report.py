@@ -1150,10 +1150,15 @@ def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
     docstring claimed "no behavioural row can see WHERE in the step the guards sit",
     and a review measured that FALSE: the behavioural rows run the SHIPPED step, so
     lifting the CLEAN arm's dry-run guard from `:399` to just after `done < "$mine"`
-    gives 4 failed, including `test_a_dispatched_dry_run_resolves_nothing`,
-    `test_a_dispatched_dry_run_files_nothing` and
-    `test_a_dirty_tick_files_one_issue_per_name_and_never_twice`. What this row adds is
-    that it NAMES the fault: a deletion or a reordering reds here with
+    gives 2 failed — this row and `test_a_dispatched_dry_run_resolves_nothing`, which
+    reds because the sweep mutated on a run the UI calls dry. The net is that NARROW,
+    and its breadth was measured rather than assumed: a CLEAN-arm REORDER can only reach
+    rows that enter the CLEAN arm, which is why `test_a_dispatched_dry_run_files_nothing`
+    and `test_a_dirty_tick_files_one_issue_per_name_and_never_twice` — both `rc=1`, both
+    DRIFT-arm rows — stay green on it. `files_nothing` is reached by a DIFFERENT mutant:
+    lift the guard ABOVE the CLEAN arm and it reds as well (2 failed, 47 passed — it and
+    this row). What this row adds is that it NAMES the fault: a deletion or a reordering
+    reds here with
     "the CLEAN arm no longer honours the dry-run input" / "a ledger-closing guard sits
     BELOW the sweep", rather than off a downstream behaviour diff — and it catches a
     CLEAN-arm deletion at all, which is what the scoping note below exists for.

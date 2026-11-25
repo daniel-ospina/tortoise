@@ -167,9 +167,15 @@ TITLE_SUFFIX = (
 #: NON-GREEDINESS — an earlier revision of this comment claimed the opposite and a
 #: review measured it false: with the anchor kept, replacing `(.+?)` by `(.+)` leaves
 #: every row in the suite green (49 passed), because a hard `$` forces the group's
-#: extent either way. The non-greedy spelling is kept as the narrower default — it
-#: cannot over-capture on a line carrying the suffix twice — but the PROPERTY this
-#: comment exists to protect is the anchor's.
+#: extent either way. The non-greedy spelling is kept as the narrower default for a
+#: DIFFERENT reason than the one above: should the `$` anchor ever be loosened, it
+#: stops at the FIRST suffix rather than the last, so the failure is loud — a name
+#: truncated back toward itself, which the round-trip row reds on — instead of silent
+#: folding of one name into another. ⛔ It is NOT load-bearing for the class today and
+#: is not claimed to be: with `$` present neither spelling can over-capture (measured —
+#: `(.+)` leaves the suite green), and with `$` REMOVED the non-greedy spelling is the
+#: one that truncates a suffix-bearing name while `(.+)` still round-trips it. The
+#: PROPERTY this comment exists to protect is the anchor's.
 #: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` pins it.
 _TITLE_RE = re.compile(
     r"^" + re.escape(TITLE_PREFIX) + r"(.+?)" + re.escape(TITLE_SUFFIX) + r"$"
