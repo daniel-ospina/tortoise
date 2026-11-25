@@ -15721,53 +15721,28 @@ def _layer_payload(entry: dict, layer: str) -> dict:
     branch label is the fallback for an older callee, not the rule.
 
     ⚠️ NAMED RESIDUAL, not a promise: the layer's own KIND property
-    (``LAYER_KIND_PROP``) is re-attached HERE and in ``entity_reads.list_layer``,
-    but **not** in ``TortoiseSDK._get_entity`` — so an MCP
+    (``LAYER_KIND_PROP``) is re-attached in ``entity_reads.layer_payload`` — the
+    one home both this route and ``list_layer`` call — but **not** in
+    ``TortoiseSDK._get_entity`` — so an MCP
     ``tortoise_get_entity`` on a hybrid ``(:Object:Source)`` answers without
     ``objectKind`` while this route serves it (#14659). The withholding direction
     is the safe one and the gap predates this route, which is why it is stated
     here and filed rather than widened into a customer-facing MCP payload.
     """
-    props = dict(entry.get("properties") or {})
-    labels = entry.get("labels")
-    is_source = (
-        "Source" in labels if labels is not None
-        else entry.get("label") == "Source")
-    if is_source:
-        from tortoise.projection.entities import filter_source_props
+    from tortoise.entity_reads import layer_payload
 
-        raw = dict(props)
-        props, _denied = filter_source_props(props)
-        # ⛔ …and a HYBRID keeps its own layer's KIND: the filter is an ALLOWLIST,
-        # so it drops `objectKind`/`subjectKind` too, and this route would stop
-        # echoing the field the row is keyed by (the list read re-attaches it for
-        # the same reason). The KIND is the layer's declaration, never a `:Source`
-        # payload — everything the filter denied stays denied.
-        # ⛔ KEYED ON THE ROUTE'S LAYER, NOT THE MATCHED BRANCH. `entry["label"]`
-        # is whichever branch resolved the node, so keying the echo on it handed
-        # `objectKind` back through `GET /v1/sources/{id}` — a property the
-        # `:Source` bag DENIES (`_SOURCE_NODE_PROPS` does not declare it, and
-        # `_DOC_RETIRED_KEYS` retires it, D10 B6). `layer` is the declaration the
-        # route asked for, and `entity_reads.LAYER_KIND_PROP` is its one home.
-        # ⛔ `layer` is REQUIRED and has no branch fallback, deliberately: a
-        # route always knows which layer it serves, and an optional kwarg would
-        # let a future caller that forgot it silently re-open the Source door to
-        # `objectKind`. ⛔ The `is_source` test above DOES keep a branch
-        # fallback, and it is NOT fail-closed — stated plainly because an earlier
-        # cut of this very comment claimed it was. On a row that arrives with
-        # `labels` missing and `label == "Object"` for a node that is really a
-        # hybrid, that fallback answers False and `filter_source_props` is never
-        # called: the denied `content` is published (measured). It is unreachable
-        # in production only because `_resolve_entity` ALWAYS emits `labels`
-        # (`projection/__init__.py`), which is a property of the callee, not of
-        # this fallback — so it stays for legacy/mock rows and must never be read
-        # as a safety guarantee.
-        from tortoise.entity_reads import LAYER_KIND_PROP
-
-        _kind_prop = LAYER_KIND_PROP.get(layer)
-        if _kind_prop and _kind_prop in raw and _kind_prop not in props:
-            props[_kind_prop] = raw[_kind_prop]
-    return props
+    # ⛔ THE RULE LIVES IN ONE PLACE (`entity_reads.layer_payload`), because the
+    # two hand-copied forms had already drifted: (1) `:Source` is decided by the
+    # node's WHOLE LABEL SET, never by the branch that resolved it — a hybrid
+    # `(:Object:Source)` resolves through the `Object` branch, so a branch test
+    # published the Source half's denied `content` here; (2) the layer's KIND is
+    # re-attached from the PRE-filter bag, keyed on the ROUTE's declaration
+    # (`layer`), never on `entry["label"]` — keying it on the branch handed
+    # `objectKind` back through `GET /v1/sources/{id}`. `labels` may be absent on
+    # legacy/mock rows; `layer_payload` states that fallback and why it is NOT a
+    # safety guarantee.
+    return layer_payload(
+        entry.get("properties") or {}, entry.get("labels"), layer)
 
 
 #: The labels whose WHOLE property map `/belief` may publish inside
@@ -16590,8 +16565,26 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             sdk._get_proj(), "ConfidenceChanged", entity_id,
             require_any=event_store.CONFIDENCE_TRANSITION_KEYS)
 
-    last = await _read_offload(
-        _latest_belief_write, op="get_entity_belief.last")
+    # ⛔ ASK THE EMITTER'S GATE *BEFORE* THE QUERY, not only after it. The scan
+    # below is `MATCH (e:GraphEvent) WHERE e.type = $type RETURN … ORDER BY …
+    # LIMIT` — a LABEL SCAN with no index on `type` (``event_store.
+    # LATEST_FOR_NODE_SCAN`` states the plan), so on a real graph it costs the
+    # store's size. With ``ConfidenceChanged`` in neither admission path of
+    # ``sdk._emit_event`` no row of that type can exist, so that scan is an
+    # O(store) read whose only possible answer is `None` — paid on the read lane,
+    # for every belief request, to prove an absence the gate already knows.
+    # ``_belief_changes_reach_the_graph_store`` is the ONE home of that question
+    # (it reads the emitter's own ``_graph_event_types()``), so the same call
+    # that decides whether to explain a null decides whether to look for one, and
+    # the day the type joins the emitter both move together with no change here.
+    last: dict | None
+    if _belief_changes_reach_the_graph_store():
+        last = await _read_offload(
+            _latest_belief_write, op="get_entity_belief.last")
+    else:
+        # Not "there was no write": the reason field below says which absence
+        # this is. The payload shape is unchanged either way.
+        last = None
     # Provenance is a :Point read (`TortoiseSDK._provenance` calls `_get_point`),
     # so it is asked only for a Point — asking it of an Object would return the
     # callee's own "Point … not found" error INSIDE a successful response, which
@@ -54957,7 +54950,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (727 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

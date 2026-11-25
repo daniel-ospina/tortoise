@@ -113,6 +113,56 @@ def _safe_label(label: str) -> str:
     return label
 
 
+def layer_payload(
+    props: dict, labels: Any, label: str,
+) -> dict:
+    """One layer node's publishable property bag — the ONE home of the rule.
+
+    A ``:Source`` goes through ``projection.entities.filter_source_props`` (#3998 /
+    D30 — the graph indexes the raw; it is not the raw store), decided by the
+    node's WHOLE LABEL SET and never by the branch a MATCH reached it by: Cypher
+    label matching is SUBSET-based, so ``MATCH (n:Object)`` also matches a
+    ``(:Object:Source)`` hybrid, and returning ``properties(n)`` unfiltered put
+    that node's DENIED ``content`` on ``/v1/objects`` and ``/v1/subjects``
+    (measured) while ``/v1/sources/{url}`` withheld it.
+
+    ⛔ AND THE HYBRID KEEPS ITS OWN LAYER'S KIND. ``filter_source_props`` is an
+    ALLOWLIST (``_SOURCE_NODE_PROP_NAMES``), so filtering a ``(:Object:Source)``
+    drops ``objectKind`` — and a list filtered on ``?kind=goal`` then returned a
+    row that did not echo the field it was selected by (measured). The KIND is the
+    LAYER's declaration, not a ``:Source`` payload, so it is re-attached from the
+    PRE-filter bag (``raw``) and everything the filter denied stays denied.
+
+    ⛔ ONE HOME, TWO CALLERS, because the two copies had already drifted. The list
+    read (``list_layer``) and the by-id read (``hosted_api._layer_payload``) each
+    carried a hand-copied form of this rule — and it is the half that most
+    recently shipped wrong (a branch-keyed echo handed ``objectKind`` back through
+    ``GET /v1/sources/{id}``). ``label`` is the ROUTE's layer declaration, never a
+    matched branch, and it is required: a caller that forgot it would silently
+    re-open that door.
+    """
+    # ⛔ A COPY, not an alias: the re-attach below reads the pre-filter bag, and an
+    # alias would make "the kind comes from before the filter" true only by
+    # accident of ``filter_source_props`` being pure.
+    raw = dict(props or {})
+    # ⛔ NOT fail-closed when `labels` is None: a legacy/mock row that is really a
+    # hybrid but declares only ``Object`` publishes what the filter would
+    # withhold. Stated because it is a residual, not a guarantee — it is
+    # unreachable in production only because ``_resolve_entity`` always emits
+    # ``labels``, which is a property of the callee.
+    is_source = (label == "Source" if labels is None else "Source" in labels)
+    if not is_source:
+        return raw
+
+    from .projection.entities import filter_source_props
+
+    out, _denied = filter_source_props(raw)
+    kind_prop = LAYER_KIND_PROP.get(label)
+    if kind_prop and kind_prop in raw and kind_prop not in out:
+        out[kind_prop] = raw[kind_prop]
+    return out
+
+
 def list_layer(
     proj: Any,
     label: str,
@@ -234,28 +284,9 @@ def list_layer(
     ).result_set
     out: list[dict] = []
     for r in rows:
-        raw = dict(r[0])
-        # ⛔ A COPY, not an alias: `filter_source_props` returns a fresh map
-        # today, so the re-attach below would survive either way — but the
-        # comment's guarantee is that the kind comes from the PRE-filter bag,
-        # and an alias makes that true only by accident of the callee being
-        # pure. `_layer_payload` (the by-id arm) copies for the same reason.
-        props = dict(raw)
-        if "Source" in (r[1] or ()):
-            from .projection.entities import filter_source_props
-
-            props, _denied = filter_source_props(props)
-            # ⛔ THE HYBRID KEEPS ITS OWN LAYER'S KIND. `filter_source_props` is an
-            # ALLOWLIST (`_SOURCE_NODE_PROP_NAMES`), so filtering a
-            # `(:Object:Source)` drops `objectKind` — and a list filtered on
-            # `?kind=goal` then returned a row that did not echo the field it was
-            # selected by (measured). The kind is the LAYER's declaration, not a
-            # `:Source` payload, and it came from the same `MATCH … {where}`, so it
-            # is re-attached from the pre-filter bag. Everything else stays denied.
-            kind_name = LAYER_KIND_PROP[label]
-            if kind_name in raw and kind_name not in props:
-                props[kind_name] = raw[kind_name]
-        out.append(props)
+        # ``layer_payload`` is the ONE home of the filter + kind re-attach rule
+        # (see its docstring: the by-id read applies the same one).
+        out.append(layer_payload(r[0], r[1], label))
     return out, total
 
 
@@ -348,7 +379,20 @@ def _endpoint_preview(row: Any) -> dict:
     labels = row[1] or []
     return {
         "id": row[0],
-        "label": (labels[0] if labels else None),
+        # ⛔ MEMBERSHIP, NOT POSITION — the SAME rule the NAME coalesce above
+        # already applies (``CASE WHEN 'Source' IN labels(m) …``), so the two
+        # fields of one preview cannot disagree about what the neighbour is.
+        # ``labels[0]`` is whatever the engine happened to order first, so a
+        # hybrid ``(:Object:Source)`` neighbour answered ``{"label": "Object",
+        # "name": <its url>}``: the NAME came from the Source arm while the LABEL
+        # came from position, and a client that reads ``label`` saw a plain
+        # Object carrying a url-shaped name — the first-label-vs-membership
+        # defect this PR fixes on four other surfaces, reintroduced on the one
+        # field a client filters on (``sources = [o for o in others if
+        # o["label"] == "Source"]`` finds nothing for a hybrid). The ``:Source``
+        # half is what decides the payload, so it decides the label too.
+        "label": ("Source" if "Source" in labels
+                  else (labels[0] if labels else None)),
         "name": row[2],
     }
 
@@ -417,8 +461,15 @@ def entity_relations(
     # here — would greedily swallow the trailing `/relations`.
     root_label, root, root_key = _resolve_root(proj.g, entity_id)
     if root_label is None:
+        # ⛔ ``None``, NOT ``True``: this arm never calls
+        # ``declared_relation_packs()``, so it has not asked whether the
+        # declarations are readable and must not answer yes. It is unreachable
+        # through the route (which 404s on the null ``entity``) but this module is
+        # the library Phase B's ``entity_profile`` will adopt, and a positive
+        # claim about a registry the path never read is the substituted-value
+        # class the docstring one screen up spends a paragraph on.
         return ({"entity": None, "relations": [], "count": 0,
-                 "declarationsReadable": True}, 0)
+                 "declarationsReadable": None}, 0)
     _safe_label(root_label)
     if root_key not in _HOP_KEYS:
         # `_resolve_root` can only produce a key from its own constant table;
