@@ -687,12 +687,21 @@ def test_the_renderer_refuses_to_write_over_the_source(tmp_path, monkeypatch, ca
     plausible route to the conflict this split exists to remove.
 
     ⛔ AND THE SOURCE IS BUILT IN A THROWAWAY GIT TREE, NOT IN THIS CHECKOUT: this arm
-    is graded by MUTATION, and with the source branch deleted the real arm overwrote
-    the REAL tracked `docs/architecture/CYPHER-INVENTORY.src.md` (measured: 127,003 ->
-    371,800 bytes, rows and all) before the byte-for-byte assertion reported the loss —
-    taking any uncommitted edit to the source with it. The scratch source is `git add`ed
-    so the TRACKED-PATH branch is still reachable when the source branch is deleted,
-    which is what keeps the stderr assertion below discriminating.
+    is graded by MUTATION, and the write it guards needs BOTH the source branch
+    neutralised AND the tracking probe unable to answer (an UNTRACKED source, or a tree
+    with no index, where `git ls-files --error-unmatch` exits 128). With the probe made
+    inert that way, the real arm wrote the appendix over the REAL
+    `docs/architecture/CYPHER-INVENTORY.src.md` (measured: 127,003 -> 371,800 bytes, rows
+    and all), taking any uncommitted edit to the source with it.
+
+    ⛔ THE PRECONDITION MATTERS, so it is stated here rather than assumed: with only the
+    source branch deleted and the source TRACKED, the probe refuses FIRST and nothing is
+    written (measured: 127,003 bytes before and after) — which is exactly what the
+    comment below records. Both paths are real; only the second is the reason this arm
+    may CONSTRUCT its source in a throwaway tree, because the mutation that writes is the
+    one where the probe cannot answer. Hence the scratch source is `git add`ed: the
+    TRACKED-PATH branch stays reachable, which is what keeps the stderr assertion below
+    discriminating.
 
     In-process and cheap: the guard sits BEFORE the census, so this never walks the
     tree; the source is compared byte-for-byte to prove nothing was written.
