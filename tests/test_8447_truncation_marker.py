@@ -143,6 +143,43 @@ class TestMarkerVocabulary:
         mark_truncation(sink, returned=10, candidates=11, exact=True)
         assert truncation_field(sink) == {"truncated": True, "total_available": 11}
 
+    def test_an_offset_page_asks_about_the_population_beyond_it(self):
+        """``offset`` is part of the question, not decoration (#14592 P1-2).
+
+        The defect: a ``SKIP``-paged route computing the verdict from
+        ``candidates > returned`` marks EVERY page truncated except an
+        exactly-full last one — measured on 3 rows at ``limit=1``: offsets 0 and
+        1 correctly said more remained, offsets 2 (the terminal page) and 3
+        (past the end, empty) ALSO said ``truncated: true`` while nothing
+        remained. A caller paging ``while truncated`` never terminates, and the
+        terminal page is indistinguishable from a truncated one.
+        """
+        # 3 matches, one row per page: only the pages with rows behind them cut.
+        for offset, delivered, expected in ((0, 1, True), (1, 1, True),
+                                            (2, 1, False), (3, 0, False)):
+            sink: dict = {}
+            mark_truncation(sink, returned=delivered, candidates=3,
+                            exact=True, offset=offset)
+            field = truncation_field(sink)
+            assert field[TRUNCATED_FIELD] is expected, (offset, field)
+            if expected:
+                # The total is the WHOLE population, never the remainder.
+                assert field[TOTAL_AVAILABLE_FIELD] == 3, field
+            else:
+                assert TOTAL_AVAILABLE_FIELD not in field, field
+
+    def test_offset_zero_is_the_pre_change_predicate(self):
+        """The default keeps every unpaged caller byte-identical."""
+        for returned, candidates in ((3, 3), (5, 20), (10, 11)):
+            unpaged: dict = {}
+            paged_at_zero: dict = {}
+            mark_truncation(unpaged, returned=returned, candidates=candidates,
+                            exact=True)
+            mark_truncation(paged_at_zero, returned=returned,
+                            candidates=candidates, exact=True, offset=0)
+            assert truncation_field(unpaged) == truncation_field(paged_at_zero), (
+                returned, candidates)
+
     def test_missing_verdict_is_a_refusal_never_a_default_false(self):
         """An absent marker must not be read as 'complete' — that is the bug."""
         with pytest.raises(RuntimeError, match="truncation marker missing"):
@@ -1624,7 +1661,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                 for module, _lineno, _name, owner in cls._scan(root)}
 
     def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
-        """All SEVEN call sites, not the three a two-name filter can match.
+        """All NINE call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
         and four further alias bindings introduced by
@@ -1638,13 +1675,18 @@ class TestTheMarkerSiteRegisterIsComplete:
         unrelated edit to `sdk.py` while an alias pin only breaks when a site is
         added or moved. The same alias NAME can legitimately appear in two
         modules, so the key is `(module, name)`.
+
+        ⚠️ The bare-name count in `hosted_api.py` is THREE: `list_points`
+        (pre-existing), plus `_paged` and `get_entity_relations` from #14592.
+        That pair shipped unregistered, and this test is what caught it.
         """
         from collections import Counter
 
         seen = Counter((module, name)
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
-            ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            # list_points, _paged, get_entity_relations
+            ("tortoise/hosted_api.py", "mark_truncation"): 3,
             ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
@@ -1675,11 +1717,13 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_four_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see all four."""
+    def test_the_scan_finds_every_site_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all six."""
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::_paged",
+            "tortoise/hosted_api.py::get_entity_relations",
             "tortoise/hosted_api.py::search",
             "tortoise/sdk.py::_issue_insight",
             "tortoise/sdk.py::_tortoise_fts_query",
@@ -1719,3 +1763,82 @@ class TestTheMarkerSiteRegisterIsComplete:
             assert stale not in doc, (
                 f"the register re-introduced the stale cardinality claim "
                 f"{stale!r} — name the sites, let the AST scan keep the count")
+
+    @staticmethod
+    def _routes_reaching(callee: str) -> set[str]:
+        """Hosted route paths whose call chain reaches `callee`.
+
+        Derived from ``tortoise/hosted_api.py``'s own call graph (a handler may
+        reach the marker through a helper — ``/v1/objects`` and ``/v1/subjects``
+        both page through ``_list_layer_route`` → ``_paged``), so this cannot go
+        stale when a route is added, renamed or re-pointed.
+        """
+        import ast
+        from pathlib import Path
+
+        module = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "hosted_api.py")
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        funcs = {n.name: n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        targets = {
+            name: {(sub.func.attr if isinstance(sub.func, ast.Attribute)
+                    else getattr(sub.func, "id", ""))
+                   for sub in ast.walk(node)
+                   if isinstance(sub, ast.Call)}
+            for name, node in funcs.items()
+        }
+        reach = {callee}
+        while True:
+            grew = {n for n, called in targets.items() if called & reach} - reach
+            if not grew:
+                break
+            reach |= grew
+        routes = set()
+        for name in reach - {callee}:
+            for dec in funcs[name].decorator_list:
+                if not isinstance(dec, ast.Call) or not dec.args:
+                    continue
+                path = dec.args[0]
+                if (isinstance(path, ast.Constant)
+                        and isinstance(path.value, str)
+                        and path.value.startswith("/v1/")):
+                    routes.add(path.value)
+        return routes
+
+    def _register_entry(self, site: str) -> str:
+        """The register bullet for ONE ``<module>::<function>``, prose included."""
+        doc = self._module_docstring()
+        marker = f"- ``{site}``"
+        start = doc.find(marker)
+        assert start != -1, f"the register names no entry for {site}"
+        rest = doc[start + len(marker):]
+        end = rest.find("\n- ``")
+        return marker + (rest if end == -1 else rest[:end])
+
+    def test_the_paged_entry_names_every_route_that_pages_through_it(self):
+        """``_paged`` marks THREE routes; the register must name all three.
+
+        The entry named ``GET /v1/objects`` and ``GET /v1/subjects`` only, and
+        described ``candidates`` as an exact ``count()`` — both false for the
+        third caller, ``GET /v1/sources`` (``candidates=len(rows)`` over
+        ``list_sources``' whole-population answer). An auditor grepping the
+        register for ``/v1/sources`` therefore found no site and concluded the
+        surface is UNMARKED, which is the inverse of the failure this register
+        exists to prevent (#14592 review, P3).
+
+        Route coverage is DERIVED from the call graph, so a new route that pages
+        through ``_paged`` reds here until the register names it — the same
+        guarantee ``test_every_marker_call_site_is_named_in_the_register`` gives
+        at ``module::function`` granularity, at route granularity.
+        """
+        routes = self._routes_reaching("_paged")
+        assert routes == {"/v1/objects", "/v1/subjects", "/v1/sources"}, (
+            "the routes reaching `_paged` changed shape — re-derive which of "
+            f"them are SKIP/LIMIT-paged before trusting this pin: {sorted(routes)}")
+        entry = self._register_entry("tortoise/hosted_api.py::_paged")
+        missing = sorted(r for r in routes if r not in entry)
+        assert not missing, (
+            f"the register's `_paged` entry does not name {missing} — a lane "
+            "auditing #8447 greps the register for its route and concludes the "
+            "surface is unmarked; name the route in that bullet")

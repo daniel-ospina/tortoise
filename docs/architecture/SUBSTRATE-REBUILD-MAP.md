@@ -281,9 +281,9 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **74** lines across **23**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 74 lines,
-`git grep -l ':Document' -- tortoise/` → 23 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **77** lines across **24**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 77 lines,
+`git grep -l ':Document' -- tortoise/` → 24 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 nine moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
@@ -311,16 +311,16 @@ names the retired label in order to explain a rule about it — and it is the fi
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
 retirement prose in `tortoise/mcp_server.py:4543`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37957` and `_file_human_approval`'s `:37999`, one line each in a file this population already
+`tortoise/sdk.py:37958` and `_file_human_approval`'s `:38000`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4448` is the `# prop named "error"
 must not suppress the onboarding observation.` comment and the
 `:Document` retirement prose is at `:4543`; `sdk.py:37126` is a
 ``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37366`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37957` in `record_decision` (opening `:37937`;
-`:37956` is the `:Source` line immediately above it) and `:37999` in `_file_human_approval`
-(opening `:37977`)**), whose
+`:Document` docstring lines are `:37958` in `record_decision` (opening `:37938`;
+`:37957` is the `:Source` line immediately above it) and `:38000` in `_file_human_approval`
+(opening `:37978`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
@@ -331,7 +331,13 @@ module's opening paragraph names `:Object`/`:Subject`/`:Event`/`:Document`/`:Sou
 to say which labels the one derive-and-encode rule spans, i.e. prose that names
 the retired label to state a rule about it, in a file this population had not
 previously reached, so it lifts the FILE count as well as the line count
-(like #10976 and #11729 before it). All nine are the point
+(like #10976 and #11729 before it). The tenth is #14592's
+`tortoise/entity_reads.py`, the REST read layer: its `_RELATION_ENDPOINT_NAME`
+comment names the retired label to say why a bare `(:Document {id})` left behind
+by an interrupted `relabel_legacy_documents` must not answer a name from its
+stored `content` — prose that names the retired label to state a rule about it,
+in a file this population had not reached at all, so it lifts the FILE count too.
+All ten are the point
 rather than an accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
@@ -341,7 +347,7 @@ of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
-and one narrow enough to skip them (`\(\w*:Document`) still matches **nine**
+and one narrow enough to skip them (`\(\w*:Document`) still matches **eleven**
 lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
 `relabel_legacy_documents`'s docstring), that same
 `cache_eviction.py:956` comment, and the `hosted_backup.py` ones (the
@@ -349,9 +355,13 @@ served-label declaration, the validator's docstring and `restore_backup`'s),
 which arrived with #11729, plus three more in that file from #12015's own
 docstring constants and comments — the unlabelled dump entry, and the composed
 remedy's two notes — each naming `MATCH (n:Document)` as the relabel walk's
-scope, which is the reason a label-less target may not be promised that repair.
-Those three match the narrow pattern by spelling, not by shape: a Cypher scope,
-not an RST literal. The exception is still an exception, so the exclusion
+scope, which is the reason a label-less target may not be promised that repair,
+plus #14592's two: `entity_reads.py`'s note on a bare `(:Document {id})` left by
+an interrupted relabel, and `hosted_api.py`'s on the `(:Document:Source)` shape
+that interrupt produces.
+The #12015 three match the narrow pattern by spelling, not by shape: a Cypher
+scope, not an RST literal. #14592's two are prose as well — a node shape quoted in
+a comment and in a docstring — so the exclusion argument is unchanged by them. The exception is still an exception, so the exclusion
 argument stands; a guard carrying a hand-maintained allowlist of docstrings is a
 guard nobody can trust, so the label claim stays evidence recorded here rather
 than a check that would have to be argued with.
