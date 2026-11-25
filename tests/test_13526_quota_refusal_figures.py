@@ -858,10 +858,25 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
         return real_datetime.fromisoformat(raw)
 
     base = handed(timedelta())
-    #: TWO shifts, and the second crosses a year ON PURPOSE: a pinned calendar
-    #: component tracks the clock under a six-hour shift and stops tracking it
-    #: under a year-crossing one, which is the only cheap way to tell a pin from
-    #: a read.
+    #: TWO shifts, and BOTH are needed because each catches the other's blank.
+    #: Their roles REVERSE by pin kind, so neither is "the real test":
+    #:
+    #: * a year/month/day pin (`replace(day=1)`) keeps the time-of-day, so the
+    #:   six-hour shift passes it UNLESS that shift crosses the pinned component
+    #:   (it does not for most start instants, and does near a month end) — the
+    #:   year-crossing shift is what reliably exposes it;
+    #: * a SUB-DAY pin is the inverse — `replace(hour=2)` moves exactly 0 s under
+    #:   `+6h` (caught there) and exactly the shift under `+405d`, because 405
+    #:   days is a whole number of days, so the year-crossing shift does NOT
+    #:   catch it.
+    #:
+    #: ⛔ So do not trim this to one shift on the strength of "the year-crossing
+    #: one is the real test": doing so silently stops catching sub-day pins, and
+    #: dropping the year-crossing one stops catching calendar pins. An earlier
+    #: revision of this comment said a pinned calendar component "tracks the
+    #: clock under a six-hour shift" and called the year-crossing shift "the only
+    #: cheap way" — measured false for every sub-day pin, which is the shape the
+    #: source arm above explicitly does not cover.
     for shift in (timedelta(hours=6), timedelta(days=405)):
         moved = (handed(shift) - base).total_seconds()
         assert abs(moved - shift.total_seconds()) <= 2, (
