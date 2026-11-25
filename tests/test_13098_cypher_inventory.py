@@ -329,6 +329,70 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
+def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
+        tmp_path):
+    """`--check --render <path>` must not accept a write it then silently drops.
+
+    ⛔ THE NO-OP-GATE SHAPE, measured at #14625's round-4 review: `main()` returns
+    from the `--check` branch before the `--render` branch, so
+    `cypher_inventory.py --check --render /tmp/both.md` printed
+    `check: 25 pinned counts match`, exited **0**, and NEVER WROTE the file. Both are
+    independent optional flags and no §7 sentence declares a precedence, while §7's
+    procedure names both halves (item 1 renders, item 2 re-checks) — so running them
+    as one command is a plausible reading, and a green check beside a write that did
+    not happen is exactly the "gate that silently does nothing" class this module
+    exists to refuse. 2 (could not run) is the honest answer; 0 is not.
+    """
+    out = tmp_path / "both.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--check", "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 2, (
+        "`--check --render` must exit 2 (could not run), got "
+        f"{proc.returncode}; a 0 here reads as 'checked and rendered' when the write "
+        f"never happened. stdout was:\n{proc.stdout}")
+    assert not out.exists(), (
+        "the refused command must write NOTHING — it was accepted and the write was "
+        "SILENTLY DROPPED instead")
+    assert "25 pinned counts match" not in proc.stdout, (
+        "the refusal must not print a check verdict; stdout was:\n" + proc.stdout)
+    assert "--check" in proc.stderr and "--render" in proc.stderr, (
+        "the refusal must name BOTH verbs so the lane knows what to split; stderr "
+        f"was:\n{proc.stderr}")
+
+
+def test_a_directory_destination_is_refused_AS_a_directory(tmp_path):
+    """A directory destination exits 2 with the TRUE cause, not "a TRACKED path".
+
+    ⛔ `git ls-files --error-unmatch -- <dir>` exits **0** for any directory that
+    merely CONTAINS tracked files, so the tracked-path probe claimed
+    `--render docs/architecture` and prescribed "Pick an untracked path" while the
+    real error is EISDIR — which the write guard names only for a directory holding
+    no tracked file (measured at #14625's round-4 review). Exit status was 2 in both
+    cases, so this arm grades the DIAGNOSIS: a reader sent to "pick an untracked
+    path" re-runs the same command on another directory and gets the same refusal.
+    """
+    untracked = tmp_path / "empty-dir"
+    untracked.mkdir()
+    for dest in (ROOT / "docs" / "architecture", untracked):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+             "--render", str(dest)],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert proc.returncode == 2, (
+            f"`--render {dest}` must exit 2 (could not run), got {proc.returncode}")
+        assert "DIRECTORY" in proc.stderr, (
+            f"the refusal for `{dest}` must name the DIRECTORY as the cause; stderr "
+            f"was:\n{proc.stderr}")
+        assert "TRACKED path" not in proc.stderr, (
+            f"`{dest}` was refused as a TRACKED path — the proven FALSE cause for a "
+            "directory that contains tracked files (the real error is EISDIR); "
+            f"stderr was:\n{proc.stderr}")
+
+
 def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_path):
     """`--render`/`--check` answer 2 when the census cannot enumerate the tree.
 
@@ -2847,6 +2911,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_refuses_to_write_over_the_source",
         "test_the_renderer_refuses_to_write_over_a_tracked_path",
         "test_the_renderer_refuses_the_all_surface_combination",
+        # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
+        # the write, and a directory destination refused with a false cause. Both are
+        # message/precedence defects, so nothing else in the tree asserts them.
+        "test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish",
+        "test_a_directory_destination_is_refused_AS_a_directory",
         "test_the_renderer_reports_a_probe_failure_as_could_not_run",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
