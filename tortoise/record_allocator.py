@@ -290,14 +290,34 @@ JOURNAL_COUNT_SQL = (
     "WHERE org_id = %s AND graph_id = %s"
 )
 
-#: Graphs this ORG that the RECORD has seen writing, and that have NO counter
-#: row — i.e. "born uncut", the state `#13043` review P1-1 named. The creation
-#: hook that PREVENTS it is :func:`provision_graph_record` (`#14582`, the plan's
-#: `§A7.8` item 8); this query is the RECONCILIATION path for the graphs it did
-#: not reach — the ones created before it landed, and the ones whose hook failed
-#: best-effort (a record outage at creation must not fail a user's graph, so that
-#: case is reported on `/health` as `armed_but_uncut` and healed by
+#: Graphs this ORG that the RECORD has seen writing, and that are **NOT
+#: ALLOCATING** — a population with TWO members, both of which allocate nothing:
+#: no counter row at all ("born uncut", the state `#13043` review P1-1 named),
+#: and a counter row in a NON-TERMINAL mode (`seeded`, `halted`). The creation
+#: hook that PREVENTS the first is :func:`provision_graph_record` (`#14582`, the
+#: plan's `§A7.8` item 8); this query is the RECONCILIATION path for the graphs
+#: it did not reach — the ones created before it landed, and the ones whose hook
+#: failed best-effort (a record outage at creation must not fail a user's graph,
+#: so that case is reported on `/health` as `armed_but_uncut` and healed by
 #: `tools/record_allocator_cli.py backfill`).
+#:
+#: ⛔ THE SECOND MEMBER IS NOT OPTIONAL, AND LEAVING IT OUT WAS A MEASURED FALSE
+#: CLEAN (#14624 review 1, P1). `backfill` SEEDS and does not arm by default, and
+#: `seeded` allocates nothing (`ALLOCATION_SQL` is scoped to `active`), so an
+#: operator following the checklist in `CUTOVER_ACK_TEXT` — `sweep` → `backfill`
+#: → re-run `sweep` to confirm → roll the flag — read **0 rows, "clean"** over
+#: graphs this very verb had left refusing every record write, then rolled a
+#: global flag over them. `write_live_record` is fail-soft, so the loss was
+#: silent. The population a pre-flight enumerates is therefore **everything not
+#: in the terminal state**, never "everything missing a row": a `seeded` graph
+#: STAYS in this population until it is `active`.
+#:
+#: ⛔ and `halted` belongs in it too: it allocates nothing either (it is the state
+#: a defect leaves a graph in), so a `sweep` that omitted it would answer "none"
+#: over a stopped graph. Its REMEDY is different (`reopen` before `arm`), which is
+#: why the mode travels with the graph id instead of being inferred from
+#: membership — see :func:`tortoise.record_allocator.MODE_SEEDED`'s and
+#: `MODE_HALTED`'s opposite remedies in :func:`_transition`.
 #:
 #: ⛔ IT READS `journal_event`, NOT `public.graphs`, and the reason is a GRANT,
 #: not a preference: `tortoise_record_app` has no privilege on `public.graphs`
@@ -308,10 +328,11 @@ JOURNAL_COUNT_SQL = (
 #: so the first write is the point at which this becomes actionable (and, for a
 #: born-uncut graph, the point at which its first line's row is lost).
 UNCUT_GRAPHS_SQL = (
-    "SELECT DISTINCT j.graph_id FROM public.journal_event j "
+    "SELECT DISTINCT j.graph_id, c.mode FROM public.journal_event j "
     f"LEFT JOIN public.{RECORD_CURSOR_TABLE} c "
     "       ON c.org_id = j.org_id AND c.graph_id = j.graph_id "
-    "WHERE j.org_id = %s AND c.graph_id IS NULL ORDER BY j.graph_id"
+    f"WHERE j.org_id = %s AND (c.graph_id IS NULL OR c.mode <> '{MODE_ACTIVE}') "
+    "ORDER BY j.graph_id"
 )
 
 ARM_SQL = (

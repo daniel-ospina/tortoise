@@ -1143,12 +1143,106 @@ def test_dry_run_and_arm_belong_to_backfill_only() -> None:
         assert excinfo.value.code == cli.EXIT_USAGE, argv
 
 
+def test_the_population_is_everything_not_allocating_not_just_missing_rows():
+    """⛔ THE FALSE CLEAN (#14624 review 1, the P1) — pinned where it was made.
+
+    `backfill` seeds without arming, and a `seeded` row allocates nothing
+    (`ALLOCATION_SQL` is scoped to `active`). With `WHERE c.graph_id IS NULL` the
+    graph the run had just touched LEFT the population, so the operator checklist
+    (sweep → backfill → re-sweep to confirm → roll the flag) read **clean** over
+    graphs that refuse every record write — silently, because the live door is
+    fail-soft.
+
+    The population a pre-flight enumerates is therefore everything NOT in the
+    TERMINAL state. Both members matter and each carries its own remedy, which is
+    why the mode is SELECTed beside the id rather than inferred from membership.
+
+    NON-VACUITY: this is a static pin, and it is paired with live legs that drive
+    the real database (`test_a_non_arm_backfill_does_not_read_as_a_finished_cutover`,
+    `test_a_halted_graph_is_seeded_but_never_armed_by_backfill`). Reverting the
+    predicate to `c.graph_id IS NULL` reds this row in the fast matrix and those
+    two in `test-record-postgres`.
+    """
+    from tortoise import record_allocator as ra
+
+    sql = " ".join(ra.UNCUT_GRAPHS_SQL.split())
+    assert f"c.mode <> '{ra.MODE_ACTIVE}'" in sql, (
+        "the population is narrowed back to 'no counter row', so a `seeded`/"
+        f"`halted` graph vanishes from the pre-flight: {sql!r}")
+    assert "c.mode" in sql.split("FROM")[0], (
+        "the population must SELECT the counter's mode — membership alone cannot "
+        f"tell `seeded` (heal with `arm`) from `halted` (heal with `reopen`): {sql!r}")
+    assert ra.MODE_SEEDED not in sql and ra.MODE_HALTED not in sql, (
+        "the predicate is spelled `<> active` on PURPOSE: an enumeration of the "
+        "non-terminal modes would silently omit a future mode, whereas 'not the "
+        "terminal one' cannot")
+
+
+def test_backfill_never_arms_a_halted_counter(monkeypatch) -> None:
+    """⛔ `arm` moves `seeded` → `active` ONLY, so an org-wide `backfill --arm`
+    that met a `halted` graph raised out of the middle of the run — after
+    committing every graph before it (#14624 review 1).
+
+    No database: the seed's ANSWER is what the decision reads (`result.mode`), so
+    it is monkeypatched to the halted state and the arm leg is a recorder that
+    FAILS if it is called. The live leg is
+    `test_a_halted_graph_is_seeded_but_never_armed_by_backfill`.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
+
+    answers = {
+        _sql_key(ra.UNCUT_GRAPHS_SQL): [("g-halted", ra.MODE_HALTED)],
+        _sql_key(ra.JOURNAL_MAX_SQL): [(2,)],
+        _sql_key(ra.JOURNAL_COUNT_SQL): [(2,)],
+    }
+    monkeypatch.setattr(ra, "scope_tenant", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ra, "seed",
+        lambda *a, **k: SimpleNamespace(seq=2, mode=ra.MODE_HALTED,
+                                       healed_tail=False, burned=False))
+
+    def _arm_must_not_be_called(*a, **k):
+        raise AssertionError(
+            "`arm` was called on a halted counter: it refuses (`seeded` → "
+            "`active` only) and would abort an org-wide run mid-way")
+
+    monkeypatch.setattr(ra, "arm", _arm_must_not_be_called)
+
+    payload = cli._cmd_backfill(_FakeRecordConn(answers),
+                               _backfill_args("o", arm_graphs=True))
+    assert (payload["considered"], payload["seeded"], payload["armed"]) == (1, 1, 0), payload
+    entry = payload["graphs"][0]
+    assert entry["counter_mode"] == ra.MODE_HALTED, entry
+    assert entry["armed"] is False, entry
+    assert "reopen" in entry["arm_refused"], (
+        f"the entry must name the halt's own remedy: {entry}")
+    assert _sql_key(ra.UNCUT_GRAPHS_SQL) in _FakeRecordConn(answers)._answers, (
+        "the fake answers the population read the code actually runs — a renamed "
+        "statement would silently answer nothing instead of failing here")
+
+
 # ── the backfill ───────────────────────────────────────────────────────────
 
 @pytestmark_live
-def test_the_backfill_reports_its_three_counts_and_is_idempotent(
+def test_a_non_arm_backfill_does_not_read_as_a_finished_cutover(
         armed, record_schema):
-    """`N considered / M seeded / K refused`, and a re-run is a no-op."""
+    """⛔ `N considered / M seeded / K refused` — AND `seeded` IS NOT CUT OVER
+    (#14624 review 1, the P1).
+
+    The defect this pins, measured on the reviewed head: `backfill` seeds and does
+    NOT arm by default, `seeded` allocates nothing (`ALLOCATION_SQL` is scoped to
+    `active`) — and `UNCUT_GRAPHS_SQL` was `WHERE c.graph_id IS NULL`, so the graph
+    the run had just "healed" DISAPPEARED from the population. The operator
+    checklist in `CUTOVER_ACK_TEXT` (sweep → backfill → re-run sweep to confirm →
+    roll the flag) therefore read **0 rows, clean** over graphs that refuse every
+    record write, and the fail-soft door made the loss silent.
+
+    This row asserts the two halves at once: the graph STAYS in `sweep`'s
+    population with `counter_mode: seeded`, and only `--arm` moves it to the
+    terminal state that legitimately leaves. Revert the SQL predicate to
+    `c.graph_id IS NULL` and the `sweep`/re-run assertions below red.
+    """
     from tools import record_allocator_cli as cli
 
     org, graph = _uncut_graph(record_schema, "backfill", positions=(1, 2, 3))
@@ -1163,22 +1257,88 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
     assert (dry["considered"], dry["seeded"], dry["refused"]) == (1, 0, 0), dry
     assert (dry["would_seed"], dry["would_arm"]) == (1, None), dry
     assert dry["graphs"][0]["outcome"] == "would_seed"
+    assert dry["graphs"][0]["counter_mode"] is None, (
+        "the dry run must say WHICH not-cut-over state the graph is in: `None` "
+        "is born uncut, and it is healed by seed — not by reopen")
     assert _counter(record_schema, org, graph) is None, (
         "--dry-run wrote a row: the one thing it promises is that it does not")
 
     real = cli._cmd_backfill(_conn(), args)
     assert (real["considered"], real["seeded"], real["refused"]) == (1, 1, 0)
+    assert real["armed"] is None, "no --arm was passed, so nothing was armed"
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "a graph with 3 position rows must seed to 3 — its next write is 4")
+    assert "finish_the_cutover" in real, (
+        "a run that leaves graphs SEEDED must say so in words: `seeded` is not "
+        "cut over, and the operator's next step is `--arm`")
 
-    # ⛔ IDEMPOTENCE IS MEASURED AS "NOTHING LEFT TO DO", not as "the same three
-    # counts again": the population is UNCUT graphs, so a graph the first run
-    # seeded has left it. A second run that reported it again would be a verb
-    # that cannot tell a healed graph from a broken one.
+    # ⛔ THE FALSIFIER. A graph left `seeded` is STILL not allocating, so it must
+    # still be in the population a pre-flight enumerates. Before this fix this
+    # read `count: 0` — the false CLEAN.
+    swept = cli._cmd_sweep(_conn(), _sweep_args(org))
+    assert swept["count"] == 1, (
+        "`sweep` read CLEAN over a graph `backfill` left `seeded`: the population "
+        f"must be everything NOT ALLOCATING, not everything missing a row: {swept}")
+    assert swept["uncut_graphs"][0]["counter_mode"] == "seeded", swept
+
+    # …and a re-run still SEES it (nothing to re-discover by hand), while the
+    # counter does not move: idempotence is about the WRITE, not about hiding the
+    # graph from the pre-flight.
     again = cli._cmd_backfill(_conn(), args)
-    assert (again["considered"], again["seeded"], again["refused"]) == (0, 0, 0), again
+    assert (again["considered"], again["seeded"], again["refused"]) == (1, 1, 0), (
+        "a second run must still consider the graph it left seeded — reporting 0 "
+        "is the blind population this row exists to catch", again)
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "the backfill must be IDEMPOTENT: a second run may not move the counter")
+
+    # --arm is what finishes it, and THEN the graph leaves the population for the
+    # reason the terminal state exists.
+    armed_run = cli._cmd_backfill(_conn(), _backfill_args(org, arm_graphs=True))
+    assert (armed_run["considered"], armed_run["seeded"],
+            armed_run["armed"]) == (1, 1, 1), armed_run
+    assert _counter(record_schema, org, graph) == (3, "active")
+    assert cli._cmd_sweep(_conn(), _sweep_args(org))["count"] == 0, (
+        "an `active` graph allocates, so it is OUT of the population — this is "
+        "the one zero that is a clean one")
+
+
+@pytestmark_live
+def test_a_halted_graph_is_seeded_but_never_armed_by_backfill(
+        armed, record_schema):
+    """⛔ `arm` MOVES `seeded` → `active` ONLY, so a halted graph in the (now
+    wider) population must be SEEDED and reported, not armed (#14624 review 1).
+
+    A `halted` counter allocates nothing either, so the population carries it. It
+    is NOT healed by `arm`: a halt is a deliberate stop after a defect, with the
+    opposite remedy (`reopen`), so an org-wide `backfill --arm` that called `arm`
+    blindly would raise out of the middle of the run — after committing the graphs
+    before it.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
+
+    org, graph = _uncut_graph(record_schema, "halted", positions=(1, 2))
+    conn = _conn()
+    # `halt` moves `active` → `halted` ONLY, so the graph must be cut over first —
+    # which is what the arm run below does (and it also proves the happy path the
+    # next assertion contrasts with).
+    assert cli._cmd_backfill(conn, _backfill_args(org, arm_graphs=True))["armed"] == 1
+    ra.halt(conn, org_id=org, graph_id=graph)
+    conn.commit()
+    assert _counter(record_schema, org, graph) == (2, "halted")
+
+    payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm_graphs=True))
+    assert (payload["considered"], payload["seeded"], payload["armed"]) == (1, 1, 0), (
+        "a halted graph must NOT be counted as armed", payload)
+    assert payload["graphs"][0]["counter_mode"] == "halted", payload
+    assert payload["graphs"][0]["armed"] is False, payload
+    assert "reopen" in payload["graphs"][0]["arm_refused"], (
+        "the entry must name the remedy the halt actually has: reopen", payload)
+    assert _counter(record_schema, org, graph) == (2, "halted"), (
+        "backfill may not lift a halt — that is the `reopen` verb's decision")
+    assert cli._cmd_sweep(_conn(), _sweep_args(org))["count"] == 1, (
+        "a halted graph is not cut over, so the pre-flight may not read clean "
+        "over it")
 
 
 def test_a_dry_run_reports_would_counts_and_a_real_run_reports_the_writes(
@@ -1195,12 +1355,17 @@ def test_a_dry_run_reports_would_counts_and_a_real_run_reports_the_writes(
     exists to avoid). The connection is a recorder, so "wrote nothing" is
     MEASURED — zero `commit()`s and one run-level `rollback()`.
     """
-    from tortoise import record_allocator as ra
     from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
 
     graphs = ["g-1", "g-2"]
     answers = {
-        _sql_key(ra.UNCUT_GRAPHS_SQL): [(graph,) for graph in graphs],
+        # ⛔ TWO COLUMNS: `(graph_id, counter_mode)`. The second one is the state
+        # the population now carries (`None` = born uncut, `seeded`/`halted` = a
+        # row that allocates nothing) — a fake answering the OLD one-column shape
+        # reds here rather than silently reporting `counter_mode: None` (#14624
+        # review 1).
+        _sql_key(ra.UNCUT_GRAPHS_SQL): [(graph, None) for graph in graphs],
         _sql_key(ra.JOURNAL_MAX_SQL): [(3,)],
         _sql_key(ra.JOURNAL_COUNT_SQL): [(3,)],
     }
@@ -1357,6 +1522,16 @@ def _backfill_args(org: str, *, dry_run: bool = False,
                            dsn=None, floor=None, journal=None,
                            dry_run=dry_run, arm_graphs=arm_graphs,
                            acknowledge_cutover=False, as_json=False)
+
+
+def _sweep_args(org: str) -> SimpleNamespace:
+    """The same shape for `sweep` — which reads no floor here, so every entry's
+    `enumerated_floor` is `None` and the payload says UNKNOWN rather than a
+    comparison it never made."""
+    return SimpleNamespace(org_id=org, command="sweep", graph_id=None, dsn=None,
+                           floor=None, journal=None, dry_run=False,
+                           arm_graphs=False, acknowledge_cutover=False,
+                           as_json=False)
 
 
 def _sql_key(sql: str) -> str:
