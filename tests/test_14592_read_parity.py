@@ -992,12 +992,14 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
         assert "content" not in denied, denied
         assert raw not in repr(denied), denied
-        # ⛔ … AND THE URL ARM ECHOES THE KIND THE ID ARM DOES. A re-attach keyed
-        # on the MATCHED BRANCH read this node through `Source{url}` and dropped
-        # `objectKind`, while the same node by `id` (the `Object` branch) kept
-        # it — one node, two addresses, two payloads. Keying on the label set
-        # makes both arms serve the same bag; this line is what reds otherwise.
-        assert denied.get("objectKind") == "goal", denied
+        # ⛔ … AND THE TWO SOURCE ADDRESSES SERVE THE SAME BAG. A re-attach keyed
+        # on the MATCHED BRANCH read this node through `Source{url}` (no kind) by
+        # url and through the `Object` branch (kind echoed) by id — one node, two
+        # addresses, two payloads. The echo is keyed on the ROUTE's layer now, so
+        # BOTH Source arms withhold `objectKind` and the Object door keeps it
+        # (asserted below). Both halves are pinned: flipping the echo either way
+        # reds one of them.
+        assert "objectKind" not in denied, denied
 
         # … and so do both root arms: the relations preview …
         relations = client.get(f"/v1/entities/{hyb}/relations")
@@ -1036,6 +1038,15 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         by_id = client.get(f"/v1/sources/{hyb}")
         assert by_id.status_code == 200, by_id.text
         assert raw not in by_id.text, by_id.text
+        # ⛔ AND THE KIND IS THE ROUTE'S LAYER, NOT THE MATCHED BRANCH: read as a
+        # Source, the node answers the Source bag, which does not declare
+        # `objectKind` (D10 B6 retires it). Keying the by-id echo on the matched
+        # branch handed it back here (measured) — a denied property riding a door
+        # that withholds the rest.
+        assert "objectKind" not in by_id.json(), by_id.json()
+        # …while reading it as the Object it also is keeps its own layer's kind.
+        as_object = client.get(f"/v1/objects/{hyb}").json()
+        assert as_object["objectKind"] == "goal", as_object
         # ⛔ BOTH FORMS OF THE LEAK ASSERTION, because neither subsumes the
         # other: `repr` sees a decoded value (an escape is unescaped, so a `'`
         # IS caught) while the response TEXT sees the wire form (a non-ASCII
