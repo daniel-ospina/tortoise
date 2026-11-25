@@ -715,8 +715,11 @@
          the escape hatch two blocks down, which CENTRES the beats whose copy
          fits and starts an overflowing one at its own padding-top — so the
          padding below is the floor at every phone height, and the hero is the
-         beat that always overflows (722.5px of copy in a 700px box at 375x812),
-         which is why its auto margins resolve to zero and its h1 stays at y=80.
+         beat that reaches it first. Measured at this head: at 375x764 its
+         687.95px of copy overflows a 652px box, so its auto margins resolve to
+         zero and the h1 rides the padding at y=80; at 375x812 the same copy
+         FITS a 700px box, the margins share 6.03px a side and the h1 sits at
+         y=86.03. Both clear the button's 54.4.
          Reducing it to 2rem put the h1 at y=33 and painted the first line
          UNDER the button
          (26.7x21.4px overlap at 375x812, and only +1.0px clearance at 390x844
