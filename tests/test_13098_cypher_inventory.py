@@ -262,7 +262,13 @@ def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsy
         + "| `tortoise/sdk.py:1` | `f` | plain | read | candidate:SQL-shaped | `RETURN 1` |\n",
         encoding="utf-8",
     )
-    result = census.census(("tortoise",))
+    # ⛔ NO CENSUS HERE, AND THAT IS THE POINT: both refusals return BEFORE they
+    # touch the result (verified — `render(rowed, None)` raises 2 and `check(rowed,
+    # None)` returns 1), so measuring the tree here would add a full walk (~8 s) to
+    # the REQUIRED `python-ci-gate` for a value nothing reads. Passing `None` is
+    # deliberate: if a future edit makes either path consult the census, this arm
+    # TypeErrors HERE rather than quietly re-adding the cost.
+    result = None
     with pytest.raises(SystemExit) as refused:
         census.render(rowed, result)
     # 2 is this tool's "could not run" — never 1, which is the DRIFT verdict the
@@ -291,19 +297,71 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
     table.
     """
     out = tmp_path / "wide.md"
-    proc = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
-         "--render", str(out), "--all-surface"],
-        capture_output=True, text=True, cwd=ROOT,
-    )
-    assert proc.returncode == 2, (
-        f"`--render --all-surface` must exit 2 (could not run), got {proc.returncode}")
-    assert "--all-surface" in proc.stderr, (
-        "the refusal must name the flag that contradicts `--render`; stderr was:\n"
-        + proc.stderr)
-    assert not out.exists(), (
-        "the refusal must write NOTHING — a half-written wide document is the "
-        "artifact the refusal exists to prevent")
+    for verb in ("--render", "--check"):
+        argv = [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+                verb] + ([str(out)] if verb == "--render" else []) + ["--all-surface"]
+        proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+        # ⛔ `--check --all-surface` IS THE SAME CONTRADICTION ONE VERB OVER: the
+        # pins are product counts, so the wide census can never satisfy them —
+        # measured before this guard, it exited 1 with 27 DRIFT keys, a guaranteed
+        # false RED reached through the documented verb.
+        assert proc.returncode == 2, (
+            f"`{verb} --all-surface` must exit 2 (could not run), got "
+            f"{proc.returncode}")
+        assert "--all-surface" in proc.stderr, (
+            f"the refusal must name the flag that contradicts `{verb}`; stderr was:\n"
+            + proc.stderr)
+        assert not out.exists(), (
+            "the refusal must write NOTHING — a half-written wide document is the "
+            "artifact the refusal exists to prevent")
+
+
+def test_the_renderer_refuses_to_write_over_the_source():
+    """`--render <the source>` would corrupt the tracked file AND lock the tool.
+
+    `render()`'s own refusal guards the SOURCE'S CONTENT, never the DESTINATION, so
+    pointing `--render` at `CYPHER-INVENTORY.src.md` read the clean source, passed
+    that refusal, and wrote source + 1,327 rows over the tracked file. That is
+    self-locking: `--check` then exits 1 (it carries rows) and `--render` exits 2 (it
+    refuses a rowed source), so the tool can neither grade nor repair the tree it
+    just wrote. §7 tells every lane to run this verb, so a mistyped path is the
+    plausible route to the conflict this split exists to remove.
+
+    In-process and cheap: the guard sits BEFORE the census, so this never walks the
+    tree; the source is compared byte-for-byte to prove nothing was written.
+    """
+    before = DOC_SRC.read_bytes()
+    rc = census.main(["--render", DOC_SRC.relative_to(ROOT).as_posix()])
+    assert rc == 2, f"`--render <source>` must exit 2, got {rc}"
+    assert DOC_SRC.read_bytes() == before, (
+        "the tracked SOURCE was rewritten — the guard must refuse before writing")
+
+
+def test_the_renderer_refuses_to_write_over_a_tracked_path(monkeypatch):
+    """…and over ANY tracked path, not only the source.
+
+    ⛔ THE TRACKED-PATH BRANCH IS PINNED WITHOUT RISKING A REAL FILE: the tool's
+    `git ls-files` probe is the thing under test, so it is the thing replaced — a
+    fake that reports "tracked" for a path that does not exist. If the guard is
+    present, nothing is written and the target stays absent; if it regressed, this
+    reds on the assertion below rather than after a 370 KB document has replaced a
+    real tracked file.
+    """
+    target = ROOT / "docs" / "architecture" / "refuse-me.md"
+    assert not target.exists(), "a real file sits at the probe path — pick another"
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(ROOT).as_posix()])
+    assert rc == 2, f"`--render <tracked path>` must exit 2, got {rc}"
+    assert not target.exists(), (
+        "the guard must refuse before writing — a rendered document over a tracked "
+        "path is the artifact this split exists to prevent")
 
 
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
