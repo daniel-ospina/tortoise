@@ -3295,6 +3295,14 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
     graph it refused, and the one the seed's guard accepts (`row_max <= floor`).
     Printing `0` there sent the operator to a command the same guard refuses,
     which is the failure mode this function exists to avoid.
+
+    ⛔ AND IT INTERSECTS THE HALTED POPULATION: a `halted` row whose journal max
+    exceeds its count refuses `divergence` too (`provision_graph_record` reads
+    the row, a `halted` row is not `active`, so `seed` runs and the guard
+    classifies first), and a re-seed does NOT move the mode. The divergence
+    sequence therefore names the `reopen` step CONDITIONALLY rather than
+    assuming the row is `seeded` — the two populations are not disjoint and the
+    printed sequence must reach the state in both.
     """
     if reason == f"mode_{record_projection.MODE_HALTED}":
         return (
@@ -3314,7 +3322,13 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
             f"{org_id} --graph-id {graph_id} --enumerated-floor <the record's "
             f"own MAX(seq)>` — the number `backfill` prints in the `remedy` field "
             f"of a graph it refused `divergence` — then `arm --org-id {org_id} "
-            f"--graph-id {graph_id} --acknowledge-cutover`.")
+            f"--graph-id {graph_id} --acknowledge-cutover`. ⛔ IF `arm` ANSWERS "
+            f"THAT THE ROW IS `halted`, run `reopen --org-id {org_id} --graph-id "
+            f"{graph_id}` first: a re-seed is monotone and does NOT move the mode "
+            f"(`SEED_SQL`'s `ON CONFLICT` never touches it), so ONE graph can be "
+            f"divergent AND halted, and `ARM_SQL` accepts `seeded` only — the two "
+            f"populations intersect, and a halt is an operator's decision this "
+            f"sequence must not skip.")
     return (
         f"Remedy, PER GRAPH: `tools/record_allocator_cli.py seed --org-id "
         f"{org_id} --graph-id {graph_id} --enumerated-floor 0`, then `arm "
@@ -3521,8 +3535,20 @@ def provision_graph_record(*, org_id: str, graph_id: str,
                 org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
                 org_id, graph_id, org_id, graph_id)
             return {"provisioned": False, "reason": "commit_failed"}
-        # The graph IS cut over now, so any earlier observation of it is stale.
-        clear_uncut_graph(org_id, graph_id)
+        # ⛔ "PROVISIONED" IS NOT THE SAME AS "CUT OVER" (#14587 review P3).
+        # The `halted` arm of `record_allocator.provision_graph_record` seeds
+        # MONOTONICALLY and deliberately does NOT re-arm — "a hook that silently
+        # resumed one would erase the only record that somebody stopped it" — so
+        # this call can return `provisioned: True` for a graph whose writes are
+        # still refused. Retracting its published entry there made `/health`
+        # forget a graph that is still cut off until its next write re-observed
+        # it, i.e. the clearer erased a CURRENT observation and called it stale.
+        # Only an `active` outcome retracts; anything else is re-published with
+        # its own mode, which is what the write path would say on the next write.
+        if outcome.mode == record_projection.MODE_ACTIVE:
+            clear_uncut_graph(org_id, graph_id)
+        else:
+            note_uncut_graph(org_id, graph_id, reason=f"mode_{outcome.mode}")
         return {
             "provisioned": True,
             "graph_id": graph_id,

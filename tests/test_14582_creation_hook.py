@@ -1338,6 +1338,14 @@ def test_the_divergence_remedy_does_not_print_a_floor_the_seed_refuses():
     assert "--enumerated-floor <the record's own MAX(seq)>" in remedy, (
         f"the divergence remedy does not name the floor that works: {remedy}")
     assert remedy.index("seed") < remedy.index("arm"), remedy
+    # A halted row can ALSO be divergent, and a re-seed does not move the mode,
+    # so the sequence must name `reopen` or its last verb is refused for that
+    # intersection — the same defect this arm exists to fix, one population over.
+    assert "reopen" in remedy and "halted" in remedy, (
+        "the divergence remedy assumes a `seeded` row, so `arm` is refused for a "
+        f"graph that is divergent AND halted: {remedy}")
+    assert rw._remedy_for_reason("o", "g", "provision_refused:divergence").count(
+        "reopen") == 1, "the conditional `reopen` must be named exactly once"
     # The un-halted population keeps the `0` sequence: its record holds no
     # position beyond the enumeration, so `0` is the correct floor there and the
     # new arm must not swallow it. It also names the fallback, so an operator
@@ -1346,6 +1354,59 @@ def test_the_divergence_remedy_does_not_print_a_floor_the_seed_refuses():
     assert ("seed --org-id org-14582 --graph-id graph-new --enumerated-floor 0"
             in unarmed_gap), unarmed_gap
     assert "divergence" in unarmed_gap and "MAX(seq)" in unarmed_gap, unarmed_gap
+
+
+def test_a_re_provisioned_halted_graph_keeps_its_published_entry(monkeypatch):
+    """⛔ `provisioned: True` IS NOT "CUT OVER" (#14587 review P3).
+
+    `record_allocator.provision_graph_record`'s `halted` arm seeds MONOTONICALLY
+    and deliberately does NOT re-arm — a hook that silently resumed a halt would
+    erase the only record that somebody stopped the graph. The caller committed
+    and then unconditionally called `clear_uncut_graph` under the comment "the
+    graph IS cut over now", which popped the graph's `armed_but_halted` entry:
+    `/health` forgot a graph whose writes are still refused, until its next write
+    re-observed it. A retraction must be earned by an `active` outcome.
+
+    Mutant: restore the unconditional `clear_uncut_graph` → the halted count goes
+    to 0 and the first assertion reds.
+    """
+    from tortoise import record_allocator as ra
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
+
+    def provision(mode, seq):
+        return lambda _conn, **_kw: ra.ProvisionedRecord(
+            org_id="org-14582", graph_id="graph-14582", seq=seq, mode=mode,
+            already_cut_over=False, seeded=True)
+
+    rw.reset_uncut_graphs()
+    try:
+        # The graph was already published as halted by an earlier observation.
+        rw.note_uncut_graph("org-14582", "graph-14582", reason="mode_halted")
+        assert rw.armed_but_uncut()["armed_but_halted"] == 1
+
+        monkeypatch.setattr(ra, "provision_graph_record",
+                            provision(ra.MODE_HALTED, 7))
+        out = rw.provision_graph_record(
+            org_id="org-14582", graph_id="graph-14582")
+        assert out["provisioned"] is True and out["mode"] == ra.MODE_HALTED, out
+        assert rw.armed_but_uncut()["armed_but_halted"] == 1, (
+            "the hook retracted a halted graph's published entry on an outcome "
+            "that deliberately did NOT re-arm it: `/health` now forgets a graph "
+            "whose writes are still refused")
+
+        # …and an ACTIVE outcome still retracts, so the clearer is not dead.
+        monkeypatch.setattr(ra, "provision_graph_record",
+                            provision(ra.MODE_ACTIVE, 8))
+        assert rw.provision_graph_record(
+            org_id="org-14582", graph_id="graph-14582")["mode"] == ra.MODE_ACTIVE
+        assert rw.armed_but_uncut()["armed_but_halted"] == 0, (
+            "an ACTIVE outcome must retract the entry — a clearer that never "
+            "fires turns `/health` into a latch")
+    finally:
+        rw.reset_uncut_graphs()
+        rw._uncut_warned_at.clear()
 
 
 def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
