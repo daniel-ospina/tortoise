@@ -1011,6 +1011,94 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     return out
 
 
+#: How many rows `latest_for_node` will RETAIN and scan in Python before
+#: reporting that it did not find the node.
+#:
+#: ⚠️ **IT BOUNDS THE RESULT, NOT THE STORE'S WORK, and the difference is stated
+#: because an earlier revision of this comment claimed the opposite.**
+#: ``ensure_event_schema`` indexes ``event_id`` and ``seq`` only — there is no
+#: index on ``type`` — so the query below plans as *label scan → filter → sort →
+#: limit* over the graph's event store. Measured on the deployed engine (FalkorDB
+#: graph module 42006). So this is a bounded WINDOW and a bounded payload, not a
+#: bounded scan: the cost grows with the store, and the retention sweep
+#: (``purge_expired`` / ``purge_overflow``) is what actually caps it. A caller
+#: must not treat this read as O(``scan``) work. Making the scan itself cheap
+#: needs a ``:GraphEvent(type)`` index, which is a change to the store's schema
+#: and therefore NOT this change's decision to make silently.
+LATEST_FOR_NODE_SCAN = 1000
+
+
+def latest_for_node(proj, type_: str, node_id: str, *,
+                    scan: int = LATEST_FOR_NODE_SCAN) -> dict | None:
+    """The NEWEST event of ``type_`` whose payload names ``node_id``.
+
+    ``read_after`` is a forward cursor: it answers "what happened after X",
+    which is the subscriber's question. This answers the OBSERVER's — "when did
+    this node's <thing> last change, and what did it change from/to" — for the
+    read surfaces that must report a node's last transition without asking a
+    client to replay the whole feed. #14592 Phase A's ``…/belief`` is that
+    caller: ``ConfidenceChanged`` events already exist and already carry the
+    committed ``confidence``/``posterior_alpha``/``posterior_beta``, so the
+    transition IS recorded — it simply had no reader.
+
+    ⛔ **THE WINDOW IS REPORTED, NOT HIDDEN.** ``None`` therefore means *"no such
+    event in the newest ``scan`` matching events"*, never *"this node never
+    changed"*. A caller that renders ``None`` as "never changed" would state
+    something this read cannot know, so the scan bound rides the answer
+    (``LATEST_FOR_NODE_SCAN``) for the caller to publish alongside it. Events are
+    pruned by retention (``purge_expired``) and by the size cap
+    (``purge_overflow``), so a bounded window is the honest shape of the store,
+    not a shortcut.
+
+    ⚠️ **And the window bounds the RESULT, not the engine's work** — see
+    ``LATEST_FOR_NODE_SCAN``. The cost of this read grows with the event store
+    (no ``type`` index exists), so it is not a cheap per-request call; the
+    caller's own docstring says so rather than implying O(``scan``).
+
+    ``payload`` is stored as a JSON STRING, so the id is matched on the PARSED
+    payload — never on a substring match against the text (an id that is a
+    prefix of another id, or a value that merely contains the id, would then
+    select the wrong row and report another node's transition as this one's).
+
+    A row whose payload will not parse is SKIPPED, not fatal: one malformed row
+    cannot be the node's transition (its id is unreadable), and losing the answer
+    to it would make one bad write hide every later one.
+
+    Ordering is ``seq DESC``, the store's own total order — the same key
+    ``read_after`` pages by — so "newest" cannot depend on wall-clock ``ts``
+    ties within one write burst.
+    """
+    if not isinstance(scan, int) or isinstance(scan, bool) or scan < 1:
+        raise ValueError(f"scan must be a positive whole number, got {scan!r}")
+    # `ro_query` (GRAPH.RO_QUERY): this is a READ, and `query` is GRAPH.QUERY —
+    # the verb that CREATES the named graph when it does not exist (the rule
+    # `cache_eviction.py` states at its own read boundary, and the one the
+    # privatisation ratchet holds on an untyped receiver). A reader must not
+    # mint the store it was asked to read.
+    rows = proj.g.ro_query(
+        "MATCH (e:GraphEvent) WHERE e.type = $type "
+        "RETURN properties(e) ORDER BY e.seq DESC LIMIT $scan",
+        params={"type": type_, "scan": scan},
+    ).result_set
+    for (props,) in rows:
+        if not isinstance(props, dict):
+            continue
+        payload = props.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("id") != node_id:
+            continue
+        out = dict(props)
+        out["payload"] = payload
+        return out
+    return None
+
+
 def purge_expired(proj, retention_days: int = 30) -> int:
     """Delete :GraphEvent nodes older than `retention_days` (ISO8601 ts cutoff).
 

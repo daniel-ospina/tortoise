@@ -114,7 +114,11 @@ def _measurement_paragraph() -> re.Pattern[str]:
     # `tests/`, `:Document` occurs …" — breaks the match instead of sliding in before it.
     return re.compile("^" + pattern, re.MULTILINE)
 
-_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+#: ⛔ `eleven` joined at #14592, when that PR's two prose mentions took the narrow
+#: `\(\w*:Document` count past `nine` — the list is EXTENDED deliberately here, which is
+#: the "or extend _COUNT_WORDS deliberately" arm of the assertion below, not a widening.
+_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight",
+                "nine", "ten", "eleven")
 
 #: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
 #: measures with this constant and the pin below asserts the document quotes THIS
@@ -2334,11 +2338,13 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"{claimed_narrow} lines; the tree measures {narrow} — re-measure the claim "
         "(§5), never widen the assertion"
     )
-    assert narrow == 9, (
-        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 9 "
-        "this pin was re-cut against by #12015 (six at #11729, plus that workstream's "
-        "three `MATCH (n:Document)` scope notes) — the exclusion argument needs "
-        "re-measuring (§5), never the assertion widening"
+    assert narrow == 11, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 11 "
+        "this pin was re-cut against by #14592 (nine at #12015: six at #11729, plus "
+        "that workstream's three `MATCH (n:Document)` scope notes; plus #14592's two "
+        "prose mentions, the bare `(:Document {id})` a interrupted relabel leaves in "
+        "`entity_reads.py` and the `(:Document:Source)` shape `hosted_api.py` names) — "
+        "the exclusion argument needs re-measuring (§5), never the assertion widening"
     )
 
 
