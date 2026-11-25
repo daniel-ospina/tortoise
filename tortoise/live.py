@@ -163,6 +163,39 @@ def ending_axes(status, outdated: bool = False, *, is_closed=None,
     stands (§4). ⛔ The slot is compared to the ROLE, never a stage NAME — a pack
     may call its terminal stage ``released``/``written-off``/``signed`` (§4.1).
 
+    ⛔ ONE STORED VALUE, TWO ANSWERS — THE FALSY NON-BOOLEAN RESIDUAL (#14671
+    review, P2). ``bool()`` here and the Cypher reads (:func:`_terminal_excluded`
+    KEEP direction ``coalesce(n.isClosed, false) = false``, and
+    :func:`_terminal_expression`'s ``<> false``) agree on every BOOLEAN, on NULL
+    and on every TRUTHY non-boolean — and they PART on a FALSY non-boolean.
+    Measured at this head's FalkorDB, one stored value per row, read back through
+    both Cypher comparisons:
+
+    | stored ``isClosed`` | ``coalesce(v,false) = false`` (KEEP) | ``<> false`` | this function |
+    |---|---|---|---|
+    | ``true`` / ``false`` | dropped / kept | TRUE / FALSE | ended / current |
+    | ``1``, ``"yes"`` | dropped | TRUE | ended |
+    | ``0``, ``0.0``, ``""`` | **dropped** | **TRUE** | **current** |
+
+    So on a falsy non-boolean the two Cypher directions AGREE that the marker is
+    an ending while this function calls it current: the row is silently DROPped
+    from every Cypher KEEP set — the drop direction, not the keep one — and an
+    EP input priced by the Python arm is treated as ended by the Cypher arms.
+    ⛔ THIS ONE IS REACHABLE, unlike ``outdated`` (:func:`_terminal_expression`
+    states the same asymmetry for that flag, but the flag is server-managed,
+    ``_sanitize_props`` refuses it on the passthrough and the journal fold
+    enforces its type): ``isClosed`` rides the props passthrough VERBATIM, so
+    ``update_knowledge(id, isClosed=0)`` stores the integer — the shape
+    ``tortoise/indexer/github_indexer.py``'s props-door note documents
+    (``SET n += $props`` applies the caller's props unchanged; ``isClosed`` is no
+    reserved name, so nothing coerces it). The residual is INHERITED from
+    #13034's ``= false`` conjunct, not introduced by the participation read this
+    rule serves; the fix is to normalise at INTAKE (``bool()`` on write, or a
+    cast in the predicate), and until that lands this paragraph IS the record.
+    Do not "fix" it by making the Python side agree with the Cypher one — that
+    would end a node on a value the caller said nothing about, which is the
+    silent-drop direction this rule exists to close.
+
     ⛔ ``goalState`` is deliberately NOT a fifth marker: it is a legacy arm in
     ``derived_invalidation``, not part of this rule (§6).
 

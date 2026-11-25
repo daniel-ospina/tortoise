@@ -49,6 +49,7 @@ from tests import _live_utils
 from tortoise.live import (
     TERMINAL_EXCLUDED_STATUSES,
     TERMINAL_STAGE_SLOT,
+    _terminal_excluded,
     ending_axes,
     is_position_ended,
     is_terminal_status,
@@ -205,6 +206,39 @@ class TestTheAxesAreOneDeclaration:
         assert ending_axes("live", is_closed=1) == ("isClosed",)
         assert ending_axes("live", is_closed=0) == ()
         assert ending_axes("live", is_closed=False) == ()
+
+    def test_the_falsy_non_boolean_marker_is_a_STATED_residual(self):
+        """ONE STORED VALUE, TWO ANSWERS — a residual that must stay STATED.
+
+        ``is_closed`` is read by ``bool()`` here, while every Cypher reader
+        compares the marker strictly — ``coalesce(n.isClosed, false) = false``
+        in the KEEP direction (:func:`_terminal_excluded`) and ``<> false`` in
+        :func:`_terminal_expression`. Measured on a lane FalkorDB at this head,
+        a stored ``0`` / ``0.0`` / ``""`` reads FALSE for ``= false`` (the KEEP
+        set DROPS the row) and TRUE for ``<> false``, so Cypher calls it ENDED
+        while this function calls it CURRENT — the silent-drop direction, on a
+        value a caller can store verbatim (``update_knowledge(id, isClosed=0)``
+        rides the props passthrough unchanged).
+
+        This row pins the DIVERGENCE and the docstring that records it TOGETHER,
+        so neither can be edited into silence: normalising at intake (``bool()``
+        on write, or a cast in the predicate) is the fix, and it must update
+        ``ending_axes``' docstring and this row in the same commit. The row does
+        not bless the divergence — it keeps it from becoming invisible, which is
+        the failure class #14671's review measured.
+        """
+        for falsy in (0, 0.0, "", ()):
+            assert ending_axes("live", is_closed=falsy) == (), falsy
+            assert is_position_ended(is_closed=falsy) is False, falsy
+        keep = _terminal_excluded("n")
+        # The MECHANISM: a strict `= false` conjunct, not a normalising cast.
+        assert "coalesce(n.isClosed, false) = false" in keep, keep
+        assert "toBoolean" not in keep, keep
+        doc = ending_axes.__doc__ or ""
+        assert "ONE STORED VALUE, TWO ANSWERS" in doc, (
+            "the falsy non-boolean divergence this row pins must stay STATED in "
+            "`ending_axes`' docstring; if the predicate is normalised, update "
+            "both in the same commit")
 
     def test_the_two_predicates_are_the_axes_and_cannot_disagree(self):
         """The whole cross product: bool(axes) == is_terminal_status, and the
