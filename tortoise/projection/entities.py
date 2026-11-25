@@ -7939,8 +7939,33 @@ def filter_source_props(props: dict) -> tuple[dict, list[str]]:
 #: returns the record row's map without calling this predicate —
 #: ``record_serve.ServedAnswer`` carries props but no label set to grade with. That
 #: arm is an open residual, so the list above names the doors that DO call it.
+#: ⛔ ``Session`` is in the set because it is a READ ROOT and its props are not a
+#: payload. ``navigation._ROOT_BRANCHES`` carries it as "the one deliberate
+#: addition (a legacy root outside ``_CANONICAL_ENTITY_ID_PROPS``)", so
+#: ``entityProfile`` / ``tortoise_traverse`` / ``entity_relations``' root preview
+#: all resolve through it — and while it was OUTSIDE this set a session root
+#: published ``{id, type}`` alone (measured: ``turn_count``, ``harness``,
+#: ``model``, ``machine_id`` and ``created_at`` dropped) while the SAME node as a
+#: NEIGHBOUR under a DIFFERENT root on the same surface came back whole, because the
+#: neighbour path (``_parse_node_with_identity``) filters ``:Source`` rather than
+#: allow-listing. The figures are not secret and are already served by the session
+#: doors themselves — ``hosted_api``'s ``GET /v1/sessions`` (``list_sessions``'
+#: query) and ``GET /v1/sessions/{id}`` (the detail query) both ``RETURN s.id,
+#: s.created_at, s.turn_count, …, s.harness, s.machine_id, s.model``, and
+#: ``activation_scorecard.FUNNEL_QUERY`` returns the same three scalar columns — so
+#: denying them here made one surface contradict the door beside it. ⛔ Cited by
+#: NAME, not by line: this very lane's review had to re-derive three rotted
+#: ``hosted_api.py:<n>`` cites, and a line number in a permanent rationale is the
+#: next one to rot. ⛔ NOT ``LIFETIME_MEMORY_QUERY``: that one aggregates
+#: (``min(s.created_at)``, ``count(DISTINCT s)``) and returns none of these columns;
+#: citing it here was a review finding against this comment's first cut.
+#: ⛔ This is NOT a widening beyond the pre-#14593
+#: behaviour: the root used to publish ANY label's map unfiltered, so including
+#: ``Session`` is strictly narrower than what shipped. And it opens no ``:Source``
+#: leak — the grading is a SET and deny-by-default, so a hybrid
+#: ``(:Session:Source)`` still fails on the ``Source`` half (measured).
 PUBLISHABLE_PAYLOAD_LABELS: frozenset = frozenset(
-    {"Point", "Object", "Subject", "Event"})
+    {"Point", "Object", "Subject", "Event", "Session"})
 
 
 def label_set_publishable(labels) -> bool:

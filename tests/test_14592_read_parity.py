@@ -1526,6 +1526,133 @@ def test_relations_bounds_the_ROOT_the_same_way_it_bounds_a_neighbour(tmp_path):
         assert short.json()["entity"]["nameTruncated"] is False, short.json()["entity"]
 
 
+def test_a_Session_ROOT_publishes_its_own_map_as_fully_as_a_neighbour(tmp_path):
+    """#14593 review P2: the root graded a legacy ``:Session`` off a session map.
+
+    ``navigation._ROOT_BRANCHES`` carries ``Session`` as "the one deliberate
+    addition (a legacy root outside ``_CANONICAL_ENTITY_ID_PROPS``)", so
+    ``entityProfile`` / ``tortoise_traverse`` / ``entity_relations`` all resolve
+    through it. Grading the root with ``publishable_payload`` while ``Session`` was
+    OUTSIDE ``PUBLISHABLE_PAYLOAD_LABELS`` answered ``{id, type}`` for a session
+    root — measured, ``turn_count`` / ``harness`` / ``model`` / ``machine_id`` /
+    ``created_at`` all dropped — while the SAME stored node, reached as a
+    NEIGHBOUR under a different root on the same surface, came back whole, because
+    the neighbour path (``_parse_node_with_identity``) filters ``:Source`` instead of
+    allow-listing. ⛔ NOT "in the same response": ``visited`` seeds the CALLER's
+    ``entity_id`` while ``_hop_query`` excludes by ``coalesce(id, url, eventId)``, so
+    an id-keyed ``:Session`` root never re-enters its own response (a url-addressed
+    ``:Source`` that also carries an ``id`` CAN — which is why the claim is scoped to
+    the root this test grades rather than stated as a property of every root), and
+    the asymmetry is therefore observed across two calls (cycle-2/cycle-3 review
+    P3, measured by reverting and by a url-keyed cycle probe).
+
+    The figures are not a payload and the session doors already serve them
+    (``GET /v1/sessions`` / ``GET /v1/sessions/{id}`` return ``s.id,
+    s.created_at, s.turn_count, …, s.harness, s.machine_id, s.model``), so the
+    asymmetry was the defect, not the disclosure. ``activation_scorecard.FUNNEL_QUERY``
+    returns those same three scalars (``s.id``, ``s.created_at``, ``s.turn_count``)
+    alongside two counts — ⛔ NOT ``LIFETIME_MEMORY_QUERY``, whose ``RETURN`` is
+    aggregates only (``min(s.created_at)``, ``count(DISTINCT s)``); a first cut of
+    this docstring named that one and was wrong about it.
+
+    ⛔ Both directions are pinned, because the cheap "fixes" are each one-sided:
+    a rule that puts ``Session`` in the set must NOT publish a ``(:Session:Source)``
+    hybrid (grading is a SET, and ``Source`` fails it), and it must NOT be a licence
+    to publish an unknown label — the deny-by-default arm is asserted here too, so
+    "add the label I was looking at" cannot quietly become "publish everything".
+
+    ⛔ THE NEIGHBOUR ARM IS DRIVEN THROUGH THE GRAPH, not through a hand-built row
+    (review finding against this test's first cut: a literal `[1, ["Session"], …]`
+    never touches FalkorDB, so the docstring's "the SAME node as a NEIGHBOUR" was
+    wider than what it measured, and the set comparison it ended on was already
+    implied by the asserts above it). One `:Session` node, one edge, and the hop a
+    real `entityProfile`/`tortoise_traverse` call runs — so the two arms are graded
+    on the SAME stored node, and a future change that narrows either one reds here.
+    """
+    from tortoise.navigation import _hop_query, _parse_node_with_identity, _resolve_root
+    from tortoise.projection.entities import label_set_publishable, publishable_payload
+    from tortoise.sdk import TortoiseSDK
+
+    session_id = "sess-root-14593"
+    hybrid_id = "sess-hybrid-14593"
+    anchor_id = "point-anchor-14593"
+    secret = "SESSION-HYBRID-BODY-THAT-MUST-NOT-RIDE-THE-ROOT"
+    client = TortoiseSDK(str(tmp_path / "session-root.db"))
+    try:
+        g = client._get_proj().g
+        g._query(
+            "CREATE (s:Session {id:$i}) SET s.turn_count=$n, s.harness=$h, "
+            "s.model=$m, s.machine_id=$mc, s.created_at=$c",
+            params={"i": session_id, "n": 7, "h": "pi",
+                    "m": "deepseek-flash", "mc": "box-1",
+                    "c": "2026-11-25T00:00:00Z"},
+            read_only=False)
+        # A real neighbour hop for the SAME session node: anchor -[:CONTAINS]-> it.
+        g._query(
+            "CREATE (p:Point {id:$p, content:'anchor'}) "
+            "WITH p MATCH (s:Session {id:$i}) CREATE (p)-[:CONTAINS]->(s)",
+            params={"p": anchor_id, "i": session_id},
+            read_only=False)
+        g._query(
+            "CREATE (s:Session:Source {id:$i, url:$u}) SET s.turn_count=$n, "
+            "s.text=$t",
+            params={"i": hybrid_id, "u": "https://example.test/s-14593",
+                    "n": 3, "t": secret},
+            read_only=False)
+
+        label, root, _key, labels = _resolve_root(g, session_id)
+        assert label == "Session", label
+        assert labels == ["Session"], labels
+        # The map is the node's OWN — every stored field survives the root door.
+        assert root["turn_count"] == 7, root
+        assert root["harness"] == "pi", root
+        assert root["model"] == "deepseek-flash", root
+        assert root["machine_id"] == "box-1", root
+        assert root["created_at"] == "2026-11-25T00:00:00Z", root
+        assert root["id"] == session_id, root
+        assert root["type"] == "Session", root
+
+        # …and the SAME stored node, reached as a NEIGHBOUR of the anchor by the
+        # hop a real read runs, carries exactly those fields. This is the parity
+        # the PR is about: before the fix the root answered a strictly smaller map
+        # than the neighbour did for one node.
+        rows = g.query(
+            _hop_query("Point", "id"),
+            params={"eid": anchor_id, "visited": [anchor_id]}).result_set
+        neighbours = [_parse_node_with_identity(row[0])[0] for row in rows]
+        session_neighbours = [n for n in neighbours if n["id"] == session_id]
+        assert session_neighbours, (
+            f"the anchor's hop did not return the session: "
+            f"{[n.get('id') for n in neighbours]}")
+        neighbour = session_neighbours[0]
+        assert neighbour["type"] == "Session", neighbour
+        for field in ("turn_count", "harness", "model", "machine_id",
+                      "created_at"):
+            assert neighbour[field] == root[field], (field, root, neighbour)
+        # ⛔ Same KEYS on the same node, both arms — the defect was a key GAP.
+        assert set(neighbour) - {"_relationship", "_idx"} <= set(root), (
+            sorted(set(neighbour) - set(root)), sorted(root))
+
+        # ⛔ The hybrid arm: a `:Session:Source` root withholds its body, because
+        # the rule grades the whole SET and `Source` is not in it.
+        h_label, h_root, _h_key, h_labels = _resolve_root(g, hybrid_id)
+        # The union may answer EITHER branch (the ":Session:Source" allocation
+        # order is the engine's, not ours) — which is exactly why the grading is on
+        # the SET and not on `label`.
+        assert h_label in {"Session", "Source"}, h_label
+        assert set(h_labels) == {"Session", "Source"}, h_labels
+        assert "text" not in h_root, h_root
+        assert secret not in repr(h_root), h_root
+
+        # ⛔ The deny-by-default arm is untouched: a label the set has never heard
+        # of still gets the filtered map, not the whole one.
+        assert label_set_publishable(["Gadget"]) is False
+        assert publishable_payload(
+            {"id": "g-1", "text": secret}, ["Gadget"]) == {"id": "g-1"}
+    finally:
+        client.close()
+
+
 def test_relations_identifies_an_Event_neighbour_by_its_eventId(tmp_path):
     """⛔ review P3: the `m.eventId` identity fallback had NO pin.
 
