@@ -2440,10 +2440,10 @@ SWEEP_NAMES = 66
 #: REWRITTEN `sdk_g.query(` into the SDK's private name — wrong here, since `g` is a FalkorDB
 #: handle and not the SDK, which is why the receivers were converted instead. This tree therefore
 #: adds NO NET untyped receiver: `--check --baseline origin/main` reports the count EQUAL to the
-#: baseline on this tree (11913 vs 11913, `nothing was added`) even though this fold's own arms
+#: baseline on this tree (11919 vs 11919, `nothing was added`) even though this fold's own arms
 #: add one `g.query(` cleanup row — the twelve-to-one wipe dedupe pays for it — and the pair
 #: below is a reading of this tree, not a number kept in step with it.
-SWEEP_RESIDUE = (11912, "68d06e179e3a6d9e")
+SWEEP_RESIDUE = (11919, "23d33d1281ceeaa1")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
