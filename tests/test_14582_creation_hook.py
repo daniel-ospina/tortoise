@@ -24,6 +24,11 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
   persists nothing — F1 — and the registry arm creates a graph `public.graphs`
   never holds, so the FK refuses it — F3). An unpinned absence is how the next
   reader "fixes" it back into a permanently-red health field;
+* the sites that create a graph BY DELEGATION (the HTTP create aliases, the
+  default-graph mint, the credential resolver, the two SDK verbs) are pinned as
+  REACHING a hooked door, transitively, so a refactor that drifts an alias off the
+  route reds instead of shipping a graph with no cursor row (#14587 P3-3: the PR
+  body claimed this pin and nothing pinned it);
 * a graph the record ALREADY knows is REFUSED, not seeded (`#12894`'s divergence
   rule) — `SEED_SQL`'s own guard decides it, there is no second predicate here;
 * `/health` CANNOT report `record.ok: true` on an armed deployment carrying an
@@ -94,6 +99,36 @@ _HELPERS = (
 #: F3: its registry arm creates a graph the record cannot file — `public.graphs`
 #: never holds it, and `record_cursor`'s FK refuses it).
 _UNHOOKED = (("tortoise/sdk.py", "_graph_create"),)
+
+#: The DELEGATED sites: an entry point that creates a graph WITHOUT minting the id
+#: itself, so it is covered by the door it routes through. `(module, entry point,
+#: door)` — and the route is RESOLVED through that module's own AST rather than
+#: asserted here, because a name in a table is exactly the prose promise this pin
+#: replaces. ⛔ THE TABLE ABOVE (`_DOORS`) IS NOT THIS PIN: it reads the DOOR's
+#: body, and a delegating site that stops delegating leaves every door intact.
+#: Measured on the #14587 review (P3-3): the PR body's census claimed A1/A2, B1,
+#: C1/C2/C3 were "verified by AST pin, not by reading", and NOTHING pinned them —
+#: the aliases were verified by reading a reviewer had done, which is not a pin and
+#: does not survive the next refactor. So a `create_graph` alias that started minting
+#: its own id (bypassing A/B/C) would have left the suite green while the graph it
+#: created was born UNCUT — the defect this whole file exists to name.
+_DELEGATED = (
+    # A1 / A2 — the two HTTP create doors; both delegate to `_provision_graph` (A).
+    ("tortoise/hosted_api.py", "create_org_graph", "_provision_graph"),
+    ("tortoise/hosted_api.py", "create_graph", "_provision_graph"),
+    # B1 / B2 — the default-graph mint, and the credential resolver that reaches it
+    # on a read MISS only (two hops through `default_graph_for_credential`), which
+    # is what makes this arm TRANSITIVE rather than a direct-call check.
+    ("tortoise/supabase_control.py", "_mint_default_graph_row_best_effort",
+     "ensure_default_graph_row"),
+    ("tortoise/supabase_control.py", "default_graph_id_for_credential",
+     "ensure_default_graph_row"),
+    # C1 / C2 / C3 — the SDK doors: the org/team create that mints the default
+    # graph, and the memory-graph verb. Both delegate to `_graph_create`, whose
+    # REGISTRY arm is the hooked one (the Supabase arm is `_UNHOOKED`, F1).
+    ("tortoise/sdk.py", "_org_create", "_graph_create"),
+    ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
+)
 
 
 # ── DB-free: the hook is wired, and it ARMS ────────────────────────────────
@@ -215,6 +250,105 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "so each create logs a warning and the deployment reads "
         "`record.armed_but_uncut` forever. If this door is to be hooked, the "
         "graph-row mint has to land first")
+
+
+def _same_module_call_graph(rel: str) -> dict[str, set[str]]:
+    """Every function in `rel` mapped to the names its body calls.
+
+    Structural (`ast`, via :func:`_call_names`), so a mention in a docstring or a
+    comment cannot satisfy a route — the same reason :func:`_call_names` is
+    structural. Names rather than resolved objects because the only thing a route
+    needs is "a call to a function defined in this module", which is what
+    :func:`_reaches` follows.
+    """
+    tree = ast.parse(_source(rel))
+    return {node.name: _call_names(node)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _reaches(graph: dict[str, set[str]], start: str, target: str) -> bool:
+    """Can `start` reach a call to `target` through functions in its own module?"""
+    seen: set[str] = set()
+    frontier = [start]
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for callee in graph.get(name, ()):
+            if callee == target:
+                return True
+            if callee in graph:
+                frontier.append(callee)
+    return False
+
+
+def test_every_delegating_creation_site_routes_through_a_hooked_door():
+    """⛔ THE CENSUS'S OTHER HALF — the seven sites that create a graph BY DELEGATION.
+
+    `_DOORS` pins the three sites that MINT an id; these are the sites that reach one
+    of them. They are the quiet half: a door keeps calling the hook perfectly while an
+    alias drifts off the route, and the graph the alias creates is born uncut with no
+    test red (the failure mode the module docstring measures). The PR's census claimed
+    them as "verified by AST pin" when the review found nothing pinned them (#14587
+    P3-3), so the pin is here rather than in the claim.
+
+    ⛔ TRANSITIVE ON PURPOSE: `default_graph_id_for_credential` does not call the mint,
+    it calls `default_graph_for_credential` which does. A direct-call check would red
+    on the correct code or be quietly deleted; the reachability reader follows the
+    route however it is spelled and however many hops it takes.
+    """
+    graphs: dict[str, dict[str, set[str]]] = {}
+    missing: list[str] = []
+    for rel, entry, door in _DELEGATED:
+        if rel not in graphs:
+            graphs[rel] = _same_module_call_graph(rel)
+        graph = graphs[rel]
+        assert entry in graph, (
+            f"{rel}::{entry} is gone — the census found it as a delegating creation "
+            f"site; re-run the census (`rg -n 'create_graph|insert_graph|"
+            f"ensure_default_graph_row|_graph_create' tortoise/`) and pin the new name "
+            f"rather than deleting this check")
+        if not _reaches(graph, entry, door):
+            missing.append(f"{rel}::{entry} no longer reaches {door}")
+    assert not missing, (
+        f"these graph-creating sites stopped routing through a hooked door: {missing}. "
+        "A graph they create is born UNCUT — the record refuses every write for it "
+        "(`cursor_not_active`) while `write_live_record`, fail-soft by contract, reports "
+        "success, so nothing reds and the loss only shows at a rebuild. Route it through "
+        "`_provision_graph` (A), `ensure_default_graph_row` (B) or `_graph_create`'s "
+        "REGISTRY arm (C), or — if it mints an id of its own — hook it and add it to "
+        "`_DOORS`")
+
+
+def test_the_delegation_pin_reads_the_route_and_not_the_names():
+    """Non-vacuity for the arm above, and the two ways it could be decoration.
+
+    A pin that reads a TABLE of names passes whatever the code does; a reachability
+    reader that ignores hops reds on the correct multi-hop site. Both are asserted
+    here, against hand-built graphs, and the REAL module is checked for the hop count
+    the transitive reader exists for.
+    """
+    assert not _reaches({"create_org_graph": {"_mint_graph_key"}},
+                        "create_org_graph", "_provision_graph"), (
+        "a site that calls some OTHER helper was read as reaching the door — the "
+        "arm would be satisfied by the name appearing anywhere")
+    assert _reaches({"a": {"b"}, "b": {"c"}, "c": {"_provision_graph"}},
+                    "a", "_provision_graph"), (
+        "the reader lost a route three hops deep, so the transitive sites it exists "
+        "for would red on correct code")
+    # ⛔ THE REAL MULTI-HOP SITE, measured rather than assumed: if this ever becomes a
+    # direct call the transitive arm stops being exercised by the tree it grades.
+    graph = _same_module_call_graph("tortoise/supabase_control.py")
+    assert "ensure_default_graph_row" not in graph[
+        "default_graph_id_for_credential"], (
+        "`default_graph_id_for_credential` now calls the mint directly — that is fine, "
+        "but the transitive arm in the sibling test is then no longer measured on real "
+        "code: point it at another multi-hop site or state that the reader is no longer "
+        "exercised here")
+    assert _reaches(graph, "default_graph_id_for_credential",
+                    "ensure_default_graph_row")
 
 
 def test_the_hook_arms_and_does_not_only_seed():

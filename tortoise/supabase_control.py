@@ -4461,9 +4461,19 @@ def ensure_default_graph_row(cp, org_id: str,
         # IS an active row, while any OTHER value leaves the org unnamed, which
         # is exactly how the migration's `status = 'active'` guard reads it.
         if (row.get("status") or "active") == "active" and row.get("id"):
-            # #14582: the self-heal arm — an EXISTING default row whose record
-            # cursor is missing gets one on this org's next credential
-            # resolution. Idempotent when it is already `active`.
+            # #14582: the RE-PROVISION arm, and NOT a request-path self-heal — the
+            # claim this comment used to make was retracted by the #14587 review
+            # (P2-1) in `_provision_default_graph_record`'s docstring, ~130 lines
+            # above, and is not restated here as true. This arm runs only for a
+            # caller that REACHES this function for a row that already exists
+            # (`provision_org` / `provision_org_with_token`, or the convergent
+            # mint race), and a default graph that exists with no cursor row is a
+            # READ HIT on the credential path — `default_graph_for_credential`
+            # returns before the mint — so no credential resolution lands here for
+            # it. The pre-existing population is healed by the operator verb
+            # (`record_allocator_cli.py seed` + `arm`, per graph) or on the graph's
+            # next write, which `record_writer.record_owns_position` observes.
+            # Idempotent when the cursor is already `active`.
             _provision_default_graph_record(org_id, row["id"])
             return row["id"]
     if cp.query("graphs", select=["id"],

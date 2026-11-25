@@ -9164,6 +9164,24 @@ _PER_FILE_SHARD_LETTER_RE = re.compile(
 #: have exempted exactly the claim that rotted.
 _HISTORICAL_LETTERS_RE = re.compile(
     r"\u26d4 HISTORICAL-LETTERS-BEGIN.*?\u26d4 HISTORICAL-LETTERS-END", re.DOTALL)
+#: The ONE fenced span of the header allowed to state a POOL CENSUS — `fast_pool()`'s file count,
+#: and what a branch added to it relative to `main`. Same shape as `_HISTORICAL_LETTERS_RE`, for the
+#: same reason, and it was added because the same defect recurred there: the count moves with every
+#: merge that adds a test file (so a LIVE figure reds every such fold and then gets carried rather
+#: than re-derived) AND the "more than `main`" half is zero the moment the branch merges (so it can
+#: never be a standing claim about this tree at all). A fenced HISTORY bound to the sha it was
+#: measured at is the only form that neither rots nor needs re-deriving; what is graded is that no
+#: census figure lives OUTSIDE it.
+_HISTORICAL_POOL_CENSUS_RE = re.compile(
+    r"\u26d4 HISTORICAL-POOL-CENSUS-BEGIN.*?\u26d4 HISTORICAL-POOL-CENSUS-END", re.DOTALL)
+#: A pool census stated as a LIVE claim. Anchored on the size word (`holds`/`held`/`carries`/
+#: `carried` + `N files`), not on the phrase `fast_pool()`, because the block mentions `fast_pool()`
+#: many times to state RULES ("`fast_pool()` drops every carve-out member") — a pattern that flagged
+#: those would red on the block's own reasoning and get narrowed into silence, which is the
+#: no-op-gate class. The past tense is read on purpose: a fenced history is written in it ("held
+#: 1335 files"), so a pattern that read only the present would let the history's own spelling look
+#: unread and invite a re-spelling that drifts from the arm.
+_POOL_CENSUS_RE = re.compile(r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\d+\s+files")
 #: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
@@ -10160,6 +10178,102 @@ def test_the_per_file_shard_letter_guard_is_not_vacuous():
         "# and `tests/test_14350_drain_convergence.py` sits in shard e at this head.\n"
         "\nfast_shards: 11\n"))), (
         "the fence swallowed a claim stated AFTER it — the exemption must end where its "
+        "marker ends")
+
+
+def test_the_fast_shards_header_states_no_live_pool_census():
+    """#14587 review P3-1: a pool census is a HISTORY, never a live claim in this block.
+
+    Measured at `06c10adb`, the block stated: "`fast_pool()` holds 1335 files at this head against
+    **1333** on `origin/main`, and the **two** additions are `tests/test_14582_creation_hook.py`
+    (this PR's) and `tests/test_14592_operating_model_evidence.py` (`#14606`'s, **landed on `main`
+    and folded in here**)". Three things were wrong and only one of them was the figure: `main`
+    held **1334**, the delta was **one** file, and a file already in `main`'s manifest cannot be an
+    addition RELATIVE to `main` — so the sentence contradicted itself as well as the measurement.
+    Nothing graded it, which is why it went stale twice (its predecessor read "1333 here against
+    1333").
+
+    ⛔ THE FIX IS THE BLOCK'S OWN RULE, not a tighter figure. A count that must be re-derived on
+    every fold, graded by nothing, is a claim that rots — and grading the VALUE here would be worse
+    than the rot: the pool grows with every PR that adds a test file, so a live figure would red
+    every one of those folds, which is how a merge-magnet block collects conflicts. What survives is
+    the FORM: a census lives in a fenced history bound to the sha it was measured at, and a live one
+    reds.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert len(_HISTORICAL_POOL_CENSUS_RE.findall(header)) == 1, (
+        "the block must carry exactly ONE fenced pool-census span — zero means the history was "
+        "deleted or the fence markers were renamed (and then this guard silently widens to the "
+        "whole block), two means a merge spliced the fence, which would exempt text neither half "
+        "measured")
+    enclosed = _HISTORICAL_POOL_CENSUS_RE.search(header).group(0)
+    assert _POOL_CENSUS_RE.search(enclosed), (
+        "the pool-census fence states no census — the mask below then exempts nothing and this "
+        "guard has no subject, which is the no-op-gate class it exists to avoid")
+    live = _POOL_CENSUS_RE.findall(_HISTORICAL_POOL_CENSUS_RE.sub(" ", header))
+    assert live == [], (
+        "the `fast_shards` header states a pool census outside the fenced history: "
+        f"{live}. A file count is a measurement of ONE tree and the \"more than `main`\" half is "
+        "zero once this branch merges, so it cannot stand as a claim here — cite the sha you "
+        "measured it at inside `⛔ HISTORICAL-POOL-CENSUS-BEGIN/END` instead. ⛔ Do NOT fix this by "
+        "re-measuring the figure: the count moves with every PR that adds a test file, so a live "
+        "figure reds each of those folds and gets carried rather than re-derived — the rot, not "
+        "the repair.")
+
+
+def test_the_pool_census_guard_is_not_vacuous():
+    """The pre-fix sentence must RED, and the fence must exempt only what it encloses.
+
+    `stale` reproduces the sentence this PR carried at `06c10adb` — the very text the sibling arm
+    was written for — so the pattern is measured against the defect that shipped rather than a
+    string invented to match it. The two fixtures after it are the false negatives that a looser
+    or a wider reading would let through: a census the pattern cannot see (narrowed into silence),
+    and a census stated AFTER the fence (a regex that swallows the rest of the block).
+    """
+    stale = _emission_block_header(
+        "# ⛔ AND THE DELTA IS NOT THIS PR'S ALONE: `fast_pool()` holds 1335 files at this head\n"
+        "# against 1333 on `origin/main`, and the two additions are\n"
+        "# `tests/test_14582_creation_hook.py` (this PR's) and\n"
+        "# `tests/test_14592_operating_model_evidence.py` (`#14606`'s, landed on `main`).\n"
+        "\nfast_shards: 11\n")
+    assert _POOL_CENSUS_RE.findall(stale), (
+        "the pre-fix census sentence was not read — the pattern has been narrowed into silence, "
+        f"so the sibling guard is decoration: {stale!r}")
+    # The `carries` spelling is the same claim, and it was the second way this block had written
+    # it before; a pattern reading only `holds` would let it back in silently.
+    assert _POOL_CENSUS_RE.findall(
+        "`fast_pool()` carries 1336 files at this head"), (
+        "the `carries` spelling of the same claim was not read")
+    # …and the block's many RULE statements about `fast_pool()` must NOT read as a census: a guard
+    # that reds on the block's own reasoning is a guard that gets deleted.
+    for safe in (
+        "`fast_pool()` drops every carve-out member",
+        "`fast_pool()` is built from these member lists, not from a `tests/**` glob",
+    ):
+        assert not _POOL_CENSUS_RE.findall(safe), (
+            f"the guard read a RULE statement as a pool census ({safe!r}) — a pattern that does "
+            "that reds on the block's own prose")
+    # The fence exempts exactly its own span, and ENDS where its marker ends. ⛔ The fixture must
+    # MATCH the pattern before it is masked, or the two assertions below pass on a fence that
+    # exempts nothing — the same no-op-gate class, one level down.
+    fenced = _emission_block_header(
+        "# ⛔ HISTORICAL-POOL-CENSUS-BEGIN\n"
+        "# (measured at `06c10adb`: `fast_pool()` held 1335 files against `main`'s 1334)\n"
+        "# ⛔ HISTORICAL-POOL-CENSUS-END\n"
+        "\nfast_shards: 11\n")
+    assert _POOL_CENSUS_RE.findall(fenced), (
+        "the fence fixture states no census the pattern can see, so the two arms below prove "
+        "nothing about masking")
+    assert _POOL_CENSUS_RE.findall(
+        _HISTORICAL_POOL_CENSUS_RE.sub(" ", fenced)) == [], (
+        "the fence did not exempt the census it encloses")
+    assert _POOL_CENSUS_RE.findall(_HISTORICAL_POOL_CENSUS_RE.sub(" ", _emission_block_header(
+        "# ⛔ HISTORICAL-POOL-CENSUS-BEGIN\n"
+        "# (measured at `06c10adb`: `fast_pool()` held 1335 files against `main`'s 1334)\n"
+        "# ⛔ HISTORICAL-POOL-CENSUS-END\n"
+        "# and `fast_pool()` holds 1336 files at this head.\n"
+        "\nfast_shards: 11\n"))), (
+        "the fence swallowed a census stated AFTER it — the exemption must end where its "
         "marker ends")
 
 

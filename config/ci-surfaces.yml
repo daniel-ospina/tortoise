@@ -66,13 +66,26 @@ version: 1
 # job-level wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28`
 # with `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence, which is why
-# a copy stating `1333 here against 1333` is FALSE at this fold. ⛔ AND THE DELTA IS NOT THIS PR'S
-# ALONE: `fast_pool()` holds 1335 files at this head against 1333 on `origin/main`, and the two
-# additions are `tests/test_14582_creation_hook.py` (this PR's) and
-# `tests/test_14592_operating_model_evidence.py` (`#14606`'s, landed on `main` and folded in here) —
-# a sentence that names only one of them states a delta it did not measure. ⛔ No parent's FIGURE is
-# carried here either: the fold re-packed every bin (the packer is greedy), so the per-fold readings
+# `main`'s own partition must be re-derived on `main`, never read out of this sentence.
+# ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
+# `fast_pool()`'s FILE COUNT moves with every merge that adds a test file, so a live figure here
+# would red every such fold — and a figure that reds gets carried rather than re-derived, which is
+# the rot `#11576`'s paragraph above already records. The census is also PR-SCOPED: "one more than
+# `main`" is zero more the moment the branch merges, so it cannot be a standing claim about this
+# tree at all. It is a HISTORY instead — fenced below and bound to the sha it was measured at — and
+# what is GRADED is the FORM rather than the value:
+# `test_the_fast_shards_header_states_no_live_pool_census` reds if a census figure appears OUTSIDE
+# the fence, so the claim cannot come back as a live one. No fold has to re-derive a census, and a
+# fold that carries one anyway is what the fence exists to catch.
+# ⛔ HISTORICAL-POOL-CENSUS-BEGIN
+# (measured at `06c10adb`: `fast_pool()` held 1335 files against `origin/main` `a29b5f24ce95`'s 1334,
+# and the ONE addition was `tests/test_14582_creation_hook.py` — this PR's own new suite. The earlier
+# copy of this sentence stated 1333 for `main` and named `#14606`'s
+# `tests/test_14592_operating_model_evidence.py` as a second addition; both were false, because that
+# file is already in `main`'s manifest and so cannot be a delta against `main`. A census measures
+# exactly ONE tree — re-measure it with `ci_selection.fast_pool()` at the head you cite.)
+# ⛔ HISTORICAL-POOL-CENSUS-END
+# ⛔ No parent's FIGURE is carried here either: the fold re-packed every bin (the packer is greedy), so the per-fold readings
 # that stood in this block before the union splice — `#14565`'s, `#14574`'s, `#14559`'s, the
 # `826.0`/`825.9` pair, and the `826.4`/`826.3` pair this branch carried one fold earlier —
 # describe trees that no longer exist, and they are deleted rather than re-pointed. The name lists
