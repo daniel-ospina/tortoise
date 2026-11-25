@@ -21761,9 +21761,11 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # 107 `test_files` remaining — the census suite is ABSENT, the selection is NOT empty
     # (measured WITH THAT ENTRY REMOVED: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)`
     # -> `surfaces=[]`, `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`;
-    # with the entry in place the same call answers `surfaces=['core']`, `n_test_files=969`;
-    # re-taken at the #14625 merge onto `main` `29bb16b5b6b4`, which added test files — this
-    # figure is base-bound and moves with the tree, so re-take it rather than carry it).
+    # with the entry in place the same call answers `surfaces=['core']`, `n_test_files=971`;
+    # re-taken at this PR's rebase onto `main` `4b2fba3e8aa0`, which added test files
+    # (`#14607`'s two new `core` rows, `test_mcp_selfcheck.py` and
+    # `test_recall_neighborhood.py`) — this figure is base-bound and moves with the tree,
+    # so re-take it rather than carry it).
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",

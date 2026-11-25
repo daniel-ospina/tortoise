@@ -73,13 +73,15 @@ version: 1
 # by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1337 files at this head against 1335 on `main`, and
-# the TWO entries this branch adds are `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py` — re-derived by running the verb on BOTH manifests
-# (`origin/main`'s and this tree's), not carried from either parent's paragraph, and `main` carries
-# nothing this tree lacks. ⛔ Every row named above is `main`'s at this head, NOT this branch's:
-# counting one as this branch's would make the list disagree with the paragraph's own
-# 1337 − 1335 = 2. The name lists are what the guard COMPARES against the live emission
+# is measurable and small: `fast_pool()` holds 1337 files at this head and 1337 on `origin/main`
+# (`4b2fba3e8aa0`) — re-derived by running the verb on BOTH manifests (`origin/main`'s and this
+# tree's), never carried — so THIS branch adds NO entry to the pool (it edits already-registered
+# test files and adds none), and every row named above is `main`'s at this
+# head, NOT this branch's. ⛔ That pair read `1337 against 1335`, a delta of TWO, while `#14607`
+# itself was the branch: the two rows it added (`tests/test_mcp_selfcheck.py`,
+# `tests/test_recall_neighborhood.py`) landed WITH it, so a later fold must re-derive the pair
+# rather than inherit that delta — counting them as this branch's would be exactly the carried
+# figure this clause forbids. The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
