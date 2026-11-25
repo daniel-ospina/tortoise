@@ -26,9 +26,9 @@ this document classifies **statements**.
 |---|---|
 | product surface (`tortoise/**/*.py`, test modules excluded) | **314** files scanned |
 | files carrying at least one statement site | **103** |
-| **statement sites (this census)** | **1331** |
-| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **879** (593 read, 286 write) |
-| **`plain` READS — the migration candidates** | **593** |
+| **statement sites (this census)** | **1332** |
+| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **880** (594 read, 286 write) |
+| **`plain` READS — the migration candidates** | **594** |
 | `adjacency` (edge pattern, fixed length) | 293 |
 | `ep` (the epistemic scalars) | 32 |
 | `traversal` (variable length) | 3 |
@@ -36,12 +36,12 @@ this document classifies **statements**.
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 105 |
 | non-Cypher door calls (excluded from every shape total) | 266 |
-| **AST door calls** = census + non-Cypher | **1597** |
+| **AST door calls** = census + non-Cypher | **1598** |
 
-> **The finding, with its count: 593 of 1331 product statements (44.6 %) need none of the
+> **The finding, with its count: 594 of 1332 product statements (44.6 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 589 statements.
+> not an adjective; it is 594 statements.
 
 ---
 
@@ -65,7 +65,7 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1331** | **103** | `tortoise/**/*.py`, test modules excluded |
+| product surface (this census) | **1332** | **103** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **9,236** | **860** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. ⛔ **RE-DERIVED LAST AT THIS PR-LEVEL MERGE (`origin/main` `a7baa98d05` × `#14232`)** — `--all-surface --json` on the fully resolved tree reads **9,228 / 857 / 2,555** (sites / carrying files / scanned `.py`), against **8,889 / 772 / 2,171** measured by running the same tool in a detached worktree AT `origin/main` `a7baa98d05`: so the delta `+339` sites / `+85` carrying files / `+384` scanned files is NOT this branch's, it is main's `tests/`+`tools/` growth between the base the sentence below names and this one — re-measured, never carried, and stated as a delta of two readings rather than attributed file-by-file. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,134 / 9,150 / 9,170 / 9,186 here, and only `9,208` reproduces at this tree — the **2,549** files it scans are `main`'s **2,547** at this merge (`0467ba329d7`) plus this PR's TWO added files (`tortoise/projection_worker.py`, `tests/test_14185_projection_worker.py`), neither of which carries a site, so `files_with_sites` is **854** at BOTH trees (re-measured after the merges of `2c0d66e2ec`, `69908d006b` and `1b0db0489408` — TWO of which grew it (`2c0d66e2ec` added 2 `.py` files, `1b0db0489408` added 2) and one of which added NONE (`69908d006b`'s `.py` diff is three modifications and no addition, so it grew nothing: an earlier cut of this row said so and that qualifier was lost in a re-cut, which is why it is restored here rather than dropped); the row read 2,539 before the last of those, which is why the figure is re-derived rather than carried) — `tests/` included, which is why these numbers move on a test edit. ⛔ RE-DERIVED, not carried: an earlier revision of this row stated 9,186 / 849 / 2,533 with `main` at 2,527, and all four were stale by the time the branch merged — measured with `uv run python tools/cypher_inventory.py --all-surface --json` at this head, which is the only thing that answers it (the pin cannot: this row is deliberately unpinned). That cut's delta was **+20 sites and +5 carrying files**, enumerated rather than counted, per file with the tool's own parser: `tortoise/outside_view.py` 3, `tortoise/resident_pin.py` 3, `tests/test_14012_outside_view.py` 9, `tests/test_14012_resident_pin.py` 3 and `tests/test_14012_resident_cli.py` 2 — the sixth added file, `tools/resident.py`, carries none. ⛔ RE-MEASURED AGAIN, and the previous cut of this very sentence is the proof the re-derivation rule is load-bearing: it read `+17` / `…outside_view.py` 8 / `+11 added files` — an enumeration summing to 19 beside a claimed delta of 17 — because the sites/files pair had been re-measured while the enumeration and the scanned-file count had not. Every figure here is now `--all-surface --json`'s own output at the head that ships, per file, and `git ls-tree`'s `.py` count for the file delta (⛔ the six files marked "this lane's" above were NOT this lane's: they went to `main` in `e74cf1d13d` (#14161), which took `main` from **2,535** at `dea00903b50f` to 2,541; the merge parent `b4da1f5c01` read **2,542**, `main` had moved to **2,547** by this re-cut's merge base `0467ba329d7`, and this branch adds exactly TWO scanned files — measured by `--all-surface` at each tree, not the eleven an earlier cut claimed). ⛔ **RE-MEASURED A FOURTH TIME at this re-cut's merge (`#14222`, merged with `origin/main` `0467ba329d7`)** — the base this merge actually took, and its merge-base with this head. The previous cut named `5e83c2a2f697`, which is now one base behind: `main` added **TWO** `.py` files between them (`git diff --name-status 5e83c2a2f697 0467ba329d7 --diff-filter=A -- '*.py'` → `tools/extractor_cost_measure.py`, `tests/test_extractor_cost_measure.py`), which is exactly why the scanned-file count moved **2,545**→**2,547** while `sites` **9,208** and `files_with_sites` **854** are unchanged — neither new file carries a statement, so it joins the scanned population without joining the carrying one. Every figure below was re-derived at the base that shipped. ⛔ **The Appendix was RED on the PREVIOUS base (`70fbd1a27dd5`) — and `main` had ALREADY repaired it before this merge, so the attribution matters.** The earlier cut of this sentence named `main` as the red one, and at the base this row now names (`0467ba329d7`) that is false: measured `70fbd1a2`'s committed table against `main`'s, **400** rows differ and **378** of them are `tortoise/sdk.py` (of **386** cited sdk.py rows) — that is `main` RE-CUTTING the staleness its own `sdk.py` growth had created, and `tortoise/sdk.py` reads 62,785 lines at BOTH trees, so the 62,764 → 62,785 growth that caused it predates both. At `0467ba329d7` `main`'s table is GREEN, because `main`'s own `--markdown` re-cut shipped with it: measured `main`'s table against this branch's table **at that cut** (`0467ba329d7`'s own head, not the head you are reading), **exactly ONE** row differed — the single `tortoise/monitoring.py` row for `_probe_once._run_query`, which sat at `:4823` on `main` and moved when this branch changed that file — so this merge's regeneration repairs that ONE row, not 378, and the earlier "**379**" figure (which counted the same row against the pre-re-cut base) does not describe this head. ⛔ `--check` stays GREEN over all of it, because the pins are scalars and an insertion is not a new statement. (An earlier cut of this row named `10e51693f1`: it is an ANCESTOR of that base, **twelve** commits behind it (`git rev-list --count 10e51693f1..0467ba329d7` = 12), and the figure DID move — it reads **2,545** scanned files (`git ls-tree -r --name-only 10e51693f1 \| grep -c '\.py$'`), not 2,547, because the two `extractor_cost_measure` files postdate it — but a reader who re-derives at the newer sha re-derives at the tree that shipped, which is the only base this rule accepts.): `main` alone reads **9,208 / 854 / 2,547** and the merged tree reads **9,208 / 854 / 2,549** — sites and carrying files IDENTICAL at both trees, which is what a module that issues no Cypher must do, and the two extra scanned files are this PR's own. The number beside this row names the tree it does — and at THIS row's tree, `38f2ab7fc594` merged into a branch that merges `#14263`'s relation-PAIR leg, `--all-surface --json` reads **9,219 / 855 / 2,551** against **9,211 / 854 / 2,549** measured by running the same tool in a detached worktree AT `38f2ab7fc594` (so neither figure is arithmetic on the other); the `+8` sites, `+1` carrying file and `+2` scanned files are this branch's own, enumerated per file by the tool's parser: `tortoise/sdk.py` **1** (`_endpoint_kind_map`'s label-anchored read) and `tests/test_relation_guards_14263.py` **7** (`s._get_proj().g.query(…)`), while `tortoise/relation_guards.py` scans as a file that carries NO statement — which is why the carrying-file move is `+1` and not `+2`) ⛔ **RE-MEASURED at THIS PR (#14415), at the MERGED tree** (the round-9 head: `origin/main` `b2d1e9086a` plus the peer lane's round-8/9 fixes): `--all-surface --json` reads **9,236 / 860 / 2,564** on the merged tree against **9,233 / 859 / 2,561** measured by running the same tool in a detached worktree AT `origin/main` `b2d1e9086a` — so the `+3` sites and `+1` carrying file are this branch's own round-9 test additions, a delta of two readings rather than an attribution file-by-file, and, and the `+3` scanned files are exactly this PR's own (`tortoise/batch_ingest.py`, `tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`), none of which contributes a census-VISIBLE site (the thirteen statements `batch_ingest.py` really issues are behind a door predicate this census does not match — see this PR's cut paragraph in §7, and `#14422`). The pre-merge reading on this branch was **9,228 / 857 / 2,560** against main's **9,228 / 857 / 2,557** at `f7b3e9a5a77b`; main's own +2 sites and +2 scanned files between those two bases are main's, not this branch's |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,651 occurrences of the door predicate across 113 files
+1,652 occurrences of the door predicate across 113 files
 2,407 occurrences of the verb predicate across 151 files   (upper-bound shape, see below)
 
-1,651  regex door-pattern occurrences
+1,652  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,593  occurrences on a line carrying a door CALL          [measured]
+= 1,598  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,593  AST door calls
-= 1331  classified Cypher statements + 266 non-Cypher door calls
+= 1,598  AST door calls
+= 1,332  classified Cypher statements + 266 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -217,7 +217,7 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **879** | read=593, write=286 |
+| `plain` | **880** | read=594, write=286 |
 | `adjacency` | **293** | read=192, write=101 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
@@ -1003,21 +1003,21 @@ metric §0 is about does not move for it. §1's `rg` reconciliation is re-measur
 with `--markdown` at this head — the two new files' six rows are in it, so a reader can resolve every
 one.
 
-**The cut this PR (#14592 Phase A, `feat/14592-read-parity`) makes — FOUR new statement sites in TWO files, every one a `plain` READ (two of them `partial`) — re-cut by RUNNING the tool on the tree merged with `origin/main` `5163c3ee8b61`, never by arithmetic on the markers.** The REST read-parity routes reuse the doors that already existed for the by-id reads (`FalkorProjection._resolve_entity` + `entities.filter_source_props`, `TortoiseSDK.list_knowledge(kind='source')`, `TortoiseSDK.check_confidence`), so those add NO statement — but two reads had no reusable function anywhere in the tree, and they are what the four sites are: `tortoise/entity_reads.py` carries **three** (`list_layer`'s exact `count()` and its `SKIP`/`LIMIT` page, both `MATCH (n:{label}) WHERE …` with an INTERPOLATED label — the `???` marker's class, so `partial` 321→**323** — and `entity_relations`' edge read), and `tortoise/event_store.py` carries **one** (`latest_for_node`'s `MATCH (e:GraphEvent) WHERE e.type = $type … ORDER BY e.seq DESC LIMIT $scan` — a single indexed read served by an `Event` label scan, and the newest `ConfidenceChanged` reader the `…/belief` route needed). So `sites` 1327→**1331**, `plain` 875→**879** (read 589→**593**), `candidates` 589→**593**, `files` 102→**103** and `files_scanned` 313→**314** (`entity_reads.py` is new product surface; `event_store.py` already carried sites), `ast_door_calls` 1593→**1597** (= 1331 + the unchanged `non_cypher_door_calls` **266**), while `adjacency` **293** (read **192**), `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `unresolved` **105** do not move at all. ⛔ **The relations read was `adjacency` in this PR's first cut and is `plain` here, and the move is a STORE BUG the review found rather than a re-classification for convenience**: the edge read's two branches were a flat `… UNION ALL … ORDER BY … SKIP/LIMIT`, and the deployed engine SILENTLY DROPS that window on a `UNION` (measured: `SKIP 0/1/2/3 LIMIT 2` each returned the same first rows), so `offset` was inert and every request got the node's whole edge set. The fix wraps the branches in `CALL {{ … }}` and pages outside it, which is also why the census now folds the site to `plain`: §1's door predicate reads the STATEMENT, and `CALL` is not the fixed-length edge pattern `adjacency` is defined by (the edge pattern is inside the subquery). Both readings are true of their own tree — the first cut's `adjacency` **294** (read **193**) and this head's `plain` — and re-taking them at the head you ship is the rule; a reader who carries the first cut's pair will red `--check`. ⛔ **All four are issued through `ro_query` (GRAPH.RO_QUERY), not `query`, and that is a claim this census can now read rather than take on trust:** §1's door predicate matches `ro_query` as a door, so the four sites are counted either way — but `query` is GRAPH.QUERY, which MINTS the named graph when it does not exist, so a GET that used it would create the store it was asked to read. The read arm is why `read` is true of these sites and not merely declared of them. §1's `rg` reconciliation moves by exactly those four occurrences and that one file: door **1,647 / 112**→**1,651 / 113**, verb **2,398 / 150**→**2,407 / 151** (three additional `MATCH (`-bearing statements plus the `UNION`'s second branch). Appendix A is regenerated with `--markdown` at this merged tree, so a reader can resolve every one.
+**The cut this PR (#14592 Phase A, `feat/14592-read-parity`) makes — FIVE new statement sites in TWO files, every one a `plain` READ (three of them `partial`) — re-cut by RUNNING the tool on the tree merged with `origin/main` `5163c3ee8b61`, never by arithmetic on the markers.** The REST read-parity routes reuse the doors that already existed for the by-id reads (`FalkorProjection._resolve_entity` + `entities.filter_source_props`, `TortoiseSDK.list_knowledge(kind='source')`, `TortoiseSDK.check_confidence`), so those add NO statement — but two reads had no reusable function anywhere in the tree, and they are what the five sites are: `tortoise/entity_reads.py` carries **four** (`list_layer`'s exact `count()` and its `SKIP`/`LIMIT` page, both `MATCH (n:{label}) WHERE …` with an INTERPOLATED label — the `???` marker's class — `entity_relations`' edge read, and `layer_kind_values`' `RETURN DISTINCT n.{kind_prop}` vocabulary scan, the third of the INTERPOLATED-label class, so `partial` 321→**324**), and `tortoise/event_store.py` carries **one** (`latest_for_node`'s `MATCH (e:GraphEvent) WHERE e.type = $type … ORDER BY e.seq DESC LIMIT $scan` — a single indexed read served by an `Event` label scan, and the newest `ConfidenceChanged` reader the `…/belief` route needed). So `sites` 1327→**1332**, `plain` 875→**880** (read 589→**594**), `candidates` 589→**594**, `files` 102→**103** and `files_scanned` 313→**314** (`entity_reads.py` is new product surface; `event_store.py` already carried sites), `ast_door_calls` 1593→**1598** (= 1332 + the unchanged `non_cypher_door_calls` **266**), while `adjacency` **293** (read **192**), `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `unresolved` **105** do not move at all. ⛔ **The fifth site is review cycle 5's**: the `kind` filter on `/v1/objects` and `/v1/subjects` used to accept any value and answer a page positively marked COMPLETE for one that matched nothing, so the route now asks the layer which `<layer>Kind` spellings it carries — one `RETURN DISTINCT` scan, `plain`/`read`, `partial` for the interpolated property name. ⛔ **The relations read was `adjacency` in this PR's first cut and is `plain` here, and the move is a STORE BUG the review found rather than a re-classification for convenience**: the edge read's two branches were a flat `… UNION ALL … ORDER BY … SKIP/LIMIT`, and the deployed engine SILENTLY DROPS that window on a `UNION` (measured: `SKIP 0/1/2/3 LIMIT 2` each returned the same first rows), so `offset` was inert and every request got the node's whole edge set. The fix wraps the branches in `CALL {{ … }}` and pages outside it, which is also why the census now folds the site to `plain`: §1's door predicate reads the STATEMENT, and `CALL` is not the fixed-length edge pattern `adjacency` is defined by (the edge pattern is inside the subquery). Both readings are true of their own tree — the first cut's `adjacency` **294** (read **193**) and this head's `plain` — and re-taking them at the head you ship is the rule; a reader who carries the first cut's pair will red `--check`. ⛔ **All five are issued through `ro_query` (GRAPH.RO_QUERY), not `query`, and that is a claim this census can now read rather than take on trust:** §1's door predicate matches `ro_query` as a door, so the five sites are counted either way — but `query` is GRAPH.QUERY, which MINTS the named graph when it does not exist, so a GET that used it would create the store it was asked to read. The read arm is why `read` is true of these sites and not merely declared of them. §1's `rg` reconciliation moves by exactly those five occurrences and that one file: door **1,647 / 112**→**1,652 / 113**, verb **2,398 / 150**→**2,407 / 151** (both re-read from `--json`'s `rg_totals` at this head rather than by arithmetic on the per-site prose, which is how the earlier “three additional `MATCH (`-bearing statements” clause went stale). Appendix A is regenerated with `--markdown` at this merged tree, so a reader can resolve every one.
 
-<!-- cypher-inventory:sites = 1331 -->
+<!-- cypher-inventory:sites = 1332 -->
 <!-- cypher-inventory:files = 103 -->
 <!-- cypher-inventory:files_scanned = 314 -->
 <!-- cypher-inventory:unresolved = 105 -->
-<!-- cypher-inventory:candidates = 593 -->
+<!-- cypher-inventory:candidates = 594 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
 <!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 879 -->
+<!-- cypher-inventory:shape_plain = 880 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
 <!-- cypher-inventory:shape_unresolved = 105 -->
-<!-- cypher-inventory:shape_plain_read = 593 -->
+<!-- cypher-inventory:shape_plain_read = 594 -->
 <!-- cypher-inventory:shape_plain_write = 286 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
 <!-- cypher-inventory:shape_adjacency_write = 101 -->
@@ -1028,8 +1028,8 @@ one.
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 105 -->
 <!-- cypher-inventory:non_cypher_door_calls = 266 -->
-<!-- cypher-inventory:ast_door_calls = 1597 -->
-<!-- cypher-inventory:partial = 323 -->
+<!-- cypher-inventory:ast_door_calls = 1598 -->
+<!-- cypher-inventory:partial = 324 -->
 
 ---
 
@@ -1172,7 +1172,8 @@ one.
 | `tortoise/entity_identity.py:1601` | `resolve_document_target_id` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE (n:Object OR (n:Source AND n.documentKind IS NOT NUL…` |
 | `tortoise/entity_reads.py:191` | `list_layer` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) WHERE {} RETURN count(n)` |
 | `tortoise/entity_reads.py:195` | `list_layer` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) WHERE {} RETURN properties(n) ORDER BY n.{}, id(n) SKIP…` |
-| `tortoise/entity_reads.py:343` | `entity_relations` | plain | read | candidate:SQL-shaped | `CALL { {} } RETURN oid, labels, name, mechanism, declared, idx, dire…` |
+| `tortoise/entity_reads.py:235` | `layer_kind_values` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) WHERE n.{} IS NOT NULL RETURN DISTINCT n.{}` |
+| `tortoise/entity_reads.py:382` | `entity_relations` | plain | read | candidate:SQL-shaped | `CALL { {} } RETURN oid, labels, name, mechanism, declared, idx, dire…` |
 | `tortoise/entity_resolver.py:290` | `_read_entities` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) WHERE n.id IS NOT NULL AND n.resolved_from IS NULL AND …` |
 | `tortoise/entity_resolver.py:680` | `follow_resolved_from` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.resolved_from` |
 | `tortoise/entity_resolver.py:727` | `find_live_holder` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) WHERE n.id IS NOT NULL AND (n.status IS NULL OR NOT n.s…` |
@@ -1248,227 +1249,227 @@ one.
 | `tortoise/hosted_api.py:15213` | `list_points` | plain | read | candidate:SQL-shaped | `MATCH (n:Point){} WHERE ??? RETURN properties(n) ORDER BY n.createdA…` |
 | `tortoise/hosted_api.py:15389` | `get_point._cache_props` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: $id}) WHERE {} RETURN properties(p)` |
 | `tortoise/hosted_api.py:15407` | `get_point._cache_sees_node` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: $id}) RETURN properties(p)` |
-| `tortoise/hosted_api.py:16642` | `org_info` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)` |
-| `tortoise/hosted_api.py:18879` | `register_user` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) WHERE t.email = $email RETURN t.id` |
-| `tortoise/hosted_api.py:19020` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (t:Team { id: $id, name: $name, email: $email, tier: 'free', …` |
-| `tortoise/hosted_api.py:19037` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey { id: $id, org_id: $org_id, key_hash: $hash, key_pr…` |
-| `tortoise/hosted_api.py:19096` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) DETACH DELETE t` |
-| `tortoise/hosted_api.py:19099` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $id}) DETACH DELETE k` |
-| `tortoise/hosted_api.py:19593` | `_seed_demo_graph` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id` |
-| `tortoise/hosted_api.py:19602` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
-| `tortoise/hosted_api.py:19611` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
-| `tortoise/hosted_api.py:19634` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=0` |
-| `tortoise/hosted_api.py:19727` | `_seed_demo_graph` | ep | write | stays:ep-carveout (§6.3) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
-| `tortoise/hosted_api.py:19736` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
-| `tortoise/hosted_api.py:19746` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
-| `tortoise/hosted_api.py:19755` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
-| `tortoise/hosted_api.py:19764` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (c:Point {id:'epis_claim1'}), (f:Point {id:'sem_fact_layers'})…` |
-| `tortoise/hosted_api.py:19769` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (w:Point {id:'proc_wf1'}), (c:Point {id:'epis_claim1'}) MERGE …` |
-| `tortoise/hosted_api.py:19775` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', point…` |
-| `tortoise/hosted_api.py:20224` | `_ensure_graph_exists` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind, g.status` |
-| `tortoise/hosted_api.py:20379` | `_key_created_analytics` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1` |
-| `tortoise/hosted_api.py:20412` | `_rotatable_key_row` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.name, k.graph_id, k.sc…` |
-| `tortoise/hosted_api.py:20448` | `_claim_key_revocation` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $tid, id: $id}) WHERE k.revoked_at IS NULL …` |
-| `tortoise/hosted_api.py:20474` | `_force_revoke_key_row` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $tid, id: $id}) SET k.revoked_at = $now` |
-| `tortoise/hosted_api.py:21218` | `list_api_keys` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) RETURN k.id, k.key_p…` |
-| `tortoise/hosted_api.py:21229` | `list_api_keys` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id: $tid}) RETURN k.id, k.key_prefix, k.created…` |
-| `tortoise/hosted_api.py:21359` | `revoke_api_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.revoked_at` |
-| `tortoise/hosted_api.py:21375` | `revoke_api_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now` |
-| `tortoise/hosted_api.py:21642` | `toggle_api_key_enabled` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.revoked_at, k.created_…` |
-| `tortoise/hosted_api.py:21707` | `toggle_api_key_enabled` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.name = $name` |
-| `tortoise/hosted_api.py:21713` | `toggle_api_key_enabled` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.scopes = $sc` |
-| `tortoise/hosted_api.py:22417` | `_capture_abandoned_marker` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_ok=false, s.capture_extrac…` |
-| `tortoise/hosted_api.py:22457` | `_clear_capture_phase` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_extraction_phase=null, s.c…` |
-| `tortoise/hosted_api.py:24226` | `_capture_session_impl._report_capture._link_off_loop` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.entity_links_attempted=$a, s.entit…` |
-| `tortoise/hosted_api.py:24265` | `_capture_session_impl._report_capture._session_alive` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN count(s)` |
-| `tortoise/hosted_api.py:24310` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
-| `tortoise/hosted_api.py:24344` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
-| `tortoise/hosted_api.py:24379` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
-| `tortoise/hosted_api.py:24876` | `_capture_session_impl._report_capture._enrichment_read` | ep | read | stays:ep-carveout (§6.3) | `MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, coalesce(n.pointKind…` |
-| `tortoise/hosted_api.py:25028` | `_capture_session_impl._report_capture` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok, s.capture_extracto…` |
-| `tortoise/hosted_api.py:25684` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.is_episodic, coalesce(s.value_n…` |
-| `tortoise/hosted_api.py:25695` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (p:Point) WHERE p.id IN $ids RETURN p.id, p.content` |
-| `tortoise/hosted_api.py:25700` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) RETURN o.name, o.objectKind` |
-| `tortoise/hosted_api.py:25704` | `_load_commit_graph_state` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true})-[r]->(t) WHERE type(r) IN ['IMPL'…` |
-| `tortoise/hosted_api.py:25766` | `_load_commit_graph_state` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true, op_type:'IMPL'}) MATCH (o)-[:IMPL …` |
-| `tortoise/hosted_api.py:25813` | `_store_commit_telemetry` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (r:CommitRecord {client_commit_id:$cid}) SET r.telemetry=$t, r…` |
-| `tortoise/hosted_api.py:25891` | `_prevalidate_supersede_window` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {id:$id}) RETURN n.validFrom` |
-| `tortoise/hosted_api.py:25911` | `_prevalidate_supersede_window` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt` |
-| `tortoise/hosted_api.py:26387` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) WITH collect…` |
-| `tortoise/hosted_api.py:26459` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Source {url:$did}) SET s.id=coalesce(s.id, $did), s.sourceK…` |
-| `tortoise/hosted_api.py:26569` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (e:Event {eventId:$eid}) SET e.id=$eid, e.eventKind='AgentSess…` |
-| `tortoise/hosted_api.py:26581` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) MERGE (e)-[:pr…` |
-| `tortoise/hosted_api.py:26596` | `_execute_commit_writes` | ep | write | stays:ep-carveout (§6.3) | `MERGE (e:Event {eventId:$eid}) SET e.id=$eid, e.eventKind=$ek, e.nam…` |
-| `tortoise/hosted_api.py:26608` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) MERGE (e)-[:pr…` |
-| `tortoise/hosted_api.py:26747` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (a:Source {url:$u1}), (b:Source {url:$u2}) MERGE (a)-[:referen…` |
-| `tortoise/hosted_api.py:26816` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id:$pid}) SET p.updatedAt=$now` |
-| `tortoise/hosted_api.py:26942` | `_execute_commit_writes._terminal_state` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/hosted_api.py:27054` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) MERGE (s)-[:CONTAIN…` |
-| `tortoise/hosted_api.py:27183` | `_execute_commit_writes` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE o.name = $n AND {} RETURN o.id` |
-| `tortoise/hosted_api.py:27210` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) MERGE (e)-[:abo…` |
-| `tortoise/hosted_api.py:27365` | `_execute_commit_writes` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE ({}) AND o.name = $exact RETURN o.id` |
-| `tortoise/hosted_api.py:27419` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object) WHERE o.id IN $ids MERGE (p)-[…` |
-| `tortoise/hosted_api.py:27429` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object) WHERE ({}) AND o.name = $exact…` |
-| `tortoise/hosted_api.py:27915` | `commit_session._commit_region` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Session {id:$sid}) SET s.is_episodic=true, s.created_at=coa…` |
-| `tortoise/hosted_api.py:28013` | `commit_session._commit_region` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (r:CommitRecord {client_commit_id:$cid}) SET r.write_ops_bille…` |
-| `tortoise/hosted_api.py:28231` | `list_sessions` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session) WHERE ??? OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point…` |
-| `tortoise/hosted_api.py:28575` | `get_session_detail` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count,…` |
-| `tortoise/hosted_api.py:28615` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE (p.pointKin…` |
-| `tortoise/hosted_api.py:28712` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'…` |
-| `tortoise/hosted_api.py:28831` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE (p.pointKin…` |
-| `tortoise/hosted_api.py:28855` | `get_session_detail` | plain | read | candidate:SQL-shaped | `MATCH (src:Source {url:$url}) RETURN src.url, src.sourceKind, src.ev…` |
-| `tortoise/hosted_api.py:29024` | `_scorecard_for_org._read_graph` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/hosted_api.py:29027` | `_scorecard_for_org._read_graph` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/hosted_api.py:29967` | `_session_count_by_harness` | plain | read | candidate:SQL-shaped | `MATCH (s:Session) WHERE s.harness = $h RETURN count(s)` |
-| `tortoise/hosted_api.py:29972` | `_session_count_by_harness` | plain | read | candidate:SQL-shaped | `MATCH (s:Session) WHERE s.harness IS NULL RETURN count(s)` |
-| `tortoise/hosted_api.py:30086` | `delete_session._delete_session_sync` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.id, s.harness` |
-| `tortoise/hosted_api.py:30111` | `delete_session._delete_session_sync` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE p.eventId I…` |
-| `tortoise/hosted_api.py:30116` | `delete_session._delete_session_sync` | plain | read | candidate:SQL-shaped | `MATCH (src:Source {url:$url}) RETURN src.eventId` |
-| `tortoise/hosted_api.py:30129` | `delete_session._delete_session_sync` | adjacency | write | stays:graph-maintenance | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p R…` |
-| `tortoise/hosted_api.py:30147` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e` |
-| `tortoise/hosted_api.py:30156` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (src:Source {url:$url}) DETACH DELETE src` |
-| `tortoise/hosted_api.py:30160` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) DETACH DELETE s` |
-| `tortoise/hosted_api.py:30233` | `_user_memberships` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
-| `tortoise/hosted_api.py:30264` | `_membership_org` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:30342` | `_org_node` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:30571` | `_count_active_free_memberships` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
-| `tortoise/hosted_api.py:30630` | `_owned_free_org_ids` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active', role:'owner'}) W…` |
-| `tortoise/hosted_api.py:31009` | `_eager_provision_org_graph` | plain | read | candidate:SQL-shaped | `MATCH (m:TeamMeta) RETURN count(m)` |
-| `tortoise/hosted_api.py:31320` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, role:'owner'}) WHERE m.created_at…` |
-| `tortoise/hosted_api.py:31341` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {name:$name}) RETURN t.id, t.graph_name, t.tier, t.del…` |
-| `tortoise/hosted_api.py:31359` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$oid, user_id:$uid}) WHERE m.status = 'a…` |
-| `tortoise/hosted_api.py:31725` | `_rollback_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) DETACH DELETE g` |
-| `tortoise/hosted_api.py:32259` | `_apply_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, coalesce(g.status…` |
-| `tortoise/hosted_api.py:32881` | `_apply_graph_rename` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, coalesce(g.status…` |
-| `tortoise/hosted_api.py:33502` | `delete_graph` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind` |
-| `tortoise/hosted_api.py:33660` | `_graph_row_probe` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind, coalesce(g.sta…` |
-| `tortoise/hosted_api.py:33703` | `_rollback_restore_name_race` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.status = 'deleted', g.d…` |
-| `tortoise/hosted_api.py:33738` | `_trash_name_conflict` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid, name:$name}) RETURN g.id, coalesce(g.st…` |
-| `tortoise/hosted_api.py:34181` | `_membership_role` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:34391` | `_require_owner` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid}) RETURN m.role, m.st…` |
-| `tortoise/hosted_api.py:34556` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:34575` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
-| `tortoise/hosted_api.py:34580` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid}) WHERE i.accepted_at IS NULL AND (…` |
-| `tortoise/hosted_api.py:34603` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid, email:$email}) WHERE i.accepted_at…` |
-| `tortoise/hosted_api.py:34623` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role,…` |
-| `tortoise/hosted_api.py:34632` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:Membership {org_id:$tid, user_id:$fake}) ON CREATE SET m.ro…` |
-| `tortoise/hosted_api.py:34643` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.email_sent_at = $now` |
-| `tortoise/hosted_api.py:34700` | `invite_info._registry_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
-| `tortoise/hosted_api.py:34760` | `invite_info` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:34810` | `_sweep_terminal_invite_placeholders` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid, email:$email}) WHERE i.accepted_at…` |
-| `tortoise/hosted_api.py:34834` | `_delete_fake_invite_membership` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$fake}) DELETE m` |
-| `tortoise/hosted_api.py:34913` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
-| `tortoise/hosted_api.py:34938` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:34957` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:34978` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:34984` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
-| `tortoise/hosted_api.py:35001` | `accept_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
-| `tortoise/hosted_api.py:35249` | `_registry_pending_invite_by_token` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
-| `tortoise/hosted_api.py:35270` | `_registry_otp_issue` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
-| `tortoise/hosted_api.py:35295` | `_registry_otp_verify` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.otp_hash, i.otp_expires_at, i…` |
-| `tortoise/hosted_api.py:35311` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, i.otp_expires_a…` |
-| `tortoise/hosted_api.py:35319` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_attempts = COALESCE(i.otp_at…` |
-| `tortoise/hosted_api.py:35324` | `_registry_otp_verify` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.otp_attempts` |
-| `tortoise/hosted_api.py:35329` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, i.otp_expires_a…` |
-| `tortoise/hosted_api.py:35337` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_attempts = 0` |
-| `tortoise/hosted_api.py:35410` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:35418` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35427` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35433` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
-| `tortoise/hosted_api.py:35454` | `_registry_mismatch_accept_v2` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
-| `tortoise/hosted_api.py:35661` | `invite_otp` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35715` | `resend_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.email, i.role, i.ac…` |
-| `tortoise/hosted_api.py:35746` | `resend_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
-| `tortoise/hosted_api.py:35759` | `resend_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35798` | `expire_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.status, i.accepted_…` |
-| `tortoise/hosted_api.py:35811` | `expire_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.status IS NULL OR i.status = '…` |
-| `tortoise/hosted_api.py:35883` | `list_pending_invites_for_me` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {email:$email}) WHERE i.accepted_at IS NULL AND …` |
-| `tortoise/hosted_api.py:35912` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.id, i.org_id, i.email, i.role…` |
-| `tortoise/hosted_api.py:35937` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:35951` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35966` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
-| `tortoise/hosted_api.py:35972` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
-| `tortoise/hosted_api.py:35988` | `_registry_accept_by_id` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
-| `tortoise/hosted_api.py:36066` | `decline_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.email, i.org_id, i.status, i.…` |
-| `tortoise/hosted_api.py:36083` | `decline_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.status IS NULL OR i.status = '…` |
-| `tortoise/hosted_api.py:36089` | `decline_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at` |
-| `tortoise/hosted_api.py:36175` | `list_members` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.st…` |
-| `tortoise/hosted_api.py:36218` | `remove_member` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role` |
-| `tortoise/hosted_api.py:36226` | `remove_member` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) SET m.status='remov…` |
-| `tortoise/hosted_api.py:36269` | `change_member_role` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role` |
-| `tortoise/hosted_api.py:36277` | `change_member_role` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) SET m.role=$role` |
-| `tortoise/hosted_api.py:36323` | `_org_members_sync` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN m.user_id…` |
-| `tortoise/hosted_api.py:36373` | `_export_graph_snapshot` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN labels(n), properties(n)` |
-| `tortoise/hosted_api.py:36403` | `_export_graph_snapshot` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), type(r)…` |
-| `tortoise/hosted_api.py:36961` | `_stamp_import_prop` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.{} = $v` |
-| `tortoise/hosted_api.py:37245` | `_apply_import_pack_config` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:PackInstall {namespace: $ns}) SET p.version = $version, p.s…` |
-| `tortoise/hosted_api.py:37729` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL SET k.revo…` |
-| `tortoise/hosted_api.py:37734` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, status:'active'}) SET m.status='re…` |
-| `tortoise/hosted_api.py:37739` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {org_id:$tid}) WHERE (i.status IS NULL OR i.stat…` |
-| `tortoise/hosted_api.py:37745` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.deleted_at=$now, t.grace_hours=$gh` |
-| `tortoise/hosted_api.py:38322` | `_org_graph_names` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.namespace` |
-| `tortoise/hosted_api.py:38489` | `_drop_org_acl_users` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id` |
-| `tortoise/hosted_api.py:38538` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid}) DETACH DELETE m` |
-| `tortoise/hosted_api.py:38542` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$tid}) DETACH DELETE k` |
-| `tortoise/hosted_api.py:38546` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {org_id:$tid}) DETACH DELETE i` |
-| `tortoise/hosted_api.py:38550` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) DETACH DELETE t` |
-| `tortoise/hosted_api.py:38757` | `_purge_deleted_orgs_locked` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) WHERE t.deleted_at IS NOT NULL AND t.deleted_at < $cu…` |
-| `tortoise/hosted_api.py:39014` | `reconcile` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at …` |
-| `tortoise/hosted_api.py:39020` | `reconcile` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` |
-| `tortoise/hosted_api.py:39403` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, ba…` |
-| `tortoise/hosted_api.py:39412` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp,…` |
-| `tortoise/hosted_api.py:39418` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (m:Membership {org_id:$tid, user_id:$uid, role:'owner', statu…` |
-| `tortoise/hosted_api.py:39426` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, org_id:$tid, …` |
-| `tortoise/hosted_api.py:39450` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) DETACH DELETE t` |
-| `tortoise/hosted_api.py:39451` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$id}) DETACH DELETE k` |
-| `tortoise/hosted_api.py:39452` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$id}) DETACH DELETE m` |
-| `tortoise/hosted_api.py:39453` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:SignupToken {org_id:$id}) DETACH DELETE s` |
-| `tortoise/hosted_api.py:40877` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
-| `tortoise/hosted_api.py:40891` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
-| `tortoise/hosted_api.py:40898` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.tier, t.suspended_at` |
-| `tortoise/hosted_api.py:40939` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$u…` |
-| `tortoise/hosted_api.py:40977` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
-| `tortoise/hosted_api.py:40992` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
-| `tortoise/hosted_api.py:41009` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL SET k.revoked_a…` |
-| `tortoise/hosted_api.py:41028` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
-| `tortoise/hosted_api.py:41053` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now SET k.revoked_at…` |
-| `tortoise/hosted_api.py:41092` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND k.crea…` |
-| `tortoise/hosted_api.py:41100` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'recovery', created_by:$ui…` |
-| `tortoise/hosted_api.py:41115` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$u…` |
-| `tortoise/hosted_api.py:41128` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` |
-| `tortoise/hosted_api.py:41137` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
-| `tortoise/hosted_api.py:41151` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp,…` |
-| `tortoise/hosted_api.py:41876` | `_get_onboarding_state` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.onboarding_state` |
-| `tortoise/hosted_api.py:41951` | `_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) WHERE coalesce(g.status, 'act…` |
-| `tortoise/hosted_api.py:41966` | `_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid, kind:'default'}) WHERE coalesce(g.statu…` |
-| `tortoise/hosted_api.py:42210` | `_read_onboarding_state_and_version` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.onboarding_state, coalesce(t.state…` |
-| `tortoise/hosted_api.py:42261` | `_cas_write_onboarding_state` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) WHERE coalesce(t.state_version, 0) = $expec…` |
-| `tortoise/hosted_api.py:42363` | `_write_onboarding_state` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.onboarding_state = $state` |
-| `tortoise/hosted_api.py:44205` | `_org_name` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.name` |
-| `tortoise/hosted_api.py:44222` | `_OrgSeedSurface.query` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/hosted_api.py:44885` | `public_demo._seed_demo_sync` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id` |
-| `tortoise/hosted_api.py:46793` | `_github_credentials` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org` |
-| `tortoise/hosted_api.py:46823` | `_org_email` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.email` |
-| `tortoise/hosted_api.py:46847` | `_write_org_email` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.email = $email` |
-| `tortoise/hosted_api.py:47171` | `github_callback` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org…` |
-| `tortoise/hosted_api.py:47317` | `_store_github_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_org = $org` |
-| `tortoise/hosted_api.py:47343` | `_clear_github_credentials` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_token_enc = null, t.github_org…` |
-| `tortoise/hosted_api.py:48569` | `_prior_stored_turn_count` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid}) OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point…` |
-| `tortoise/hosted_api.py:48637` | `_relink_sessions_after_index` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session)-[:CONTAINS]->(t:Point) WHERE t.pointKind='event' R…` |
-| `tortoise/hosted_api.py:48650` | `_relink_sessions_after_index` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.entity_links_attempted=$a, s.entit…` |
-| `tortoise/hosted_api.py:51415` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.email` |
-| `tortoise/hosted_api.py:51454` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id:$id}) RETURN k.created_by` |
-| `tortoise/hosted_api.py:51459` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1` |
-| `tortoise/hosted_api.py:51516` | `_billing_checkout_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_custo…` |
-| `tortoise/hosted_api.py:51577` | `_billing_checkout_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid` |
-| `tortoise/hosted_api.py:51582` | `_billing_checkout_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_em…` |
-| `tortoise/hosted_api.py:51721` | `_billing_checkout_new_org_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {name:$name}) RETURN count(t)` |
-| `tortoise/hosted_api.py:51779` | `_billing_portal_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id` |
-| `tortoise/hosted_api.py:51926` | `_org_id_for_stripe_customer` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id` |
-| `tortoise/hosted_api.py:52105` | `_webhook_apply_event._set` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t += $props` |
-| `tortoise/hosted_api.py:52416` | `webhooks_stripe` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.tier` |
-| `tortoise/hosted_api.py:52420` | `webhooks_stripe` | plain | read | candidate:SQL-shaped | `MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen` |
-| `tortoise/hosted_api.py:52426` | `webhooks_stripe` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})` |
+| `tortoise/hosted_api.py:16719` | `org_info` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)` |
+| `tortoise/hosted_api.py:18956` | `register_user` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) WHERE t.email = $email RETURN t.id` |
+| `tortoise/hosted_api.py:19097` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (t:Team { id: $id, name: $name, email: $email, tier: 'free', …` |
+| `tortoise/hosted_api.py:19114` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey { id: $id, org_id: $org_id, key_hash: $hash, key_pr…` |
+| `tortoise/hosted_api.py:19173` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) DETACH DELETE t` |
+| `tortoise/hosted_api.py:19176` | `register_user` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $id}) DETACH DELETE k` |
+| `tortoise/hosted_api.py:19670` | `_seed_demo_graph` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id` |
+| `tortoise/hosted_api.py:19679` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
+| `tortoise/hosted_api.py:19688` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
+| `tortoise/hosted_api.py:19711` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=0` |
+| `tortoise/hosted_api.py:19804` | `_seed_demo_graph` | ep | write | stays:ep-carveout (§6.3) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
+| `tortoise/hosted_api.py:19813` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
+| `tortoise/hosted_api.py:19823` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:Point {id:$id}) SET p.content=$c, p.pointKind=$k, p.is_oper…` |
+| `tortoise/hosted_api.py:19832` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}) MERGE (t:Tag {name:$tag}) MERGE (p)-[:TAGG…` |
+| `tortoise/hosted_api.py:19841` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (c:Point {id:'epis_claim1'}), (f:Point {id:'sem_fact_layers'})…` |
+| `tortoise/hosted_api.py:19846` | `_seed_demo_graph` | adjacency | write | stays:graph-maintenance | `MATCH (w:Point {id:'proc_wf1'}), (c:Point {id:'epis_claim1'}) MERGE …` |
+| `tortoise/hosted_api.py:19852` | `_seed_demo_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', point…` |
+| `tortoise/hosted_api.py:20301` | `_ensure_graph_exists` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind, g.status` |
+| `tortoise/hosted_api.py:20456` | `_key_created_analytics` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1` |
+| `tortoise/hosted_api.py:20489` | `_rotatable_key_row` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.name, k.graph_id, k.sc…` |
+| `tortoise/hosted_api.py:20525` | `_claim_key_revocation` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $tid, id: $id}) WHERE k.revoked_at IS NULL …` |
+| `tortoise/hosted_api.py:20551` | `_force_revoke_key_row` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id: $tid, id: $id}) SET k.revoked_at = $now` |
+| `tortoise/hosted_api.py:21295` | `list_api_keys` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) RETURN k.id, k.key_p…` |
+| `tortoise/hosted_api.py:21306` | `list_api_keys` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id: $tid}) RETURN k.id, k.key_prefix, k.created…` |
+| `tortoise/hosted_api.py:21436` | `revoke_api_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.revoked_at` |
+| `tortoise/hosted_api.py:21452` | `revoke_api_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now` |
+| `tortoise/hosted_api.py:21719` | `toggle_api_key_enabled` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.revoked_at, k.created_…` |
+| `tortoise/hosted_api.py:21784` | `toggle_api_key_enabled` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.name = $name` |
+| `tortoise/hosted_api.py:21790` | `toggle_api_key_enabled` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id: $id}) SET k.scopes = $sc` |
+| `tortoise/hosted_api.py:22494` | `_capture_abandoned_marker` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_ok=false, s.capture_extrac…` |
+| `tortoise/hosted_api.py:22534` | `_clear_capture_phase` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_extraction_phase=null, s.c…` |
+| `tortoise/hosted_api.py:24303` | `_capture_session_impl._report_capture._link_off_loop` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.entity_links_attempted=$a, s.entit…` |
+| `tortoise/hosted_api.py:24342` | `_capture_session_impl._report_capture._session_alive` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN count(s)` |
+| `tortoise/hosted_api.py:24387` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
+| `tortoise/hosted_api.py:24421` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
+| `tortoise/hosted_api.py:24456` | `_capture_session_impl._report_capture._sweep_orphaned_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (s:Session {id:$sid}) WITH count(s) AS present WHERE …` |
+| `tortoise/hosted_api.py:24953` | `_capture_session_impl._report_capture._enrichment_read` | ep | read | stays:ep-carveout (§6.3) | `MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, coalesce(n.pointKind…` |
+| `tortoise/hosted_api.py:25105` | `_capture_session_impl._report_capture` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok, s.capture_extracto…` |
+| `tortoise/hosted_api.py:25761` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.is_episodic, coalesce(s.value_n…` |
+| `tortoise/hosted_api.py:25772` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (p:Point) WHERE p.id IN $ids RETURN p.id, p.content` |
+| `tortoise/hosted_api.py:25777` | `_load_commit_graph_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) RETURN o.name, o.objectKind` |
+| `tortoise/hosted_api.py:25781` | `_load_commit_graph_state` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true})-[r]->(t) WHERE type(r) IN ['IMPL'…` |
+| `tortoise/hosted_api.py:25843` | `_load_commit_graph_state` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true, op_type:'IMPL'}) MATCH (o)-[:IMPL …` |
+| `tortoise/hosted_api.py:25890` | `_store_commit_telemetry` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (r:CommitRecord {client_commit_id:$cid}) SET r.telemetry=$t, r…` |
+| `tortoise/hosted_api.py:25968` | `_prevalidate_supersede_window` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {id:$id}) RETURN n.validFrom` |
+| `tortoise/hosted_api.py:25988` | `_prevalidate_supersede_window` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt` |
+| `tortoise/hosted_api.py:26464` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) WITH collect…` |
+| `tortoise/hosted_api.py:26536` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Source {url:$did}) SET s.id=coalesce(s.id, $did), s.sourceK…` |
+| `tortoise/hosted_api.py:26646` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (e:Event {eventId:$eid}) SET e.id=$eid, e.eventKind='AgentSess…` |
+| `tortoise/hosted_api.py:26658` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) MERGE (e)-[:pr…` |
+| `tortoise/hosted_api.py:26673` | `_execute_commit_writes` | ep | write | stays:ep-carveout (§6.3) | `MERGE (e:Event {eventId:$eid}) SET e.id=$eid, e.eventKind=$ek, e.nam…` |
+| `tortoise/hosted_api.py:26685` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) MERGE (e)-[:pr…` |
+| `tortoise/hosted_api.py:26824` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (a:Source {url:$u1}), (b:Source {url:$u2}) MERGE (a)-[:referen…` |
+| `tortoise/hosted_api.py:26893` | `_execute_commit_writes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id:$pid}) SET p.updatedAt=$now` |
+| `tortoise/hosted_api.py:27019` | `_execute_commit_writes._terminal_state` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/hosted_api.py:27131` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) MERGE (s)-[:CONTAIN…` |
+| `tortoise/hosted_api.py:27260` | `_execute_commit_writes` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE o.name = $n AND {} RETURN o.id` |
+| `tortoise/hosted_api.py:27287` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) MERGE (e)-[:abo…` |
+| `tortoise/hosted_api.py:27442` | `_execute_commit_writes` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE ({}) AND o.name = $exact RETURN o.id` |
+| `tortoise/hosted_api.py:27496` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object) WHERE o.id IN $ids MERGE (p)-[…` |
+| `tortoise/hosted_api.py:27506` | `_execute_commit_writes` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object) WHERE ({}) AND o.name = $exact…` |
+| `tortoise/hosted_api.py:27992` | `commit_session._commit_region` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (s:Session {id:$sid}) SET s.is_episodic=true, s.created_at=coa…` |
+| `tortoise/hosted_api.py:28090` | `commit_session._commit_region` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (r:CommitRecord {client_commit_id:$cid}) SET r.write_ops_bille…` |
+| `tortoise/hosted_api.py:28308` | `list_sessions` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session) WHERE ??? OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point…` |
+| `tortoise/hosted_api.py:28652` | `get_session_detail` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count,…` |
+| `tortoise/hosted_api.py:28692` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE (p.pointKin…` |
+| `tortoise/hosted_api.py:28789` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'…` |
+| `tortoise/hosted_api.py:28908` | `get_session_detail` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE (p.pointKin…` |
+| `tortoise/hosted_api.py:28932` | `get_session_detail` | plain | read | candidate:SQL-shaped | `MATCH (src:Source {url:$url}) RETURN src.url, src.sourceKind, src.ev…` |
+| `tortoise/hosted_api.py:29101` | `_scorecard_for_org._read_graph` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/hosted_api.py:29104` | `_scorecard_for_org._read_graph` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/hosted_api.py:30044` | `_session_count_by_harness` | plain | read | candidate:SQL-shaped | `MATCH (s:Session) WHERE s.harness = $h RETURN count(s)` |
+| `tortoise/hosted_api.py:30049` | `_session_count_by_harness` | plain | read | candidate:SQL-shaped | `MATCH (s:Session) WHERE s.harness IS NULL RETURN count(s)` |
+| `tortoise/hosted_api.py:30163` | `delete_session._delete_session_sync` | plain | read | candidate:SQL-shaped | `MATCH (s:Session {id:$sid}) RETURN s.id, s.harness` |
+| `tortoise/hosted_api.py:30188` | `delete_session._delete_session_sync` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE p.eventId I…` |
+| `tortoise/hosted_api.py:30193` | `delete_session._delete_session_sync` | plain | read | candidate:SQL-shaped | `MATCH (src:Source {url:$url}) RETURN src.eventId` |
+| `tortoise/hosted_api.py:30206` | `delete_session._delete_session_sync` | adjacency | write | stays:graph-maintenance | `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p R…` |
+| `tortoise/hosted_api.py:30224` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e` |
+| `tortoise/hosted_api.py:30233` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (src:Source {url:$url}) DETACH DELETE src` |
+| `tortoise/hosted_api.py:30237` | `delete_session._delete_session_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) DETACH DELETE s` |
+| `tortoise/hosted_api.py:30310` | `_user_memberships` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
+| `tortoise/hosted_api.py:30341` | `_membership_org` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:30419` | `_org_node` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:30648` | `_count_active_free_memberships` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
+| `tortoise/hosted_api.py:30707` | `_owned_free_org_ids` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active', role:'owner'}) W…` |
+| `tortoise/hosted_api.py:31086` | `_eager_provision_org_graph` | plain | read | candidate:SQL-shaped | `MATCH (m:TeamMeta) RETURN count(m)` |
+| `tortoise/hosted_api.py:31397` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, role:'owner'}) WHERE m.created_at…` |
+| `tortoise/hosted_api.py:31418` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {name:$name}) RETURN t.id, t.graph_name, t.tier, t.del…` |
+| `tortoise/hosted_api.py:31436` | `_create_org_registry_lane` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$oid, user_id:$uid}) WHERE m.status = 'a…` |
+| `tortoise/hosted_api.py:31802` | `_rollback_graph` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) DETACH DELETE g` |
+| `tortoise/hosted_api.py:32336` | `_apply_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, coalesce(g.status…` |
+| `tortoise/hosted_api.py:32958` | `_apply_graph_rename` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, coalesce(g.status…` |
+| `tortoise/hosted_api.py:33579` | `delete_graph` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind` |
+| `tortoise/hosted_api.py:33737` | `_graph_row_probe` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind, coalesce(g.sta…` |
+| `tortoise/hosted_api.py:33780` | `_rollback_restore_name_race` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.status = 'deleted', g.d…` |
+| `tortoise/hosted_api.py:33815` | `_trash_name_conflict` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid, name:$name}) RETURN g.id, coalesce(g.st…` |
+| `tortoise/hosted_api.py:34258` | `_membership_role` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:34468` | `_require_owner` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid}) RETURN m.role, m.st…` |
+| `tortoise/hosted_api.py:34633` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:34652` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
+| `tortoise/hosted_api.py:34657` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid}) WHERE i.accepted_at IS NULL AND (…` |
+| `tortoise/hosted_api.py:34680` | `invite_to_org` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid, email:$email}) WHERE i.accepted_at…` |
+| `tortoise/hosted_api.py:34700` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role,…` |
+| `tortoise/hosted_api.py:34709` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:Membership {org_id:$tid, user_id:$fake}) ON CREATE SET m.ro…` |
+| `tortoise/hosted_api.py:34720` | `invite_to_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.email_sent_at = $now` |
+| `tortoise/hosted_api.py:34777` | `invite_info._registry_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
+| `tortoise/hosted_api.py:34837` | `invite_info` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:34887` | `_sweep_terminal_invite_placeholders` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {org_id:$tid, email:$email}) WHERE i.accepted_at…` |
+| `tortoise/hosted_api.py:34911` | `_delete_fake_invite_membership` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$fake}) DELETE m` |
+| `tortoise/hosted_api.py:34990` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
+| `tortoise/hosted_api.py:35015` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:35034` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35055` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35061` | `accept_invite` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
+| `tortoise/hosted_api.py:35078` | `accept_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
+| `tortoise/hosted_api.py:35326` | `_registry_pending_invite_by_token` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation) WHERE i.accepted_at IS NULL AND (i.status IS NU…` |
+| `tortoise/hosted_api.py:35347` | `_registry_otp_issue` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
+| `tortoise/hosted_api.py:35372` | `_registry_otp_verify` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.otp_hash, i.otp_expires_at, i…` |
+| `tortoise/hosted_api.py:35388` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, i.otp_expires_a…` |
+| `tortoise/hosted_api.py:35396` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_attempts = COALESCE(i.otp_at…` |
+| `tortoise/hosted_api.py:35401` | `_registry_otp_verify` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.otp_attempts` |
+| `tortoise/hosted_api.py:35406` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, i.otp_expires_a…` |
+| `tortoise/hosted_api.py:35414` | `_registry_otp_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) SET i.otp_attempts = 0` |
+| `tortoise/hosted_api.py:35487` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:35495` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35504` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35510` | `_registry_mismatch_accept_v2` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
+| `tortoise/hosted_api.py:35531` | `_registry_mismatch_accept_v2` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
+| `tortoise/hosted_api.py:35738` | `invite_otp` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35792` | `resend_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.email, i.role, i.ac…` |
+| `tortoise/hosted_api.py:35823` | `resend_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
+| `tortoise/hosted_api.py:35836` | `resend_invite` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:35875` | `expire_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.status, i.accepted_…` |
+| `tortoise/hosted_api.py:35888` | `expire_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.status IS NULL OR i.status = '…` |
+| `tortoise/hosted_api.py:35960` | `list_pending_invites_for_me` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {email:$email}) WHERE i.accepted_at IS NULL AND …` |
+| `tortoise/hosted_api.py:35989` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.id, i.org_id, i.email, i.role…` |
+| `tortoise/hosted_api.py:36014` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:36028` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:36043` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN properties(t)` |
+| `tortoise/hosted_api.py:36049` | `_registry_accept_by_id` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)` |
+| `tortoise/hosted_api.py:36065` | `_registry_accept_by_id` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.accepted_at IS NULL AND (i.sta…` |
+| `tortoise/hosted_api.py:36143` | `decline_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.email, i.org_id, i.status, i.…` |
+| `tortoise/hosted_api.py:36160` | `decline_invite` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {id:$id}) WHERE i.status IS NULL OR i.status = '…` |
+| `tortoise/hosted_api.py:36166` | `decline_invite` | plain | read | candidate:SQL-shaped | `MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at` |
+| `tortoise/hosted_api.py:36252` | `list_members` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.st…` |
+| `tortoise/hosted_api.py:36295` | `remove_member` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role` |
+| `tortoise/hosted_api.py:36303` | `remove_member` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) SET m.status='remov…` |
+| `tortoise/hosted_api.py:36346` | `change_member_role` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role` |
+| `tortoise/hosted_api.py:36354` | `change_member_role` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, user_id:$uid}) SET m.role=$role` |
+| `tortoise/hosted_api.py:36400` | `_org_members_sync` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN m.user_id…` |
+| `tortoise/hosted_api.py:36450` | `_export_graph_snapshot` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN labels(n), properties(n)` |
+| `tortoise/hosted_api.py:36480` | `_export_graph_snapshot` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), type(r)…` |
+| `tortoise/hosted_api.py:37038` | `_stamp_import_prop` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.{} = $v` |
+| `tortoise/hosted_api.py:37322` | `_apply_import_pack_config` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:PackInstall {namespace: $ns}) SET p.version = $version, p.s…` |
+| `tortoise/hosted_api.py:37806` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL SET k.revo…` |
+| `tortoise/hosted_api.py:37811` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid, status:'active'}) SET m.status='re…` |
+| `tortoise/hosted_api.py:37816` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {org_id:$tid}) WHERE (i.status IS NULL OR i.stat…` |
+| `tortoise/hosted_api.py:37822` | `_soft_delete_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.deleted_at=$now, t.grace_hours=$gh` |
+| `tortoise/hosted_api.py:38399` | `_org_graph_names` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.namespace` |
+| `tortoise/hosted_api.py:38566` | `_drop_org_acl_users` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid}) RETURN g.id` |
+| `tortoise/hosted_api.py:38615` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$tid}) DETACH DELETE m` |
+| `tortoise/hosted_api.py:38619` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$tid}) DETACH DELETE k` |
+| `tortoise/hosted_api.py:38623` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (i:Invitation {org_id:$tid}) DETACH DELETE i` |
+| `tortoise/hosted_api.py:38627` | `_purge_registry_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) DETACH DELETE t` |
+| `tortoise/hosted_api.py:38834` | `_purge_deleted_orgs_locked` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) WHERE t.deleted_at IS NOT NULL AND t.deleted_at < $cu…` |
+| `tortoise/hosted_api.py:39091` | `reconcile` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at …` |
+| `tortoise/hosted_api.py:39097` | `reconcile` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` |
+| `tortoise/hosted_api.py:39480` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, ba…` |
+| `tortoise/hosted_api.py:39489` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp,…` |
+| `tortoise/hosted_api.py:39495` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (m:Membership {org_id:$tid, user_id:$uid, role:'owner', statu…` |
+| `tortoise/hosted_api.py:39503` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, org_id:$tid, …` |
+| `tortoise/hosted_api.py:39527` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) DETACH DELETE t` |
+| `tortoise/hosted_api.py:39528` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {org_id:$id}) DETACH DELETE k` |
+| `tortoise/hosted_api.py:39529` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (m:Membership {org_id:$id}) DETACH DELETE m` |
+| `tortoise/hosted_api.py:39530` | `agent_signup` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:SignupToken {org_id:$id}) DETACH DELETE s` |
+| `tortoise/hosted_api.py:40954` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id …` |
+| `tortoise/hosted_api.py:40968` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RE…` |
+| `tortoise/hosted_api.py:40975` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.tier, t.suspended_at` |
+| `tortoise/hosted_api.py:41016` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$u…` |
+| `tortoise/hosted_api.py:41054` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
+| `tortoise/hosted_api.py:41069` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
+| `tortoise/hosted_api.py:41086` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL SET k.revoked_a…` |
+| `tortoise/hosted_api.py:41105` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
+| `tortoise/hosted_api.py:41130` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now SET k.revoked_at…` |
+| `tortoise/hosted_api.py:41169` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND k.crea…` |
+| `tortoise/hosted_api.py:41177` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'recovery', created_by:$ui…` |
+| `tortoise/hosted_api.py:41192` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$u…` |
+| `tortoise/hosted_api.py:41205` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now` |
+| `tortoise/hosted_api.py:41214` | `session_key` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL AND (k.cre…` |
+| `tortoise/hosted_api.py:41228` | `session_key` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp,…` |
+| `tortoise/hosted_api.py:41953` | `_get_onboarding_state` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.onboarding_state` |
+| `tortoise/hosted_api.py:42028` | `_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) WHERE coalesce(g.status, 'act…` |
+| `tortoise/hosted_api.py:42043` | `_graph_recording_override` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {org_id:$tid, kind:'default'}) WHERE coalesce(g.statu…` |
+| `tortoise/hosted_api.py:42287` | `_read_onboarding_state_and_version` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.onboarding_state, coalesce(t.state…` |
+| `tortoise/hosted_api.py:42338` | `_cas_write_onboarding_state` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) WHERE coalesce(t.state_version, 0) = $expec…` |
+| `tortoise/hosted_api.py:42440` | `_write_onboarding_state` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.onboarding_state = $state` |
+| `tortoise/hosted_api.py:44282` | `_org_name` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.name` |
+| `tortoise/hosted_api.py:44299` | `_OrgSeedSurface.query` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/hosted_api.py:44962` | `public_demo._seed_demo_sync` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id` |
+| `tortoise/hosted_api.py:46870` | `_github_credentials` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org` |
+| `tortoise/hosted_api.py:46900` | `_org_email` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $id}) RETURN t.email` |
+| `tortoise/hosted_api.py:46924` | `_write_org_email` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.email = $email` |
+| `tortoise/hosted_api.py:47248` | `github_callback` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org…` |
+| `tortoise/hosted_api.py:47394` | `_store_github_org` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_org = $org` |
+| `tortoise/hosted_api.py:47420` | `_clear_github_credentials` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id: $id}) SET t.github_token_enc = null, t.github_org…` |
+| `tortoise/hosted_api.py:48646` | `_prior_stored_turn_count` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session {id:$sid}) OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point…` |
+| `tortoise/hosted_api.py:48714` | `_relink_sessions_after_index` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (s:Session)-[:CONTAINS]->(t:Point) WHERE t.pointKind='event' R…` |
+| `tortoise/hosted_api.py:48727` | `_relink_sessions_after_index` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (s:Session {id:$sid}) SET s.entity_links_attempted=$a, s.entit…` |
+| `tortoise/hosted_api.py:51492` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.email` |
+| `tortoise/hosted_api.py:51531` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {id:$id}) RETURN k.created_by` |
+| `tortoise/hosted_api.py:51536` | `_billing_customer_email` | plain | read | candidate:SQL-shaped | `MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1` |
+| `tortoise/hosted_api.py:51593` | `_billing_checkout_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_custo…` |
+| `tortoise/hosted_api.py:51654` | `_billing_checkout_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid` |
+| `tortoise/hosted_api.py:51659` | `_billing_checkout_sync` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_em…` |
+| `tortoise/hosted_api.py:51798` | `_billing_checkout_new_org_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {name:$name}) RETURN count(t)` |
+| `tortoise/hosted_api.py:51856` | `_billing_portal_sync` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id` |
+| `tortoise/hosted_api.py:52003` | `_org_id_for_stripe_customer` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id` |
+| `tortoise/hosted_api.py:52182` | `_webhook_apply_event._set` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (t:Team {id:$id}) SET t += $props` |
+| `tortoise/hosted_api.py:52493` | `webhooks_stripe` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.tier` |
+| `tortoise/hosted_api.py:52497` | `webhooks_stripe` | plain | read | candidate:SQL-shaped | `MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen` |
+| `tortoise/hosted_api.py:52503` | `webhooks_stripe` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})` |
 | `tortoise/hosted_backup.py:496` | `_paged_rows` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/hosted_backup.py:515` | `_independent_counts` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) AND …` |
 | `tortoise/hosted_backup.py:522` | `_independent_counts` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH ()-[r]->() RETURN count(r)` |
