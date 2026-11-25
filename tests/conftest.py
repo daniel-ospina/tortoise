@@ -841,6 +841,45 @@ def _clear_record_refusal_state() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_uncut_graphs():
+    """#14610 review P2: the UNCUT-GRAPH registry is process state, never ambient.
+
+    `_record_health` folds the armed-but-uncut count into `record.ok` —
+    `hosted_api` sets ``block["ok"] = False`` when the record is ``armed`` and
+    that count is ``> 0`` — and `record_writer._UNCUT_GRAPHS` is keyed by
+    ``org\\0graph`` for the life of the PROCESS. `reset_uncut_graphs()` exists for
+    exactly this, but its only callers were inside
+    ``tests/test_14582_creation_hook.py``, so a file that leaves an uncut graph
+    behind hands every later health leg in the same shard a degraded record: an
+    ordering dependency between test FILES, not a property of the health block —
+    the same class `_no_ambient_record_refusal` above exists for.
+
+    MEASURED at ``77c4b4bf`` (one pytest process each, ``TORTOISE_TEST_CARVE_OUT=1``)::
+
+        pytest tests/test_14002_record_only_journal.py tests/test_9548_record_arming_health.py
+
+    **6 failed, 62 passed, 5 skipped** on this branch (first: ``test_9548:142
+    assert record["ok"] is True``, the payload carrying ``armed_but_uncut: 1``),
+    and **68 passed, 5 skipped** on a pristine ``git archive origin/main`` tree,
+    which does not carry the fold. The polluter is `test_14002`'s
+    ``{'o\\0g': 'no_cursor_row'}`` row, still set after every test in that file.
+
+    Both sides, and resolved through ``sys.modules``: this is an AUTouse fixture,
+    so importing `tortoise.record_writer` here would make the whole suite depend
+    on that module importing cleanly, and a process that never loaded it has no
+    registry to clear.
+    """
+    import sys
+
+    record_writer = sys.modules.get("tortoise.record_writer")
+    if record_writer is not None:
+        record_writer.reset_uncut_graphs()
+    yield
+    if record_writer is not None:
+        record_writer.reset_uncut_graphs()
+
+
+@pytest.fixture(autouse=True)
 def _no_ambient_dead_heartbeat_ticker():
     """#12666: a CANCELLED heartbeat ticker is process state, never ambient.
 
