@@ -1985,8 +1985,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # returns `core` AND this suite (the same #1349/#3332/#3616 silent-drop
              # class as queue_resweep/batch_open/next_work/reap_empty_test_graphs).
              "tools/fly_secret_declaration_report.py",
-             # #13098: the same silent-drop class, one artefact over, and the reason it is
-             # worth a third entry for a `.md`: the Cypher census's pins
+             # #13098: the same silent-drop class, one artefact over, and the reason EACH
+             # `.md` artefact in this group earns its own entry: the Cypher census's pins
              # (`tests/test_13098_cypher_inventory.py`, registered `core`) compare the tool's
              # own count against the numbers PINNED IN THAT DOCUMENT'S SOURCE, so a
              # source-only edit is exactly how a count drifts. ⛔ AND BOTH PATHS ARE

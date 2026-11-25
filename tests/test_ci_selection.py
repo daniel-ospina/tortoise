@@ -21741,16 +21741,22 @@ def test_the_write_path_cost_instrument_and_its_evidence_select_the_pin():
 def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # #13098: `tests/test_13098_cypher_inventory.py` is `core`-registered, and its pins
     # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN THE
-    # CENSUS SOURCE — so both the tool and that file are subjects of the suite. ⛔ The
-    # subject is `CYPHER-INVENTORY.src.md` (tracked), NOT `CYPHER-INVENTORY.md`: the
-    # document is `--render`'s gitignored output, so no diff carries it. Without the
-    # CORE_ALSO entries this was the #3261/#6388 silent-drop
+    # CENSUS SOURCE — so the tool, its harness, that TRACKED source and the RENDERED
+    # document are ALL subjects of the suite. ⛔ BOTH `.md` paths are entries, for two
+    # DIFFERENT diffs: `CYPHER-INVENTORY.src.md` (tracked) for the ordinary edit, and
+    # `CYPHER-INVENTORY.md` (the rendered, gitignored document) for the one diff that
+    # CAN carry it — a modify/delete conflict resolved by "keep our version" RE-STAGES
+    # the gitignored file. So it is NOT "a file no diff carries": `.gitignore` keeps it
+    # out of every OTHER diff, which is why its entry is inert there — and the reading
+    # this comment used to state ("no diff carries it") is the one round 11 falsified.
+    # Without the CORE_ALSO entries this was the #3261/#6388 silent-drop
     # class: `tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only diff was filtered out
     # BEFORE the `core` fallback and took the docs-only early return, and the harness's
     # exit-code contract was graded by nothing.
     #
-    # Mutation check: removing the three CORE_ALSO entries empties `surfaces` for all
-    # three paths and drops the suite from `test_files` — measured at the reviewed head.
+    # Mutation check: removing any ONE of the entries below empties `surfaces` for that
+    # path and drops the suite from `test_files` — measured at the reviewed head, with
+    # the rendered document's re-stage diff the one that then selects NOTHING at all.
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
