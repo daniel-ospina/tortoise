@@ -22,7 +22,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 80 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), then `cypher-diff.yml`'s `differential` job (#13098), and now `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s `redis-guard` have LEFT this row for the fleet's x64 pool (#13596, departures 3 and 4 below), `test-graph-reaper.yml`'s `reap` job ADDED one (#14559: the empty-test-graph reaper's schedule), and `fly-secret-declaration-drift.yml`'s `report` job ADDED one (#14585: the hourly read-only drift report — `sweep` is the resolve body INSIDE that job, not a job id; measured at this head: the file's only job key is `report`, `:187`) |
+| `ubuntu-latest` | 80 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), then `cypher-diff.yml`'s `differential` job (#13098), and now `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s `redis-guard` have LEFT this row for the fleet's x64 pool (#13596, departures 3 and 4 below), `test-graph-reaper.yml`'s `reap` job ADDED one (#14559: the empty-test-graph reaper's schedule), and `fly-secret-declaration-drift.yml`'s `report` job ADDED one more (#14585: the hourly read-only drift report, which did not re-derive this row either — it left the page at 79 against a measured 80 — and `sweep` is the resolve body INSIDE that job, not a job id; measured at this head: the file's only job key is `report`, `:187`). That workflow contributes TWO pre-strip lines against ONE job — its job's `runs-on:` plus the single whole-line comment below it that quotes the label — which is why the `N / M` figure below moves by two while this row moves by one |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), re-measured 2026-11-24 at this head (`yaml.safe_load` each workflow,
@@ -47,7 +47,7 @@ refusal is a **content** test, not a prefix one: the expression may be the whole
 a label (`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static
 label — a space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same
 reason: the `runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest`
-row was previously written as 83 against a measured 79, so treat both rows as a dated measurement
+row was previously written as 83 against a then-measured 79, so treat both rows as a dated measurement
 and re-derive them rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
@@ -986,7 +986,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5594`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5603`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to NON-REQUIRED jobs whose red

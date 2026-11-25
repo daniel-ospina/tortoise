@@ -97,14 +97,14 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,647 occurrences of the door predicate across 112 files
+1,648 occurrences of the door predicate across 112 files
 2,398 occurrences of the verb predicate across 150 files   (upper-bound shape, see below)
 
-1,647  regex door-pattern occurrences
+1,648  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,593  occurrences on a line carrying a door CALL          [measured]
+= 1,594  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,593  AST door calls
+= 1,594  AST door calls
 = 1327  classified Cypher statements + 267 non-Cypher door calls
 ```
 
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,647** across **112** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,653 / 113**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,647 / 112 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,648** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,654 / 113**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,648 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
