@@ -3486,7 +3486,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
 #: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
 #: filters `_rows()` to `_reach(row) == "customer-callable"` and counts the doors over
-#: THAT set, so quoting the whole table here (44 x 16) would state a denominator no arm
+#: THAT set, so quoting the whole table here (44 x 18) would state a denominator no arm
 #: measures — an earlier cut of this note did, and another read 45 in a third frame.
 #: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
 #: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved

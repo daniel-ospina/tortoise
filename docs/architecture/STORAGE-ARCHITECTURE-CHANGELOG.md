@@ -2749,7 +2749,7 @@ Two further sites in the same class, both introduced by this branch's own review
 ## §13 gains row 46 — `#14592`'s relations preview is an all-edge reader (`2026-11-25`, `cy-14593`)
 
 `tortoise/entity_reads.py` is new on `#14592` (Phase A read parity), and its `entity_relations` walks
-**every** relationship type in both orientations — `MATCH (n:{root_label} {key:$eid})-[r]->(m)` and
+**every** relationship type in both orientations — `MATCH (n:{root_label} {root_key:$eid})-[r]->(m)` and
 the `UNION ALL` reverse. Nothing declared it, so `tests/test_7948_about_object_read_sites.py`'s
 empty-pattern class found a live site owning neither a row nor an entry, and
 `test_the_empty_pattern_class_is_derived_and_declared` reddened with `30 derived, 12 registered`.
