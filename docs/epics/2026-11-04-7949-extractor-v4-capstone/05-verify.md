@@ -146,8 +146,7 @@ merge, because a typed list of paths rots exactly the way a typed line number do
 
 ⛔ **`#14552` MOVED EVERY ONE OF THOSE FIGURES, and this is the note that says so.** Its per-row gate ask
 in `_write_capture_turns` is `+40` lines in `sdk.py`, so the present-tense numbers in the two rows above
-were re-derived at that head rather than carried: 22127 → 22167, 28635 → 28675, 28476 → 28516, 28439 →
-28479, 28036 → 28076, 28073 → 28113, 28598 → 28638, 28599 → 28639, 22085 → 22125, 29203 → 29243 (grep the
+were re-derived at that head rather than carried. ⛔ **THE `→` RIGHT-HAND VALUES THIS NOTE USED TO PRINT — `22167`, `28675`, `28516`, `28479`, `28076`, `28113`, `28638`, `28639`, `22125`, `29243` — ARE DELETED, because each reads at NO head (measured):** they were `222cd68d3b`'s values plus a flat `+40`, but `#14552` (`939e37f664e5`, on `main`) moved these anchors `+40` from ITS OWN parent `d4b2df6d826`, which was already 29 lines further on — so all ten read 29 LOW, which is the same defect the D5 cell above retracts for its own `+40`. The arithmetic, re-derived with `git show <sha>:tortoise/sdk.py` and the symbol greps (`"stats": _capture_stats_with_step_witness`, `relation_write = apply_relation_edges(`, `dedup_reviewed IS NULL`, `declared = declared_relation_predicates()`), is `d4b2df6d826` `22156` / `22114` / `28664` / `29232` → `939e37f664e5` `22196` / `22154` / `28704` / `29272`, the `+40` sits between those two heads, and `939e37f664e5` matches THIS head at all four. Re-derive each of the remaining six **by symbol at the head you merge** (grep the
 symbol, never the delta). ⛔ **The offsets and `→` chains are NOT part of that set**: `+3008` / `+3742`, the
 `#13551`-to-filter move and every `#NNNNN`→ step record what the number was at the head each move names, so
 they keep their own figures — reading them as claims about this head is the error the row below exists to
