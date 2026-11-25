@@ -57,31 +57,28 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `837bba743d38` folded in, carrying
-# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row, `#14574`'s drift-reporter row
-# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14560`'s
-# `tests/test_14560_operator_vectors.py` and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (both `core`, both flat 2.0 s, both `main`'s) —
-# plus `main`'s own row at this head (`tests/test_14592_operating_model_evidence.py`, `core`, at the same
-# flat 2.0 s `DEFAULT_FAST_WEIGHT`) and `#14607`'s two new `core` rows
-# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), the verb packs the pool into
-# two bins: ten shards at 826.7 s (a, b, d, e, f, g, h, i, j, k) and one at 826.6 s (c), so
-# `ceil(826.7/60 x 2)` = 28 m governs (a
-# shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree by construction rather
-# than by a hand re-read.
+# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
+# `#14597`'s `tests/test_expansion_fusion_14344.py`, `#14415`'s two batch rows, `#14548`'s residue
+# RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py`, `#14565`'s reaper-schedule row,
+# `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`) and `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` (all `core`, all flat 2.0 s) — plus `#14607`'s two
+# new `core` rows (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), the verb
+# packs the pool into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s
+# (c, d, h), so `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
+# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 826.9 = 2.0317), so the two agree by construction rather than
+# by a hand re-read.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1336 files at this head against 1334 on `main`, and
-# the TWO additions this branch brings are `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py` — re-derived with the verb, not carried. ⛔ The
-# `tests/test_14592_operating_model_evidence.py` row named above is `main`'s at this head
-# (`#14606` landed it, and `#14606` IS the merge base): counting it as this branch's would
-# make the list disagree with the paragraph's own 1336 − 1334 = 2. ⛔ The
-# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
-# this branch's: each landed before this fold. The name lists are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
-# a graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
+# is measurable and small: `fast_pool()` holds 1337 files at this head against 1335 on `main`, and
+# the TWO entries this branch adds are `#14607`'s `tests/test_mcp_selfcheck.py` and
+# `tests/test_recall_neighborhood.py` — re-derived by running the verb on BOTH manifests
+# (`origin/main`'s and this tree's), not carried from either parent's paragraph, and `main` carries
+# nothing this tree lacks. ⛔ Every row named above is `main`'s at this head, NOT this branch's:
+# counting one as this branch's would make the list disagree with the paragraph's own
+# 1337 − 1335 = 2. The name lists are what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
+# about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -3218,6 +3215,7 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
+  - test_expansion_fusion_14344.py
   # #14186: the `core` arm of the TRIPLE registration (core/api/eval), and the
   # one `--register` mints by default. LOAD-BEARING, not a rider on the other
   # two: the seam's two primary subjects (`tortoise/embed_seam.py`,
@@ -15778,6 +15776,7 @@ durations:
   test_record_reconcile_trigger.py: 2.4  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.2
   test_13337_cache_graph_declaration.py: 4.2  # new in #13337; "a default is not a reading", so the row must EXIST (`api`+`core` above are what put it in `fast_pool()`). What the weight covers: the declaration's source order, the control-plane read's filters, both verbs' flag/whitespace arms and the JSON coordinate are DB-FREE; the store-backed acceptance legs skip without `TEST_RECORD_DB_URI` + `TORTOISE_DB_URI` and are ARMED in `test-record-postgres` — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_record_schema_placement.py: 1.2  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 0.2
+  test_expansion_fusion_14344.py: 2.0  # new in #14344 (PR #14396) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity`'s coverage check is a RATIO with headroom, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority). What the weight covers: the merge rule the C2 entity/fact key expansion's two passes share — the rank-concatenation counterfactual still displacing pass-1 evidence while the fusion does not, agreement between the two passes outranking novelty ON A FIXTURE THAT PUTS THE SHARED ID AT A TOP SLOT (the pair condition, never an unbounded dominance claim), scores carried from the originating pass (so the single-strategy `threshold` filter sees raw leg scores), the union never dropping an id, a repeated row not earning a second fusion term, the one-empty-side pass-through, no shuffle when the expansion adds nothing, and determinism. Pure: no graph, no embedder, no network.
   test_relation_guards_14263.py: 2.0  # new in #14263 (PR #14284) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity`'s coverage check is a RATIO with headroom, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers: the module's four-outcome verdict table (accept / normalised / undeclared / reversed, the reversed state kept DISTINCT per AX §2), the two silent legs staying silent, the shipped-declaration read being the pack catalog rather than a fixture, the `LABEL_ENDPOINTS` mirror against `pack_state._ONTOLOGY_LABELS`, the abstention reasons staying distinct (`ABSTAIN_*` — the module defines
   # seven stable ids and this file pins four of them by equality), the `declarationOnly` row contributing no pair, the namespace fold being refused, and each of the three connect doors carrying the honest state while still writing the edge (`#1934` warn-not-block). Mostly in-process over an embedded graph; the ingest/door cases build the SDK's own store under `tmp_path`, and on a `TORTOISE_DB_URI`-set lane those constructions are redirected to the server the run was given by the epic-#1647 class-level redirect. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.
