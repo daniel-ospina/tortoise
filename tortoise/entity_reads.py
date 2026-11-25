@@ -235,7 +235,12 @@ def list_layer(
     out: list[dict] = []
     for r in rows:
         raw = dict(r[0])
-        props = raw
+        # ⛔ A COPY, not an alias: `filter_source_props` returns a fresh map
+        # today, so the re-attach below would survive either way — but the
+        # comment's guarantee is that the kind comes from the PRE-filter bag,
+        # and an alias makes that true only by accident of the callee being
+        # pure. `_layer_payload` (the by-id arm) copies for the same reason.
+        props = dict(raw)
         if "Source" in (r[1] or ()):
             from .projection.entities import filter_source_props
 

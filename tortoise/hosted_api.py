@@ -15730,15 +15730,22 @@ def _layer_payload(entry: dict) -> dict:
 
         raw = dict(props)
         props, _denied = filter_source_props(props)
-        # ⛔ …and a HYBRID keeps its own layer's KIND: the filter is an ALLOWLIST,
-        # so it drops `objectKind`/`subjectKind` too, and this route would stop
-        # echoing the field the row is keyed by (the list read re-attaches it for
-        # the same reason). The KIND is the layer's declaration, never a `:Source`
-        # payload — everything the filter denied stays denied.
-        _kind_prop = {"Object": "objectKind", "Subject": "subjectKind"}.get(
-            entry.get("label") or "")
-        if _kind_prop and _kind_prop in raw and _kind_prop not in props:
-            props[_kind_prop] = raw[_kind_prop]
+        # ⛔ …and a HYBRID keeps its own layer's KIND, keyed on the node's LABEL
+        # SET for the same reason the filter above is: `entry["label"]` is the
+        # branch that RESOLVED the node, so a `(:Object:Source)` read by its
+        # url resolves through `Source{url}` and a BRANCH-keyed re-attach echoed
+        # `objectKind` by id while withholding it by url — the same node, two
+        # addresses, two payloads (measured). The kind is the LAYER's
+        # declaration, never a `:Source` payload, so it is re-attached from the
+        # PRE-filter bag; everything the filter denied stays denied. The map is
+        # `entity_reads.LAYER_KIND_PROP`, imported rather than re-spelled, so
+        # the list door and this door cannot disagree about a layer.
+        from .entity_reads import LAYER_KIND_PROP
+
+        for _lbl in (labels or (entry.get("label"),)):
+            _kind_prop = LAYER_KIND_PROP.get(_lbl)
+            if _kind_prop and _kind_prop in raw and _kind_prop not in props:
+                props[_kind_prop] = raw[_kind_prop]
     return props
 
 

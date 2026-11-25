@@ -992,6 +992,12 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
         assert "content" not in denied, denied
         assert raw not in repr(denied), denied
+        # ⛔ … AND THE URL ARM ECHOES THE KIND THE ID ARM DOES. A re-attach keyed
+        # on the MATCHED BRANCH read this node through `Source{url}` and dropped
+        # `objectKind`, while the same node by `id` (the `Object` branch) kept
+        # it — one node, two addresses, two payloads. Keying on the label set
+        # makes both arms serve the same bag; this line is what reds otherwise.
+        assert denied.get("objectKind") == "goal", denied
 
         # … and so do both root arms: the relations preview …
         relations = client.get(f"/v1/entities/{hyb}/relations")
@@ -1030,7 +1036,15 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         by_id = client.get(f"/v1/sources/{hyb}")
         assert by_id.status_code == 200, by_id.text
         assert raw not in by_id.text, by_id.text
-        body = client.get("/v1/objects", params={"limit": 100}).json()
+        # ⛔ BOTH FORMS OF THE LEAK ASSERTION, because neither subsumes the
+        # other: `repr` sees a decoded value (an escape is unescaped, so a `'`
+        # IS caught) while the response TEXT sees the wire form (a non-ASCII
+        # character is `\uXXXX` there and raw in `repr`). The fixture is ASCII
+        # either way — the pair is what keeps a future payload covered.
+        listed_resp = client.get("/v1/objects", params={"kind": "goal", "limit": 100})
+        body_text = listed_resp.text
+        body = listed_resp.json()
+        assert raw not in body_text, body_text
         assert raw not in repr(body), body
         listed = [o for o in body["objects"] if o["id"] == hyb]
         assert listed, body  # …and it IS listed, filtered
@@ -1038,7 +1052,9 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         # is an ALLOWLIST, so it drops `objectKind` too — without the re-attach a
         # `?kind=goal` page returned a row that did not carry the kind it was
         # filtered on (measured). The kind is the LAYER's declaration, not a
-        # `:Source` payload, so it survives; the denied `content` does not.
+        # `:Source` payload, so it survives; the denied `content` does not. The
+        # `kind` PARAMETER is part of the pin: the row must be SELECTED by that
+        # kind, not merely carry it.
         assert listed[0]["objectKind"] == "goal", listed[0]
 
         # A second hybrid on the OTHER layer, so the Subject routes have a row to
@@ -1055,6 +1071,11 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         finally:
             sdk.close()
         assert raw not in client.get(f"/v1/subjects/{sub}").text
+        # …and the SECOND layer's kind survives the same allowlist, by the SAME
+        # code path: the re-attach iterates the node's labels through
+        # `LAYER_KIND_PROP`, so a map that named only `Object` would let this
+        # arm go quiet with nothing red.
+        assert client.get(f"/v1/subjects/{sub}").json().get("subjectKind") == "PERSON"
         sub_body = client.get("/v1/subjects", params={"limit": 100}).text
         assert raw not in sub_body, sub_body
         assert sub in sub_body, sub_body
