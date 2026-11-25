@@ -16049,6 +16049,22 @@ async def list_sources(
     rows = await _read_offload(
         lambda: sdk.list_knowledge(kind="source"), op="list_sources")
     rows = list(rows or [])
+    # ⛔ A DETERMINISTIC, TOTAL order before slicing — the callee's own order is
+    # NOT total, and this route re-issues that query once per page, so ties are
+    # not even required to break the same way on the next request.
+    # `_list_sources` ends `RETURN s.url, s.sourceKind, count(p) AS points
+    # ORDER BY points DESC` (sdk.py) — and `points` ties are the ORDINARY shape,
+    # not the corner: a provenance Source with one extracted Point is the common
+    # row, so most of a real population carries `points = 1`. Slicing that order
+    # in Python let an `offset` walk drop one row and repeat another while
+    # `_paged(..., exact=True)` positively claimed the enumeration complete as
+    # `truncated: false` — the silent-drop direction, and the exact class `#5346`
+    # names and this PR closes on `/v1/objects`/`/v1/subjects` (which order by
+    # `n.name, id(n)`) and pinned there with a planted same-name pair.
+    # The tiebreak is `url`, the Source's IDENTITY (`#4649`), so it is unique per
+    # row and the order is total. `points` is negated to keep the callee's
+    # most-connected-first reading — the ordering is made total, not replaced.
+    rows.sort(key=lambda r: (-(r.get("points") or 0), r.get("url") or ""))
     page = rows[offset:offset + limit]
     return _paged("sources", page, candidates=len(rows), offset=offset, exact=True)
 

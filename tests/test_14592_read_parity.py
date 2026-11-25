@@ -233,6 +233,50 @@ def test_sources_list_pages_with_the_same_offset_truth(tmp_path):
         assert pages[2]["sources"] == [], pages
 
 
+def test_sources_list_pages_over_a_TOTAL_order_so_a_walk_cannot_drop_a_row(
+        tmp_path):
+    """#14593 review P2: this route sliced the CALLEE's NON-TOTAL order.
+
+    ``_list_sources`` ends ``ORDER BY points DESC`` and the route re-issues that
+    query once per page, so equal-``points`` rows (the ORDINARY shape — one
+    extracted Point per provenance Source) may be returned in any order, and not
+    necessarily the SAME order on the next request. A walk could then drop one
+    row and repeat another while the marker positively said ``truncated: false``
+    — the silent-drop class ``#5346`` names, closed on the two layer lists and
+    missing here.
+
+    ⛔ The falsifier is the ORDER, not just the set: the URLs are created in
+    reverse-alphabetical order and all tie on ``points``, so a pass requires the
+    documented total order ``(-points, url)`` rather than whatever the engine's
+    tie order happens to be. Then a real offset walk is checked to visit every
+    row exactly once, which is the property a caller actually relies on.
+    """
+    urls = ("https://example.test/zeta", "https://example.test/alpha",
+            "https://example.test/mike")
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            for u in urls:  # created in this order, every row on `points = 1`
+                sdk._create_point("statement", "extracted", extractedFrom=u)
+        finally:
+            sdk.close()
+        whole = client.get("/v1/sources", params={"limit": 50}).json()
+        assert [r["url"] for r in whole["sources"]] == sorted(urls), whole
+
+        walk: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                "/v1/sources", params={"limit": 1, "offset": offset}).json()
+            walk += [r["url"] for r in page["sources"]]
+            if not page["truncated"]:
+                break
+            offset += 1
+            assert offset <= len(urls), ("the walk did not terminate", walk)
+        assert walk == sorted(urls), walk
+        assert len(set(walk)) == len(walk), walk
+
+
 def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
     """The `/v1/points` tombstone contract, one layer over: ended rows leave the
     listing surface and stay retrievable BY ID."""
