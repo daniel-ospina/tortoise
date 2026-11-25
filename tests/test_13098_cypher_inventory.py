@@ -560,6 +560,21 @@ def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
     assert refused_dir.value.code == 2, (
         f"a directory as the source must refuse with 2, got {refused_dir.value.code!r}")
 
+    # ⛔ AND NOT JUST AN `OSError` — the twin of `check()`'s pair. `UnicodeDecodeError` is
+    # a `ValueError`, so an `except OSError` guard alone let a non-UTF-8 source reach the
+    # traceback and exit 1 (the DRIFT code) from a verb that has NO drift verdict. Graded
+    # here because the other twin's decode half is graded by `check()`'s arm while this
+    # one was graded by NOTHING: dropping the keyword from `render()`'s guard otherwise
+    # leaves the whole suite green (measured: 95 passed / 15 skipped, and 110 passed with
+    # the doc pin armed, with the decode half removed).
+    latin1_src = tmp_path / "latin1-src.md"
+    latin1_src.write_bytes(b"# the source, with no pins and no rows\n" + b"\xff\xfe\n")
+    with pytest.raises(SystemExit) as refused_latin1:
+        census.render(latin1_src, {"sites": []})
+    assert refused_latin1.value.code == 2, (
+        "a source that cannot be DECODED must refuse with 2 (could not run), got "
+        f"{refused_latin1.value.code!r}")
+
     unreadable.chmod(0o000)
     try:
         _skip_if_chmod_does_not_deny(unreadable)
