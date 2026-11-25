@@ -523,6 +523,7 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         if before else ""
     if spliced:
         after = spliced
+        redumped = False
     else:
         # No spliceable TOP-LEVEL `mcpServers` object: the key is absent, it exists
         # only NESTED (the `~/.claude.json` shape, whose servers live under
@@ -537,11 +538,11 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         # an object" is true of every shape that lands here.
         nl = _newline_of(before)
         after = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", nl) + nl
-        if before:
-            out.actions.append(
-                f"{path}: no `mcpServers` object this installer can splice "
-                f"(the file has no TOP-LEVEL `mcpServers` key, or its first one is "
-                f"not an object) — the whole document was re-written")
+        # ⛔ The action is appended WHERE THE WRITE LANDS, not here: saying "the whole
+        # document was re-written" under `--dry-run` (nothing written) or after a
+        # backup refusal (the write is abandoned) is the same false-statement class
+        # this branch exists to remove. `redumped` carries the reason forward.
+        redumped = before != ""
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose
@@ -566,7 +567,14 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         fromfile=f"a/{path.name}", tofile=f"b/{path.name}"))
     out.diffs.append(diff)
     out.planned.append(str(path))
+    reason = (f"{path}: no `mcpServers` object this installer can splice "
+              f"(the file has no TOP-LEVEL `mcpServers` key, or its first one is "
+              f"not an object)")
     if dry_run:
+        if redumped:
+            out.actions.append(
+                f"{reason} — the whole document WILL be re-written "
+                f"(planned; nothing was written)")
         return out
     if before and not _git_tracks(path):
         # A backup ONLY for a file git is not already keeping: in a repository
@@ -600,6 +608,8 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
                 f"was NOT rewritten; back it up yourself and re-run")
             return out
     _write_text(path, after)
+    if redumped:
+        out.actions.append(f"{reason} — the whole document was re-written")
     out.wrote.append(str(path))
     return out
 

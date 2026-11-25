@@ -477,7 +477,9 @@ def test_the_fallback_message_is_TRUE_for_a_duplicate_mcpservers_key(project):
     an OBJECT under `json.loads` yet cannot be spliced. The fallback's parenthetical
     said "the file has none, or `mcpServers` is not an object" — false on the first
     half for this shape, by the same standard that removed "no `mcpServers` object to
-    merge into". It now says "no `mcpServers` key, or its FIRST one is not an object".
+    merge into". The message now says "no TOP-LEVEL `mcpServers` key, or its first
+    one is not an object" — TOP-LEVEL because a NESTED-only key also reaches the
+    fallback (see the nested row below).
     """
     original = ('{\n'
                 '  "mcpServers": [1],\n'
@@ -531,6 +533,49 @@ def test_a_NESTED_mcpservers_cannot_be_spliced_and_the_message_says_TOP_LEVEL(pr
     assert json.loads(after)["projects"]["/home/u/repo"]["mcpServers"] == {
         "fs": {"command": "npx"}}, "the nested member's bytes changed"
     assert "tortoise.mcp_bridge" in after
+
+
+def test_the_redump_action_is_WRITTEN_where_the_write_lands(project, tmp_path):
+    """The action must not claim a write that did not happen.
+
+    It used to be appended inside the fallback branch, BEFORE the `--dry-run` return
+    and BEFORE the backup, so two reachable paths showed "the whole document was
+    re-written" over an untouched file: a dry run (`wrote: []`, measured) and a
+    backup refusal (one output carrying both "was re-written" and "was NOT
+    rewritten"). The message is the installer's only account of what it did.
+    """
+    project.mkdir(parents=True, exist_ok=True)
+    (project / ".git").mkdir(exist_ok=True)
+    original = '{\n  "unrelated": {"a": 1}\n}\n'
+    path = project / ".mcp.json"
+
+    # ── dry run: planned wording, and the file untouched
+    path.write_text(original, encoding="utf-8")
+    result = harness_onboard.write_config("pi", project, dry_run=True)
+    assert not result.wrote
+    assert path.read_text(encoding="utf-8") == original
+    said = " ".join(result.actions)
+    assert "WILL be re-written" in said and "nothing was written" in said, said
+    assert "was re-written" not in said.replace("WILL be re-written", ""), (
+        f"a dry run claimed the document WAS written: {said}")
+
+    # ── backup refusal: a REFUSAL, and no claim of a write
+    home = tmp_path / "ro"
+    home.mkdir()
+    (home / ".git").mkdir()
+    ro = home / ".mcp.json"
+    ro.write_text(original, encoding="utf-8")
+    ro.chmod(0o600)
+    home.chmod(0o500)                      # creation of the backup must fail
+    try:
+        refused = harness_onboard.write_config("pi", home)
+    finally:
+        home.chmod(0o700)
+    assert refused.refusals, "an unprotectable backup must be a REFUSAL"
+    assert not refused.wrote
+    assert not [a for a in refused.actions if "re-written" in a], (
+        f"the abandoned write was still reported as done: {refused.actions}")
+    assert ro.read_text(encoding="utf-8") == original
 
 
 def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
