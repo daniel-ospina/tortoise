@@ -1354,12 +1354,26 @@ def legacy_extension_obstacle(harness: str,
     root_path = Path(root)
     legacy = root_path / LEGACY_PI_DIRNAME
     legacy_disabled = root_path / PI_DISABLED_DIRNAME
-    if not (legacy.is_dir() and not legacy.is_symlink()):
-        return ""
-    if not (legacy_disabled.exists() or legacy_disabled.is_symlink()):
-        return ""
-    return (f"a legacy capture extension is already disabled at "
-            f"{PI_DISABLED_DIRNAME} — move one aside")
+    if (legacy.is_dir() and not legacy.is_symlink()
+            and (legacy_disabled.exists() or legacy_disabled.is_symlink())):
+        return (f"a legacy capture extension is already disabled at "
+                f"{PI_DISABLED_DIRNAME} — move one aside")
+    # #14342: the SECOND producer has its own collision, and the install refuses
+    # it on the same condition the installer does — both names present with
+    # DIFFERENT bytes. A re-created copy with identical bytes is re-asserted by
+    # the installer (the farm re-materializes this file), so it is NOT an
+    # obstacle and naming it here would withhold a command that works.
+    active = root_path / PI_SECOND_PRODUCER_NAME
+    retired = root_path / PI_SECOND_PRODUCER_DISABLED_NAME
+    if (os.path.lexists(active) and os.path.lexists(retired)
+            and _pi_entry_is_loadable(active)):
+        live = _sha256_file(active) if active.is_file() else None
+        kept = _sha256_file(retired) if retired.is_file() else None
+        if live is None or live != kept:
+            return (f"the second capture producer is registered AND its "
+                    f"disabled copy already exists at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} — move one aside")
+    return ""
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -1822,42 +1836,163 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
+def _pi_entry_is_loadable(path: Path) -> bool:
+    """Does Pi's loader REGISTER anything at ``path``?
+
+    The rule is Pi's own (``dist/core/extensions/loader.js``), and it is
+    narrower AND wider than a name test:
+
+    * a direct entry is loaded iff its name ENDS WITH ``.ts`` / ``.js``
+      (``isExtensionFile``) — so ``<stem>.ts.disabled`` is NOT loaded;
+    * **every** subdirectory is resolved through ``resolveExtensionEntries``:
+      a ``package.json`` with ``pi.extensions``, else ``index.ts`` /
+      ``index.js``. There is **NO dot-prefix filter** anywhere in
+      ``discoverExtensionsInDir``, so ``.tortoise-capture.disabled/index.ts``
+      is a LOADED extension.
+
+    That second half is why this predicate exists as code: the #3713 guard
+    renamed a legacy extension directory to a DOT-prefixed name and treated it
+    as retired, while Pi kept loading it — a guard that leaves both producers
+    registered is the duplication it was written to remove (#14342).
+
+    Unreadable/absent ⇒ ``False`` from this reader; callers that must not
+    assume then use :func:`_assert_pi_entry_not_loadable`, which fails closed.
+    """
+    try:
+        if not os.path.lexists(path):
+            return False
+        if path.is_dir():
+            manifest = path / "package.json"
+            if manifest.is_file():
+                try:
+                    declared = json.loads(manifest.read_text("utf-8"))
+                except (OSError, ValueError):
+                    # An unreadable manifest may declare entries — treat the
+                    # directory as loadable rather than guess it away.
+                    return True
+                if isinstance(declared, dict):
+                    pi_section = declared.get("pi")
+                    if isinstance(pi_section, dict) and pi_section.get("extensions"):
+                        return True
+            return (path / "index.ts").is_file() or (path / "index.js").is_file()
+        return path.name.endswith(".ts") or path.name.endswith(".js")
+    except OSError:
+        return True
+
+
+def _retire_pi_entry(path: Path) -> str | None:
+    """Make ``path`` unloadable WITHOUT destroying it. Returns an error or None.
+
+    Retires in place, by the loader's own rule, so the file bytes never leave
+    the extensions directory and a user can rename them back:
+
+    * a ``*.ts`` / ``*.js`` entry is renamed to ``<name>.disabled``;
+    * a directory's ``index.ts`` / ``index.js`` is renamed to
+      ``<index>.disabled`` (the directory may stay where it is: with no entry
+      point, ``resolveExtensionEntries`` returns null);
+    * a directory declaring ``pi.extensions`` in ``package.json`` is REFUSED —
+      retiring that shape means editing the manifest, which is the user's file,
+      not this installer's.
+    """
+    try:
+        if path.is_dir():
+            manifest = path / "package.json"
+            if manifest.is_file():
+                try:
+                    declared = json.loads(manifest.read_text("utf-8"))
+                except (OSError, ValueError):
+                    return (f"{path} carries an unreadable package.json — its "
+                            "declared entries cannot be verified, so it is not "
+                            "retired by this installer. Move it aside by hand.")
+                pi_section = declared.get("pi") if isinstance(declared, dict) else None
+                if isinstance(pi_section, dict) and pi_section.get("extensions"):
+                    return (f"{path} declares `pi.extensions` in package.json; "
+                            "renaming its files would leave that manifest "
+                            "pointing at nothing. Move the directory aside by "
+                            "hand.")
+            for name in ("index.ts", "index.js"):
+                entry = path / name
+                if entry.is_file() or entry.is_symlink():
+                    entry.rename(path / f"{name}.disabled")
+            return None
+        path.rename(path.with_name(f"{path.name}.disabled"))
+        return None
+    except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
+        return f"{path}: {e.__class__.__name__}: {e}"
+
+
+def _assert_pi_entry_not_loadable(path: Path) -> str | None:
+    """Fail closed when the retirement did not achieve what it claims."""
+    if _pi_entry_is_loadable(path):
+        return (f"{path} is STILL an extension Pi loads — the guard renamed it "
+                "into a shape the loader registers, so both capture producers "
+                "stay live")
+    return None
+
+
 def _disable_pi_second_producer(
         ext_dir: Path, *, dry_run: bool) -> tuple[bool, list[str], str | None]:
     """Disable agent-infra's ``reflect-hook.ts`` — the other capture producer.
 
-    Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the producer is
-    RENAMED to a name Pi's loader does not load (``reflect-hook.ts.disabled``),
-    so its bytes survive and a user can put it back. Never a delete.
+    Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the entry is
+    RETIRED in place (:func:`_retire_pi_entry`), so its bytes survive and a
+    user can put it back. Never a recursive delete.
 
-    Absent = nothing to do (never installed, or already disabled — a farm that
-    re-materializes it is the caller's follow-up, not a failure here).
+    Absent = nothing to do (never installed, or already retired). The FARM
+    re-materializes this producer from agent-infra's ``manifest.json``, so the
+    collision case is the steady state rather than an accident: a re-created
+    copy whose bytes are IDENTICAL to the retired one is re-asserted (the
+    bytes already survive at the retired path, so removing the live duplicate
+    destroys nothing), and only a copy that DIFFERS is a refusal. Refusing on
+    every farm sync would make ``tortoise install pi`` permanently red on
+    exactly the boxes this guard targets, while the duplication stayed live.
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
-    disabled = ext_dir / PI_SECOND_PRODUCER_DISABLED_NAME
+    retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
     if not os.path.lexists(active):
         return False, [], None
-    if os.path.lexists(disabled):
-        # Renaming over it would destroy a file and may raise — and leaving both
-        # registered is the duplication. Refuse, exactly like the legacy guard.
-        return False, [], (
-            f"cannot disable the second capture producer {active}: "
-            f"{disabled} already exists. Move one of them aside and re-run. "
-            "Both would otherwise stay registered, so every session would be "
-            "captured twice (~/.tortoise/capture-spool and "
-            "~/.tortoise/session-events).")
+    if not _pi_entry_is_loadable(active):
+        # Something is there, but Pi does not register it — nothing to disable.
+        return False, [], None
+    if os.path.lexists(retired):
+        live_digest = _sha256_file(active) if active.is_file() else None
+        retired_digest = _sha256_file(retired) if retired.is_file() else None
+        if live_digest is None or live_digest != retired_digest:
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} already exists and holds DIFFERENT bytes. Move one "
+                "of them aside and re-run. Both would otherwise stay "
+                "registered, so every session would be captured twice "
+                "(~/.tortoise/capture-spool and ~/.tortoise/session-events).")
+        if dry_run:
+            return True, [f"[dry-run] would re-assert the retirement of {active} "
+                          f"(an identical copy of {retired})"], None
+        try:
+            active.unlink()
+        except OSError as e:
+            return False, [], (
+                f"the capture seam is installed, but the re-created duplicate "
+                f"{active} could not be removed: {e.__class__.__name__}: {e}. "
+                f"Two producers are registered; the bytes are preserved at "
+                f"{retired}.")
+        return True, [
+            f"re-asserted the disabled second capture producer: removed a "
+            f"re-created copy of {active} (identical bytes preserved at "
+            f"{retired})"], None
     if dry_run:
-        return True, [f"[dry-run] would rename {active} → {disabled}"], None
-    try:
-        active.rename(disabled)
-    except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
+        return True, [f"[dry-run] would retire {active} → {retired}"], None
+    error = _retire_pi_entry(active)
+    if error:
         return False, [], (
             f"the capture seam is installed, but the second capture producer "
-            f"could not be disabled ({active} → {disabled}): "
-            f"{e.__class__.__name__}: {e}. TWO producers are registered, so "
-            "every session is captured twice until one of them is removed.")
+            f"could not be disabled ({active}): {error}. TWO producers are "
+            "registered, so every session is captured twice until one of them "
+            "is removed.")
+    still = _assert_pi_entry_not_loadable(retired)
+    if still:
+        return False, [], still
     return True, [
-        f"disabled the second capture producer: renamed {active} → {disabled} "
+        f"disabled the second capture producer: retired {active} → {retired} "
         "(files preserved; it wrote ~/.tortoise/session-events/)"], None
 
 
@@ -1985,9 +2120,44 @@ def _install_pi(
                     f"[dry-run] would rename {legacy} → {legacy_disabled}")
             else:
                 legacy.rename(legacy_disabled)
+                # ⛔ THE RENAME ALONE RETIRES NOTHING (#14342). Pi's
+                # `discoverExtensionsInDir` applies NO dot-prefix filter: every
+                # subdirectory is resolved through `resolveExtensionEntries`, so
+                # `.tortoise-capture.disabled/index.ts` was still a LOADED
+                # extension and the guard left both producers registered — the
+                # duplication it exists to remove. Retire the ENTRY POINT too,
+                # by the loader's own rule, and verify the result.
+                retire_error = _retire_pi_entry(legacy_disabled)
+                if retire_error:
+                    return InstallResult(harness, changed=True,
+                                         actions=tuple(actions) + (
+                                             f"disabled legacy capture "
+                                             f"extension: renamed {legacy} → "
+                                             f"{legacy_disabled} (files "
+                                             f"preserved)",),
+                                         changed_artifacts=_written(), error=(
+                                             f"the legacy capture extension was "
+                                             f"renamed aside but is STILL an "
+                                             f"extension Pi loads "
+                                             f"({retire_error}), so both "
+                                             f"producers stay registered. "
+                                             f"Move {legacy_disabled} out of "
+                                             f"the extensions directory by "
+                                             f"hand and re-run."))
+                still_loaded = _assert_pi_entry_not_loadable(legacy_disabled)
+                if still_loaded:
+                    return InstallResult(harness, changed=True,
+                                         actions=tuple(actions) + (
+                                             f"disabled legacy capture "
+                                             f"extension: renamed {legacy} → "
+                                             f"{legacy_disabled} (files "
+                                             f"preserved)",),
+                                         changed_artifacts=_written(),
+                                         error=still_loaded)
                 actions.append(
                     f"disabled legacy capture extension: renamed {legacy} "
-                    f"→ {legacy_disabled} (files preserved)")
+                    f"→ {legacy_disabled} (files preserved; entry point "
+                    f"retired so Pi no longer loads it)")
             changed = True
 
         if not _is_regular_unchanged(dst, payload):

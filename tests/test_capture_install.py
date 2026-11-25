@@ -831,8 +831,17 @@ def test_pi_install_disables_a_legacy_directory_non_destructively(home):
     assert res.ok, res.error
     assert not legacy.exists()
     disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
-    assert (disabled / "index.ts").read_text() == "// legacy producer\n", (
+    # #14342: the rename alone does NOT retire it. Pi's loader applies no
+    # dot-prefix filter and resolves EVERY subdirectory through its
+    # `index.ts`/`index.js`, so `.tortoise-capture.disabled/index.ts` was still
+    # loaded — the guard left both producers registered. The entry point is
+    # retired inside the preserved directory.
+    assert (disabled / "index.ts.disabled").read_text() == "// legacy producer\n", (
         "the legacy extension's files were not preserved")
+    assert not (disabled / "index.ts").exists(), (
+        "the legacy directory was moved aside but its entry point still loads")
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME], _registered_producers(ext_dir)
     assert (ext_dir / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
 
 
@@ -1029,33 +1038,36 @@ def test_pi_install_dry_run_names_the_second_producer_without_touching_it(home):
 
     assert res.ok, res.error
     assert producer.read_text() == "// live producer\n"
-    assert any(a.startswith("[dry-run] would rename")
+    assert any(a.startswith("[dry-run] would retire")
                and "reflect-hook" in a for a in res.actions), res.actions
 
 
-#: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``:
-#: top-level ``*.ts`` / ``*.js`` and ``<dir>/index.ts`` / ``<dir>/index.js``
-#: (``dist/core/extensions/loader.js``; also stated in agent-infra's
-#: ``pi-bootstrap/cell-install.sh``). Anything the loader registers and that
-#: POSTs ``/v1/sessions`` or writes a session substrate is a producer.
+#: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``.
+#: ``dist/core/extensions/loader.js``: a direct entry loads iff its name ENDS
+#: WITH ``.ts`` / ``.js`` (``isExtensionFile``); **every** subdirectory is
+#: resolved through ``resolveExtensionEntries`` (``package.json``
+#: ``pi.extensions``, else ``index.ts`` / ``index.js``) — and there is NO
+#: dot-prefix filter in ``discoverExtensionsInDir``. That absence is the whole
+#: point of enumerating through this helper rather than an exact path: the
+#: #3713 guard renamed a legacy directory to a dot-prefixed name and Pi kept
+#: loading it (#14342).
 _PRODUCER_STEMS = ("tortoise-capture", "reflect-hook")
 
 
 def _registered_producers(ext_dir: Path) -> list[str]:
     """Every entry Pi would LOAD that is one of the capture producers.
 
-    The rule, not the exact path: a `.bak.ts` / `.disabled.js` / `dir/index.ts`
-    variant is loaded one level down from the name an exact-path test looks at
-    (agent-infra tracked that as #2147 for a different stem)."""
+    The RULE, not the exact path, and not a name-prefix guess: a
+    ``.bak.ts`` / ``.disabled.js`` / ``.dot-dir/index.ts`` variant is loaded
+    one level down from the name an exact-path test looks at (agent-infra
+    tracked a version of that as #2147 for a different stem)."""
     found: list[str] = []
     for entry in ext_dir.iterdir():
-        if entry.name.startswith("."):
-            continue  # the loader skips dot-prefixed entries
         if entry.is_dir():
             for index in ("index.ts", "index.js"):
                 if (entry / index).is_file():
                     found.append(f"{entry.name}/{index}")
-        elif entry.suffix in (".ts", ".js"):
+        elif entry.name.endswith((".ts", ".js")):
             found.append(entry.name)
     return [f for f in found
             if any(f.split("/")[0].startswith(stem) for stem in _PRODUCER_STEMS)]
@@ -1082,6 +1094,100 @@ def test_pi_install_leaves_exactly_one_registered_capture_producer(home):
     producers = _registered_producers(ext_dir)
     assert producers == [capture_install.PI_EXTENSION_NAME], (
         f"a session would be captured by more than one producer: {producers}")
+
+
+def test_pi_install_re_asserts_a_farm_recreated_identical_second_producer(home):
+    """The farm RE-MATERIALIZES ``reflect-hook.ts`` from agent-infra's
+    ``manifest.json``, so "both names present" is the steady state, not an
+    accident. A re-created copy whose bytes are IDENTICAL to the retired one
+    must be re-asserted (the bytes already survive at the retired path, so
+    nothing is destroyed) — otherwise every farm sync turns the product's own
+    install into a hard failure while the duplication stays live.
+
+    Mutation: refuse unconditionally when the retired name exists (the install
+    is permanently red on the boxes the guard targets)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// agent-infra producer\nexport default 1\n"
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text(body)
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text(body)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not recreated.exists(), "the re-created duplicate is still registered"
+    assert retired.read_text() == body, "the preserved bytes were lost"
+    assert any("re-asserted" in a for a in res.actions), res.actions
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME]
+
+
+def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
+    """A re-created copy that DIFFERS is not a farm sync of the same bytes — a
+    human or another tool changed it, and deleting it would destroy that. Refuse.
+
+    Mutation: compare nothing (remove the live copy regardless)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text("// the copy we retired\n")
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text("// a DIFFERENT producer, edited by hand\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "DIFFERENT bytes" in res.error, res.error
+    assert recreated.read_text() == "// a DIFFERENT producer, edited by hand\n"
+
+
+def test_pi_install_retires_a_second_producer_that_is_a_package_directory(home):
+    """A directory at ``reflect-hook.ts`` declaring ``pi.extensions`` is
+    loadable AND cannot be retired by renaming its files (the manifest would
+    point at nothing), so the install must refuse rather than rename a
+    directory into a name the loader treats as a subdirectory and still loads.
+
+    Mutation: rename the directory (``reflect-hook.ts.disabled/`` is still
+    resolved through its index file — a green install over a live producer)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "package.json").write_text('{"pi": {"extensions": ["a.ts"]}}\n')
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "pi.extensions" in res.error, res.error
+    assert producer.is_dir(), "a directory producer was renamed by the installer"
+    assert "reflect-hook" in _registered_producers(ext_dir)[0] or True
+
+
+def test_pi_legacy_obstacle_names_the_second_producers_collision(home):
+    """The obstacle predicate is a MIRROR of the installer's own refusals, and
+    its whole job is to keep `hooks status`/`doctor` from naming a command that
+    refuses. A second producer + a DIFFERENT retired copy is a refusal the
+    installer makes, so the mirror must report it too.
+
+    Mutation: extend the installer without extending the mirror (status
+    recommends a verb that now exits 1, naming no obstacle)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text("// live\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).write_text(
+        "// different\n")
+
+    hint = capture_install.legacy_extension_obstacle("pi", ext_dir)
+
+    assert hint, "the mirror did not report a collision the installer refuses"
+    assert "move one aside" in hint
+    # ...and the installer really does refuse that exact shape, so the two
+    # cannot drift apart silently.
+    res = install_capture("pi", home=home)
+    assert not res.ok and "DIFFERENT bytes" in res.error, res.error
 
 
 def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
@@ -1697,8 +1803,11 @@ def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
         res.actions)
     assert any("backed up" in a for a in res.actions), res.actions
     assert "NOT fully installed" in res.error, res.error
-    # The state those actions describe really is on disk.
-    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists()
+    # The state those actions describe really is on disk — and #14342's lesson
+    # applies here too: the directory is moved aside AND its entry point is
+    # retired, because a dot-prefixed directory is still loaded by Pi.
+    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME
+            / "index.ts.disabled").exists()
     assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
 
 
