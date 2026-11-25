@@ -921,6 +921,48 @@ def test_uninstall_says_so_when_there_is_nothing_to_remove(project):
     assert (project / "AGENTS.md").read_text(encoding="utf-8") == "# House rules\n"
 
 
+def test_a_fenced_example_of_the_block_is_neither_counted_nor_removed():
+    """⛔ A FENCED EXAMPLE IS DOCUMENTATION, NOT THE BLOCK.
+
+    A repo that DOCUMENTS what the installer appends puts the markers in a fence.
+    The scan was `text.count(...)` and `_strip_block` removed from the first BEGIN
+    to the next END, so `--uninstall` emptied the example's fence and exited 0 with
+    no refusal — the file's own contract is "removes exactly the marked block
+    (never a user's own text)". The sibling installer
+    (`install-tortoise-skills.sh`) already skips CommonMark fences for the count AND
+    the rewrite, so the two installers must agree here.
+    """
+    fenced = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
+              "\nexample body\n" + harness_onboard.END_MARK + "\n```\n\n"
+              "My own notes: never delete this.\n")
+    assert harness_onboard._markers_well_formed(fenced) == (True, "")
+    assert harness_onboard._strip_block(fenced) == fenced, (
+        "the fenced example was edited — it is documentation, not our block")
+
+
+def test_a_real_block_is_removed_while_the_fenced_example_survives():
+    """Both at once: the real block goes, the example stays, the notes stay."""
+    text = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
+            "\nexample body\n" + harness_onboard.END_MARK + "\n```\n\n"
+            + harness_onboard.INSTRUCTIONS + "\n\nMy own notes: keep this.\n")
+    assert harness_onboard._markers_well_formed(text) == (True, "")
+    stripped = harness_onboard._strip_block(text)
+    assert "example body" in stripped, "the fenced example was destroyed"
+    assert "My own notes: keep this." in stripped
+    assert "Reads go through the Tortoise MCP" not in stripped, (
+        "the real block must still be removed")
+
+
+def test_a_marker_inside_an_unclosed_fence_is_not_ours():
+    """An unterminated fence runs to EOF: refuse to guess inside a half-written example."""
+    text = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
+            "\nhalf-written example\n")
+    # No END outside the fence ⇒ the pair is (0, 0) ⇒ well-formed for "nothing to do",
+    # and nothing is removed.
+    assert harness_onboard._markers_well_formed(text) == (True, "")
+    assert "half-written example" in harness_onboard._strip_block(text)
+
+
 # ── 11 · `credentials_present` reads `./.tortoise` ───────────────────────
 #
 # `rel.lstrip("./")` strips a CHARACTER SET, not a prefix, so the first store

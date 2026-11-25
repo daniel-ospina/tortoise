@@ -966,12 +966,57 @@ def _forwards_over_http(harness: str, project_dir: Path | None = None) -> bool:
     _source, entry, _read, _status = read_entry(harness, project_dir=project_dir)
     if not entry:
         return False
-    argv = [str(a) for a in (entry.get("args") or []) if isinstance(a, (str, int))]
-    argv.append(str(entry.get("command") or ""))
-    return any("tortoise.mcp_bridge" in token for token in argv)
+    # ⛔ THE PAIR, not a substring of any token. Matching `"tortoise.mcp_bridge" in
+    # token` accepted `tortoise.mcp_bridge_old`, `--label=tortoise.mcp_bridge` and a
+    # wrapper that merely mentions it — every one of which starts something that is
+    # not the bridge, and would then be graded by an HTTP call it never makes.
+    args = [str(a) for a in (entry.get("args") or [])]
+    for index, token in enumerate(args[:-1]):
+        if token == "-m" and args[index + 1] == "tortoise.mcp_bridge":
+            return True
+    return False
 
 
-def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict:
+def _entry_bearer(harness: str, project_dir: Path | None = None
+                  ) -> tuple[str | None, bool]:
+    """The bearer the ENTRY itself puts on the wire: ``(token, reproducible)``.
+
+    ⛔ THE HARNESS SENDS THE HEADER IN THE FILE, so a probe that resolves the
+    credential from the operator's shell grades a hybrid no harness runs. Measured
+    on an http entry declaring `Authorization: Bearer ${TORTOISE_MCP_API_KEY}` with
+    `TORTOISE_MCP_API_KEY` revoked and `TORTOISE_API_KEY` valid, against an endpoint
+    that accepts only the latter: the entry's key 401s, the verifier printed `OK`,
+    and `onboard` reads that verdict. `tortoise/onboarding/SKILL.md`'s collision
+    protocol documents such an entry as an expected *policy difference*, so this is
+    not exotic input.
+
+    Returns ``(None, True)`` when the entry declares NO `Authorization` header —
+    then the client's own per-request resolution IS the shape the harness runs (the
+    bridge resolves it at request time, which is the whole point of #14607).
+    Returns ``(None, False)`` when the header exists but cannot be reproduced
+    (it expands to a blank token): grading some other credential would be the same
+    hybrid again, so the caller must abstain.
+    """
+    _source, entry, _read, _status = read_entry(harness, project_dir=project_dir)
+    headers = (entry or {}).get("headers")
+    if not isinstance(headers, dict):
+        return None, True
+    raw = None
+    for name, value in headers.items():
+        if str(name).lower() == "authorization" and isinstance(value, str):
+            raw = value
+            break
+    if raw is None:
+        return None, True
+    expanded = _expand(raw)[0].strip()
+    if not expanded.lower().startswith("bearer "):
+        return None, False
+    token = expanded[len("bearer "):].strip()
+    return (token or None), bool(token)
+
+
+def probe(*, project_dir: Path | None = None, url: str | None = None,
+          token: str | None = None) -> Verdict:
     """Make ONE live tool call through the product's own MCP client.
 
     Uses `mcp_client`'s per-request credential resolution, so a key added after
@@ -1004,9 +1049,20 @@ def probe(*, project_dir: Path | None = None, url: str | None = None) -> Verdict
 
     target = (url or "").strip()
 
+    class _FixedBearer(_BearerProvider):
+        """Send exactly what the ENTRY names, instead of resolving a credential.
+
+        Only used when the config carries its own `Authorization` value; every
+        other path must keep `_BearerProvider`'s per-request resolution.
+        """
+
+        def auth_flow(self, request):  # noqa: D401 - httpx protocol
+            request.headers["Authorization"] = f"Bearer {token}"
+            yield request
+
     async def _call() -> list:
         resolved = target or mcp_client.mcp_url()
-        provider = _BearerProvider(resolved)
+        provider = _FixedBearer(resolved) if token else _BearerProvider(resolved)
         async with _client(provider) as client:
             tools = await client.list_tools()
             return list(tools or [])
@@ -1148,17 +1204,18 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
             fix="re-register it: `tortoise onboard --harness " + harness + "`",
             source=static.source, transport=static.transport,
             configs_read=static.configs_read)
-    if endpoint is None and not _forwards_over_http(harness, project_dir):
-        # ⛔ A LOCAL stdio SERVER IS NOT THE BRIDGE, and an HTTP call proves nothing
-        # about it. `declared_endpoint` is None for EVERY bare stdio entry, so the
-        # probe fell back to the CLIENT-resolved endpoint in the operator's shell —
-        # and a self-hosted entry (`python -m tortoise.mcp_server`, whose own server
-        # may point at a dead port) came back `OK (…, stdio): live call succeeded`,
-        # graded about an endpoint that entry never contacts. `onboard` reads
-        # `verdict.exit_code`, so that green also licensed writing the two
-        # "reads go through the MCP" sentences on an install nothing proved. The
-        # bridge is the one stdio shape an HTTP probe DOES grade (it is a
-        # stdio→HTTP shim), and it is identified by the entry's own argv.
+    if static.transport == "stdio" and not _forwards_over_http(harness, project_dir):
+        # ⛔ THE GATE IS THE ENTRY'S SHAPE, NOT THE PRESENCE OF AN ENDPOINT.
+        # `endpoint is None` was the first cut of this condition, and it left a hole
+        # wide enough for the very entry the bridge writes: an stdio entry that also
+        # declares `env.TORTOISE_MCP_URL` (which `harness_onboard.bridge_entry()`
+        # does) made `declared_endpoint` return a URL, so this branch never ran and
+        # `probe()` graded it — measured with
+        # `{"command": "python3", "args": ["-m", "http.server"], "env":
+        # {"TORTOISE_MCP_URL": "http://127.0.0.1:9/mcp"}}` → `OK`, exit 0, about a
+        # local server that is not Tortoise at all. A LOCAL stdio server that does
+        # not shim to HTTP cannot be proved by an HTTP call, endpoint declared or
+        # not; only the bridge is a stdio→HTTP shim.
         return Verdict(
             status=RESOLVES_UNPROBED,
             detail=("the entry starts a LOCAL stdio server (not the HTTP bridge), so "
@@ -1169,7 +1226,23 @@ def check(harness: str = "pi", *, project_dir: Path | None = None,
                  f"`tortoise onboard --harness {harness}`"),
             source=static.source, transport=static.transport,
             configs_read=static.configs_read)
-    probed = probe(project_dir=project_dir, url=endpoint)
+    token, reproducible = _entry_bearer(harness, project_dir)
+    if not reproducible:
+        # The entry declares an `Authorization` header that expands to nothing (its
+        # variable is unset or the value is blank). The harness would send THAT, so
+        # grading the shell's credential would verify a config that is not this one
+        # — the hybrid an earlier round fixed for the ENDPOINT, now closed for the
+        # credential half.
+        return Verdict(
+            status=RESOLVES_UNPROBED,
+            detail=("the entry's own `Authorization` header expands to nothing, so "
+                    "the credential the harness would send cannot be reproduced "
+                    "here — an abstention, not a pass"),
+            fix=(f"replace the captured header with the credential-free bridge: "
+                 f"`tortoise onboard --harness {harness}`"),
+            source=static.source, transport=static.transport,
+            configs_read=static.configs_read)
+    probed = probe(project_dir=project_dir, url=endpoint, token=token)
     # Keep the config provenance the static pass found: the probe does not read
     # the harness file, so dropping it would lose "which file did I load" — and
     # the probe always speaks HTTP to the endpoint even when the ENTRY is stdio

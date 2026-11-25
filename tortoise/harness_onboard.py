@@ -464,8 +464,72 @@ def _git_tracks(path: Path) -> bool:
 
 # ── Instruction file (the two sentences), delimiter-marked + reversible ───
 
+def _fence_spans(text: str) -> list[tuple[int, int]]:
+    """The character spans covered by CommonMark fenced code blocks.
+
+    ⛔ A FENCED EXAMPLE OF THE BLOCK IS NOT THE BLOCK. The marker scan was a plain
+    `text.count(...)` and `_strip_block` removed from the first BEGIN to the next
+    END, so an instruction file that DOCUMENTS the block — a fenced example, which
+    is how a repo explains what the installer appends — read as well-formed and was
+    EDITED: measured, `--uninstall` left the fence's body empty and exited 0 with no
+    refusal, and an install did the same before appending the real block. That
+    breaks the file's own contract ("removes exactly the marked block (never a
+    user's own text)"). The sibling installer
+    (`install-tortoise-skills.sh`) already skips every CommonMark fence for the
+    count AND the rewrite; this is the same rule, so the two cannot disagree about
+    what a marker means.
+
+    A fence opens with >= 3 backticks or tildes (indented by at most 3 spaces) and
+    closes with the same character repeated at least as many times. An UNCLOSED
+    fence runs to the end of the file: an unterminated block is not a licence to
+    guess, and the caller treats the text after it as fenced (so a marker inside a
+    half-written example is never touched).
+    """
+    spans: list[tuple[int, int]] = []
+    open_char: str | None = None
+    open_len = 0
+    open_at = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        candidate = stripped[:1]
+        run = 0
+        while run < len(stripped) and stripped[run] == candidate:
+            run += 1
+        is_fence = indent <= 3 and candidate in ("`", "~") and run >= 3
+        if open_char is None:
+            if is_fence:
+                open_char, open_len, open_at = candidate, run, offset
+        elif is_fence and candidate == open_char and run >= open_len:
+            spans.append((open_at, offset + len(line)))
+            open_char = None
+        offset += len(line)
+    if open_char is not None:
+        spans.append((open_at, len(text)))
+    return spans
+
+
+def _outside_fences(text: str) -> str:
+    """`text` with every fenced span blanked, preserving offsets and line count.
+
+    Blanking (rather than deleting) keeps a character offset in the result equal to
+    the offset in the original, so `_strip_block` can decide line by line against
+    the ORIGINAL while `_markers_well_formed` counts against this view.
+    """
+    spans = _fence_spans(text)
+    if not spans:
+        return text
+    out = list(text)
+    for start, end in spans:
+        for index in range(start, min(end, len(out))):
+            if out[index] != "\n":
+                out[index] = " "
+    return "".join(out)
+
+
 def _marker_pair(text: str) -> tuple[int, int]:
-    """How many BEGIN and END markers a file carries.
+    """How many BEGIN and END markers a file carries OUTSIDE fenced examples.
 
     ⛔ THE PAIRING IS THE SAFETY PROPERTY. `_strip_block` removes from a BEGIN to
     the next END, so a file carrying a BEGIN with NO END makes that removal swallow
@@ -474,8 +538,12 @@ def _marker_pair(text: str) -> tuple[int, int]:
     `--uninstall` then left `'# House rules\n'`, deleting `My own later notes: never
     delete this.` Reversibility is advertised as "removes exactly the marked
     block"; a malformed pair must therefore be REFUSED, never guessed at.
+
+    Fenced spans are excluded here and in `_strip_block` (`_fence_spans`), so a
+    documented example of the block is neither counted nor removed.
     """
-    return text.count(BEGIN_MARK), text.count(END_MARK)
+    scan = _outside_fences(text)
+    return scan.count(BEGIN_MARK), scan.count(END_MARK)
 
 
 def _markers_well_formed(text: str) -> tuple[bool, str]:
@@ -486,7 +554,8 @@ def _markers_well_formed(text: str) -> tuple[bool, str]:
     if begins != 1 or ends != 1:
         return False, (f"start markers: {begins} / end markers: {ends} — the "
                        f"marked block is malformed")
-    if text.index(BEGIN_MARK) > text.index(END_MARK):
+    scan = _outside_fences(text)
+    if scan.index(BEGIN_MARK) > scan.index(END_MARK):
         return False, "the END marker appears BEFORE the BEGIN marker"
     return True, ""
 
@@ -496,15 +565,18 @@ def _strip_block(text: str) -> str:
 
     Assumes the pair has been validated by `_markers_well_formed`; callers must
     refuse a malformed file rather than silently deleting the text between a
-    dangling BEGIN and some later END.
+    dangling BEGIN and some later END. A fenced EXAMPLE of the block is left alone
+    — it is documentation, not ours to remove.
     """
+    scan_lines = _outside_fences(text).splitlines(keepends=True)
     out: list[str] = []
     inside = False
-    for line in text.splitlines(keepends=True):
-        if BEGIN_MARK in line:
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        outside = scan_lines[index] if index < len(scan_lines) else line
+        if BEGIN_MARK in outside:
             inside = True
             continue
-        if END_MARK in line:
+        if END_MARK in outside:
             inside = False
             continue
         if not inside:
