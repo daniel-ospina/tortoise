@@ -1158,7 +1158,7 @@ def test_the_published_help_parser_reads_the_event_command():
     """
     parsed = _parse_published_gh_subcommands(_GH_HELP_FIXTURE)
     assert parsed == {"auth", "pr", "repo", "run", "api", "event", "org"}, sorted(parsed)
-    assert "event" not in {"co"}, "the ALIAS section is not `gh`'s command set"
+    assert "co" not in parsed, "the ALIAS section is not `gh`'s command set"
     assert "event" in _GH_SUBCOMMANDS, (
         "`gh event` (2.105.0's Event Streams preview) is not in the closed list, so "
         "`gh event listen` reads CLEAN in a workflow scan"
@@ -1199,7 +1199,7 @@ def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
 #: ADDED AFTER 2.102.0 — `event` (2.105.0, the Event Streams preview: `gh event listen` and
 #: `gh event subscription create|list|view|delete`) is here for that reason. It is NOT in
 #: `_GH_EXEC`, which enumerates a narrower idiom subset used only to DERIVE which helper
-#: scripts shell out to `gh` — the same partial list that omits `cache`/`gist`/`label` and
+#: scripts shell out to `gh` — the same partial list that omits `cache`/`gist` and
 #: is deliberately scoped in its own comment.
 #:
 #: ⚠️ A RELEASE THAT ADDS A COMMAND REDS `test_every_gh_subcommand_is_recognised` ON EVERY PR
