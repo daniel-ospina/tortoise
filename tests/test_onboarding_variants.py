@@ -785,8 +785,17 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 
+    # ⛔ THE `(?:env:)?` GROUP IS A LOCATOR REPAIR, not a relaxation, and `main`'s `#14607`
+    # landing is why it was owed: that landing spells the header snippet
+    # `"Authorization": "Bearer ${env:TORTOISE_API_KEY}"` (the harness-config spelling), which
+    # the previous regex could not match AT ALL — so this pin redded on a served document that
+    # still carries the env-indirect Bearer it asks for, and `referenced` read empty (a red
+    # that says "no snippet" about a file that has one). What the pin GRADES is unchanged and
+    # still non-vacuous: the name extracted here — whichever spelling carried it — must be one
+    # `tortoise/mcp_client.py` actually READS (`_env_names_the_client_reads`), so a snippet
+    # repointed at an unread name still reds this test, which is the #5153 defect it exists for.
     referenced = set(
-        re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
+        re.findall(r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}', skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
     # ASK THE CLIENT WHAT IT READS, and prove it READS. The precedence loop (a
@@ -1671,6 +1680,13 @@ def test_3232_generic_restart_lines_are_exact():
         "the installer's closing cue must restart, THEN confirm/list the "
         "skills — the skills directory is read at agent start")
     quick = QUICKSTART.read_text(encoding="utf-8")
-    assert "Restart your client." in quick, (
-        "docs/quickstart-cloud.md must keep its restart cue before the "
-        "tools-appear sentence")
+    # ⛔ RE-POINTED, and the artifact is what moved, not the claim: `main`'s `#14607`
+    # onboarding landing REWROTE this cue from two sentences (`Restart your client.` then the
+    # tools-appear sentence) into ONE — `Restart your client, then confirm the tools are
+    # actually there` — so the pinned string stopped occurring while the doc still says
+    # restart-then-confirm. The assertion therefore pins the live sentence, which carries
+    # BOTH halves the docstring asks for; what it still refuses is a doc that tells a reader
+    # to confirm the tools WITHOUT the restart, because this string is the whole cue.
+    assert "Restart your client, then confirm the tools are actually there" in quick, (
+        "docs/quickstart-cloud.md must keep its restart-then-confirm cue before a reader "
+        "hunts for the tools")
