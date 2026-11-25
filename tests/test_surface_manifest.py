@@ -2431,7 +2431,7 @@ def test_the_guard_reds_on_a_tampered_default_behind_an_approved_tool():
         "this test is pinned to tortoise_graph_overview's `days` default")
 
     tampers = {
-        # `limit` is the 4th positional default of `tortoise_search`.
+        # `limit` is the 4th positional default of `tortoise_graph_overview`.
         "default": {"__defaults__": (*fn.__defaults__[:3], 999, *fn.__defaults__[4:])},
         "annotation": {"__annotations__": {**fn.__annotations__, "query": "int"}},
     }
@@ -2607,6 +2607,22 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
         """shadow implementation, added under the representative's own name"""
         return "shadow"
 
+    # ⛔ SNAPSHOT the real component, and restore it — do not just pop the prefix.
+    # `add_tool` under an EXISTING name REPLACES that component (the semantics
+    # `test_the_guard_reds_on_a_same_name_replacement_of_an_approved_tool` asserts 700
+    # lines up), so popping every `tool:{representative}@*` key in `finally` deletes the
+    # REAL tool as well: `mcp.get_tool(representative)` then raises for the rest of the
+    # process, and a later in-process read of the served surface (this file's guard
+    # cases, a `_registered_schema(...)` pin) reds on state this test leaked — or passes
+    # for the wrong reason. `representative` is a LIVE tool (the first `served` manifest
+    # row), which is what makes the collision real; the pre-#11609 name,
+    # `tortoise_search_shadow`, could not collide.
+    components = mcp_server.mcp._local_provider._components
+    prefix = f"tool:{representative}@"
+    original = {k: v for k, v in components.items() if k.startswith(prefix)}
+    assert original, (
+        f"{representative} has no registered component — the manifest row this case "
+        "derives its representative from is not the served surface")
     tortoise_search_shadow.__name__ = representative
     mcp_server.mcp.add_tool(tortoise_search_shadow)
     try:
@@ -2622,9 +2638,18 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
             "the guard redded for some other reason than the missing fingerprint"
         )
     finally:
-        components = mcp_server.mcp._local_provider._components
-        for k in [k for k in components if k.startswith(f"tool:{representative}@")]:
+        # Drop the shadow's keys (a same-name add can mint a different version suffix)
+        # AND put the captured originals back under their own keys. Recovering by
+        # popping alone is what left the tool unserved.
+        for k in [k for k in components if k.startswith(prefix)]:
             components.pop(k)
+        components.update(original)
+
+    restored = [v for k, v in components.items() if k.startswith(prefix)]
+    assert restored and all(v.fn is not tortoise_search_shadow for v in restored), (
+        f"this case left {representative} UNSERVED (or left the shadow in place) for the "
+        "rest of the session: the same-name shadow must be removed and the real "
+        "component restored")
 
 
 def test_a_null_served_attributes_is_treated_as_malformed_not_as_nothing_to_check():
