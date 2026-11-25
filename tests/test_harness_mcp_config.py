@@ -751,17 +751,22 @@ class TestDocsPageAndSkillConfig:
                     '<h4 id="chatgpt">ChatGPT</h4>')
 
     def test_quickstart_cloud_teaches_the_http_shape_indirectly(self):
-        """#4674: the cloud quickstart taught `streamable-http` plus a literal
-        `Bearer tt_...` key -- the exact anti-pattern this module forbids -- and
-        nothing pinned it, so it re-drifted (its own guard comment at the
-        `.mcp.json` http-type test only *mentions* the divergence).
+        """#4674 -> #14607: the quickstart must teach the shape the product SHIPS.
 
-        The prose deliberately NAMES the legacy value, because a first-time
-        reader needs to recognise it; so the assertions target the
-        copy-pasteable SHAPE. The per-harness checks PARSE the blocks, so a bare
-        string sitting in prose cannot satisfy them, and the Cursor block is
-        pinned because a single block labelled for Cursor while carrying the
-        Claude form is the same silent-drop defect one layer down.
+        Two drifts, one test. #4674 caught `streamable-http` plus a literal
+        `Bearer tt_...` key. #14607 catches the REST of that shape: an
+        `Authorization` header at all -- `type: http` plus a header IS the capture
+        the bridge exists to remove (an `${VAR}` in a config is read once, at
+        spawn, and unset it expands to an empty bearer). The quickstart was still
+        teaching that shape, and this test PINNED it, so the next lane to fix the
+        doc met a red test defending the defect.
+
+        The assertions target the copy-pasteable SHAPE (the blocks are PARSED, so a
+        bare string in prose cannot satisfy them), and they pin the BRIDGE fields
+        one by one -- `type`, `args`, `env`, and the ABSENCE of `headers` and
+        `${` -- because each one is a way the capture can come back. The Cursor
+        block is pinned separately: a single block labelled for Cursor while
+        carrying the Claude form is the same silent-drop defect one layer down.
         """
         text = self.QUICKSTART.read_text(encoding="utf-8")
         assert '"Bearer tt_' not in text, (
@@ -775,22 +780,42 @@ class TestDocsPageAndSkillConfig:
                     "streamable-http entry again -- Cursor CLI drops it silently"
                 )
         claude = self._quickstart_block("**Claude Code**")
-        assert claude["type"] == "http", (
-            "#4674: the quickstart's Claude Code block must use type=http"
-        )
-        assert claude["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}", (
-            "#4674: the quickstart's Claude Code header must be env-indirect"
-        )
+        assert claude.get("type") == "stdio", (
+            "#14607: the quickstart's Claude Code block must be the stdio bridge "
+            f"-- a `type: http` plus header entry is the capture; got {claude!r}")
+        assert claude.get("command") == "python3", (
+            f"#14607: the bridge entry names a bare interpreter; got "
+            f"{claude.get('command')!r}")
+        assert claude.get("args") == ["-m", "tortoise.mcp_bridge"], (
+            "#14607: the quickstart must run the bridge module -- got "
+            f"{claude.get('args')!r}")
+        assert (claude.get("env") or {}).get("TORTOISE_MCP_URL"), (
+            "#14607: the quickstart's entry must name its endpoint in "
+            f"`env.TORTOISE_MCP_URL` -- got {claude.get('env')!r}")
+        assert "headers" not in claude, (
+            "#14607: the quickstart must NOT teach an Authorization header -- the "
+            "bridge resolves the key per request, so a header there is a capture "
+            f"of the environment variable; got {claude.get('headers')!r}")
+        assert "${" not in json.dumps(claude), (
+            "#14607: the quickstart's entry must interpolate NOTHING -- an unset "
+            "variable expands to an empty bearer (the #10605 capture)")
         cursor = self._quickstart_block("**Cursor**")
         assert "type" not in cursor, (
             "#4674: the quickstart's Cursor block must omit `type` -- Cursor "
-            "infers the transport from url, and a `type` there is the shape "
-            "its CLI can silently drop"
+            "infers the transport, and a `type` there is the shape its CLI can "
+            "silently drop"
         )
-        assert cursor["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}", (
-            "#4674: the quickstart's Cursor block must use the tested "
-            "${env:...} expansion"
-        )
+        assert cursor.get("args") == ["-m", "tortoise.mcp_bridge"], (
+            "#14607: the Cursor block must be the SAME bridge as the Claude one "
+            f"-- got {cursor.get('args')!r}")
+        assert (cursor.get("env") or {}).get("TORTOISE_MCP_URL"), (
+            f"#14607: the Cursor block must name its endpoint; got {cursor!r}")
+        assert "headers" not in cursor, (
+            "#14607: the Cursor block must carry no Authorization header -- got "
+            f"{cursor.get('headers')!r}")
+        assert "${" not in json.dumps(cursor), (
+            "#14607: the Cursor block must interpolate NOTHING -- got "
+            f"{json.dumps(cursor)}")
 
     def _quickstart_json_blocks(self) -> list[dict]:
         """Every ```json config block in the quickstart, parsed."""
@@ -1929,38 +1954,52 @@ class TestCommittedRepoMcpJson:
     entry could not authenticate even when the daemon WAS up under the
     documented `tortoise serve --http --auth tenant`.
 
-    Covers all five fields of the entry: `url`, `type`, `headers`, the absence
-    of a stdio `env`/`command`/`args`, and no literal credential in the file.
-    "No literal credential" is scoped deliberately: every `env` and `headers`
-    value of EVERY server must be structurally env-indirect and a non-empty
-    string (those are the credential-carrying fields a client sends), every
-    `env` value must additionally name ITS OWN section key verbatim
-    (`{"VAR": "${VAR}"}`): the `env` key IS the variable a client exports, so
-    a lookalike (`${VAR_TYPO}`) clears the shape check yet is unset in practice
-    and expands to `""` -- the same silent-401 class the Authorization header
-    guard pins. `headers` are exempt from the name-match because a header key
-    (`Authorization`) is a header name, not a variable name. And every token
-    family this repo mints today -- `tt_`/`tk_` (tortoise/auth.py),
-    `oat_`/`ort_`/`ct_`/`cs_` (tortoise/oauth.py), `st_`
-    (tortoise/hosted_api.py) -- is forbidden anywhere in the file, including
-    prose and argv, since a key pasted there is the same leak. A THIRD-PARTY
-    secret in PROSE or in `args`/`command` is out of scope: argv legitimately
-    holds package names and flags, and telling a secret from ordinary text
-    needs a heuristic that hyphenated keys defeat, so either check would be
-    theatre.
+    ⛔ **#14607 SUPERSEDES THE TRANSPORT SHAPE THIS CLASS USED TO PIN, and keeps
+    its security property.** The `type: http` + `Authorization: Bearer
+    ${TORTOISE_API_KEY}` entry was itself the defect: an `${VAR}` in a config is a
+    CAPTURE of an environment variable the harness read once at spawn, and an
+    unset variable expands to `""` -- so the request went out as
+    `Authorization: Bearer ` and the server could only answer `-32001 invalid or
+    missing Bearer token`, a message that names the credential's VALUE while the
+    fault is that the client never had one (#10605's class). Measured on the
+    reporting box: `mcp_catalog` -> `tortoise [core, not-loaded]`, silently, and
+    an agent working in this repo fell back to hand-rolled HTTP for a day.
+
+    The entry is now the credential-free **bridge** (`python3 -m
+    tortoise.mcp_bridge`), which resolves the key per request from the
+    environment or either store and refuses a missing one with the named
+    `MCP-KEY-EMPTY` message instead of an empty bearer. #3601's properties are
+    PRESERVED AND STRENGTHENED:
+
+    * the shipped target is still the HOSTED endpoint (an agent with no local
+      daemon still works) -- now as `TORTOISE_MCP_URL`;
+    * no literal credential anywhere in the file, and now **no `${VAR}` at all,
+      and no `headers` block**, so there is nothing left to expand to empty.
+
+    "No literal credential" is otherwise scoped as before: every `env` value of
+    EVERY server must be structurally env-indirect or an allow-listed
+    non-secret literal, and every token family this repo mints today --
+    `tt_`/`tk_` (tortoise/auth.py), `oat_`/`ort_`/`ct_`/`cs_`
+    (tortoise/oauth.py), `st_` (tortoise/hosted_api.py) -- is forbidden anywhere
+    in the file, including prose and argv, since a key pasted there is the same
+    leak.
 
     Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
-    `url` at their own daemon WILL see `test_tortoise_entry_targets_hosted_endpoint`
-    fail locally. That is expected -- the message describes the shipped default,
-    not their tree -- and it is why this pins the shipped file rather than an
-    effective or merged config.
+    `TORTOISE_MCP_URL` at their own daemon WILL see
+    `test_tortoise_entry_targets_hosted_endpoint` fail locally. That is
+    expected -- the message describes the shipped default, not their tree.
     """
 
     COMMITTED = REPO_ROOT / ".mcp.json"
     # Scheme words that may precede a ${...} expression in a header value.
     GLUE = ("", "Bearer ", "Token ", "Basic ", "ApiKey ")
+    #: `env` values that are NOT credentials, and therefore may be literal: an
+    #: endpoint URL and any future non-secret knob. A name that is not here must
+    #: be a `${VAR}` expression, so a new credential-carrying env key cannot ride
+    #: in as a literal without this list being edited on purpose.
+    NON_SECRET_ENV_KEYS = frozenset({"TORTOISE_MCP_URL"})
     # A `${VAR}` expression must name a bare variable: content inside the
     # braces -- a shell default (`${VAR:-literal}`) or a nested expression --
     # can smuggle a literal past any check that only looks for `${`.
@@ -2008,66 +2047,66 @@ class TestCommittedRepoMcpJson:
         return server
 
     def test_tortoise_entry_targets_hosted_endpoint(self):
-        url = self._tortoise().get("url")
-        assert url == ENDPOINT, (
+        # #14607 moved the target from `url` to the bridge's
+        # `env.TORTOISE_MCP_URL`. The #3601 property is unchanged: the shipped
+        # entry must reach the HOSTED endpoint, because a local-daemon url
+        # breaks every agent without a running daemon.
+        entry = self._tortoise()
+        target = entry.get("url") or (entry.get("env") or {}).get(
+            "TORTOISE_MCP_URL")
+        assert target == ENDPOINT, (
             f"committed .mcp.json must target the hosted endpoint {ENDPOINT}; "
             f"a local-daemon url breaks every agent without a running daemon "
-            f"(#3601) -- got {url!r}"
+            f"(#3601) -- got {target!r}"
         )
 
-    def test_tortoise_entry_keeps_http_type(self):
-        # This root file also serves Claude Code, whose schema treats `type` as
-        # load-bearing for a url entry; pi ignores `type` and picks the
-        # transport from url-vs-command. Pinned because docs/quickstart-cloud.md
-        # teaches the same object and could drift silently; since #4674 it shows
-        # the same `http` value and is pinned by
-        # `TestDocsPageAndSkillConfig::test_quickstart_cloud_teaches_the_http_shape_indirectly`.
-        assert self._tortoise().get("type") == "http", (
-            f"committed .mcp.json tortoise entry must keep type='http' -- got "
-            f"{self._tortoise().get('type')!r}"
-        )
+    def test_tortoise_entry_is_the_credential_free_bridge(self):
+        """#14607: no `${VAR}`, no `headers`, no credential in the shipped config.
 
-    def test_tortoise_header_is_env_indirect(self):
-        headers = self._tortoise().get("headers")
-        # Diagnosable failure on every malformed shape, not just the empty one
-        # (#3601 was `"headers": {}`): a bare AttributeError tells a maintainer
-        # nothing about what drifted.
-        assert headers is None or isinstance(headers, dict), (
-            f"committed .mcp.json tortoise headers must be an object -- got "
-            f"{type(headers).__name__}"
-        )
-        auth = (headers or {}).get("Authorization")
-        assert auth, (
-            f"committed .mcp.json must carry an Authorization header -- an "
-            f"empty/absent headers block cannot authenticate even when the "
-            f"daemon is up (#3601); got headers={headers!r}"
-        )
-        assert isinstance(auth, str), (
-            f"committed .mcp.json Authorization must be a string -- got "
-            f"{type(auth).__name__}"
-        )
-        # Exact value, not a substring: a lookalike env var
-        # (`${TORTOISE_API_KEY_ALT}`) is unset in practice and expands to
-        # `Bearer ` -- a silent 401 that a substring check would pass. Matches
-        # what the emitted-config classes pin for the same header.
-        assert auth == "Bearer ${TORTOISE_API_KEY}", (
-            f"committed .mcp.json Authorization must be exactly "
-            f"'Bearer ${{TORTOISE_API_KEY}}' (env-indirect, no literal key) -- "
-            f"got {auth!r}"
-        )
-
-    def test_tortoise_entry_is_http_only(self):
-        # The entry must stay an HTTP entry. `_comment` and
-        # docs/infra-runbook.md section 4.5 both state that the committed entry
-        # carries no `env` (the DB target is resolved server-side by the hosted
-        # API), and the stdio command+args pattern was replaced in feat/338 --
-        # so re-adding any of these drifts the docs silently.
+        The previous shape (`type: http` + `Authorization: Bearer
+        ${TORTOISE_API_KEY}`) PRESENTED as env-indirect and was a capture: an unset
+        variable expands to `""`, the request goes out with an empty bearer, and
+        the server's only possible answer is `-32001`. Pinned field by field
+        because each one is a way the capture can come back.
+        """
         entry = self._tortoise()
-        for key in ("env", "command", "args"):
-            assert key not in entry, (
-                f"committed .mcp.json tortoise entry must not define {key!r} "
-                f"(it is an HTTP entry -- see its _comment); got {entry[key]!r}"
-            )
+        assert entry.get("type") == "stdio", (
+            f"committed .mcp.json tortoise entry must be the stdio bridge -- got "
+            f"type={entry.get('type')!r}")
+        assert entry.get("args") == ["-m", "tortoise.mcp_bridge"], (
+            f"committed .mcp.json must run the bridge module -- got "
+            f"{entry.get('args')!r}")
+        command = entry.get("command", "")
+        assert command and "/" not in command, (
+            f"committed .mcp.json `command` must be a bare interpreter name on "
+            f"PATH (a committed absolute path dangles off the installer's "
+            f"machine, #9475) -- got {command!r}")
+        assert "headers" not in entry, (
+            f"committed .mcp.json must carry NO headers: the bridge sends the "
+            f"bearer itself, per request (#10605) -- got {entry.get('headers')!r}")
+        raw = json.dumps(entry)
+        assert "${" not in raw, (
+            f"committed .mcp.json tortoise entry must not interpolate ANY "
+            f"${{VAR}} -- an unset variable expands to an empty string, which is "
+            f"exactly the #14607 capture; got {raw}")
+        assert "tortoise.mcp_server" not in raw, (
+            "committed .mcp.json must not re-introduce the feat/338 stdio "
+            "command+env pattern (it needs TORTOISE_DB_URI in env)")
+
+    def test_tortoise_entry_carries_no_credential_anywhere(self):
+        # A KEY env/header value on the tortoise entry would be a committed
+        # secret (the class below covers every server, this names the one that
+        # ships a credential path at all).
+        entry = self._tortoise()
+        for section in ("env", "headers"):
+            values = entry.get(section) or {}
+            for key, value in values.items():
+                if key in self.NON_SECRET_ENV_KEYS:
+                    continue
+                assert self.ENV_EXPR.fullmatch(str(value)), (
+                    f"committed .mcp.json tortoise.{section}.{key} must be a "
+                    f"${{VAR}} expression or an allow-listed non-secret knob -- "
+                    f"got {value!r}")
 
     def test_no_literal_api_key_in_committed_config(self):
         # This file ships to users -- a literal credential leaks one. Resolve
@@ -2123,6 +2162,10 @@ class TestCommittedRepoMcpJson:
                         f"committed .mcp.json {server}.{section}.{key} must be "
                         f"a non-empty string -- got {type(value).__name__}"
                     )
+                    if section == "env" and key in self.NON_SECRET_ENV_KEYS:
+                        # An endpoint URL is not a credential and is declared as
+                        # one permissive name on purpose (see the class doc).
+                        continue
                     if section == "env":
                         direct = self.ENV_EXPR.fullmatch(value) is not None
                     else:
