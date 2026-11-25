@@ -522,6 +522,28 @@ def _ref_sha(ref: str) -> str | None:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
+def _origin_branches_containing(rev: str) -> set[str]:
+    """The BRANCHES of `origin` whose history contains `rev` — `refs/remotes/origin/` only.
+
+    ⛔ NOT `git branch -r --contains` (measured, `test (d)` on this PR's own CI). `branch -r`
+    lists every ref under `refs/remotes/`, and it reads the FIRST path segment as the remote
+    name — so the ref `refs/remotes/pull/14108/merge`, which `actions/checkout` writes for a PR
+    checkout (`+refs/pull/<n>/merge:refs/remotes/pull/<n>/merge`), is printed as the branch
+    `pull/14108/merge`. On a REUSED self-hosted runner workspace that ref OUTLIVES the job that
+    fetched it, and it contains `83e94826a8a` by construction (the PR head it merges does), so
+    the premise arm reds forever against a BRANCH it never measured — a checkout artifact read
+    as a branch. `refs/remotes/origin/*` is exactly the browser-visible branch set the block's
+    narrow claim is about; `remotes/pull/*` is not, and a "remote" a checkout invented is not
+    one of the repo's remotes.
+
+    `refs/remotes/origin/HEAD` is dropped: it is a SYMREF onto a branch already in the set, so
+    keeping it would only make one containment read as two.
+    """
+    out = _git("for-each-ref", "--format=%(refname)", "--contains", rev, "refs/remotes/origin/")
+    return {line.strip() for line in out.splitlines()
+            if line.strip() and line.strip() != "refs/remotes/origin/HEAD"}
+
+
 #: Where each addressed rev is FETCHABLE from — the refspec a skip's re-arm line prints.
 #:
 #: ⛔ A RE-ARM THAT CANNOT RUN IS NOT A RE-ARM (review, round 12, P2): the skip printed
@@ -1168,9 +1190,15 @@ def test_the_history_clause_premises_hold_in_this_clone():
     claim written against it goes stale without a red.
 
     ⛔ IT READS THE CLONE'S REMOTE-TRACKING REFS, so a clone whose `refs/remotes/origin/*` are
-    stale (a deleted branch never pruned) reds the `branch -r --contains` arm until
+    stale (a deleted branch never pruned) reds the containment arm until
     `git fetch origin --prune`. That is the premise being stale, not the block being wrong —
     which is why it lives here and not in the prose arm, which runs everywhere.
+
+    ⛔ THE CONTAINMENT ARM IS SCOPED TO `origin`'s BRANCH NAMESPACE (measured: this PR's own
+    `test (d)`). `git branch -r --contains` also lists `refs/remotes/pull/<n>/merge`, the PR
+    checkout ref `actions/checkout` fetches, and reads `pull` as a remote name — on a reused
+    self-hosted runner a leftover `pull/14108/merge` contains this commit by construction, so
+    that arm redded against a ref that is not a branch. See `_origin_branches_containing`.
     """
     _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
     head_ref = _ref_sha("refs/pull/14108/head")
@@ -1192,9 +1220,17 @@ def test_the_history_clause_premises_hold_in_this_clone():
     assert on_main.returncode == 1, (
         "premise: the commit is NOT on `origin/main` (rc 1 = not an ancestor; anything else "
         "means the measurement did not run)")
-    assert _git("branch", "-r", "--contains", RESIDUE_ABBREV).strip() == "", (
-        "premise: no remote BRANCH contains it — which is the only part of the block's "
-        "narrow claim that is about branches",)
+    # ⛔ NON-VACUITY FIRST: the query must be able to say YES. `origin/main` contains its own
+    # tip, so a well-formed scoped query always names it — if it does not, the empty answer
+    # below is the query failing to read anything, not the commit being absent from branches.
+    main_tip = _git("rev-parse", "origin/main").strip()
+    assert "refs/remotes/origin/main" in _origin_branches_containing(main_tip), (
+        "non-vacuity: the scoped query must report `origin/main` for main's own tip — an empty "
+        "answer from a query that cannot read the namespace is UNMEASURED, not a pass")
+    holders = _origin_branches_containing(RESIDUE_ABBREV)
+    assert holders == set(), (
+        "premise: no `origin` BRANCH contains it — which is the only part of the block's "
+        f"narrow claim that is about branches; containing branch(es): {sorted(holders)}")
 
 
 def test_the_history_clause_is_only_quoted_as_falsified():
