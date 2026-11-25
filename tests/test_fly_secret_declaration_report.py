@@ -638,6 +638,34 @@ def test_a_whitespace_bearing_name_round_trips_through_the_title_grammar():
         )
 
 
+def test_a_name_that_contains_the_title_suffix_still_round_trips():
+    """The grammar's `$` anchor is what makes a NON-GREEDY capture safe, so pin it.
+
+    The comment above `_TITLE_RE` states the group is non-greedy "so a name that
+    itself CONTAINS the suffix still round-trips". That property does not come from
+    the non-greediness at all — a shortest-match group is free to stop early — it
+    comes from the ESCAPED SUFFIX being anchored with `$`, which forces the match to
+    run to the end of the line. Removing that anchor (or turning the pattern into a
+    `search` over a longer string) would break exactly this class while leaving every
+    underscore-shaped name green, so the class gets its own row rather than living as
+    prose a reader has to trust. `read_fly_secret_names` accepts such a name: it
+    requires only a non-empty string.
+    """
+    suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
+    for name in (
+        f"BEFORE {suffix}",
+        f"BEFORE {suffix} AFTER",
+        f"{suffix} {suffix}",
+    ):
+        title = _tool("--title", name).stdout.strip()
+        proc = _tool("--filter-owned-titles", stdin=title + "\n")
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == [name], (
+            f"{name!r} was filed under a title the sweep reads back as "
+            f"{proc.stdout!r} — that issue could never be resolved"
+        )
+
+
 def test_the_workflow_owns_the_grammar_in_exactly_one_place():
     """No title literal in the shell: a grammar spelled twice drifts."""
     text = WORKFLOW_FILE.read_text()
@@ -966,6 +994,14 @@ def test_a_dispatched_dry_run_resolves_nothing(tmp_path):
     then PATCH-closed every issue this workflow owns: a run the UI calls a DRY RUN
     closed a real alert while asserting a recovery nobody measured. Pinned on the
     SHIPPED step, so a comment cannot stand in for the guard.
+
+    ⛔ THE `jq` SKIPIF IS A DECLARED REQUIREMENT, and the honest reason is narrower than
+    "the mutant would stay green" (a review round measured it and an earlier version of
+    this comment was wrong): on a host without the `jq` BINARY the DRIFT arm dies at the
+    count read — BEFORE its `DRY RUN` notice or any filing — so run 1 files nothing and
+    this row REDs at `len(h.filed_titles()) == 1`, with the mutant and without it. It is
+    not vacuous; its failure is a HOST failure, and declaring the substrate keeps a
+    missing tool from reading as a broken guard.
     """
     h = _Harness(tmp_path)
     h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
@@ -1072,6 +1108,73 @@ def test_the_resolve_gate_is_supplied_a_default_branch_on_every_event():
         "object, so the bare payload field is empty on every tick that resolves and the "
         "sweep parks on its skip arm forever. Got "
         f"{env.get('DEFAULT_BRANCH')!r}"
+    )
+
+
+def test_the_dry_run_wire_is_PINNED_because_its_absence_is_FAIL_OPEN():
+    """The CLEAN arm's other two wires fail CLOSED; this one fails OPEN, so pin it.
+
+    `DEFAULT_BRANCH` unset and a short-form `REF` both take the sweep's SKIP arm, so
+    their absence is at least safe, and
+    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event` pins their
+    values for correctness. `FILE_ISSUES` is the opposite direction: the guards read
+    `${FILE_ISSUES:-true}`, so an ABSENT wire means "not a dry run". Delete this one
+    `env:` line from the workflow and a `workflow_dispatch` with the DEFAULT
+    `file_issues=false` closes the ledger again — the exact defect this PR exists to
+    fix — with every behavioural row still green, because `_Harness.run()` supplies
+    `FILE_ISSUES` itself and so cannot see the workflow's own wiring (#14601 item 2,
+    measured there: with that entry deleted nothing in this file reds).
+    """
+    env = json.loads(_report_step_env())
+    assert env.get("FILE_ISSUES") == (
+        "${{ github.event_name != 'workflow_dispatch' || "
+        "github.event.inputs.file_issues == 'true' }}"
+    ), (
+        "the dry-run wire is unpinned: `FILE_ISSUES` is read as `${FILE_ISSUES:-true}`, "
+        "so an ABSENT entry reads as NOT a dry run and a dispatched dry run closes the "
+        f"ledger (#14601 item 2). Got {env.get('FILE_ISSUES')!r}"
+    )
+
+
+def test_the_clean_arms_guards_sit_ABOVE_the_resolve_sweep():
+    """A ledger-closing guard placed BELOW the sweep guards nothing.
+
+    `_Harness.run()` hands the shipped step its `env:` itself, so no behavioural row
+    can see WHERE in the step the guards sit: move either one below the `resolve`
+    call and every row stays green while the sweep has already closed the issue.
+    The guards' VALUES are pinned by
+    `test_the_resolve_gate_is_supplied_a_default_branch_on_every_event`; this row
+    pins only the ORDER, so neither property can be lost silently when the other is
+    edited.
+
+    ⛔ THE SEARCH IS SCOPED TO THE CLEAN ARM, and that is load-bearing rather than
+    tidy (a review round measured the unscoped version and an earlier draft of this
+    docstring was wrong): `if [ "${FILE_ISSUES:-true}" != "true" ]` occurs in BOTH
+    arms — the CLEAN arm's guard and the DRIFT arm's identical one — so an unscoped
+    `find` on a CLEAN-arm deletion silently re-anchors on the DRIFT arm and the
+    `!= -1` arms never fire: the row still reds, but it complains about ORDER when
+    the guard is GONE, which is a fair test reporting the wrong fault. Slicing to the
+    arm the sweep lives in gives each anchor exactly one occurrence, so a deletion
+    reds on its own message.
+
+    `.find()` rather than `.index()`: a deleted guard must RED with a message that
+    names it, not raise `ValueError: substring not found`.
+    """
+    run = _report_step()
+    clean_start = run.find('if [ "${RC:-}" = "0" ]; then')
+    drift_start = run.find('if [ ! -s "$REPORT" ]; then')
+    assert clean_start != -1, "the CLEAN arm is gone — where does a clean reading go?"
+    assert drift_start != -1, "the DRIFT arm is gone — where does a drift reading go?"
+    assert clean_start < drift_start, "the CLEAN arm no longer precedes the DRIFT arm"
+    clean_arm = run[clean_start:drift_start]
+    dry_run_guard = clean_arm.find('if [ "${FILE_ISSUES:-true}" != "true" ]')
+    ref_guard = clean_arm.find('if [ -z "${DEFAULT_BRANCH:-}" ]')
+    sweep = clean_arm.find("auto-file-issue.sh resolve")
+    assert dry_run_guard != -1, "the CLEAN arm no longer honours the dry-run input"
+    assert ref_guard != -1, "the CLEAN arm no longer checks which branch it read"
+    assert sweep != -1, "the resolve sweep is gone — would the ledger ever close (#8841)?"
+    assert dry_run_guard < sweep and ref_guard < sweep, (
+        "a ledger-closing guard sits BELOW the sweep, so it guards nothing"
     )
 
 
@@ -1207,7 +1310,15 @@ def test_a_zero_count_drift_reading_never_exits_green(tmp_path):
     out = h.run(rc="1", reading={"verdict": "DRIFT", "remainder": []})
     assert h.last_rc != 0, f"a zero-count DRIFT reading exited 0:\n{out}"
     assert "::error::" in out, out
-    assert "issues --method POST" not in h.calls()
+    # ⛔ GRADE SOMETHING THE MUTANT MOVES. `"issues --method POST" not in h.calls()`
+    # held with the guard present AND with it deleted (a `count=0` reading enumerates
+    # no ROWS, so the loop files nothing — 0 POST calls either way): dead weight that
+    # read as coverage. The guard's own sentence exists only on that branch, and the
+    # mutant replaces it with `DRIFT — 0 undeclared Fly secret name(s)`.
+    assert "contradicts its own verdict" in out, (
+        f"the zero-count guard did not fire — a self-contradictory reading fell through "
+        f"to the DRIFT arm:\n{out}"
+    )
 
 
 def test_an_empty_reading_identity_is_an_error(tmp_path):
