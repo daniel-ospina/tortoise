@@ -1616,7 +1616,7 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
     # on purpose: it stays silent about WHICH non-zero code a file chooses
     # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins it for the
-    # three files below, because which code each can spare is a per-tool contract
+    # files listed below, because which code each can spare is a per-tool contract
     # decision). Other corpus guards still refuse with a bare
     # `SystemExit(<message>)` — exit 1 — where 1 is also the tool's own
     # DRIFT/failure code, `tools/bridge_table.py`, `tools/mcp_rename_table.py`
@@ -1662,14 +1662,16 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each of the three files below CHOOSES (`#4053`, `#11342`) —
-#: their guards landed in earlier PRs, and this file only PINS them — and the
-#: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
-#: CPython, so for two of these files an old interpreter was reported as the
-#: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
-#: 1, and `test_design_map_check` documents 1 as "violations" while reserving 2
-#: for the map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
-#: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
+#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — the
+#: verdict code it spares, or reuses on purpose. `REFUSAL_WHY` carries the reason
+#: for every row, and the table below is the sole authority on which rows exist:
+#: this comment deliberately states no count and no list of them, because every one
+#: written here has gone stale.
+#:
+#: `SystemExit(<message>)` exits 1 in CPython, and for several of these tools 1 is
+#: already a verdict of their own, so a guard taking the bare message shape can
+#: report an environment refusal as a finding the run never reached — which is why
+#: each code here was chosen deliberately rather than defaulted to (`#11342`).
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
 #: per-tool contract decision, not a property of the guard shape. Pinning it here
@@ -1689,6 +1691,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/claim_dense_leg_13732.py": 4,
     "tools/vector_parity_13906.py": 4,
     "tools/graphevent_home.py": 2,
+    "tools/fly_secret_declaration_report.py": 2,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1718,10 +1721,10 @@ REFUSAL_WHY: dict[str, str] = {
         "guard takes 4, which the tool otherwise never returns"
     ),
     "tools/capstone_ledger.py": (
-        "the set 0-4 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
-        "ADVISORY), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
+        "the set 0-5 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
+        "ADVISORY/USAGE), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
         "— it is the fail-closed neighbour, and closing a row is not reaching a "
-        "verdict. Adding 5 to the tool's set would change a documented public "
+        "verdict. Extending that set would change a documented public "
         "contract to satisfy a lint, which is the wrong trade"
     ),
     "tools/build_site_icons.py": (
@@ -1807,6 +1810,17 @@ REFUSAL_WHY: dict[str, str] = {
         "exactly `could not run`: with the historical `SystemExit(<message>)` "
         "shape the status would be 1, which a caller gating on the exit would "
         "read as a produced verdict about a record nothing read"
+    ),
+    "tools/fly_secret_declaration_report.py": (
+        "`main()` returns 0 CLEAN / 1 DRIFT / 2 UNREADABLE, so 1 is a VERDICT a "
+        "caller branches on (the drift workflow files one issue per undeclared "
+        "name off 1, and closes its ledger off 0) and an "
+        "environment refusal must not wear it; the file's own UNREADABLE arm "
+        "already maps every not-a-reading to 2, and an unsupported interpreter "
+        "IS not-a-reading, so the guard reuses 2 rather than inventing a code. "
+        "#14396's branch carries this guard with the `SystemExit(<message>)` "
+        "shape (status 1, i.e. DRIFT; that PR is still open, so nothing is on "
+        "`main` yet) — corrected here rather than re-added"
     ),
 }
 
