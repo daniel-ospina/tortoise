@@ -173,11 +173,14 @@ def list_layer(
         # DROPPED by `kind_fallbacks.named_kind` (which also TRIMS surrounding
         # whitespace, so the stored value is the caller's spelling apart from
         # that trim), an uninstalled NAMESPACE is refused by
-        # `hosted_api._require_approved_kind` WHEN THE GRAPH HAS AN APPROVAL SET
-        # (a graph with no `:PackInstall` records admits every namespace — the
-        # #2714 back-compat rule stated in `pack_state.kind_namespace_is_approved`)
-        # — a check on the namespace, never on the spelling — and nothing else
-        # rewrites the value. Measured: one
+        # `hosted_api._require_approved_kind` when the graph's approval set is
+        # not ``None`` — the #2714 back-compat rule in
+        # `pack_state.kind_namespace_is_approved`: ``None`` means no
+        # `:PackInstall` records AND no `:PackSelection` marker (every namespace
+        # admitted), while a graph CONFIGURED empty (`set_graph_packs(packs=[])`,
+        # #2728) resolves to ``frozenset()`` and refuses. That is a check on the
+        # namespace, never on the spelling — and nothing else rewrites the value.
+        # Measured: one
         # graph holds `team` and `core:team` side by side. So an EQUALITY filter
         # answered `200 count: 0, truncated: false` for the spelling that
         # happened not to be the stored one — the "byte-identical to *this graph
