@@ -132,8 +132,10 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 314 files finds exactly 13 — the verb-at-end-of-line scan alone finds **195**,
-and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
+predicate over the same 314 files finds exactly 13 — the verb-at-end-of-line scan alone (lines matching
+`(?:MATCH|MERGE)\s*$`, case-insensitive, over the same population — **195 at BOTH trees**,
+`a29b5f24ce95` and this head, so the figure measures the predicate rather than this branch) is not a
+second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **182** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
 “(#13330 post-merge” that `#13399` added, …) with nothing following, which the case-insensitive
