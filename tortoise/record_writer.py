@@ -3008,6 +3008,16 @@ _UNCUT_OBSERVATIONS = 0
 #: gap this registry exists to surface. Both states stay visible on their own keys
 #: ('armed_but_halted' vs 'armed_but_uncut'), so nothing is hidden by the split;
 #: do NOT "fix" the asymmetry by folding `seeded` out of `armed_but_uncut`.
+#:
+#: ⛔ AND THE SPLIT IS A TRANSITION, NOT A CLASSIFICATION (#14624 review N1). A
+#: graph MOVES between the two maps — `halt` takes it out of the uncut population
+#: and `reopen` + `seed` puts it back — so :func:`note_uncut_graph` retracts the
+#: entry it is moving AWAY from. Recording both and never crossing them is what
+#: published one graph on BOTH keys after a `reopen`, and what left an uncut
+#: entry (with its now-false `provision_failed` reason) standing over a graph the
+#: operator had healed and then deliberately halted: `armed_but_uncut: 1`, a
+#: false reason, and `ok: false` — the permanent false red this split exists to
+#: prevent.
 _UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
@@ -3028,12 +3038,26 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     ⛔ `mode_halted` DOES NOT LAND HERE. See :data:`_UNCUT_HALTED`: a halted graph
     keeps its JSONL append and is an operator's decision, so it is published on
     its own key instead of being reported as an uncut graph.
+
+    ⛔ EACH OBSERVATION RETRACTS THE OTHER STATE'S ENTRY (#14624 review N1). The
+    two maps are populations of ONE graph, and the observation is the transition
+    between them, so a halted observation drops the uncut entry and an uncut one
+    drops the halted entry. Without both pops a graph is published on BOTH keys
+    after `reopen`, and an operator who healed an uncut graph and then halted it
+    keeps a stale uncut entry — with a reason that is no longer true — reddening
+    `/health` for the life of the process, which is exactly the false red the
+    split was introduced to avoid.
     """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
         if reason == f"mode_{record_projection.MODE_HALTED}":
             with _UNCUT_GUARD:
+                # The halt moves this graph OUT of the uncut population: its row
+                # EXISTS and it keeps its append, so it is no longer a gap and
+                # the reason recorded there (a provisioning failure, say) is no
+                # longer a fact about it.
+                _UNCUT_GRAPHS.pop(key, None)
                 _UNCUT_HALTED[key] = reason
                 if len(_UNCUT_HALTED) > UNCUT_GRAPH_CAP:
                     _UNCUT_HALTED.pop(next(iter(_UNCUT_HALTED)))
@@ -3045,6 +3069,10 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
             return
         with _UNCUT_GUARD:
             _UNCUT_OBSERVATIONS += 1
+            # The mirror direction: a graph this registry last saw `halted` is an
+            # incomplete cutover again once an operator reopens and re-seeds it,
+            # so the halt entry must not survive beside the new uncut one.
+            _UNCUT_HALTED.pop(key, None)
             if key in _UNCUT_GRAPHS or len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
                 _UNCUT_GRAPHS[key] = reason
             else:
@@ -3126,9 +3154,11 @@ def armed_but_uncut() -> dict[str, Any]:
     ⛔ WHAT CLEARS IT, AND WHAT CANNOT (#14610 review F3). This is PROCESS memory
     fed from THIS process's observations, so only this process can retract an
     entry: the graph's next armed write (:func:`record_owns_position` re-reads the
-    row and calls :func:`clear_uncut_graph`), a successful provision, or a
-    restart. `tools/record_allocator_cli.py backfill` repairs the RECORD but runs
-    in ANOTHER process and cannot retract this one's entry — and on a QUIESCENT
+    row and RETRACTS it — :func:`clear_uncut_graph` on the `active` arm, or
+    :func:`note_uncut_graph`'s own pop when the row is `halted`/`seeded`), a
+    successful provision, or a restart. `tools/record_allocator_cli.py backfill`
+    repairs the RECORD but runs in ANOTHER process and cannot retract this one's
+    entry — and on a QUIESCENT
     graph, or with the allocator flag OFF (where `record_owns_position` returns
     before its read), no later observation happens at all, so the entry — and the
     `ok` it drives — clear only on a restart. `/health` therefore publishes that

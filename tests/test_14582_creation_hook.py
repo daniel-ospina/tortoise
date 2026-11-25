@@ -672,6 +672,60 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
         rw.reset_uncut_graphs()
 
 
+def test_a_graph_TRANSITIONS_between_the_two_populations(monkeypatch):
+    """⛔ THE SPLIT IS A TRANSITION, NOT A CLASSIFICATION (#14624 review N1).
+
+    The registry records OBSERVATIONS of ONE graph, and a graph MOVES: `halt` is
+    the documented remedy for a duplicate position (`active` -> `halted`), and
+    `reopen` -> `seed` takes a halted graph back to an incomplete cutover. A
+    dispatch that only ever ADDED an entry to one map published the same graph
+    on BOTH keys after a `reopen` — and, the worse direction, kept an uncut entry
+    (with a reason that had stopped being true) over a graph an operator had
+    healed and then deliberately halted. That second construct is a `ok: false`
+    with a false reason that NO in-process write can clear: a halted graph never
+    reaches the `active` arm that calls `clear_uncut_graph`.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        tenant = ("org-14582", "graph-transitions")
+
+        # 1. Observed uncut: the hook never reached it. A GAP, and red.
+        rw.note_uncut_graph(*tenant, reason="provision_failed")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0)
+        assert block["armed_but_uncut_reasons"] == {"provision_failed": 1}
+        assert block["ok"] is False
+
+        # 2. The operator heals it out of band and then HALTS it. The graph now
+        #    has a row and is no longer a gap; the old reason is a dead fact.
+        rw.note_uncut_graph(*tenant, reason="mode_halted")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (0, 1), (
+            "a halt MOVES the graph between the populations: the uncut map holds "
+            "the deployment's GAPS, and this graph is not one of them")
+        assert block["armed_but_uncut_reasons"] == {}
+        assert block["ok"] is True, (
+            "the false red this transition prevents: a healed-then-halted graph "
+            "keeps its journal append and loses nothing, and `ok: false` here "
+            "could never clear while this process lives")
+
+        # 3. `reopen` -> `seed`: an incomplete cutover again, and NOT still filed
+        #    as a deliberate halt (whose remedy would be "nothing to do").
+        rw.note_uncut_graph(*tenant, reason="mode_seeded")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0), (
+            "one graph is in ONE population: `seeded` allocates nothing, so it "
+            "is a gap again, and `armed_but_halted` beside it would tell an "
+            "operator the halt is deliberate when the remedy is `arm`")
+        assert block["armed_but_uncut_reasons"] == {"mode_seeded": 1}
+        assert block["ok"] is False
+        assert sum(rw.armed_but_uncut_reasons().values()) \
+            == rw.armed_but_uncut()["armed_but_uncut"] == 1
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
         monkeypatch):
     """⛔ #14587 review P1 — THE OVERFLOW COUNTER WAS A LATCH IN THE `ok` FOLD.
