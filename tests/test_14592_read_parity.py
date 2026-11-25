@@ -450,6 +450,14 @@ def test_layer_lists_treat_the_two_spellings_of_one_kind_as_one_kind(tmp_path):
     `zzz:goal` must not pull in the bare `goal` rows.
     """
     with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        # ⛔ BEFORE any write: the BARE spelling must be admitted on an EMPTY
+        # graph. This is the discriminating assertion — with a row present the
+        # `carried` arm admits the spelling on its own, so the rest of this test
+        # passes on the UNFIXED validator (measured). Only the empty graph
+        # exercises the vocabulary arm the bare-form rule lives in.
+        for k in ("team", "role"):
+            r = client.get("/v1/subjects", params={"kind": k})
+            assert (r.status_code, r.json()["count"]) == (200, 0), (k, r.text)
         client.post("/v1/subjects", json={"name": "Ops", "subjectKind": "team"})
         client.post("/v1/subjects", json={"name": "QA", "subjectKind": "core:team"})
         client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
@@ -461,6 +469,14 @@ def test_layer_lists_treat_the_two_spellings_of_one_kind_as_one_kind(tmp_path):
             assert r.status_code == 200, (kind, r.text)
             assert sorted(s["name"] for s in r.json()["subjects"]) == ["Ops", "QA"], \
                 (kind, r.json())
+        # ⛔ The CARRIED arm answers the equivalence too: a graph holding the
+        # BARE off-vocabulary spelling must admit its `core:` form (the filter
+        # would answer correctly for either, so refusing one is a pure over-block).
+        client.post("/v1/objects", json={"name": "BARE", "objectKind": "organisation"})
+        for kind in ("organisation", "core:organisation"):
+            r = client.get("/v1/objects", params={"kind": kind})
+            assert r.status_code == 200, (kind, r.text)
+            assert [o["name"] for o in r.json()["objects"]] == ["BARE"], (kind, r.json())
         # …and the equivalence is `core:`-only: an arbitrary namespace is exact.
         for kind, expected in (("goal", ["ACME"]), ("core:goal", ["ACME"]),
                                ("zzz:goal", ["NS"])):

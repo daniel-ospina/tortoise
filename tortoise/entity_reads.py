@@ -169,8 +169,11 @@ def list_layer(
     if kind:
         # ⛔ THE TWO SPELLINGS OF ONE KIND ARE THE SAME KIND, so the filter is an
         # equivalence set, not equality. `core:team` and `team` are both admitted
-        # by the route's validator and BOTH are storable (`kind_is_known` strips
-        # the namespace on the write side, so a graph can hold either), and an
+        # by the route's validator and BOTH are storable: the write doors reject
+        # only a BLANK kind (`kind_fallbacks.named_kind`) and persist the
+        # caller's spelling VERBATIM — measured, one graph holds `team` and
+        # `core:team` side by side (`kind_is_known` is a bucket VALIDATOR, not a
+        # rewriter, and is not on that path at all) — and an
         # equality filter answered `200 count: 0, truncated: false` for the
         # spelling that happened not to be the stored one — the "byte-identical
         # to *this graph names no such thing*" page this read exists not to
@@ -179,7 +182,7 @@ def list_layer(
         # form; an ARBITRARY namespace stays exact, because `zzz:goal` is a
         # vocabulary item of its own and must not pull in the bare `goal` rows.
         conditions.append(f"n.{kind_prop} IN $kinds")
-        params = {"kinds": _kind_equivalents(kind)}
+        params = {"kinds": kind_equivalents(kind)}
     where = " AND ".join(conditions)
 
     # ⛔ `ro_query` (GRAPH.RO_QUERY), never `query`, on every read in this module.
@@ -211,7 +214,7 @@ def list_layer(
     return [dict(r[0]) for r in rows], total
 
 
-def _kind_equivalents(kind: str) -> list[str]:
+def kind_equivalents(kind: str) -> list[str]:
     """The spellings that NAME THE SAME KIND as ``kind`` — ``[bare, core:bare]``.
 
     Deliberately NOT a namespace-stripping generalisation: an arbitrary namespace

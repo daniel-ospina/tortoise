@@ -15911,7 +15911,15 @@ async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
     carried = await _read_offload(
         lambda: entity_reads.layer_kind_values(sdk._get_proj(), label),
         op=f"{surface}.kind_vocabulary")
-    if kind in carried:
+    # ⛔ The CARRIED arm answers the same equivalence the filter applies, not one
+    # spelling of it: a graph holding `organisation` must admit
+    # `?kind=core:organisation` too (measured before this arm: 400, while the
+    # filter would have answered correctly for either spelling — an over-block,
+    # and the same asymmetry this admission removes one level up for declared
+    # kinds). An arbitrary namespace's equivalence set is itself, so
+    # `?kind=zzz:goal` still admits only the rows that really carry it.
+    if any(spelling in carried
+           for spelling in entity_reads.kind_equivalents(kind)):
         return
     allowed = sorted(vocabulary | carried | NIL_KINDS)
     raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
