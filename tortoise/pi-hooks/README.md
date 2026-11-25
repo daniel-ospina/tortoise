@@ -111,8 +111,20 @@ The install step therefore disables the legacy entry before copying this one:
 - a **symlink** is unlinked (`rm`, no `-r`) — the agent-infra checkout it
   points at is untouched;
 - a **real directory** is moved to `~/.pi/agent/extensions/.tortoise-capture.disabled`
-  — a dot-prefixed name the loader skips (`entry.name.startsWith(".")`), so
-  its files are preserved but it no longer registers.
+  **and its entry point is retired inside it** (`index.ts` → `index.ts.disabled`).
+
+⛔ **The dot prefix alone retires NOTHING, and this record claimed it did
+(#14342).** Pi's `discoverExtensionsInDir` applies **no** dot-prefix filter: a
+direct entry loads iff its name *ends with* `.ts`/`.js` (`isExtensionFile`), and
+**every** subdirectory is resolved through `resolveExtensionEntries`
+(`package.json` `pi.extensions`, else `index.ts`/`index.js`). So
+`.tortoise-capture.disabled/index.ts` was a **loaded** extension — the guard
+moved the producer aside and Pi kept registering it, leaving exactly the
+duplication the guard exists to remove, plus a receipt that said otherwise. The
+entry point is retired by the loader's own rule and the result is **asserted**:
+a retirement that still loads fails the install rather than reporting success.
+The same rule is why the second producer below is retired to
+`reflect-hook.ts.disabled` — a name `isExtensionFile` rejects.
 
 It never runs `rm -rf`. If you deliberately keep **both** producers, the
 collision is the runtime problem tracked by **#3713** — the artifact-side
@@ -173,6 +185,35 @@ agent-infra's copy to a shim of `tortoise/pi-hooks/`, carrying no capture code
 of its own), which is `daniel-ospina/agent-infra#1671`. Until that lands, the
 installer's guard is the product-side answer and the farm is the reason it can
 regress.
+
+#### What this costs, stated — the `#10017` census authority
+
+`tools/turn_parity_census.py` takes its local record from
+`~/.tortoise/session-events/` (`--local-record-dir`) and its module records the
+owner's ruling that *that substrate, not the hosted store, is the authority*.
+Its only writer is `reflect-hook` — this seam writes `capture-spool/`. So a box
+that installs this seam and disables the second producer keeps **no** record
+rows, and a future census run has nothing to compare against. That is a
+consequence of the recorded decision ("the authority is the local record"), not
+a bug in this guard, so it is **disclosed rather than silently absorbed**: the
+authority has to move (the census reading the spool, or this seam also emitting
+the census record) before the census is meaningful on an installed box. Raised
+on #14342; not decided here.
+
+#### The shapes this guard does and does not cover
+
+Covered, by the loader's rule: a top-level `reflect-hook.ts` (retired to
+`.disabled`) and a directory entry point (retired to `index.ts.disabled`). A
+directory declaring `pi.extensions` in `package.json` is **refused**, because
+retiring its files would leave that manifest pointing at nothing — the operator
+moves it aside.
+
+Not covered, and named so it is not mistaken for coverage: a *variant* name
+inside the extensions directory (`reflect-hook.ts.bak.ts`,
+`reflect-hook.old/index.ts`) is a producer Pi loads, and neither guard touches
+it. The fleet's own extension-hygiene check refuses those by pattern in
+`agent-infra`'s `pi-bootstrap/cell-install.sh` (`denied_extension_stem`); this
+installer does not.
 
 #### The backlog is a decision, not a delete
 
