@@ -9375,9 +9375,21 @@ def _get_auto_detect(id: str) -> dict:
     if resolved:
         # ⛔ THIS ARM APPLIED NO FILTER AT ALL (#14593 review P2, measured), so a
         # plain `:Source` — not only a hybrid — returned its stored map through
-        # `tortoise_get(id)` while the typed doors withheld it. It now grades the
-        # label SET with the shared rule and filters through the one `#3998`
-        # home, so all of `tortoise_get*` answer the same way for the same node.
+        # `tortoise_get(id)`. It now grades the label SET and filters through the
+        # one `#3998` home.
+        # ⛔ SCOPE, because two earlier drafts of this comment claimed more and were
+        # measured false: this covers the UNTYPED form's CACHE answer only. The
+        # typed spellings do not share it — `tortoise_get(id, type='entity')`
+        # reaches `tortoise_get_entity` and, on an armed `prefer`/`record`
+        # deployment, the record-served arm (`sdk._get_entity_served`, which grades
+        # no label set), while `type='point'` reaches `sdk._get_point`, whose
+        # `MATCH (n:Point {id:$id}) RETURN properties(n)` publishes the stored map
+        # — so a `(:Point:Source)` hybrid answers those doors differently from this
+        # one. Both are PRE-EXISTING, out of this PR's Phase-A scope, and named as
+        # open residuals on the PR. The rule and the doors it DOES govern are
+        # stated at its home, `projection.entities.label_set_publishable`. Do not
+        # restate a family-wide parity sentence here: nothing in this file can make
+        # it true.
         entry = resolved[0]
         props = dict(entry["properties"])
         from tortoise.projection.entities import filter_source_props, label_set_publishable
