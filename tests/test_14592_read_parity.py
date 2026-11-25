@@ -1043,6 +1043,39 @@ def test_belief_folds_the_POSITION_axis_into_the_terminal_state(tmp_path):
             assert body["ep_state"] == "baseline", (entity["name"], body)
 
 
+def test_the_belief_route_documents_both_readings_of_baseline():
+    """⛔ P3 (review): `ep_state: "baseline"` has TWO readings on this route.
+
+    `baseline` is not only a DECLARED PRIOR (a `set_point_baseline` stamp whose
+    variance is the prior's own width, #3415): `ep_state_resolve`'s #2490 fold
+    also downgrades a TERMINAL claim's DECAYED posterior to `baseline` — exactly
+    what `test_belief_does_not_report_a_terminal_claims_decayed_posterior_as_measured`
+    above proves (a retracted Point answers `baseline` carrying
+    `alpha=beta=1.0`), and `current` then carries the decay, not a prior. The
+    route-level comment is the only place a
+    client of THIS field is told what the word means, and it stated only the
+    prior reading — so a client applying it takes a decayed vacuity for a
+    declared prior, the error the surrounding prose exists to prevent.
+    `docs/product/mcp-sdk-surface.md` already states both readings; this pin
+    keeps the route's copy on the same contract instead of letting a future edit
+    drop the second arm again.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent
+              / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    marker = '"ep_state": belief_state,'
+    at = source.index(marker)
+    prose = source[source.rindex("# ⛔ `measured`", 0, at):at]
+    assert "DECLARED" in prose and "PRIOR" in prose, prose
+    assert "TERMINAL" in prose and "DECAYED" in prose, (
+        "the `ep_state` comment states only the declared-prior reading of "
+        "`baseline` — the #2490 terminal fold publishes a DECAYED posterior "
+        "under the same word (see "
+        "test_belief_does_not_report_a_terminal_claims_decayed_posterior_as_"
+        "measured), so the route must say both")
+
+
 def test_relations_keeps_an_inbound_neighbour_that_carries_no_identity(tmp_path):
     """⛔ P3 (review cycle 4): the self-loop guard must not drop identity-less
     neighbours.

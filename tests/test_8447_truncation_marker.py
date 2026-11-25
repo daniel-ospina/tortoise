@@ -1763,3 +1763,82 @@ class TestTheMarkerSiteRegisterIsComplete:
             assert stale not in doc, (
                 f"the register re-introduced the stale cardinality claim "
                 f"{stale!r} — name the sites, let the AST scan keep the count")
+
+    @staticmethod
+    def _routes_reaching(callee: str) -> set[str]:
+        """Hosted route paths whose call chain reaches `callee`.
+
+        Derived from ``tortoise/hosted_api.py``'s own call graph (a handler may
+        reach the marker through a helper — ``/v1/objects`` and ``/v1/subjects``
+        both page through ``_list_layer_route`` → ``_paged``), so this cannot go
+        stale when a route is added, renamed or re-pointed.
+        """
+        import ast
+        from pathlib import Path
+
+        module = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "hosted_api.py")
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        funcs = {n.name: n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        targets = {
+            name: {(sub.func.attr if isinstance(sub.func, ast.Attribute)
+                    else getattr(sub.func, "id", ""))
+                   for sub in ast.walk(node)
+                   if isinstance(sub, ast.Call)}
+            for name, node in funcs.items()
+        }
+        reach = {callee}
+        while True:
+            grew = {n for n, called in targets.items() if called & reach} - reach
+            if not grew:
+                break
+            reach |= grew
+        routes = set()
+        for name in reach - {callee}:
+            for dec in funcs[name].decorator_list:
+                if not isinstance(dec, ast.Call) or not dec.args:
+                    continue
+                path = dec.args[0]
+                if (isinstance(path, ast.Constant)
+                        and isinstance(path.value, str)
+                        and path.value.startswith("/v1/")):
+                    routes.add(path.value)
+        return routes
+
+    def _register_entry(self, site: str) -> str:
+        """The register bullet for ONE ``<module>::<function>``, prose included."""
+        doc = self._module_docstring()
+        marker = f"- ``{site}``"
+        start = doc.find(marker)
+        assert start != -1, f"the register names no entry for {site}"
+        rest = doc[start + len(marker):]
+        end = rest.find("\n- ``")
+        return marker + (rest if end == -1 else rest[:end])
+
+    def test_the_paged_entry_names_every_route_that_pages_through_it(self):
+        """``_paged`` marks THREE routes; the register must name all three.
+
+        The entry named ``GET /v1/objects`` and ``GET /v1/subjects`` only, and
+        described ``candidates`` as an exact ``count()`` — both false for the
+        third caller, ``GET /v1/sources`` (``candidates=len(rows)`` over
+        ``list_sources``' whole-population answer). An auditor grepping the
+        register for ``/v1/sources`` therefore found no site and concluded the
+        surface is UNMARKED, which is the inverse of the failure this register
+        exists to prevent (#14592 review, P3).
+
+        Route coverage is DERIVED from the call graph, so a new route that pages
+        through ``_paged`` reds here until the register names it — the same
+        guarantee ``test_every_marker_call_site_is_named_in_the_register`` gives
+        at ``module::function`` granularity, at route granularity.
+        """
+        routes = self._routes_reaching("_paged")
+        assert routes == {"/v1/objects", "/v1/subjects", "/v1/sources"}, (
+            "the routes reaching `_paged` changed shape — re-derive which of "
+            f"them are SKIP/LIMIT-paged before trusting this pin: {sorted(routes)}")
+        entry = self._register_entry("tortoise/hosted_api.py::_paged")
+        missing = sorted(r for r in routes if r not in entry)
+        assert not missing, (
+            f"the register's `_paged` entry does not name {missing} — a lane "
+            "auditing #8447 greps the register for its route and concludes the "
+            "surface is unmarked; name the route in that bullet")

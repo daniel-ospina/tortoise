@@ -89,7 +89,7 @@ page, so they are never marked here. The criterion is REACHABILITY, and it is
 applied per surface rather than stated once: the marker is written where a row
 dropped at the cap is unreachable by any subsequent call.
 
-Two hosted layer-list routes are the recorded exception, and they are an
+The hosted ``_paged`` routes are the recorded exception, and they are an
 exception in FORM only (``hosted_api.py::_paged``, below): they are
 ``SKIP``/``LIMIT`` paged, so their marker answers the same reachability question
 — *"does the population extend beyond what THIS RESPONSE delivered?"* — as
@@ -116,13 +116,17 @@ are rather than naming them:
   landed on ``main`` after this register was written; a new site joins this list
   however it arrives).
 - ``tortoise/hosted_api.py::_paged`` — hosted ``GET /v1/objects`` and
-  ``GET /v1/subjects``, the ``SKIP``/``LIMIT``-paged pair. ⚠️ Its verdict is
-  OFFSET-AWARE and is the recorded exception described above: ``candidates`` is
-  an EXACT ``count()`` under the same WHERE and the marker is asked about
-  ``offset + delivered``, so a page with matches behind it is ``truncated: true``
-  (plus ``total_available``) and the TERMINAL page — and a page past the end — is
-  ``false``. Computed from ``candidates > delivered`` alone, the terminal page
-  and an offset past the end both reported ``truncated: true``.
+  ``GET /v1/subjects`` (both via ``_list_layer_route``) and hosted
+  ``GET /v1/sources`` (via ``list_sources``), i.e. all THREE ``_paged`` callers.
+  ⚠️ Its verdict is OFFSET-AWARE and is the recorded exception described above:
+  the marker is asked about ``offset + delivered``, so a page with matches
+  behind it is ``truncated: true`` (plus ``total_available``) and the TERMINAL
+  page — and a page past the end — is ``false``. Computed from
+  ``candidates > delivered`` alone, the terminal page and an offset past the end
+  both reported ``truncated: true``. ``candidates`` is EXACT for all three, but
+  it is not one shape: an exact ``count()`` under the same WHERE for the two
+  layer lists, and the WHOLE-POPULATION list length (``candidates=len(rows)``
+  over ``list_sources``' already-complete answer) for ``/v1/sources``.
 - ``tortoise/hosted_api.py::get_entity_relations`` — hosted
   ``GET /v1/entities/{id}/relations``: a ``limit + 1`` PROBE row taken AFTER the
   ``SKIP``/``LIMIT`` window, so it proves *there are more edges than this page

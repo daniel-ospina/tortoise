@@ -16337,9 +16337,15 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                      or entity.get("url") or entity.get("eventId")),
         },
         # ⛔ `measured` | `baseline` | `absent` (#11702) — the word that makes
-        # `current` readable: `measured` is evidence-derived, `baseline` is a
-        # DECLARED PRIOR (a `set_point_baseline` stamp whose variance is the
-        # prior's own width, #3415), and `absent` comes with `current: null`.
+        # `current` readable: `measured` is evidence-derived, `absent` comes with
+        # `current: null`, and `baseline` covers TWO readings — EITHER a DECLARED
+        # PRIOR (a `set_point_baseline` stamp whose variance is the prior's own
+        # width, #3415) OR, via `ep_state_resolve`'s #2490 terminal fold, a
+        # TERMINAL claim's DECAYED posterior (`live.VACUITY_BELIEF` — e.g.
+        # `alpha=beta=1.0`, whose mean 0.5 is a vacuity, NOT a prior). So
+        # `baseline` alone does not mean "declared": read the entity's
+        # `status`/`outdated` (and `isClosed`/`pipelineSlot`) — the same three
+        # axes the fold above passes — before treating `current` as a prior.
         "ep_state": belief_state,
         # `null` + a named reason, never a fabricated Beta(1,1): a node with no
         # persisted belief has no posterior, and the neutral mean is not one.
