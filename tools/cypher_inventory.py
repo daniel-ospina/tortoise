@@ -161,8 +161,11 @@ DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
 #: "the doc's numbers are wrong" (#13098 review, P2). The appended table's own
 #: first five cells (`markdown_table`) are the shape nothing but the generator
 #: emits, and they still match a pasted appendix — measured against the tracked
-#: document on `main` (`git show origin/main:docs/architecture/CYPHER-INVENTORY.md`):
-#: 1327 of 1327 rows, zero prose rows.
+#: document on `main` BEFORE this split, at `a29b5f24ce` (`git show
+#: a29b5f24ce:docs/architecture/CYPHER-INVENTORY.md` — that path leaves `main` with
+#: this change, so the command is stamped to the sha it was measured at): every one
+#: of its appendix rows matched, and no prose row did. ⛔ No row count is typed
+#: here: the appendix's own length is the number.
 #:
 #: ⚠️ A CHANGE TO `markdown_table`'s COLUMNS MUST RE-CUT THIS PATTERN: the arm
 #: `test_a_hand_authored_prose_row_is_not_read_as_a_census_row` grades the pattern
