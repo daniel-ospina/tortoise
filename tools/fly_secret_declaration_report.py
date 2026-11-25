@@ -170,14 +170,15 @@ TITLE_SUFFIX = (
 #: extent either way.
 #:
 #: ⛔ DO NOT CLAIM THE `.+?` SPELLING IS SAFER — two revisions of this comment tried,
-#: and both were measured false. With `$` present the spellings capture IDENTICALLY
-#: (0 differing captures across 20,005 generated cases, double-suffix included). With
-#: `$` REMOVED the non-greedy spelling is strictly WORSE: it truncates a suffix-bearing
-#: name (`"BEFORE <suffix> AFTER"` reads back as `"BEFORE "`) and it FOLDS distinct
-#: names onto one read-back (`"A"` and `"A <suffix> B"` both read back as `"A"`),
-#: while `(.+)` round-trips both exactly. So the non-greedy spelling is retained only
-#: because it is what shipped; it carries no protection of its own, and it is not the
-#: safer choice. The anchor does the work — and if the anchor is ever loosened,
+#: and both were measured false. With `$` present the spellings capture IDENTICALLY (a
+#: hard literal `$` forces the group's extent from either end, and the greedy spelling
+#: leaves the suite green). With `$` REMOVED the non-greedy spelling is strictly WORSE:
+#: it truncates a suffix-bearing name (`"BEFORE <suffix> AFTER"` reads back as
+#: `"BEFORE "`) and it FOLDS distinct names onto one read-back (`"A"` and
+#: `"A<suffix> B"` both read back as `"A"`), while `(.+)` round-trips both exactly. So
+#: the non-greedy spelling is retained only because it is what shipped; it carries no
+#: protection of its own, and it is not the safer choice. The anchor does the work — and
+#: if the anchor is ever loosened,
 #: `tests/…::test_a_name_that_contains_the_title_suffix_still_round_trips` reds on the
 #: truncation rather than letting the loss pass unnoticed.
 _TITLE_RE = re.compile(

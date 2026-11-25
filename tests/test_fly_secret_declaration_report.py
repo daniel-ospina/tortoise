@@ -657,15 +657,13 @@ def test_a_name_that_contains_the_title_suffix_still_round_trips():
     group is free to stop early, so the class is reachable in production. The comment
     above `_TITLE_RE` currently states the same causal fact this docstring does — noted
     as CURRENTLY AGREEING rather than as an enforced invariant, because both are prose
-    and NOTHING READS THAT COMMENT. The five rows that exercise the grammar split
-    four-and-one: `test_the_issue_title_is_a_stable_dedupe_key`,
-    `test_the_resolve_sweep_only_recognises_this_workflows_own_titles`, the whitespace
-    row and this row all drive the shipped tool through
-    `_tool(… '--title' / '--filter-owned-titles')` and inspect its OUTPUT, never the
-    comment; the fifth, `test_the_workflow_owns_the_grammar_in_exactly_one_place`, reads
-    the WORKFLOW text for a stray title literal and calls `_tool` not at all. So neither
-    the Python comment nor its wording is read by any row. They can drift, and no row
-    here would notice.
+    and NOTHING READS THAT COMMENT, so neither its wording nor its presence is pinned by
+    any row. They can drift, and no row would notice. What IS pinned is the grammar's
+    BEHAVIOUR: a change to `_TITLE_RE` reds this row, the whitespace row, and — measured
+    by stripping the suffix's leading space — the behavioural
+    `test_a_clean_tick_files_nothing_and_closes_what_it_owns` (3 failed, 46 passed), while
+    `test_the_workflow_owns_the_grammar_in_exactly_one_place` separately keeps the shell
+    from spelling a title literal of its own. No row reads the comment.
     """
     suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
     for name in (
