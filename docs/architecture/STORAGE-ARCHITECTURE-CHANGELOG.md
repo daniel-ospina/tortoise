@@ -2774,14 +2774,20 @@ read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NIN
 bound stays 4). `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the same figures and enumerates the same
 readers, so it moves with it, including its `Outside this nineteen` list marker.
 
-**Also in this change, a stale cite the branch's own `+1082` lines in `hosted_api.py` created:**
-`tools/graphevent_home.py`'s export-scan sentence (and the README and `readers.json` that mirror it)
-still named `hosted_api.py`'s `:35810` for `_export_graph_snapshot`. Re-derived BY CONTENT at this head —
-the def at `:36892`, the `"GraphEvent" in labels` branch at `:36922`, the `events.append(d)` at
-`:36930` — and the artifact regenerated from the verb
-(`python tools/graphevent_home.py readers > docs/evidence/13094-graphevent/readers.json`), never
-hand-edited. `test_the_export_scan_cites_open_on_the_statements_they_name` reddened on the carried
-`35810` and is green on the re-derived triple.
+**Also in this change, a stale cite the branch's own `+1082` lines in `hosted_api.py` created — and
+the reconcile onto `origin/main` then made the fix a NO-OP:** `tools/graphevent_home.py`'s export-scan
+sentence (and the README and `readers.json` that mirror it) named `hosted_api.py`'s `:35810` for
+`_export_graph_snapshot`, which the branch's own lines had moved. The reconcile took main's
+`hosted_api.py` **and** main's already-re-derived artefacts, so this branch performs no artefact edit
+at all (`git diff origin/main HEAD -- tortoise/hosted_api.py tools/graphevent_home.py
+docs/evidence/13094-graphevent/` is empty) and the triple the artefacts carry is main's. Verified
+against the tree at this head rather than restated from a captured number: `_export_graph_snapshot`
+at `:36937`, the `"GraphEvent" in labels` branch at `:36967`, `events.append(d)` at `:36975` — which
+is what `tools/graphevent_home.py`, the README and `readers.json` all name.
+`test_the_export_scan_cites_open_on_the_statements_they_name` is green here (40 passed in
+`tests/test_13094_graphevent_home.py`). ⚠️ A re-derivation this change did NOT perform is not claimed
+above: the symbols are the authority and a triple copied into prose from an earlier head is exactly
+the rot the paragraph before this one is about.
 
 **Gates at this change.** `tests/test_7948_about_object_read_sites.py` 61 passed ·
 `tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs`, `test_12184_shifted_cites`,

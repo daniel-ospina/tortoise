@@ -5738,9 +5738,14 @@ def test_the_module_filter_admits_a_split_traversal():
     # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
     # is PRE-EXISTING, so P7 added none of them.
     # ⛔ 29/43 -> 30/45 at `#14592`'s head (`cy-14593`): `tortoise/entity_reads.py`
-    # arrived with ONE symbol (`entity_relations`, the relations preview) carrying the
-    # SAME untyped hop in BOTH directions — `-[r]->` and its `UNION ALL` reverse — so the
-    # corpus gains exactly ONE key and TWO rows. It is declared as a §13 ROW (row 46)
+    # arrived with ONE symbol (`entity_relations`, the relations preview) whose
+    # relations query is built in TWO string statements — `inner` (which carries the
+    # untyped hop in BOTH directions, `-[r]->` and its `UNION ALL` reverse) and the
+    # `CALL { … }` consumer that re-assembles it — and the derivation keys BOTH as
+    # sites, so the corpus gains exactly ONE key and TWO rows. ⚠️ The two rows are the
+    # two STATEMENTS, not the two directions: each statement is walked in both
+    # orientations, so deleting either direction would leave the count at 30/45, while
+    # dropping either statement moves it. It is declared as a §13 ROW (row 46)
     # rather than an `EMPTY_PATTERN` entry for row 42's reason: the walk DOES read the
     # edge for a referent (the mechanism IS part of the answer), so the honest
     # declaration is a row, and the entry form would assert a fact that is not true.
