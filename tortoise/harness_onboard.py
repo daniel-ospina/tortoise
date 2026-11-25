@@ -632,10 +632,27 @@ def _fence_scan(text: str) -> tuple[list[tuple[int, int]], int | None]:
     # ⛔ WHAT MUST NOT MOVE: the nested-example decision. A documentation example whose
     # fence is indented +1..+4 inside an outer one leaves strict's counts SYMMETRIC
     # (`0 BEGIN / 0 END` — the markers are fenced, i.e. documentation), so strict is kept
-    # and `--uninstall` never reads the example as the real block. Choosing by "which
-    # reading is well-formed" instead would pick the lenient one there and DELETE the
-    # example's body, which is why the trigger is `strict left it MALFORMED`, not
-    # `lenient looks better`.
+    # and `--uninstall` never reads the example as the real block.
+    #
+    # ⛔ THE TRIGGER, STATED ACCURATELY (a review measured this and the earlier wording
+    # denied it): it is NOT "strict left it malformed, full stop". The code below takes
+    # the lenient reading when strict leaves the pair MALFORMED **or when the lenient
+    # reading's own counts are BALANCED** — i.e. it prefers the SELF-CONSISTENT reading.
+    # The nested-example decision survives because strict is symmetric there (`0/0`), so
+    # the first branch already returned and lenient is never consulted; that is a
+    # property of that fixture, not of the trigger.
+    #
+    # ⛔ KNOWN RESIDUAL, recorded rather than implied (2 of 200,000 randomly generated
+    # documents, both containing U+2028 or `\v` inside fence lines): a document where
+    # STRICT is asymmetric and LENIENT is symmetric flips from REFUSAL to WRITE. Measured
+    # on this head against the pre-`2249288c654c` reader. It needs exotic line separators
+    # inside a fence AND a marker pair that only one reading sees, so no realistic
+    # document reached it in 2,646 + 2,500 structured and 133 writer-level round trips;
+    # the honest discriminator would be a design decision, and the obvious candidate
+    # (`lenient spans ⊆ strict spans`) does NOT separate the two cases. Preferring
+    # REFUSAL whenever the two readings disagree is the conservative fix and is NOT taken
+    # here because it would refuse the legal-`+2`-closer file this change exists to stop
+    # refusing. Do not read the sentence above as "the lenient branch cannot lose text".
     if open_line is None and _marker_counts_balanced(text, spans):
         return spans, None
     lenient_spans, lenient_open = _fence_scan_pass(text, allowance=CLOSER_ALLOWANCE_COLUMNS)
