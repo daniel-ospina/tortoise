@@ -1053,6 +1053,21 @@ def test_the_hook_arms_and_does_not_only_seed():
 def test_the_uncut_registry_is_bounded_and_counts_past_the_cap(monkeypatch):
     rw.reset_uncut_graphs()
     try:
+        # ⛔ THE LITERAL, PINNED (#14587 review P3). Every other use of the cap in
+        # this suite is RELATIVE to the same constant (`== rw.UNCUT_GRAPH_CAP`,
+        # `range(rw.UNCUT_GRAPH_CAP + 8)`), so both sides of those assertions move
+        # together: raising it to 1_000_000 — which makes "bounded" a claim about a
+        # million dict entries and makes the `/health` comment's "the field cannot
+        # be made honest by memory growth" materially false — reddened NOTHING.
+        # The mechanism below is pinned; this pins the VALUE the mechanism's
+        # argument is stated against, so a new number has to be argued for here.
+        assert rw.UNCUT_GRAPH_CAP == 32, (
+            f"UNCUT_GRAPH_CAP is {rw.UNCUT_GRAPH_CAP}, not 32. The cap is the "
+            "number the overflow argument in `record_writer` is written against "
+            "(a bounded map, a lower-bound overflow counter beside it, and an "
+            "`ok` that follows only the retractable entries) — re-derive that "
+            "argument for the new value, or say here why the new number is "
+            "still bounded")
         for i in range(rw.UNCUT_GRAPH_CAP + 8):
             rw.note_uncut_graph("org-14582", f"graph-{i}", reason="no_cursor_row")
         report = rw.armed_but_uncut()
@@ -2484,6 +2499,12 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
 
     real = cli._cmd_backfill(_conn(), args)
     assert (real["considered"], real["seeded"], real["refused"]) == (1, 1, 0)
+    # ⛔ THE COUNTS RECONCILE (#14587 review P3): every considered graph lands in
+    # exactly one bucket, so a reader summing them cannot mistake a raced or
+    # partly-refused run for a complete one.
+    assert real["considered"] == (
+        real["seeded"] + real["rearmed"] + real["refused"] + real["unchanged"]
+    ), real
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "a graph with 3 position rows must seed to 3 — its next write is 4")
 
@@ -2493,6 +2514,9 @@ def test_the_backfill_reports_its_three_counts_and_is_idempotent(
     # that cannot tell a healed graph from a broken one.
     again = cli._cmd_backfill(_conn(), args)
     assert (again["considered"], again["seeded"], again["refused"]) == (0, 0, 0), again
+    assert again["considered"] == (
+        again["seeded"] + again["rearmed"] + again["refused"] + again["unchanged"]
+    ), again
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "the backfill must be IDEMPOTENT: a second run may not move the counter")
 
@@ -2700,6 +2724,60 @@ def test_the_backfill_refuses_a_gapped_graph_with_its_reason(armed, record_schem
     assert refusal["remedy"] == (
         f"seed --org-id {org} --graph-id {graph} --enumerated-floor 4")
     assert _counter(record_schema, org, graph) is None
+    # ⛔ And the RUN's exit code says so (#14587 review P3): the counts reconcile
+    # to a refusal, and `seed` on the same state returns EXIT_REFUSED already.
+    assert payload["considered"] == (
+        payload["seeded"] + payload["rearmed"] + payload["refused"]
+        + payload["unchanged"]
+    ), payload
+    assert cli._exit_code_for(payload, dry_run=False) == cli.EXIT_REFUSED, (
+        "a backfill that REFUSED a graph returned a clean exit code — a scripted "
+        "caller reads that code, and the graph still allocates nothing")
+
+
+def test_a_backfill_that_refused_a_graph_does_not_exit_ok():
+    """⛔ EXIT 0 OVER UNWRITTEN GRAPHS IS THE DEFECT, NOT AN ERGONOMICS NOTE.
+
+    `backfill` prints `K refused` with a working remedy per graph and returned
+    ``EXIT_OK`` anyway, while the single-graph ``seed`` returns ``EXIT_REFUSED``
+    on the same `SeedRefused` (#14587 review P3, carried through four rounds).
+    A human reading the payload is told everything; the scripted caller — the
+    operator this verb exists for — reads the exit code.
+
+    Mutants, each measured: delete the `_exit_code_for` call in `main` and return
+    `EXIT_OK` (the wiring arm reds); drop the `refused > 0` arm (the counted arm
+    reds); drop the `dry_run` guard (the projection arm reds).
+    """
+    import inspect
+
+    from tools import record_allocator_cli as cli
+
+    refusing = {"command": "backfill", "considered": 3, "seeded": 1,
+                "rearmed": 1, "refused": 1, "unchanged": 0}
+    assert cli._exit_code_for(refusing, dry_run=False) == cli.EXIT_REFUSED, (
+        "refused: 1 was reported and the run still exits 0")
+    # A clean run is still clean — the arm cannot be "always refuse".
+    clean = {"command": "backfill", "considered": 2, "seeded": 2,
+             "rearmed": 0, "refused": 0, "unchanged": 0}
+    assert cli._exit_code_for(clean, dry_run=False) == cli.EXIT_OK, clean
+    # `--dry-run` wrote nothing; its refusals are a PROJECTION, and refusing a
+    # pre-flight for correctly predicting a refusal would defeat its purpose.
+    assert cli._exit_code_for(refusing, dry_run=True) == cli.EXIT_OK, (
+        "a `--dry-run` that predicted a refusal returned EXIT_REFUSED — the "
+        "pre-flight the operator runs BEFORE deciding now reports failure for "
+        "doing its job")
+    # ``refused`` is a STRING token on the payloads the acknowledgement / `seed`
+    # refusals emit; those paths return EXIT_REFUSED where they are built, and a
+    # truthy string must not be read as a count here (a bool is not a count
+    # either, `isinstance(True, int)`).
+    for token in ("unacknowledged-cutover", "divergence", True, None, 0):
+        assert cli._exit_code_for({"refused": token}, dry_run=False) == cli.EXIT_OK, (
+            f"a non-count `refused` token was read as a refusal count: {token!r}")
+    # ⛔ THE WIRING, because a decision function nothing calls is a comment.
+    main_src = inspect.getsource(cli.main)
+    assert "return _exit_code_for(" in main_src, (
+        "`main` no longer returns `_exit_code_for(...)`: the payload is emitted "
+        "and the exit code is `EXIT_OK` again, whatever the run refused")
 
 
 def _uncut_graph(conn, label: str, *, positions=()):

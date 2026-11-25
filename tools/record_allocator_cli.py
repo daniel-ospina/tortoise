@@ -26,7 +26,10 @@ WHAT THE VERBS ARE FOR, one line each:
   transaction per graph, and it reports its three counts:
   ``N considered / M seeded / K refused`` with a reason per refusal. Refusal is
   a legal outcome here — a graph whose journal enumeration and record positions
-  disagree is NOT silently seeded — and it is never a silent skip.
+  disagree is NOT silently seeded — and it is never a silent skip. ⛔ AND IT IS
+  NOT A CLEAN EXIT: ``K > 0`` returns ``EXIT_REFUSED``, because a scripted
+  caller reads the exit code and every graph in `K` still allocates nothing.
+  ``--dry-run`` is exempt (it wrote nothing and its refusals are a projection).
   ``--dry-run`` exercises the REAL decision path and rolls the whole run back,
   so the operator can see the population and the refusals before writing
   anything.
@@ -626,6 +629,17 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
 
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
+    #: ⛔ THE COUNTS RECONCILE, OR THE REPORT IS NOT A REPORT (#14587 review P3).
+    #: `considered` is the population; every graph in it lands in exactly one of
+    #: `seeded` (this run wrote the row), `rearmed` (the arm pass moved an
+    #: already-`seeded` row to `active`, writing no row), `refused` (the seed's
+    #: guard refused it, remedy printed) or `unchanged` (a concurrent actor moved
+    #: the mode under this run, so the graph was rolled back untouched). Before
+    #: this, `rearmed`/`unchanged` were printed per graph but counted in NEITHER
+    #: total, so `considered != seeded + refused` on the race — a reader summing
+    #: the headline counts could not tell a short run from a raced one.
+    #: A `--dry-run` counts what it WOULD do, the same convention `seeded` follows.
+    rearmed = unchanged = 0
     for graph_id in graphs:
         # ⛔ RE-SCOPE EVERY ITERATION, AND THIS IS NOT DEFENSIVE. `scope_tenant`
         # sets a TRANSACTION-LOCAL GUC and `set_config(..., true)` ends with the
@@ -711,6 +725,7 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             # SAVEPOINT contract this verb documents).
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
+            unchanged += 1
             entry |= {"outcome": "unchanged", "reason": str(exc)}
             entries.append(entry)
             continue
@@ -739,10 +754,11 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             if arm_them:
                 entry["armed"] = True
         if rearm_only:
-            # Counted as CONSIDERED and ARMED, never as SEEDED: this run wrote no
-            # row for it, and a `seeded` count that included it would report a
-            # write that did not happen.
+            # Counted as CONSIDERED, ARMED and REARMED, never as SEEDED: this run
+            # wrote no row for it, and a `seeded` count that included it would
+            # report a write that did not happen.
             armed += 1
+            rearmed += 1
         else:
             seeded += 1
             if arm_them:
@@ -762,6 +778,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "seeded": seeded,
         "refused": refused,
         "armed": armed if arm_them else None,
+        #: ⛔ THE TWO OUTCOMES THAT WERE COUNTED NOWHERE (#14587 review P3):
+        #: `considered == seeded + rearmed + refused + unchanged` on every run,
+        #: read or dry. A scripted caller that only reads the headline counts can
+        #: now tell a full run from a raced one instead of assuming the missing
+        #: graphs were never in the population.
+        "rearmed": rearmed,
+        "unchanged": unchanged,
         "refusals": [e for e in entries if e.get("outcome") == "refused"],
         "graphs": entries,
         "cannot_see": (
@@ -986,6 +1009,32 @@ def main(argv: list[str] | None = None) -> int:
             conn.close()
 
     _emit(args, payload)
+    return _exit_code_for(payload, dry_run=bool(getattr(args, "dry_run", False)))
+
+
+def _exit_code_for(payload: dict[str, Any], *, dry_run: bool) -> int:
+    """⛔ A REFUSAL IS NOT A CLEAN EXIT (#14587 review P3).
+
+    `backfill` printed `K refused` with a working remedy per graph and then
+    returned ``EXIT_OK``, while the single-graph ``seed`` returns
+    ``EXIT_REFUSED`` on the same `SeedRefused`. A human reading the payload is
+    told everything; a SCRIPTED caller reads the exit code, and it was told
+    "fine" over graphs that still allocate nothing — the exact shape (`exit 0`
+    over uncut graphs) this verb exists to remove. So the exit code covers the
+    refusals it reports.
+
+    A `--dry-run` does not: it wrote nothing, its refusals are a projection, and
+    refusing a pre-flight because it correctly PREDICTED a refusal would make
+    the dry run useless for the decision it exists to inform.
+    """
+    if dry_run:
+        return EXIT_OK
+    refused = payload.get("refused")
+    # ``refused`` is an INT for ``backfill`` and a STRING token on the refusal
+    # payloads other verbs emit; only the counted form is a run-level verdict
+    # here (the string forms already returned EXIT_REFUSED where they were built).
+    if isinstance(refused, int) and not isinstance(refused, bool) and refused > 0:
+        return EXIT_REFUSED
     return EXIT_OK
 
 
