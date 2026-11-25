@@ -19,9 +19,12 @@ import {
   dismiss,
   emptyState,
   entryKeyOf,
+  entryOf,
   isDismissed,
   periodMs,
+  probeStorage,
   readState,
+  rowKeyOf,
   snooze,
   snoozedUntil,
   storageKey,
@@ -204,6 +207,30 @@ test('a store that throws reports persisted:false — the panel must not promise
   assert.equal(writeState(null, 'k', emptyState()), false)
 })
 
+test('the storage probe judges READS, so a merely-FULL store is not reported as blocked', () => {
+  // The probe used to WRITE, so a store at its quota threw and was reported as
+  // "your browser blocked local notification storage" — a cause it cannot know,
+  // about a store that reads fine and whose real fact (this write failed) has its
+  // own sentence. A store that blocks storage throws on the READ too.
+  const full = {
+    getItem: () => null,
+    setItem: () => { throw new Error('QuotaExceededError') },
+    removeItem: () => {},
+  }
+  assert.equal(probeStorage(full), full, 'a full store still reads')
+  const blocked = {
+    getItem: () => { throw new Error('SecurityError: storage disabled') },
+    setItem: () => {},
+    removeItem: () => {},
+  }
+  assert.equal(probeStorage(blocked), null)
+  assert.equal(probeStorage(null), null)
+  assert.equal(probeStorage(undefined), null)
+  // The probed store is a working one: the round trip it is judged by still works.
+  const ok = fakeStorage({ [storageKey({ userId: 'u', orgId: 'o' })]: '{}' })
+  assert.equal(probeStorage(ok), ok)
+})
+
 test('expired snoozes are pruned on READ (a tab closed for a week reopens clear)', () => {
   const episode = entryKeyOf(alert())
   const storage = fakeStorage()
@@ -301,33 +328,107 @@ test('an episode renders as ONE row carrying its ×N count and window', () => {
   assert.equal(entry.ageLabel, '5 min ago')
 })
 
-test('two rows that share an identity render as ONE row, and the newest wins', () => {
-  // The local key is `type|message`, so two separate bouts of the same flag type
-  // — weeks apart — are one decision and must be one ROW: two React children with
-  // the same key would drop one of them, and a list that silently loses a
-  // notification is the defect class this change exists to remove.
+test('two episodes that share an identity are TWO rows, each with its own count', () => {
+  // The DECISION identity is `type|message`, and two separate bouts of the same
+  // flag type share it (the customer-facing flag message carries no rule token).
+  // They are still two server episodes, so they are two ROWS: collapsing them
+  // deleted an episode from a security list, and keying the render on the shared
+  // identity made React drop one of two children with the same key.
   const olderBout = alert({
     message: 'same wording',
-    at: new Date(NOW.getTime() - 20 * DAY).toISOString(),
+    at: new Date(NOW.getTime() - 3 * DAY).toISOString(),
     count: 3,
+    episode: 'flag|rule-a|older',
   })
   const newerBout = alert({
     message: 'same wording',
     at: new Date(NOW.getTime() - 1 * HOUR).toISOString(),
     count: 9,
-    episode: 'flag||rekeyed',
+    episode: 'flag|rule-b|newer',
   })
   const ledger = buildLedger({ alerts: [olderBout, newerBout], state: emptyState(), now: NOW })
-  assert.equal(ledger.current.length, 1)
-  assert.equal(ledger.current[0].countLabel, '×9', 'the row describes the live episode')
-  // Order of the input does not matter — the newest still wins.
+  assert.equal(ledger.current.length, 2, 'two episodes, two notifications')
+  assert.deepEqual(ledger.current.map((e) => e.countLabel), ['×9', '×3'])
+  // Distinct ROW keys (so React keeps both) over ONE decision key (so a
+  // dismissal still means one decision).
+  assert.notEqual(ledger.current[0].rowKey, ledger.current[1].rowKey)
+  assert.equal(ledger.current[0].key, ledger.current[1].key)
+  assert.equal(rowKeyOf(newerBout), 'episode:flag|rule-b|newer')
+  // Order of the input does not matter.
   const reversed = buildLedger({ alerts: [newerBout, olderBout], state: emptyState(), now: NOW })
-  assert.equal(reversed.current.length, 1)
-  assert.equal(reversed.current[0].countLabel, '×9')
-  // One dismissal covers both, which is the same "one episode, one decision"
-  // trade-off documented on `entryKeyOf`.
-  const state = dismiss(emptyState(), entryKeyOf(newerBout), NOW)
-  assert.equal(buildLedger({ alerts: [olderBout, newerBout], state, now: NOW }).unresolved, 0)
+  assert.deepEqual(reversed.current.map((e) => e.rowKey), ledger.current.map((e) => e.rowKey))
+})
+
+test('the INCIDENT GATE: what HAPPENED after a dismissal is not covered by it', () => {
+  // The rule the server already applies (`_episode_acknowledged` in
+  // tortoise/abuse.py, "THE INCIDENT GATE"): for an incident, a row newer than
+  // the dismissal re-opens the episode — otherwise one dismissal hides a
+  // suspension that happened a week later. An unbounded local dismissal was
+  // exactly the direction that gate rejects.
+  const seen = alert({ message: 'Suspicious activity flagged on this Organization' })
+  const key = entryKeyOf(seen)
+  const state = dismiss(emptyState(), key, NOW, seen)
+  assert.equal(buildLedger({ alerts: [seen], state, now: NOW }).unresolved, 0, 'what was seen is dismissed')
+
+  // A re-suspension after an appeal: same type, same (constant) message, later.
+  const later = alert({
+    message: 'Suspicious activity flagged on this Organization',
+    at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    episode: 'flag|rule-a|later',
+    count: 4,
+  })
+  assert.equal(entryKeyOf(later), key, 'the two share one client-visible identity')
+  const after = buildLedger({ alerts: [seen, later], state, now: NOW })
+  assert.equal(after.unresolved, 1, 'the later incident is unresolved again')
+  assert.deepEqual(after.current.map((e) => e.alert), [later])
+  assert.deepEqual(after.dismissed.map((e) => e.alert), [seen], 'the old one stays dealt with')
+
+  // …and dismissing the OLDER of two live episodes covers the older history but
+  // not the newer row: you dismissed what you saw, not what came after.
+  const coversNewer = dismiss(emptyState(), key, NOW, later)
+  assert.equal(buildLedger({ alerts: [seen, later], state: coversNewer, now: NOW }).unresolved, 0)
+
+  // An OBSERVATION is the opposite: a velocity row re-reported every five
+  // minutes is the SAME ongoing measurement, so a newer row stays dismissed.
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+  })
+  const measuredState = dismiss(emptyState(), entryKeyOf(measured), NOW, measured)
+  const grown = {
+    ...measured,
+    at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    episode: 'read_velocity||later',
+  }
+  assert.equal(
+    buildLedger({ alerts: [grown], state: measuredState, now: NOW }).unresolved,
+    0,
+    'a measurement re-reported later is one ongoing measurement',
+  )
+})
+
+test('a truncated bout says its count is a FLOOR, in the row and in the detail', () => {
+  // `×100+` is a count that STOPPED, and the sentence that explained why was
+  // deleted with the previous surface while the `+` survived.
+  const truncated = alert({
+    count: 100,
+    truncated: true,
+    first_at: new Date(NOW.getTime() - 3 * HOUR).toISOString(),
+  })
+  const [entry] = buildLedger({ alerts: [truncated], state: emptyState(), now: NOW }).current
+  assert.equal(entry.countLabel, '×100+')
+  assert.equal(entry.truncated, true, 'the field must reach the render, not just the +')
+  const floor = detailOf(truncated, NOW).fields.find((f) => f.label === 'Older occurrences')
+  assert.ok(floor, 'the detail view must explain the floor')
+  assert.match(floor.value, /older than the window we can identify/)
+
+  // A row whose scan was NOT cut makes no floor claim at all.
+  assert.equal(entryOf(alert({ count: 3 })).truncated, false)
+  assert.equal(
+    detailOf(alert({ count: 3 }), NOW).fields.find((f) => f.label === 'Older occurrences'),
+    undefined,
+  )
 })
 
 test('an activity row is flagged as a measurement, an incident row is not', () => {
@@ -360,12 +461,16 @@ test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect
     ...first,
     episode: 'flag||2026-11-24T09:00:00Z',
     first_at: '2026-11-24T09:00:00Z',
-    at: new Date(NOW.getTime() - 1 * MIN).toISOString(),
     count: 12,
   }
   assert.equal(entryKeyOf(rekeyed), key, 'a growing bout keeps its identity')
-  const state = dismiss(emptyState(), key, NOW)
+  // The dismissal is recorded against the row's own `at` (what the reader saw),
+  // so a re-keyed episode whose `at` did NOT move stays dismissed.
+  const state = dismiss(emptyState(), key, NOW, first)
   assert.equal(buildLedger({ alerts: [rekeyed], state, now: NOW }).unresolved, 0)
+  // …and the row identity DOES move with the server key, which is the point of
+  // keeping the two keys apart.
+  assert.notEqual(rowKeyOf(rekeyed), rowKeyOf(first))
 
   // A DIFFERENT subject is a different identity: the `auth_ip` message embeds the
   // country, so two sign-in locations are never one dismissal.

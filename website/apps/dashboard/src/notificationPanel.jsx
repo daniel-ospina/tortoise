@@ -47,6 +47,7 @@ import {
   DISMISSED_HIDE,
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
+  LEDGER_ALL_QUIET_SNOOZED,
   LEDGER_EMPTY,
   OLDER_HIDE,
   OLDER_TOGGLE,
@@ -59,11 +60,13 @@ import {
   SNOOZE_PLACEHOLDER,
   SNOOZE_SELECT_LABEL,
   STORAGE_UNAVAILABLE,
+  TRUNCATED_NOTE,
   UNSNOOZE,
   buildLedger,
   detailOf,
   dismiss,
   periodMs,
+  probeStorage,
   readState,
   snooze,
   storageKey,
@@ -78,27 +81,37 @@ import {
 // this file must make.
 import { ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
 
-/** The real browser store, or null where there is none (SSR, a hardened privacy
- *  mode). Resolved ONCE: a fresh accessor per render would make the read effect
- *  below re-run on every render and clobber a dismissal the reader just made. */
+/** The browser's `localStorage` object, or null where there is none (SSR). A
+ *  privacy mode can expose the object and throw on first USE, so the object is
+ *  NOT trusted here — `probeStorage` judges it, once, per mount, by READING it.
+ *  Resolved ONCE (not per render) because a fresh accessor per render would make
+ *  the store identity change under the component. */
 const BROWSER_STORAGE = (() => {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return null
-    // A privacy mode can expose the object and throw on first USE, so probe it.
-    const probe = '__tortoise_notif_probe__'
-    window.localStorage.setItem(probe, '1')
-    window.localStorage.removeItem(probe)
     return window.localStorage
   } catch {
     return null
   }
 })()
 
-function Badge({ count }) {
-  if (!count) return null
+/**
+ * The unresolved count, or a `!` when the feed could not be read.
+ *
+ * The `!` exists because the two "we could not look" sentences render INSIDE the
+ * open panel, and a failed read on a CLOSED bell was pixel-identical to an
+ * all-clear one: the surface said "no notifications" about a feed it never read.
+ * The words travel in the bell's own accessible name (below), so the `!` is a
+ * visible cue for a fact that is also spoken, never a colour-only signal.
+ */
+function Badge({ count, warn }) {
+  if (!count && !warn) return null
   return (
-    <span className="notif-badge" aria-hidden="true">
-      {count > 99 ? '99+' : count}
+    <span
+      className={`notif-badge${warn ? ' notif-badge-warn' : ''}`}
+      aria-hidden="true"
+    >
+      {warn ? '!' : count > 99 ? '99+' : count}
     </span>
   )
 }
@@ -113,7 +126,7 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
       <button
         type="button"
         className="notif-open"
-        onClick={() => onOpen(entry.key)}
+        onClick={() => onOpen(entry.rowKey)}
         aria-label={`${DETAIL_ACTION}: ${entry.label}`}
       >
         <span className="notif-line">
@@ -127,6 +140,8 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
           {entry.rangeLabel ? <>{entry.rangeLabel} · </> : null}
           {entry.stamp ? <>{entry.stamp} · </> : null}
           {entry.ageLabel}
+          {/* Informational, NOT a gate: it explains the `×N+` floor above it. */}
+          {entry.truncated ? <> · {TRUNCATED_NOTE}</> : null}
         </span>
       </button>
       <div className="notif-actions">
@@ -258,7 +273,7 @@ export function NotificationBell({
   ackPending = null,
   ackError = null,
   now: nowProp = null,
-  storage = BROWSER_STORAGE,
+  storage: storeProp = BROWSER_STORAGE,
 }) {
   const [open, setOpen] = React.useState(false)
   const [detailKey, setDetailKey] = React.useState(null)
@@ -271,6 +286,11 @@ export function NotificationBell({
   const [openedAt, setOpenedAt] = React.useState(() => new Date())
   const clock = nowProp || openedAt
   const key = storageKey({ userId, orgId })
+  // Resolved ONCE per mount, by reading it: see `probeStorage` — a WRITE probe
+  // reported a merely-full store as "your browser blocked storage", which is a
+  // cause it cannot know. The store handed in by a test is judged the same way,
+  // so the classification is the production one.
+  const [storage] = React.useState(() => probeStorage(storeProp))
   const [ledger, setLedger] = React.useState(() => readState(storage, key, clock))
   const [saveFailed, setSaveFailed] = React.useState(false)
   const [lastKey, setLastKey] = React.useState(key)
@@ -292,28 +312,29 @@ export function NotificationBell({
     setSaveFailed(false)
   }
 
+  // ONE clock. `clock` is what the render uses; `freshClock()` is what a WRITE or
+  // a RE-READ uses — and on a test's injected `now` they must agree, or a snooze
+  // would be written against the wall clock and rendered against the injected
+  // one (and a write measured from a FROZEN `openedAt` made "1 hour" shorter than
+  // an hour on a panel left open, while a re-read on the wall clock could put a
+  // snooze back).
+  const freshClock = () => (nowProp ? new Date(nowProp) : new Date())
+
   const persist = (next) => {
     const ok = writeState(storage, key, next)
     setSaveFailed(!ok)
     setLedger({ state: next, persisted: ok })
-    setOpenedAt(new Date())
+    setOpenedAt(freshClock())
   }
-
-  // ONE clock. `clock` is what the render uses; `freshClock()` is what a RE-READ
-  // uses — and on a test's injected `now` they must agree, or opening the panel
-  // would prune a snooze against the wall clock while the list rendered against
-  // the injected one (a snooze set "in the future" by the fixture would silently
-  // vanish on open).
-  const freshClock = () => (nowProp ? new Date(nowProp) : new Date())
 
   const handleSnooze = (entry, ms) => {
-    persist(snooze(ledger.state, entry.key, ms, clock))
+    persist(snooze(ledger.state, entry.key, ms, freshClock()))
   }
   const handleDismiss = (entry) => {
-    persist(dismiss(ledger.state, entry.key, clock))
+    persist(dismiss(ledger.state, entry.key, freshClock(), entry.alert))
     // The detail view of a notification that is no longer in the ledger has
     // nothing left to show; go back to the list.
-    if (detailKey === entry.key) setDetailKey(null)
+    if (detailKey === entry.rowKey) setDetailKey(null)
   }
   const handleUnsnooze = (episodeKey) => persist(unsnooze(ledger.state, episodeKey))
   const handleRestore = (entry) => persist(undismiss(ledger.state, entry.key))
@@ -324,8 +345,14 @@ export function NotificationBell({
     if (opening) {
       // Re-read on open: another tab may have snoozed or dismissed something, and
       // a reloaded page is not the only way this store changes.
-      setLedger(readState(storage, key, freshClock()))
-      setOpenedAt(new Date())
+      const fresh = readState(storage, key, freshClock())
+      // …but a decision THIS session made and could not STORE survives it. With
+      // no store, a refusing one, or a full one, the re-read returns an empty
+      // state, and taking it silently undid the click the reader had just made —
+      // while `SAVE_FAILED` promises the dismissal holds "until this page
+      // reloads". `persisted: false` is exactly that fact, so it wins.
+      setLedger((prev) => (prev.persisted ? fresh : { state: prev.state, persisted: false }))
+      setOpenedAt(freshClock())
       setDetailKey(null)
     }
   }
@@ -345,20 +372,32 @@ export function NotificationBell({
   const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
   const entries = [...ledgerView.current]
   if (showOlder) entries.push(...ledgerView.older)
-  // Resolved from the LEDGER, not from the raw feed: the ledger is what the reader
-  // clicked, and it collapses rows that share an identity (see `buildLedger`), so
-  // a lookup by key there cannot show a different episode from the one on screen.
+  // Resolved from the LEDGER, not from the raw feed, by the ROW identity
+  // (`rowKey` — the server's `episode`): what the reader clicked is the row on
+  // screen. Resolving by the decision identity would open whichever episode of
+  // that identity happened to come first in the feed.
   const everyEntry = [
     ...ledgerView.current,
     ...ledgerView.older,
     ...ledgerView.snoozed,
     ...ledgerView.dismissed,
   ]
-  const detailEntry = detailKey ? everyEntry.find((e) => e.key === detailKey) || null : null
+  const detailEntry = detailKey ? everyEntry.find((e) => e.rowKey === detailKey) || null : null
   const detailAlert = detailEntry ? detailEntry.alert : null
 
   const count = ledgerView.unresolved
-  const bellLabel = count ? `${BELL_LABEL} — ${count} unresolved` : BELL_LABEL
+  // A read that failed must be visible on the CLOSED bell too: the sentences that
+  // say so live inside the panel, so without this the surface was pixel-identical
+  // to an all-clear one while claiming nothing about a feed it could not read.
+  const feedUnknown = Boolean(unavailable && alerts.length === 0)
+  const feedCut = Boolean(scanSaturated && alerts.length === 0)
+  const bellLabel = feedUnknown
+    ? `${BELL_LABEL} — the alerts could not be loaded`
+    : feedCut
+      ? `${BELL_LABEL} — the alert scan was cut, so some may be missing`
+      : count
+        ? `${BELL_LABEL} — ${count} unresolved`
+        : BELL_LABEL
 
   return (
     <div className="notif-root" ref={rootRef}>
@@ -377,9 +416,10 @@ export function NotificationBell({
         }}
         aria-expanded={open}
         aria-label={bellLabel}
+        title={bellLabel}
       >
         <span className="notif-glyph" aria-hidden="true">🔔</span>
-        <Badge count={count} />
+        <Badge count={count} warn={feedUnknown || feedCut} />
       </button>
 
       {open ? (
@@ -425,7 +465,11 @@ export function NotificationBell({
               ) : null}
               {!unavailable && !scanSaturated && count === 0 ? (
                 <p className="dim small notif-note">
-                  {alerts.length ? LEDGER_ALL_CLEAR : LEDGER_EMPTY}
+                  {!alerts.length
+                    ? LEDGER_EMPTY
+                    : ledgerView.snoozed.length
+                      ? LEDGER_ALL_QUIET_SNOOZED
+                      : LEDGER_ALL_CLEAR}
                 </p>
               ) : null}
               {/* Two different failures, two different sentences: the store is
@@ -441,7 +485,7 @@ export function NotificationBell({
                 <ul className="notif-list">
                   {entries.map((entry) => (
                     <LedgerRow
-                      key={entry.key}
+                      key={entry.rowKey}
                       entry={entry}
                       onOpen={setDetailKey}
                       onSnooze={handleSnooze}
@@ -476,7 +520,7 @@ export function NotificationBell({
                   {showSnoozed ? (
                     <ul className="notif-list notif-list-muted">
                       {ledgerView.snoozed.map((entry) => (
-                        <li key={entry.key} className="notif-row">
+                        <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
                             <span className="dim small"> · snoozed {entry.untilLabel}</span>
@@ -506,7 +550,7 @@ export function NotificationBell({
                   {showDismissed ? (
                     <ul className="notif-list notif-list-muted">
                       {ledgerView.dismissed.map((entry) => (
-                        <li key={entry.key} className="notif-row">
+                        <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
                             <span className="dim small"> · dismissed for you</span>

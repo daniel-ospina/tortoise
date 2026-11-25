@@ -1282,6 +1282,11 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
   border-radius: 999px; background: var(--red, #f87171); color: #1a0505;
   font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
+/* The `!` shown when the feed could not be read (see `Badge` in
+   notificationPanel.jsx): the SAME slot as the count so a failed read does not
+   shift the header, and a different colour so it cannot be read as "1
+   unresolved". The words travel in the bell's accessible name. */
+.notif-badge-warn { background: var(--amber, #fbbf24); color: #1a1105; }
 .notif-panel {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 60;
   width: min(380px, calc(100vw - 24px));
