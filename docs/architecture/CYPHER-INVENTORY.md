@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **314** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **315** files scanned |
 | files carrying at least one statement site | **103** |
 | **statement sites (this census)** | **1332** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **880** (594 read, 286 write) |
@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 314 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 315 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (314 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (315 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 314 files>` → **1,654** across **113** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 315 files>` → **1,654** across **113** files: exactly the
 tool's number. A bare `rg … tortoise/` gives **1,660 / 114**, the 6 extra occurrences living in
 the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,654 / 113 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 314 files>` → **2,396** across **150** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 315 files>` → **2,396** across **150** files, while the tool
 reports 2,409 / 151. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 314 files finds exactly 13 — the verb-at-end-of-line scan alone (lines matching
+predicate over the same 315 files finds exactly 13 — the verb-at-end-of-line scan alone (lines matching
 `(?:MATCH|MERGE)\s*$`, case-insensitive, over the same population — **195 at BOTH trees**,
 `c3dca6998156` and this head, so the figure measures the predicate rather than this branch) is not a
 second version of the 13: **13** of those lines are the cross-line matches just
@@ -146,7 +146,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,124, and `-i` without the exclusion 2,486 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 314
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 315
 `.py` files the same two predicates read **2,121** and **2,396**; with `-t py` and the test-module
 exclusion dropped they read **2,123** and **2,399**. The 87-occurrence 2,399→2,486 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
@@ -431,7 +431,7 @@ a restatement. ⚠️ So do NOT read `grep 'The cut this PR ('` as the populatio
 missing from that list may be stated, re-derived, one paragraph over. A cut that moves any OTHER
 pin, or any `file:line` row's payload, keeps its own heading.
 
-**The cut this PR (#14621, `cy-14593`) makes — FIVE `plain` READ sites, one new carrying file, and NOTHING else re-shaped — re-cut by RUNNING the tool at this head, whose base is `origin/main` `a3cedc2b96` (measured, not assumed: `git merge-base HEAD origin/main` reads that sha, so no merge moved the tree under the reading).** `tortoise/entity_reads.py` (the read-parity layer, a new product module) carries **four** `ro_query` calls and `tortoise/event_store.py::latest_for_node` adds **one**, so `sites` 1327→**1332**, `plain` 875→**880** (read 589→**594**, write **286** unchanged), `candidates` 589→**594**, `partial` 321→**324** (every new statement interpolates an identifier it proves safe first, which is the `???` marker's class) and `ast_door_calls` 1594→**1599** (= `1332` classified + the unchanged `267` non-Cypher calls); `files` 102→**103** (`entity_reads.py` is the ONE file that starts carrying a site) and `files_scanned` 313→**314** (it is product surface, and `tests/test_14592_read_parity.py` is test surface, so it is scanned by `--all-surface` only). `unresolved` **105**, `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `non_cypher_door_calls` **267** are ALL unchanged — no existing statement was removed, re-classified or re-shaped, and every new site is a `plain` read, which is why §0's migration metric moves by exactly those five. §1's `rg` reconciliation moves with them, measured on this tree: door occurrences **1,648 / 112 → 1,654 / 113** (the new file), the no-call residual **54 → 55**, door-call lines **1,594 → 1,599**, and the whole-text verb total **2,401 / 150 → 2,409 / 151** — while the 13 cross-line verb matches and their 10-prose/3-example split are UNCHANGED, re-enumerated at this head rather than carried. ⛔ Appendix A is regenerated with `--markdown` at this head, so the five rows are added and every `tortoise/event_store.py` and `tortoise/hosted_api.py` row below this PR's insertions is re-derived; the numstat is deliberately not typed here (it is head-bound, and §7's earlier cuts record what happened to figures that were), so run `git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` at the head you read.
+**The cut this PR (#14621, `cy-14593`) makes — FIVE `plain` READ sites, one new carrying file, and NOTHING else re-shaped — re-cut by RUNNING the tool on the tree merged with `origin/main` `29bb16b5b6b` (measured on the COMMITTED index, not assumed: `git merge-base HEAD origin/main` reads that sha, and `--check` was run after the conflict was resolved rather than over a conflicted index).** `tortoise/entity_reads.py` (the read-parity layer, a new product module) carries **four** `ro_query` calls and `tortoise/event_store.py::latest_for_node` adds **one**, so `sites` 1327→**1332**, `plain` 875→**880** (read 589→**594**, write **286** unchanged), `candidates` 589→**594**, `partial` 321→**324** (every new statement interpolates an identifier it proves safe first, which is the `???` marker's class) and `ast_door_calls` 1594→**1599** (= `1332` classified + the unchanged `267` non-Cypher calls); `files` 102→**103** (`entity_reads.py` is the ONE file that starts carrying a site) and `files_scanned` 313→**315** — the PR's own contribution is **+1** (`entity_reads.py`, product surface; `tests/test_14592_read_parity.py` is test surface, so `--all-surface` scans it only) and the merged base's `#14344` contributed the other **+1** (`tortoise/expansion_merge.py`, a scanned product module carrying NO Cypher site and no door call, which is why no other pin moved). `unresolved` **105**, `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `non_cypher_door_calls` **267** are ALL unchanged — no existing statement was removed, re-classified or re-shaped, and every new site is a `plain` read, which is why §0's migration metric moves by exactly those five. §1's `rg` reconciliation moves with them, measured on this tree: door occurrences **1,648 / 112 → 1,654 / 113** (the new file), the no-call residual **54 → 55**, door-call lines **1,594 → 1,599**, and the whole-text verb total **2,401 / 150 → 2,409 / 151** — while the 13 cross-line verb matches and their 10-prose/3-example split are UNCHANGED, re-enumerated at this head rather than carried. ⛔ Appendix A is regenerated with `--markdown` at this head, so the five rows are added and every `tortoise/event_store.py` and `tortoise/hosted_api.py` row below this PR's insertions is re-derived; the numstat is deliberately not typed here (it is head-bound, and §7's earlier cuts record what happened to figures that were), so run `git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` at the head you read.
 
 **Re-cut at the merge with `origin/main` `953c299c9b`, where `files_scanned` reads `313` and NO OTHER PIN MOVED.** `main`'s `#14423` added `tortoise/drain_claim.py` (the per-spool drain claimer), which is product surface carrying no door call and no `MATCH`/`MERGE`, so it moves the scanned-file count and nothing else: `sites` **1327**, `files` **102**, `unresolved` **105**, `candidates` **589**, `partial` **321**, `non_cypher_door_calls` **266**, `ast_door_calls` **1593** and every shape and shape-role pin are unchanged. Measured, not inferred: `git ls-tree` on the COMMITTED tree reads **313** and the tool's own `--json` agrees, and `--check` prints DRIFT for `files_scanned` alone. Appendix A was regenerated with `--markdown` at the merged tree and is byte-identical to it. ⛔ The paragraph below describes an EARLIER base of this same branch and is deliberately NOT re-cut — this section's stated convention.
 
@@ -532,7 +532,7 @@ and `--check` on the merge will report the difference. That is the documented pr
 defect in this cut — but it is stated here rather than left for the merge to discover, because a pin
 that reads green at a branch head and red at the merge is the failure this section exists to name.
 
-**The cut this PR (#14592 Phase A, `cy-14593`) makes — ONE new scanned product file and FIVE `plain` READ sites on the new REST read surface — re-derived by RUNNING the tool at the tree merged with `origin/main` `a3cedc2b96`, never by arithmetic on the markers.** `tortoise/entity_reads.py` is new product surface that CARRIES sites: four `ro_query` reads behind `/v1/objects`, `/v1/subjects`, `/v1/sources` and `/v1/entities/{id}/relations`, every one a keyed lookup or an ordered listing with no traversal, no adjacency, no fulltext and no EP — so `files_scanned` 313→**314**, `files` 102→**103**, `sites` 1327→**1332**, `plain` 875→**880** (read 589→**594**, write **286** unchanged), `candidates` 589→**594** and `partial` 321→**324**. The fifth site is `event_store.latest_for_node` (the `/v1/entities/{id}/belief` reader), which landed in the same change and is the reason `entity_reads.py`'s four are not the whole delta: `ast_door_calls` 1594→**1599** (= 1332 + the unchanged 267 non-Cypher calls), while `unresolved` **105**, `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `non_cypher_door_calls` **267** are unchanged — no existing statement was removed, re-classified or re-shaped. The three `partial` rows are the three reads whose label is INTERPOLATED (the `???` marker's class); the fourth read is fully literal, which is why `partial` moves by three while `sites` moves by five. §1's reconciliation is re-derived at this tree in the same diff — door **1,654 / 113** whole-text (bare `rg` over `tortoise/` **1,660 / 114**, the 6 extra occurrences still living in the one `tortoise/test_*.py`), verb `-i` whole-text **2,409 / 151**, line-based `-i` **2,396 / 150**, case-sensitive **2,121 / 115**, and the verb-at-end-of-line figure §1 states WITH ITS PREDICATE is unchanged — because all five new calls are `ro_query`, which the VERB predicate does not match. ⛔ That figure is deliberately NOT re-spelled here: it has two spellings 10 apart (`(?:MATCH|MERGE)\s*$` counts 195, the `\b`-anchored form counts 185, measured on this tree), and a second spelling of one measurement in a second section is how this document has carried a contradiction before — the number lives in §1 beside the predicate that produces it. Appendix A is regenerated with `--markdown` at this tree: it gains these five rows and every pre-existing row is re-derived rather than carried, because this change also edits `tortoise/hosted_api.py`, `tortoise/event_store.py`, `tortoise/pack_registry.py` and `tortoise/truncation.py` above sites those files carry.
+**The cut this PR (#14592 Phase A, `cy-14593`) makes — ONE new scanned product file and FIVE `plain` READ sites on the new REST read surface — re-derived by RUNNING the tool at the tree merged with `origin/main` `29bb16b5b6b`, never by arithmetic on the markers.** `tortoise/entity_reads.py` is new product surface that CARRIES sites: four `ro_query` reads behind `/v1/objects`, `/v1/subjects`, `/v1/sources` and `/v1/entities/{id}/relations`, every one a keyed lookup or an ordered listing with no traversal, no adjacency, no fulltext and no EP — so `files_scanned` 313→**315** (this PR's `+1`, plus `#14344`'s `tortoise/expansion_merge.py` from the merged base, which carries no Cypher site), `files` 102→**103**, `sites` 1327→**1332**, `plain` 875→**880** (read 589→**594**, write **286** unchanged), `candidates` 589→**594** and `partial` 321→**324**. The fifth site is `event_store.latest_for_node` (the `/v1/entities/{id}/belief` reader), which landed in the same change and is the reason `entity_reads.py`'s four are not the whole delta: `ast_door_calls` 1594→**1599** (= 1332 + the unchanged 267 non-Cypher calls), while `unresolved` **105**, `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `non_cypher_door_calls` **267** are unchanged — no existing statement was removed, re-classified or re-shaped. The three `partial` rows are the three reads whose label is INTERPOLATED (the `???` marker's class); the fourth read is fully literal, which is why `partial` moves by three while `sites` moves by five. §1's reconciliation is re-derived at this tree in the same diff — door **1,654 / 113** whole-text (bare `rg` over `tortoise/` **1,660 / 114**, the 6 extra occurrences still living in the one `tortoise/test_*.py`), verb `-i` whole-text **2,409 / 151**, line-based `-i` **2,396 / 150**, case-sensitive **2,121 / 115**, and the verb-at-end-of-line figure §1 states WITH ITS PREDICATE is unchanged — because all five new calls are `ro_query`, which the VERB predicate does not match. ⛔ That figure is deliberately NOT re-spelled here: it has two spellings 10 apart (`(?:MATCH|MERGE)\s*$` counts 195, the `\b`-anchored form counts 185, measured on this tree), and a second spelling of one measurement in a second section is how this document has carried a contradiction before — the number lives in §1 beside the predicate that produces it. Appendix A is regenerated with `--markdown` at this tree: it gains these five rows and every pre-existing row is re-derived rather than carried, because this change also edits `tortoise/hosted_api.py`, `tortoise/event_store.py`, `tortoise/pack_registry.py` and `tortoise/truncation.py` above sites those files carry.
 
 **The cut this PR (#14552, `feat/14552-point-writers`) makes — ONE non-Cypher door call and NOT a
 single Cypher statement — re-derived by RUNNING the tool at the tree merged with `origin/main`
@@ -1060,7 +1060,7 @@ one.
 
 <!-- cypher-inventory:sites = 1332 -->
 <!-- cypher-inventory:files = 103 -->
-<!-- cypher-inventory:files_scanned = 314 -->
+<!-- cypher-inventory:files_scanned = 315 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 594 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
