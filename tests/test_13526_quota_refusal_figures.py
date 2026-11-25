@@ -234,12 +234,31 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         for child in ast.iter_child_nodes(node):
             yield from walk_resolved(child, scope, seen)
 
+    def _receiver_is_local(call, scope):
+        """True when the call's receiver is a name THIS MODULE defines.
+
+        `datetime.now` and `time.gmtime` read the clock because their receiver is
+        a stdlib module. `_FrozenClock.now` does not: a stub whose body returns a
+        hardcoded `datetime(2026, …)` is a clock by NAME and a literal by value,
+        and it passes every rule that reads only the attribute. So a clock-named
+        call on a module-defined receiver is not counted here; the walk instead
+        descends INTO that receiver's body (it is in `scope`), where a real clock
+        read is still found — and a stub returning a literal has none.
+        """
+        root = call.func.value
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name):
+            return root.id in scope
+        return False
+
     def reaches_a_clock(node, scope):
         """True when `node` READS a clock."""
         return any(
             isinstance(child, ast.Call)
             and isinstance(child.func, ast.Attribute)
             and child.func.attr in clock_attrs
+            and not _receiver_is_local(child, scope)
             for child in walk_resolved(node, scope))
 
     def pins_a_calendar(node, scope):
@@ -311,10 +330,14 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
                 scope[name] = value
     # A helper function is a legitimate place for the clock, at module level OR
     # defined inside the fixture; register its body so `def _now_iso(): return
-    # datetime.now(UTC)…` resolves wherever it is written.
+    # datetime.now(UTC)…` resolves wherever it is written. A CLASS is registered
+    # for the same reason and one more: it is what `_receiver_is_local` walks INTO
+    # to tell a clock wrapper (`return datetime.now(UTC)`) from a frozen stub
+    # (`return datetime(2026, …)`).
     for body in (module.body, fn.body):
         for stmt in body:
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(
+                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 scope.setdefault(stmt.name, stmt)
 
     constructions = [
