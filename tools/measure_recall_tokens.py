@@ -25,11 +25,21 @@ Offline: an embedded FalkorDB file in a temp dir. No hosted call, no key.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_recall_tokens.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_recall_tokens.py`"
+    )
+
 import argparse
 import json
 import os
 import statistics
-import sys
 import tempfile
 from pathlib import Path
 
