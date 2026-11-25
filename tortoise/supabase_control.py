@@ -4315,6 +4315,51 @@ def insert_graph(cp, row: dict) -> None:
     cp.query("graphs", method="POST", json_body=row)
 
 
+def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
+    """#14582 — the CREATION HOOK for the org's `kind='default'` graph row.
+
+    Called at every arm of :func:`ensure_default_graph_row` that yields a row id:
+    the active-row short-circuit, the mint, and the convergent adopt. ⛔ ALL
+    THREE, deliberately — the short-circuit is not just an optimisation here, it
+    is the **self-heal**: every credential resolver in the tree reaches this
+    function through :func:`default_graph_id_for_credential`, so an org whose
+    default graph was missed (the hook failed, or the graph predates it) is
+    provisioned on its next authenticated request instead of waiting for an
+    operator. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
+    repeat costs one scoped read.
+
+    ⛔ IT HEALS THE PRE-EXISTING GRAPH TOO, and that is why the floor is not this
+    caller's business: `default_graph_id_for_credential` only reaches the mint
+    arm when `default_graph_row_for` found no row, but the SHORT-CIRCUIT arm runs
+    for a graph that already exists and may carry a journal this hook never
+    accounted for. The hook derives its floor from
+    `record_allocator.JOURNAL_COUNT_SQL` in the same tenant-scoped transaction, so
+    a graph with journal lines `1..N` seeds to `N` — the count is how many
+    positions already exist. A hard-coded `0` here would refuse exactly the
+    population this arm exists to heal (`SeedRefused(reason="divergence")`, with
+    text claiming the record holds positions the journal cannot reproduce, which
+    is false for a healthy pre-existing graph).
+
+    ⛔ BEST-EFFORT, and this one is not even a choice: this function's caller
+    (`_mint_default_graph_row_best_effort`) exists because `#10025` F1 forbids
+    failing the caller — the provisioning RPC's own data-plane graph is already
+    committed, and an agent-signup's plaintext key exists only in the response a
+    raise would replace with a 500. So a record fault here is LOGGED and made
+    VISIBLE (`/health` `record.armed_but_uncut`, and `backfill`), never raised.
+    """
+    try:
+        from tortoise.record_writer import provision_graph_record
+
+        provision_graph_record(org_id=org_id, graph_id=graph_id)
+    except Exception:
+        _logger.error(
+            "the default graph row %s (%s) exists but its record cursor could "
+            "NOT be provisioned (the record seam is unimportable) — every "
+            "record this org writes is refused until it is seeded: run "
+            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
+            graph_id, org_id, org_id, exc_info=True)
+
+
 def ensure_default_graph_row(cp, org_id: str,
                             graph_name: str | None = None) -> str | None:
     """Idempotently ensure the org's ``kind='default'`` graphs row (#10025).
@@ -4398,6 +4443,10 @@ def ensure_default_graph_row(cp, org_id: str,
         # IS an active row, while any OTHER value leaves the org unnamed, which
         # is exactly how the migration's `status = 'active'` guard reads it.
         if (row.get("status") or "active") == "active" and row.get("id"):
+            # #14582: the self-heal arm — an EXISTING default row whose record
+            # cursor is missing gets one on this org's next credential
+            # resolution. Idempotent when it is already `active`.
+            _provision_default_graph_record(org_id, row["id"])
             return row["id"]
     if cp.query("graphs", select=["id"],
                 filters=[("org_id", "eq", org_id),
@@ -4479,8 +4528,14 @@ def ensure_default_graph_row(cp, org_id: str,
             raise insert_error from None
         for row in rows or []:
             if (row.get("status") or "active") == "active" and row.get("id"):
+                # #14582: the CONVERGENT ADOPT arm mints no row of its own — it
+                # adopts the winner's — so the hook runs for the id that
+                # actually became durable, not for the one this call invented.
+                _provision_default_graph_record(org_id, row["id"])
                 return row["id"]
         raise
+    # #14582: the MINT arm — this call created the row, so it owns provisioning.
+    _provision_default_graph_record(org_id, graph_id)
     return graph_id
 
 
