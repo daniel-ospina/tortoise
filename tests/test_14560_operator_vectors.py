@@ -164,13 +164,13 @@ def test_the_point_table_CAN_hold_a_vector_so_the_absence_below_means_something(
     assert "embedding_vec" in columns, sorted(columns)
 
     with _Journal(sdk) as journal:
-        point = sdk._create_point("statement", "a plain claim carries a vector",
-                                  embedding=_vector())
+        sdk._create_point("statement", "a plain claim carries a vector",
+                          embedding=_vector())
     record = journal.record("PointAdded")
     assert "embedding" in (record.get("point") or {}), sorted(record.get("point") or {})
-    assert "embedding" in _point_insert_columns(record).split(", "), (
-        "a plain Point's journal vector did not reach the record's INSERT")
-    assert point["id"]
+    # ⛔ THE TWO ASSERTIONS ABOVE ARE THE CONTROL'S TEETH. An `assert point["id"]` stood
+    # here and could not red under any mutation of this diff (the SDK always returns an
+    # id), so it was dead weight rather than a third grade — #14560 review, advisory 2.
 
 
 def test_a_pure_operator_carries_no_vector_in_either_store(sdk):

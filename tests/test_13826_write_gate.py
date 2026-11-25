@@ -1121,7 +1121,13 @@ def test_an_unreadable_predicate_keeps_the_graph_copy(proj, monkeypatch):
     green (173 passed), which is why the arm needs an assertion of its own.
     """
 
-    def _unreadable(entity_type: str) -> bool:
+    def _unreadable(entity_type: str, **_kw) -> bool:
+        # `**_kw` is load-bearing, not tidiness: the door calls
+        # `mirror_required(entity_type, require_substantive=...)` unconditionally, so a
+        # single-arity stub raises `TypeError` about the keyword and reaches the
+        # `except` arm for a REASON the docstring does not state. Accepting the kwarg
+        # keeps the arm graded by the `RuntimeError` it is named for (#14560 review,
+        # advisory 3).
         raise RuntimeError("the record's arming predicate could not be read")
 
     monkeypatch.setattr(record_vector, "mirror_required", _unreadable, raising=False)
