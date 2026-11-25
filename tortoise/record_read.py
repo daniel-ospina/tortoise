@@ -83,6 +83,7 @@ __all__ = [
     "Turn",
     "TurnAnswer",
     "merge_turn_payloads",
+    "point_vector_keys",
     "served_turn_count",
     "session_text",
     "session_turns",
@@ -932,6 +933,87 @@ def turn_high_water(conn: Any, *, org_id: str, graph_id: str,
     rows = _session_turn_rows(conn, org_id=org_id, graph_id=graph_id,
                              session_id=session_id)
     return rows[-1][0] if rows else None
+
+
+#: How many ids one :func:`point_vector_keys` statement may name.
+#:
+#: ⛔ A CHUNK, NOT A CAP. The population a caller asks about is the whole set it holds —
+#: the rebuild's graph-only snapshot ids can be thousands — so the read is split into
+#: several bounded statements rather than truncated to the first N. A cap would answer
+#: "the record holds no vector" for every id past the boundary, which is the fail-OPEN
+#: direction for the one caller (`projection._rebuild_all_replay` writes the graph vector
+#: exactly when the record cannot answer the id). Parameter lists are bounded by
+#: PostgreSQL's own protocol limit (32767 bind parameters), so 500 is comfortably inside
+#: it and keeps each statement's plan cheap.
+POINT_VECTOR_KEY_CHUNK = 500
+
+
+def point_vector_keys(conn: Any, *, org_id: str, graph_id: str,
+                      keys: Sequence[str]) -> frozenset[str]:
+    """The subset of ``keys`` whose ``public.point`` row SERVES a vector.
+
+    ⛔ THE PER-ID HALF OF THE COVERAGE QUESTION (`#14552`). `record_vector.coverage` is
+    ``record_vectors >= graph_vectors`` over a LABEL — an aggregate — and a write that
+    skips its graph copy on that answer alone can drop the SOLE copy of a row the record
+    does not hold. `#13971`'s review recorded that as the reason two `:Point` writers did
+    not ask the gate, and named *"a per-id ask (does the record hold THIS row)"* as the
+    remaining work; this is that ask, for the fold that restores a pre-wipe snapshot.
+
+    ⛔ "HOLDS" MEANS **SERVES**, AND THE ANSWER TURNS ON ``embedding_vec IS NOT NULL`` — the
+    same column `record_vector._record_vector_count` (the coverage NUMERATOR) and
+    `vector_search` (the serve leg) read. The raw jsonb ``embedding`` is NOT sufficient on
+    its own: a row whose payload the converter refused (a non-384 width, a
+    double-encoded array, an object, ``[]``, a ``[null, …]`` element) keeps its
+    ``embedding`` and gets a NULL ``embedding_vec``, so the dense leg never serves it —
+    `tortoise/embedding_residual_scan.py` says so as a measurement ("the dense leg filters
+    on `embedding_vec IS NOT NULL`, so those rows are served by the graph leg only"), and
+    `tools/entity_vector_parity_census.py` calls that class ``record_unreadable``. Answering
+    such a row as "held" on the payload alone would withhold the graph's only SERVABLE
+    copy, i.e. it would be strictly MORE permissive than the aggregate this ask exists to
+    refine — the wrong direction for a delete licence. Predicating on ``embedding_vec`` can
+    only turn an answer from "held" into "not held", which writes the graph vector.
+
+    The statement ALSO carries ``embedding IS NOT NULL``, and that conjunct is a deliberate
+    no-op rather than a second criterion: ``embedding_vec`` is `GENERATED … STORED` from
+    ``embedding`` through a STRICT converter, so a non-NULL ``embedding_vec`` already implies
+    a non-NULL ``embedding`` (`supabase/migrations/20261109000001_record_embedding_vector.sql`).
+    It is kept as a cheap belt-and-braces guard whose effect can only be to answer FEWER ids
+    — i.e. it can never widen the delete licence — and because the generated column could stop
+    being STRICT in a later migration; if it ever does, this conjunct is what keeps the
+    answer conservative.
+
+    SCOPED like every read in this module: an unscoped read returns NOTHING under the
+    production role (the policies read a missing GUC as "no rows"), so a missing scope
+    would answer "the record holds nothing" for the whole population — fail-safe for this
+    caller (it writes), and still a lie a caller must not be handed silently.
+
+    Raises on an unreadable record. ⛔ THAT IS DELIBERATE, and the CALLER decides what
+    "unknown" means: `projection._rebuild_all_replay` treats it as "the record answers no
+    id" (so every vector is written), which is the conservative direction for a write.
+    Folding that decision in here would hide it behind a function whose name promises a
+    measurement.
+    """
+    from tortoise.record_projection import scope_connection
+
+    wanted = tuple(k for k in dict.fromkeys(keys) if isinstance(k, str) and k)
+    if not wanted:
+        return frozenset()
+    scope_connection(conn, org_id)
+    held: set[str] = set()
+    for start in range(0, len(wanted), POINT_VECTOR_KEY_CHUNK):
+        chunk = wanted[start:start + POINT_VECTOR_KEY_CHUNK]
+        cursor = _cursor(conn)
+        cursor.execute(
+            f"SELECT node_key FROM public.{POINT_TABLE} "
+            f"WHERE org_id = %s AND graph_id = %s AND node_key IN %s "
+            f"  AND embedding IS NOT NULL AND embedding_vec IS NOT NULL",
+            (org_id, graph_id, chunk),
+        )
+        for row in _rows(cursor):
+            node_key = row[0]
+            if isinstance(node_key, str):
+                held.add(node_key)
+    return frozenset(held)
 
 
 def _cursor(conn: Any):
