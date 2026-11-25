@@ -5622,7 +5622,7 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"at {MIN_SHORT_VIEWPORT_PX}px or wider.")
 
     def test_the_hatch_centres_copy_that_fits_instead_of_top_aligning_it(self):
-        """`flex-start` must be the FALLBACK under `safe center`, never the rule.
+        """A bare `flex-start` must not BE the alignment: auto margins centre it.
 
         The hatch is a `max-height` query, so it cannot tell a beat whose copy
         OVERRUNS the window from one that comfortably fits — and it fires on
@@ -5632,8 +5632,8 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         the layout for the page's whole reading column rather than for the
         beats that overrun it, and pinned every one of them to `padding-top`.
 
-        That is #14677, and it was measured rather than inferred — Chromium at
-        375x812, content height against the 748px box, off-centre as
+        That is #14677, measured rather than inferred — Chromium at 375x812,
+        content height against the 748px box, off-centre as
         `(topGap-padT) - (bottomGap-padB)`:
 
             #beat-ingest    173.9  -574.1   606.1px of dead space below
@@ -5645,67 +5645,90 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
 
         and every title box at y=52 — 2.4px UNDER the fixed Login pill, whose
         button ends at y=54.4 — for 72-187px2 of painted overlap on five of the
-        seven beats. `safe center` is exactly the predicate a `max-height`
-        query cannot express: centred when the copy FITS, `start` when it
-        OVERFLOWS. `flex-start` stays above it for browsers without `safe`
-        alignment, so ORDER is the mechanism — a reorder silently restores the
-        whole defect, which is why this row asserts the last value and not
-        merely that `safe center` is present somewhere.
+        seven beats.
+
+        ⛔ AND WHY THE HATCH CANNOT SAY `justify-content: safe center`, although
+        the base `.beat` rule does: `safe` cannot express this on a browser that
+        does not honour it, and declaration ORDER does not rescue that. Chrome
+        52-114 RECOGNISES the value but ignores the modifier (MDN BCD: "before
+        version 115, this value is recognized, but has no effect"), so it keeps
+        the declaration, applies a plain `center`, and any `flex-start` written
+        above it never runs — on that band the hero is centred unsafely, top
+        clipped and h1 under the pill, which is worse than the bug being fixed.
+        Auto margins have no support band: they absorb the free space when there
+        is any and resolve to zero when there is not. So this row pins the
+        MECHANISM (a `flex-start`/`start` alignment plus `margin-*: auto` on the
+        ground's first and last child), not the spelling of a keyword that a
+        browser may accept and ignore.
 
         It is also what keeps the ≤320px pill clearance intact: the hero
         overflows at every phone width measured (722.5px of copy in a 700px box
-        at 375x812), so `safe center` resolves to `start` there and its `5rem`
+        at 375x812), so ITS auto margins resolve to zero and its `5rem`
         `padding-top` still holds its h1 clear of the pill.
         """
         text = PRODUCT_TEAMS_HTML.read_text(encoding="utf-8")
         blocks = _max_height_media_blocks(text)
         assert blocks, (
             f"{PRODUCT_TEAMS_HTML.name} declares no `@media (max-height: ...)` "
-            "rule, so the `safe center` this row pins has nowhere to live.")
-        # Every rule in the hatch that names a beat, however the selector list
-        # is spelled: one shared declaration block or one per selector are
+            "rule, so the short-viewport hatch this row grades does not exist.")
+        # Rules that actually SET the alignment, however the selector list is
+        # spelled: one shared declaration block or one per selector are
         # semantically identical (see `_max_height_media_blocks`), so grading
-        # only the shared shape would false-red a correct refactor.
+        # only the shared shape would false-red a correct refactor. Rules that
+        # merely name a beat — a `padding-top` tweak in a shorter query, say —
+        # are not alignment rules and must not be graded here.
         hatch_rules = [
-            (selector, decls)
+            (selector.group(1), selector.group(2))
             for _height, body in blocks
-            for selector, decls in re.findall(r"([^{}]+)\{([^{}]*)\}", body)
-            if "#beat-" in selector
+            for selector in re.finditer(r"([^{}]+)\{([^{}]*)\}", body)
+            if "#beat-" in selector.group(1)
+            and re.search(r"justify-content\s*:", selector.group(2))
         ]
         assert hatch_rules, (
             f"{PRODUCT_TEAMS_HTML.name}: no `@media (max-height: ...)` rule "
-            "names a beat, so the hatch this row grades does not exist.")
+            "sets `justify-content` for a beat, so the hatch this row grades "
+            "does not exist.")
         for selector, decls_block in hatch_rules:
-            values = [
-                d.strip() for d in re.findall(
-                    r"justify-content\s*:\s*([^;}]+)", decls_block)
-            ]
-            assert "safe center" in values, (
+            values = [" ".join(d.split()) for d in re.findall(
+                r"justify-content\s*:\s*([^;}]+)", decls_block)]
+            assert "safe center" not in values, (
                 f"{PRODUCT_TEAMS_HTML.name}: the short-viewport hatch for "
                 f"{' '.join(selector.split())} declares "
-                f"`justify-content: {values[-1] if values else '(none)'}` and "
-                "never `safe center`. The hatch fires on every phone in "
-                "portrait, so a bare `flex-start` top-aligns the beats whose "
-                "copy FITS as well: copy high in the viewport with hundreds of "
-                "px of dead space below, and the heading under the Login pill "
-                "(#14677: measured -330 to -574px off-centre at 375x812). Use "
-                "`safe center`, and keep `flex-start` above it only as the "
-                "fallback for browsers without `safe` alignment.")
-            assert values[-1] == "safe center", (
+                f"`justify-content: safe center` ({values!r}). A browser that "
+                "recognises `safe` but ignores the modifier KEEPS that "
+                "declaration and applies a plain `center` (Chrome 52-114), so "
+                "the alignment it is ordered after never runs and an "
+                "over-flowing beat is clipped at the top with its heading "
+                "under the Login pill. Centre the beat with `margin-*: auto` "
+                "instead — it has no such support band.")
+            assert values[-1] in {"flex-start", "start"}, (
                 f"{PRODUCT_TEAMS_HTML.name}: the hatch for "
-                f"{' '.join(selector.split())} declares "
-                f"`justify-content` as {values!r}, so the LAST one "
-                f"({values[-1]!r}) is what a browser applies. `safe center` "
-                "must come AFTER `flex-start`, or the fallback silently "
-                "becomes the behaviour and every fitting beat is top-aligned "
-                "again (#14677).")
-            assert "flex-start" in values, (
-                f"{PRODUCT_TEAMS_HTML.name}: the hatch for "
-                f"{' '.join(selector.split())} dropped `justify-content: "
-                "flex-start`. A browser without `safe` alignment discards the "
-                "`safe center` declaration, and with nothing above it the "
-                "beat falls back to `normal` and loses the top-aligned "
-                "overflow behaviour the hatch exists for.")
+                f"{' '.join(selector.split())} ends its `justify-content` at "
+                f"{values[-1]!r} (all: {values!r}). It must be `flex-start` "
+                "(or `start`): that is the alignment the auto margins below "
+                "have to override-able, and the one an over-flowing beat needs "
+                "so its copy starts at `padding-top` and can be scrolled from "
+                "the top rather than clipped above it.")
+
+        # …AND THE CENTRING ITSELF. Auto margins on the ground's first and last
+        # child absorb the free space between them when the copy fits, and
+        # resolve to zero when it overflows — `safe center`'s predicate in every
+        # engine. Without both ends the copy is not centred; without either, the
+        # hatch is back to the bare `flex-start` that caused #14677.
+        centring = [
+            " ".join(rule.group(1).split())
+            for _height, body in blocks
+            for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body)
+            if "#beat-" in rule.group(1) and "margin" in rule.group(2)
+            and re.search(r"margin-(?:top|block-start)\s*:\s*auto", rule.group(2))
+        ]
+        trailing = [
+            " ".join(rule.group(1).split())
+            for _height, body in blocks
+            for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body)
+            if "#beat-" in rule.group(1) and "margin" in rule.group(2)
+            and re.search(r"margin-(?:bottom|block-end)\s*:\s*auto", rule.group(2))
+        ]
 
         # …and the group has to COVER the page's beats, derived from the markup
         # rather than hard-coded, so a new beat cannot silently escape it.
@@ -5715,9 +5738,35 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         missing = [b for b in beat_ids if f"#{b}" not in named]
         assert not missing, (
             f"{PRODUCT_TEAMS_HTML.name}: the short-viewport hatch does not name "
-            f"{missing!r}, so those beats keep the base `safe center` on a short "
-            "viewport and their overflow is clipped at BOTH edges with no way "
-            "to scroll to it.")
+            f"{missing!r}. Their copy is then aligned by the base `.beat` rule "
+            "alone, which switches to `start` only on an overflow-capable "
+            "engine and gives them no `overflow-y: auto`, so the part of the "
+            "beat that does not fit is cut off at the bottom with no way to "
+            "scroll to it. Add them to the hatch's selector list.")
+        for beat in beat_ids:
+            assert any(f"#{beat} > :first-child" in sel for sel in centring), (
+                f"{PRODUCT_TEAMS_HTML.name}: the hatch gives no "
+                f"`margin-top: auto` to `#{beat} > :first-child`, so that "
+                "beat's copy is not centred when it fits — it sits at "
+                "`padding-top` with the dead space under it, which is #14677.")
+            assert any(f"#{beat} > :last-child" in sel for sel in trailing), (
+                f"{PRODUCT_TEAMS_HTML.name}: the hatch gives no "
+                f"`margin-bottom: auto` to `#{beat} > :last-child`, so that "
+                "beat's copy is not centred when it fits — the free space "
+                "collects below it instead of splitting either side of it.")
+        # The base rule is what still protects the beats the hatch does NOT
+        # cover (a viewport 821px or taller). Those arms rely on `safe center`
+        # for the ≤320px pill clearance, and nothing else pins it.
+        base = re.search(r"\n    \.beat \{([^{}]*)\}", text)
+        assert base, f"{PRODUCT_TEAMS_HTML.name}: no base `.beat` rule found."
+        base_values = [" ".join(d.split()) for d in re.findall(
+            r"justify-content\s*:\s*([^;}]+)", base.group(1))]
+        assert base_values and base_values[-1] == "safe center", (
+            f"{PRODUCT_TEAMS_HTML.name}: the base `.beat` rule's "
+            f"`justify-content` is {base_values!r}, not a trailing "
+            "`safe center`. Above the hatch's breakpoint that declaration is "
+            "the only thing keeping an overflowing beat's padding — and so the "
+            "hero's 5rem pill clearance — intact (#14677's ≤320px arm).")
 
     def test_the_beat_can_receive_the_scroll_gesture_while_visible(self):
         """`overflow-y: auto` on a `pointer-events: none` box does nothing.
