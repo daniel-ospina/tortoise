@@ -115,12 +115,29 @@ Env seams (the gate's — all optional, all exercised by the hermetic suite)
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below, so an unsupported
+# interpreter gets THIS attributed refusal rather than whatever fails first.
+# Exit 2, never 1: `main()` returns 1 for a DRIFT verdict (0 CLEAN / 1 DRIFT /
+# 2 UNREADABLE), so an environment refusal wearing 1 would be read as a finding
+# this run never reached — the collision the file's own UNREADABLE comment
+# above `return 2` argues against (#11342). Pinned in
+# tests/test_entry_point_python_guard.py:REFUSAL_CODES.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/fly_secret_declaration_report.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/fly_secret_declaration_report.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from types import ModuleType
 
