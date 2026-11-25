@@ -3582,8 +3582,12 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
     # to read is the value TWO retirements earlier (the SDK traversal row took
     # 31 -> 30, `#11609` batch 1 another).
-    assert total >= 21, (
-        f"only {total} pairs are accepted although §13's cells name 21 door "
+    # ⛔ 21 -> 22 at `#14592`'s head (`cy-14593`): row 46 adds ONE cell occurrence (its
+    # own REST door), and `_door_reaches` accepts exactly one pair for it. The floor
+    # MOVES with the table, as the note below requires: at 21 this arm would not red
+    # on a one-occurrence `_doors()` regression, which is the whole thing it is for.
+    assert total >= 22, (
+        f"only {total} pairs are accepted although §13's cells name 22 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
         "other way"
     )
@@ -3712,10 +3716,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
     # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
-    # A table change moves this numeral with the table.
-    assert attributed >= 21, (
+    # A table change moves this numeral with the table — 21 -> 22 at `#14592`'s head
+    # (`cy-14593`), where row 46 contributed ONE cell occurrence of its own.
+    assert attributed >= 22, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 21 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 22 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
