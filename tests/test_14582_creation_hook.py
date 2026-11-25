@@ -721,7 +721,7 @@ class _MintControlPlane:
         rows = [r for r in self.graphs if matches(r)]
         if method == "PATCH":
             for row in rows:
-                row.update(json_body or {})
+                row |= json_body or {}
             return None
         return [{key: r.get(key) for key in (select or ["id"])} for r in rows]
 
