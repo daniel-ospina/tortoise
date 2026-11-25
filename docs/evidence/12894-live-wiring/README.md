@@ -416,14 +416,18 @@ lane cannot borrow), and pre-flights the counter row BEFORE the first append, so
 refuses while nothing has been written.
 
 **P1-1 / P1-2 — the flag is global, the cutover is per graph, nothing creates the row.**
-`provision_graph_record` (§A7.8 item 8) still has **zero hits in this tree**, and it is NOT built
-here: it is a migration plus two `hosted_api` call sites with a fail-hard/fail-soft split that
-`#10025` F1 governs, i.e. its own change. What this lane does instead is make the door *refuse to
+`provision_graph_record` (§A7.8 item 8) had **zero hits in this tree** when this lane ran, and it was
+NOT built here: it is a migration plus two `hosted_api` call sites with a fail-hard/fail-soft split
+that `#10025` F1 governs, i.e. its own change. ⛔ **`#14582` has since built it** —
+`record_allocator.provision_graph_record`, called from `hosted_api._provision_graph` and
+`supabase_control.ensure_default_graph_row` (and deliberately NOT from `sdk._graph_create`, whose
+both arms are findings) — so the "absent hook" reading below is this lane's history, not the tree.
+What this lane does instead is make the door *refuse to
 pretend*:
 
 * `arm` REFUSES without `--acknowledge-cutover`, and the refusal names the flag and its home (the
   writer's environment, not the operator's shell), the order of operations, the per-graph scope, the
-  absent creation hook, and the backfill lane. The state that ate rows — counter armed, door not —
+  creation hook (absent then; built by `#14582`), and the backfill lane. The state that ate rows — counter armed, door not —
   is no longer reachable by following the documented steps.
 * A read-only `sweep` finds the graphs the record has seen that have NO counter row, with the seed
   command and the warning that the floor is the JOURNAL's count, not `row_max`.

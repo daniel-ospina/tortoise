@@ -55,17 +55,16 @@ naming it (that scan's text occurs four times in `hosted_backup.py`; the two row
 | 12 | `_refresh_first_seq` | `event_store.py:1104` | aggregate `min` inside an RMW on the **sibling** label | maintenance |
 | 13 | `webhook_delivery._head_seq` fallback | `webhook_delivery.py:1049` | aggregate `max` | maintenance |
 | 14 | backup footprint | `hosted_backup.py:892` | aggregate `max, min` | maintenance |
-| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1333` | a label-agnostic read of the target graph | maintenance |
-| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1534` | a label-agnostic read of the graph | maintenance |
+| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1382` | a label-agnostic read of the target graph | maintenance |
+| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1583` | a label-agnostic read of the graph | maintenance |
 
 ⚠️ **Rows 15–16 are re-derived by CONTENT here, not by shifting the census's addresses.** As merged,
-`#13083` cited `:1182`/`:1383` for them; that row has since been re-cut to this head's
-`:1333`/`:1534`, which is where these rows point. No single delta gets from the pin to them, because
-`hosted_backup.py`'s drift accumulates in **three offset steps** — the two `+2`
-import lines land after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`)
-and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
-cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied lands at
-`:1316`/`:1517`, which are NOT the statements (`:1316` is `retired_vectors += 1`).
+`#13083` cited `:1182`/`:1383` for them; at this head they are `:1382`/`:1583` — a cumulative `+200`,
+in FOUR insertion steps rather than one: `+2` (two import lines after the pin's `:58`/`:59`), then
+`+60` after `:1035` (`@@ -1035,0 +1038,60 @@`) and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`)
+— cumulative `+151`, which is where `:1333`/`:1534` came from — and then `+49` more, inserted inside
+`_restore_retires_vector` before both statements by `#14596` (`3bbe5567df24a`), which is why an address
+taken from any earlier head is short by exactly that much.
 
 **Verdict: `record_only`-shaped.** Not one reader needs a graph capability — no traversal, no adjacency
 walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup, an ordered range scan,
@@ -85,7 +84,7 @@ home. A re-home must re-point it too.
   one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
   `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
   the census; the two `hosted_backup.py` restore-side scans share their text with four occurrences in
-  that file (one more live read at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
+  that file (one more live read at `:3652`, plus a docstring mention at `:3491`), so those rows pin the
   EXACT count — deleting any of the four reds (`occurrences`), which a `min_occurrences` floor did not
   do: measured, deleting BOTH censused sites left 2 and stayed green. What the pin still cannot do is
   say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
@@ -404,7 +403,7 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
    already used for vectors: a gate that is **measured, never asserted**).
 4. **Re-point the four maintenance readers** that reach the label directly rather than through
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
-   (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
+   (`hosted_backup.py:892`), and the two restore-side scans (`:1382`/`:1583`). ⚠️ Neither is an
    export scan — both are in `restore_graph`, and the export side is NOT censused at all
    (`hosted_backup.py:454` and `hosted_api.py:36016`, #14204), so a re-point driven by this census
    alone would leave the export endpoint reading the old home.

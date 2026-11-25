@@ -7,18 +7,21 @@ enumerated arm while the graph is cut over, so `_refuse_an_enumerated_replay`
 refuses every record while the journal keeps advancing; `write_live_record` is
 fail-soft by contract, so this is a WARN per record and never an exception). It
 also found that the flag is GLOBAL while the cutover is PER GRAPH, and that
-nothing in this tree creates the counter row for a NEW graph
-(`provision_graph_record` has zero hits), so every graph created after the
-cutover is born uncut.
+nothing created the counter row for a NEW graph
+(`provision_graph_record` had zero hits when this file was written — `#14582`
+has since added it, called from the two doors the record can file — so what
+remains is the graphs that existed BEFORE it landed), and every graph created
+after the cutover was born uncut.
 
 The fixes asserted here:
 
 * `arm` REFUSES without `--acknowledge-cutover`, and the refusal is the
   documentation: it names the env flag, its HOME (the writer, not this shell),
-  the order of operations, the per-graph scope, the absent creation hook, and
-  the backfill lane.
-* `sweep` finds born-uncut graphs the record has seen (read-only), so the hazard
-  is discoverable rather than a sentence.
+  the order of operations, the per-graph scope, the creation hook, and the
+  backfill lane.
+* `sweep` finds the graphs NOT ALLOCATING — no counter row at all, or a row in
+  `seeded`/`halted` — the record has seen (read-only), so the hazard is
+  discoverable rather than a sentence.
 * `status` reports the RECORD's state and the flag SEPARATELY (P2-4), and the
   DSN name is IMPORTED from the seam rather than copied (P2-2).
 """
@@ -51,7 +54,7 @@ def test_arm_refuses_without_the_acknowledgement(capsys) -> None:
     for required in ("TORTOISE_RECORD_ALLOCATE",   # the flag, by name
                      "WRITER",                     # …and whose environment it lives in
                      "halt", "seed", "reopen",     # the way back, in order
-                     "provision_graph_record",     # the hook that is absent
+                     "provision_graph_record",     # the creation hook, by name
                      "sweep",                      # how the hazard is found
                      "backfill_copy_turns"):       # the fourth position-row writer
         assert required in err, (

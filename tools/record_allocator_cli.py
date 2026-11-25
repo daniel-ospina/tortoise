@@ -20,8 +20,9 @@ WHAT THE VERBS ARE FOR, one line each:
 * ``halt``  — ``active → halted``. The counter is KEPT: the carried numbers are
   the only record of what was issued.
 * ``reopen``— ``halted → seeded``, so a halted graph can be re-seeded and re-armed.
-* ``sweep`` — READ-ONLY: which of this org's graphs the record has seen writing
-  with NO counter row ("born uncut").
+* ``sweep`` — READ-ONLY: which of this org's graphs are NOT ALLOCATING — no
+  counter row at all ("born uncut"), or a row in `seeded`/`halted`, which
+  allocates nothing either.
 * ``backfill`` — ``sweep``'s population, SEEDED (#14582). Idempotent, one
   transaction per graph, and it reports its three counts:
   ``N considered / M seeded / K refused`` with a reason per refusal. Refusal is
@@ -772,10 +773,14 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # every record write — fail-soft, so nothing reds. `seeded` is NOT cut
         # over; the graphs stay in `sweep`'s population until they are `active`.
         payload["finish_the_cutover"] = (
-            f"{left_seeded} graph(s) are `seeded` — which allocates NOTHING — "
-            f"so this run did not cut them over. Re-run with `--arm "
-            f"--acknowledge-cutover` to arm them, and re-run `sweep` to confirm: "
-            f"a `seeded` graph stays in that population until it is `active`")
+            f"{left_seeded} graph(s) "
+            + ("WOULD be `seeded` — which allocates NOTHING — so a real run "
+               "here would not cut them over. " if dry_run else
+               "are `seeded` — which allocates NOTHING — so this run did not "
+               "cut them over. ")
+            + ("Re-run with `--arm --acknowledge-cutover` to arm them, and "
+               "re-run `sweep` to confirm: a `seeded` graph stays in that "
+               "population until it is `active`"))
     return payload
 
 

@@ -165,9 +165,9 @@ def _strip_noise(statement: str) -> str:
 #: plus the sites of the label-agnostic scan, which would therefore carry the label
 #: into (or drop it from) a new home.** ⚠️ The UNIT is the site, not the statement
 #: text (#14183 review round 11, verified): that scan's text occurs FOUR times in
-#: `hosted_backup.py` — the two restore decisions censused here (`:1333` pre-check,
-#: `:1534` node-count verification), the live read inside
-#: `_restore_into_temp_verify_swap` (`:3603`) and a docstring mention — and those
+#: `hosted_backup.py` — the two restore decisions censused here (`:1382` pre-check,
+#: `:1583` node-count verification), the live read inside
+#: `_restore_into_temp_verify_swap` (`:3652`) and a docstring mention — and those
 #: two rows pin the EXACT count in `occurrences`, so the third CODE occurrence is
 #: covered by that pin rather than by a row of its own.
 #:
@@ -360,15 +360,15 @@ READERS: tuple[dict[str, Any], ...] = (
     },
     {
         "file": "tortoise/hosted_backup.py",
-        "line": "1333",
+        "line": "1382",
         "reader": "whole-graph scan (restore's dirty-target pre-check)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
         "occurrences": 4,
         "needs": "a full label-agnostic read of the target graph",
         "class": "maintenance",
-        "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside "
-               "`def restore_graph` at `:1098`), NOT the export: it refuses a dirty target "
+        "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1382`, inside "
+               "`def restore_graph` at `:1147`), NOT the export: it refuses a dirty target "
                "before the rebuild, so a re-home must keep it reading every node whatever "
                "shape it carries. ⚠️ It is censused because the restore must decide what "
                "it does with a `:GraphEvent` node, not because it reads one. ⚠️ NEITHER "
@@ -379,15 +379,15 @@ READERS: tuple[dict[str, Any], ...] = (
                "\"GraphEvent\" in labels` branch is `:36046` and the append `:36054` — a "
                "SERVING reader under this census's own class rule, so the `serving: 1` "
                "count in this file excludes it). No row carries either (#14204). ⚠️ This "
-               "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "
-               "live read at `:3603` (`_restore_into_temp_verify_swap`) and a docstring "
-               "mention at `:3442` — and the exact count is pinned, so deleting any of "
+               "statement occurs FOUR times in `hosted_backup.py` — `:1382`, `:1583`, the "
+               "live read at `:3652` (`_restore_into_temp_verify_swap`) and a docstring "
+               "mention at `:3491` — and the exact count is pinned, so deleting any of "
                "them reds. What the pin cannot do is say WHICH occurrence a row addresses: "
                "the `line` is that address and nothing grades it.",
     },
     {
         "file": "tortoise/hosted_backup.py",
-        "line": "1534",
+        "line": "1583",
         "reader": "whole-graph scan (restore's node-count verification)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
@@ -395,7 +395,7 @@ READERS: tuple[dict[str, Any], ...] = (
         "needs": "a full label-agnostic read of the graph",
         "class": "maintenance",
         "why": "the second restore-side scan (the restore's `actual_nodes` verification, "
-               "`hosted_backup.py:1533-1534`): "
+               "`hosted_backup.py:1582-1583`): "
                "the same statement shape as the line above, so both rows require two "
                "occurrences — see the residual noted on that row.",
     },
