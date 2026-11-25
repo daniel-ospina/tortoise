@@ -1077,8 +1077,10 @@ def main(argv: list[str] | None = None) -> int:
     # would be the same pair-vs-class defect one level down, which is the defect this
     # refusal was rewritten to remove.
     _output_verbs = [
-        verb for verb in OUTPUT_VERBS
-        if getattr(args, verb.removeprefix("--").replace("-", "_")) not in (None, False)
+        verb for verb, chosen in (
+            ("--check", args.check is not None),
+            ("--render", args.render is not None),
+        ) if chosen
     ]
     if len(_output_verbs) > 1:
         print(
