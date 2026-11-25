@@ -385,9 +385,10 @@ figures, and neither reading is a hand-count error: the census appendix used to 
 document, and its machine-written rows carried cite targets of their own — 244 distinct ones, of
 which 243 were cited nowhere else — so untracking it shrank this population by exactly those 243.
 ⛔ **THIS IS A BASE CHANGE, NOT A CORRECTION OF AN ERROR.** At `939e37f664` — the base this
-sentence was first written against — the appendix's 244 split 143 above the pivot and 101 below
-with the pivot NOT among them, and **two** of its rows were also cited elsewhere
-(line `19186`, line `28477`), so 244 − 2 = **242**, which was right. `main`'s
+sentence was first written against — that base's OWN pivot was `28477`, not this base's `29604`,
+and on ITS pivot the appendix's 244 split **150 above it / 93 below / 1 at it**, so the pivot
+ITSELF was among the rows, and **two** of them were also cited elsewhere (that pivot `28477`,
+line `19186`), so 244 − 2 = **242**, which was right. `main`'s
 `#14592` restamped the appendix, and at this branch's base `1aef0b618bcf` it reads 244 split
 **150 / 93 / 1** with neither of those two rows present and only the pivot shared, so
 244 − 1 = **243**. Both counts are right at their own base.

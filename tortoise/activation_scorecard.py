@@ -399,9 +399,10 @@ FUNNEL_QUERY = (
 # the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
 # not 242, and the tree reads **484/7/476**, not 483/7/475. ⛔ AND THE RECOUNT IS A BASE
 # CHANGE, NOT AN ERROR — state it that way, because `242` was CORRECT where it was
-# written. At `939e37f664` (the base the first version used) the appendix's 244 split
-# 143 above the pivot and 101 below with the pivot NOT among them, and TWO of its rows
-# were also cited elsewhere — line `19186` and line `28477` — so
+# written. At `939e37f664` (the base the first version used) that base's OWN pivot was
+# `28477`, not this base's `29604`: on ITS pivot the appendix's 244 split 150 above it /
+# 93 below / 1 at it, so the pivot ITSELF was among the rows, and TWO of them were also
+# cited elsewhere — that pivot (`28477`) and line `19186` — so
 # 244 − 2 = **242**. `main`'s `#14592` then restamped the appendix (its own lines
 # moved), and at THIS branch's base `1aef0b618bcf` it reads 244 split **150 / 93 / 1**
 # with NEITHER of those two rows present and only the pivot shared, so 244 − 1 =
