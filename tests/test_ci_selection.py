@@ -9192,7 +9192,15 @@ _DERIVATION_LOOKAHEAD = 60
 #: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
 #: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
 _ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`\s+rows?\b")
-_ROW_CLAIM_BEFORE_FILE_RE = re.compile(r"\brows?\s*\(`tests/(?P<file>[\w/.-]+\.py)`")
+#: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
+#: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
+#: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
+#: (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`)" — the first name was
+#: graded and the second, which is the one a later fold is free to leave behind, was not: the same
+#: "a claim graded by nothing rots" class this block exists to warn about, reproduced inside the
+#: arm cut to catch it.
+_ROW_CLAIM_BEFORE_LIST_RE = re.compile(r"\brows?\s*\((?P<names>[^)]*)\)")
+_ROW_CLAIM_PATH_IN_LIST_RE = re.compile(r"`?tests/(?P<file>[\w/.-]+\.py)`?")
 
 
 def _row_claims(header: str) -> list[str]:
@@ -9205,7 +9213,9 @@ def _row_claims(header: str) -> list[str]:
     """
     unquoted = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
     found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
-    found |= {m.group("file") for m in _ROW_CLAIM_BEFORE_FILE_RE.finditer(unquoted)}
+    for claim in _ROW_CLAIM_BEFORE_LIST_RE.finditer(unquoted):
+        found |= {m.group("file")
+                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
     return sorted(found)
 
 
@@ -9867,20 +9877,28 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
     # one-spelling matcher is exactly how this word survived one review round and one fold, and a
     # bare-`tests/*.py` matcher would leave `durations`' 50 slash-carrying keys ungraded.
+    # ⛔ `#6` is the MULTI-NAME shape, and it is why the name-list arm captures the whole paren
+    # rather than the first path: `#14607` wrote "two new `core` rows (`A`, `B`)", the earlier
+    # matcher read `A` and left `B` graded by nothing, and `B` is the name a fold is free to
+    # leave behind. Both names are claimed here, so a return to first-name-only reds.
     fixture = (
         "`#1`'s `tests/test_row_claim_after.py` row, `#2`'s drift-reporter row "
         "(`tests/test_row_claim_before.py`, `core`, flat 2.0 s), `#3`'s "
         "`tests/test_registration_not_a_row.py` registration, `#4`'s "
-        "`tests/eval/retrieval/test_row_claim_subdir.py` row, and — quoted for the record, so not "
-        "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\"")
+        "`tests/eval/retrieval/test_row_claim_subdir.py` row, — quoted for the record, so not "
+        "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\", and `#6`'s two `core` rows "
+        "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`)")
     assert _row_claims(fixture) == [
         "eval/retrieval/test_row_claim_subdir.py",
         "test_row_claim_after.py",
         "test_row_claim_before.py",
+        "test_row_claim_list_first.py",
+        "test_row_claim_list_second.py",
     ], (
         "the row-claim matcher no longer reads BOTH reversion shapes (a file then `row`, and "
-        "`row (` then the file), or it misses a SUBDIRECTORY row, or it reads a `registration` "
-        "as a row, or it grades a QUOTED dead claim as a live one: "
+        "`row (` then the file), or it misses a SUBDIRECTORY row, or it reads only the FIRST "
+        "name of a `row (`…`, `…`)` LIST while its siblings go ungraded, or it reads a "
+        "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
         f"{_row_claims(fixture)!r}")
 
 
