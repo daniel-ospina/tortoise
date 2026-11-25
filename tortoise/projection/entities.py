@@ -7943,6 +7943,38 @@ PUBLISHABLE_PAYLOAD_LABELS: frozenset = frozenset(
     {"Point", "Object", "Subject", "Event"})
 
 
+def source_allowlist_governs(labels) -> bool:
+    """Is this node WITHIN the ``#3998`` rule's jurisdiction — i.e. does it carry
+    a ``:Source`` half at all?
+
+    ⛔ THIS IS NOT ``not label_set_publishable``. The two answer different
+    questions and conflating them is a measured read REGRESSION (#14593 review
+    P2, peer commit ``ae31596adc``): the rule withholds a ``:Source``'s
+    UNDECLARED properties, so its jurisdiction is exactly "a node that is a
+    Source, wholly or in part". A node that carries no Source half — a
+    ``:Session`` root, an ``(:Object:Document)`` — is not governed by it at all,
+    and running the ``:Source`` allowlist over it does not redact anything: there
+    is no ``text`` to withhold, so it TRUNCATES the node to the Source
+    declaration. MEASURED on a ``:Session`` root through
+    ``_resolve_root`` → ``{id, type}``, losing ``turn_count``, ``created_at``,
+    ``entity_links_created`` and six more, while the SAME node as a traversal
+    neighbour kept all nine — a silent read regression on
+    ``tortoise_traverse`` / ``tortoise_entity_profile`` /
+    ``explore_connections``.
+
+    ABSENCE IS NOT JURISDICTION EITHER, and that direction is the opposite of
+    :func:`label_set_publishable`'s: an empty/unknown label list declares no
+    Source, so the rule does not reach it. (Publication still denies by default —
+    ``label_set_publishable`` keeps its own meaning, which is why the two
+    functions are separate rather than one negation of the other.)
+    """
+    if not labels:
+        return False
+    if isinstance(labels, str):
+        labels = [labels]
+    return any(lbl == "Source" for lbl in labels if lbl)
+
+
 def label_set_publishable(labels) -> bool:
     """May a read surface publish this node's whole property map?
 
@@ -7992,6 +8024,8 @@ def publishable_payload(props: dict, labels) -> dict:
     Returns a NEW dict in both arms: a caller must not be able to mutate the
     resolved entry's own map through this.
     """
-    if label_set_publishable(labels):
+    if not source_allowlist_governs(labels):
+        # Out of the rule's jurisdiction: nothing to withhold, and applying the
+        # ``:Source`` declaration here would TRUNCATE the node (#14593 review P2).
         return dict(props)
     return filter_source_props(props)[0]

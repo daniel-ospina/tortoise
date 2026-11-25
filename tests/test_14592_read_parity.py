@@ -1337,6 +1337,49 @@ def test_relations_never_puts_a_Sources_payload_in_the_name_field(tmp_path):
         assert other["name"] == url, other
 
 
+def test_a_Session_root_keeps_its_properties_and_a_hybrid_still_loses_its_body(
+        tmp_path):
+    """#14593 review P2: the fix over-reached — jurisdiction is not "unpublishable".
+
+    Grading the ``#3998`` allowlist on ``not label_set_publishable(labels)``
+    conflated two different questions. The rule withholds a ``:Source``'s
+    UNDECLARED properties; it governs a node that IS a Source, wholly or in part.
+    A ``:Session`` root carries no Source half, so running the Source allowlist
+    over it redacts nothing and TRUNCATES the node to the Source declaration —
+    MEASURED on the pre-fix head as ``{id, type}``, losing ``turn_count``,
+    ``created_at``, ``entity_links_created``, ``machine_id``, ``model`` and four
+    more, on a node the traversal neighbour path kept in full. That is a silent
+    read regression on ``tortoise_traverse`` / ``tortoise_entity_profile`` /
+    ``explore_connections``, and no test covered it (147 passed with it in place).
+
+    Both arms are pinned here because the fix must not swing back: a node in the
+    rule's jurisdiction still loses its body, and a node out of it keeps every
+    property. `source_allowlist_governs` is the one place that decides which.
+    """
+    from tortoise.projection.entities import publishable_payload, source_allowlist_governs
+
+    session = {"id": "sess-14593", "turn_count": 7, "machine_id": "m-1",
+               "model": "x", "created_at": "2026-11-25", "entity_links_created": 3}
+    # out of jurisdiction → untouched, not truncated
+    assert source_allowlist_governs(["Session"]) is False
+    assert publishable_payload(session, ["Session"]) == session
+    # …and the empty/unknown arm is out of jurisdiction too, deliberately
+    assert source_allowlist_governs([]) is False
+    assert publishable_payload(session, []) == session
+
+    source = {"id": "s-14593", "url": "https://example.test/s-14593",
+              "text": "BODY THAT MUST NOT SURVIVE", "name": "declared-ish"}
+    assert source_allowlist_governs(["Source"]) is True
+    assert source_allowlist_governs(["Object", "Source"]) is True
+    for labels in (["Source"], ["Object", "Source"], ["Subject", "Source"]):
+        out = publishable_payload(source, labels)
+        assert "text" not in out, (labels, out)
+        assert out.get("url") == source["url"], (labels, out)
+    # a hybrid whose first label is publishable is STILL governed
+    assert "text" not in publishable_payload(
+        {"id": "h", "text": "x", "objectKind": "goal"}, ["Object", "Source"])
+
+
 def test_relations_never_puts_a_hybrid_ROOTS_content_in_entity_name(tmp_path):
     """#14593 review P2: the ROOT preview graded the RESOLUTION BRANCH label.
 

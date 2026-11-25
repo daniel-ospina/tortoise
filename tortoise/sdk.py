@@ -235,7 +235,7 @@ from .projection.entities import (  # #3998: the declared :Source surface
     _SERVER_MANAGED_PROPS_BY_LABEL,
     _SOURCE_NODE_PROP_NAMES,
     filter_source_props,
-    label_set_publishable,
+    source_allowlist_governs,
 )
 # #13626: the ONE write-gate ask for the DERIVED entity vectors. It is the same helper
 # the folds use, imported rather than re-spelled: `#13610` says there is exactly one
@@ -53963,7 +53963,13 @@ class TortoiseSDK:
         # two doors cannot disagree again.
         _raw = resolved[0]["properties"]
         _labs = resolved[0].get("labels")
-        if not label_set_publishable(
+        # ⛔ JURISDICTION, not publication (#14593 review P2): the ``#3998``
+        # allowlist withholds a ``:Source``'s undeclared props, so it applies to a
+        # node CARRYING a Source half. Gating it on ``not label_set_publishable``
+        # also caught every label outside the publishable set — a ``(:Object:
+        # Document)`` — and TRUNCATED it to the Source declaration, which redacts
+        # nothing because such a node has no ``text`` to withhold.
+        if source_allowlist_governs(
                 _labs if _labs else (resolved[0].get("label") or None)):
             _props, _denied = filter_source_props(_props)
             if _echo_written:

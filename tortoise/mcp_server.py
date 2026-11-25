@@ -9382,12 +9382,14 @@ def _get_auto_detect(id: str) -> dict:
         # and #14655 — read it there.
         entry = resolved[0]
         props = dict(entry["properties"])
-        from tortoise.projection.entities import filter_source_props, label_set_publishable
+        from tortoise.projection.entities import filter_source_props, source_allowlist_governs
 
         _labs = entry.get("labels")
-        _publishable = label_set_publishable(
+        # Jurisdiction, never "not publishable" — see
+        # ``projection.entities.source_allowlist_governs`` (#14593 review P2).
+        _governed = source_allowlist_governs(
             _labs if _labs else (entry.get("label") or None))
-        if not _publishable:
+        if _governed:
             props, _denied = filter_source_props(props)
         return props
     session = _safe(sdk._get_session, id)
