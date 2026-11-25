@@ -57,47 +57,21 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `5163c3ee8b6` folded in, carrying
-# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row and `#14574`'s drift-reporter row
-# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s) — plus THIS PR's own row
-# (`tests/test_14560_operator_vectors.py`, `core`, at the same flat 2.0 s `DEFAULT_FAST_WEIGHT`),
-# the verb packs the pool into two bins: seven shards at 826.0 s (a, f, g, h, i, j, k) and four at
-# 825.9 s (b, c, d, e), so `ceil(826.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
-# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
-# this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`), PLUS this change's own `tests/test_14592_read_parity.py` (`core`
-# and `api`, and at that same flat default ON PURPOSE: a `durations` row is written from a junit
-# census, not invented, so the row a CI can re-measure is the one the sweep replaces) — the verb
-# packs seven shards at 826.0 s
-# (a, f, g, h, i, j, k) and four at 825.9 s (b, c, d, e), so `ceil(826.0/60 x 2)` = 28 m governs
-# (a shard's job-level
-# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is measurable and small: `fast_pool()` holds 1332 files at this head against 1331 on `main`, and
-# the ONE addition this fold brings is this PR's `tests/test_14560_operator_vectors.py`. ⛔ The
-# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
-# this PR's: each landed before this fold. The name lists are what the guard COMPARES against the
-# live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
-# graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` `10f0107689b9` alone packs nine shards at 825.4 s and two at 825.5 s —
-# quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
-# the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1332 files at this head against 1329 on `main`, and the three additions
-# are this branch's `tests/test_14559_reaper_schedule.py` (#14565's fold),
-# `tests/test_fly_secret_declaration_report.py` (#14574, the drift reporter this branch adds — the
-# row that moved the partition from a flat 825.6 s to nine-at-825.8/two-at-825.7) and
-# `tests/test_14592_read_parity.py` (#14592's REST read-parity suite, THIS change — the row that
-# moved it on to the seven-at-826.0/four-at-825.9 pair stated above, measured with the verb at this
-# head rather than inferred from the added file). ⛔ `#14415`'s rows
-# (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
-# NOT this PR's: they were that PR's own additions and they landed before this fold.
+# reader of the prose can see. On THIS tree — `origin/main` `51f444fd088f` folded in, then this
+# PR's own row (`tests/test_14592_read_parity.py`, `core` and `api`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` its `durations` entry states) — the verb packs the pool into two bins: five
+# shards at 826.2 s (a, g, i, j, k) and six at 826.1 s (b, c, d, e, f, h), so
+# `ceil(826.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree
+# by construction rather than by a hand re-read.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
+# own partition must be re-derived on `main`, never read out of this sentence. The name lists are
+# what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
+# about THIS head — a fold re-derives them with the verb, it never carries them. ⛔ Every other row
+# in this map at this head is `main`'s, NOT this PR's; the one addition this change makes to
+# `fast_pool()` is its own suite, and the movement from `main`'s partition to the pair above is
+# measured with the verb on this tree rather than inferred from the added file.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -306,6 +280,7 @@ surfaces:
   # MEASURED, same selector, pre-fix. The `core` row is what covers the
   # `sentry.py`-only diff, and that is the only gap it closes.
   - test_13665_sentry_init_off_loop.py
+
   # #14592 Phase A: the OTHER half of that suite's dual registration — it pins the
   # five REST read routes whose handlers live in `tortoise/hosted_api.py`, and a
   # hosted_api-only diff resolves `['api', 'onboarding']` (the EXACT `api` match
@@ -2991,6 +2966,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
   # DUAL-REGISTERED, and the two rows cover DIFFERENT diffs — measured with this
@@ -15988,6 +15964,7 @@ durations:
   # missing in turn) and the verdict step (every arm that must fail, plus the
   # rehearsal arms that must not). No docker, no DB, no graph, no model call.
   # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
+  test_14592_read_parity.py: 2.0  # new in #14592 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` and `api` registrations above are what put the file in `fast_pool()`. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority). What the weight covers: the suite drives the real ASGI app (middleware, auth dependency, SDK, graph) on the docker test lane and SKIPS visibly when no live URI is configured, which is why the file is a normal pool member rather than a `uri_requiring` one.
   test_14559_reaper_schedule.py: 2.0
   test_13220_record_label_embeddings.py: 1.8
   test_13224_cold_embedder_write_bound.py: 78.8
