@@ -1710,10 +1710,16 @@ _PRE_CUE_ONLY = _inversion_form(
 
 
 _INVERSION_FORMS = (
-    # (a) a connective whose own clause carries a CONFIRMATION PREDICATE, the
-    #     predicate's object being the session's tool list:
+    # (a) a connective whose own clause carries a CONFIRMATION PREDICATE acting
+    #     on the session's tool list, with the subject IMPLIED, "you", "you
+    #     [have]" or "having":
     #     "Restart your client after confirming the tools are actually there",
-    #     "… after you have verified the tools …", "… once the tools are listed".
+    #     "… after you have verified the tools …", "… after you've checked the
+    #     tools …". A DIFFERENT subject ("after we confirm the tools …") and the
+    #     PASSIVE ("after the tools have been confirmed present") are out of
+    #     scope by design, as is any other rephrasing — the comment claims the
+    #     subject group the regex actually admits. (The "once the tools are
+    #     listed" shape is form (e)'s, not this one's.)
     #     The predicate must sit in the connective's OWN clause: a verb merely
     #     reached later is not the condition the restart is deferred to, so
     #     "… after adding the server so you can see the tools", "… if you cannot
@@ -1766,10 +1772,16 @@ _INVERSION_FORMS = (
 _CONFIG_NOUN_RE = re.compile(r"\b(?:configs?|settings|installer|\.mcp\.json)\b",
                              re.IGNORECASE)
 # …including one naming the scope AFTER the object ("… the tools are enabled in
-# your client settings"), which is how the third measured false red phrased it.
+# your client settings"), and one pointing back at the file by PRONOUN ("… the
+# config file exists and the tools are enabled in it") — both are file-side, and
+# both were measured as FALSE REDS before their arm existed.
 _CONFIG_PREP_RE = re.compile(
-    r"\b(?:in|from|inside|per|under)\b[^.;]{0,40}?\b(?:config|settings)\b",
+    r"\b(?:in|from|inside|per|under)\s+(?:it|them|that|those)\b"
+    r"|\b(?:in|from|inside|per|under)\b[^.;]{0,40}?\b(?:config|settings)\b",
     re.IGNORECASE)
+# A clause that opens with one of these continues the cue FORWARD ("restart,
+# then …"), so a subordinator later in it is not a deferral of the restart.
+_FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards)\b", re.IGNORECASE)
 
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
@@ -1796,10 +1808,21 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     if tools_at < 0:
         return False
     before = clause[:tools_at]
+    after_object = clause[tools_at:]
     config = _CONFIG_NOUN_RE.search(before)
-    if config:
-        return not re.search(r"\band\b", before[config.end():], re.IGNORECASE)
-    return bool(_CONFIG_PREP_RE.search(clause[tools_at:]))
+    if not config:
+        return bool(_CONFIG_PREP_RE.search(after_object))
+    tail = before[config.end():]
+    and_match = re.search(r"\band\b", tail, re.IGNORECASE)
+    if not and_match:
+        return True
+    # The `and` only breaks the exclusion when the second conjunct is NOT
+    # itself file-side: "… the config file exists and the tools are enabled in
+    # it" stays file-side (the trailing pronoun points back at the file), while
+    # "… the config is right and the tools are actually there" confirms the
+    # session's tool list and is graded.
+    return bool(_CONFIG_PREP_RE.search(after_object)
+                or _CONFIG_NOUN_RE.search(tail[and_match.end():]))
 
 
 def _restart_cue_order_violation(quick: str) -> str | None:
@@ -1843,12 +1866,21 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
     pre_clauses = [c.strip() for c in re.split(r"[,.;]", before.lstrip(" \t,.;:—–-"))
                    if c.strip()][-1:]
-    # The cue's OWN sentence: text up to the first full stop. `,` and `;` stay
-    # clause breaks INSIDE it, so "…, after confirming the tools …" and
-    # "…; after confirming the tools …" are both graded.
-    post_sentence = after.split(".", 1)[0]
-    post_clauses = [c.strip()
-                    for c in re.split(r"[,;]", post_sentence.lstrip(" \t,.;:—–-"))]
+    # The cue's OWN sentence, on the same reasoning: a `.` OR a `;` ends the
+    # window (both begin a new statement — grading past them read a subordinate
+    # clause that attaches to the NEXT verb as a deferral of the restart:
+    # "Restart your client; once the tools are listed, run `tortoise mcp-status
+    # --live`." was RED, measured, and its comma twin likewise). `,` stays a
+    # clause break INSIDE the sentence, which is what keeps the inversion behind
+    # a parenthetical comma ("… fully (on macOS, quit the menu-bar app) after
+    # confirming the tools are there") visible.
+    # ⛔ `lstrip` must NOT strip the terminator, or the window silently becomes
+    # "the cue's sentence or the NEXT one" and a following sentence is graded —
+    # measured, that is how "Restart your client. When you check the tools, …"
+    # came back RED. Only the separating punctuation that continues the cue
+    # (spaces, a comma) is stripped here.
+    post_sentence = re.split(r"[.;]", after.lstrip(" \t,"), maxsplit=1)[0]
+    post_clauses = [c.strip() for c in post_sentence.split(",")]
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
             continue
@@ -1856,7 +1888,14 @@ def _restart_cue_order_violation(quick: str) -> str | None:
             if pattern.search(clause):
                 return clause
     for clause in post_clauses:
-        if not clause or _confirmation_scopes_the_config(clause):
+        # A clause led by a FORWARD sequencer continues the cue's own
+        # predication in the forward direction: "then once the tools are listed
+        # run …", "and once the tools are listed, run …", "then after confirming
+        # the tools are there, run …" all put the confirmation AFTER the restart
+        # and were RED (measured). The sequencer is what says so; the
+        # subordinator that follows it does not make it a deferral.
+        if (not clause or _FORWARD_SEQUENCER_RE.match(clause)
+                or _confirmation_scopes_the_config(clause)):
             continue
         for pattern in _INVERSION_FORMS:
             if pattern is _PRE_CUE_ONLY:
@@ -2068,6 +2107,24 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client. When you check the tools, `tortoise_*` will be "
      "there.", False),
     ("Restart your client now. The tools then appear in the tool list.", False),
+    # a `;` or a forward sequencer continues the cue FORWARD — the subordinator
+    # that follows is not a deferral of the restart (all measured RED before):
+    ("Restart your client; once the tools are listed, run `tortoise mcp-status "
+     "--live`.", False),
+    ("Restart your client, then once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, then after confirming the tools are actually there, "
+     "run `tortoise mcp-status`.", False),
+    # two file-side facts CONJOINED are still file-side (measured RED before the
+    # pronoun arm existed), and so is a config fact named after the object:
+    ("Restart your client after confirming the config file exists and the tools "
+     "are enabled in it.", False),
+    ("Restart your client after checking the installer ran and the config lists "
+     "the tools.", False),
+    # the row that makes `_PRE_CUE_ONLY`-is-pre-cue-only LOAD-BEARING: without
+    # the identity skip this forward confirmation is graded by form (f)
+    # (measured — removing the skip changed no row before this one existed).
+    ("Restart your client, confirm the tools are actually there.", False),
     # ── inversions the previous cut passed ─────────────────────────────────
     # contracted auxiliary: the uncontracted twin was graded, this was not:
     ("Restart your client after you've verified the tools are actually there.",
