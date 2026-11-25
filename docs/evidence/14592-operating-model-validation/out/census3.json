@@ -1,0 +1,159 @@
+{
+  "expand_doc01_decision": {
+    "tool": "tortoise_expand_relationships",
+    "args": {
+      "point_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d"
+    },
+    "ok": true,
+    "reply": {
+      "result": [
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+          "related_kind": "statement",
+          "related_content": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+          "direction": "incoming",
+          "operator_id": "1a21036fcf1-9443c1763746",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+          "related_kind": "statement",
+          "related_content": "ColdPath Logistics holds a validated cold-chain certificate",
+          "direction": "incoming",
+          "operator_id": "1a21036fd59-902554c18806",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+          "related_kind": "statement",
+          "related_content": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots",
+          "direction": "incoming",
+          "operator_id": "1a21036fdb8-f7b7900ef2f5",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+          "related_kind": "statement",
+          "related_content": "Dev Patel ruled the capital spend for our own refrigerated van not approvable this quarter",
+          "direction": "incoming",
+          "operator_id": "1a21036fe14-f8b801531161",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+          "related_kind": "statement",
+          "related_content": "The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows",
+          "direction": "incoming",
+          "operator_id": "1a21036fe8d-839a76fd73df",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "1a210370019-534024145152",
+          "related_kind": "statement",
+          "related_content": "[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+          "direction": "incoming",
+          "operator_id": "1a21036fe8d-839a76fd73df",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+          "related_kind": "statement",
+          "related_content": "Buying our own refrigerated van needs 48,000 pounds of capital spending",
+          "direction": "incoming",
+          "operator_id": "1a21036ff42-2a150ef5fcc6",
+          "related_status": "live"
+        },
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "1a21036ffa1-35d87bd8d4db",
+          "related_kind": "statement",
+          "related_content": "[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+          "direction": "incoming",
+          "operator_id": "1a21036ff42-2a150ef5fcc6",
+          "related_status": "live"
+        }
+      ]
+    }
+  },
+  "expand_cert_claim": {
+    "tool": "tortoise_expand_relationships",
+    "args": {
+      "point_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078"
+    },
+    "ok": true,
+    "reply": {
+      "result": [
+        {
+          "predicate": "",
+          "mechanism": "IMPL",
+          "related_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+          "related_kind": "statement",
+          "related_content": "We choose ColdPath Logistics as our delivery partner",
+          "direction": "outgoing",
+          "operator_id": "1a21036fd59-902554c18806",
+          "related_status": "live"
+        }
+      ]
+    }
+  },
+  "explore_doc01_decision": {
+    "tool": "tortoise_explore_connections",
+    "args": {
+      "node_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+      "hops": 3,
+      "include_content": true
+    },
+    "ok": true,
+    "reply": [
+      "[{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120\",\"related_kind\":\"statement\",\"related_content\":\"ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fcf1-9443c1763746\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078\",\"related_kind\":\"statement\",\"related_content\":\"ColdPath Logistics holds a validated cold-chain certificate\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fd59-902554c18806\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362\",\"related_kind\":\"statement\",\"related_content\":\"NordicFreight's 6pm order cutoff cannot make our morning restaurant slots\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fdb8-f7b7900ef2f5\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8\",\"related_kind\":\"statement\",\"related_content\":\"Dev Patel ruled the capital spend for our own refrigerated van not approvable this quarter\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fe14-f8b801531161\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a\",\"related_kind\":\"statement\",\"related_content\":\"The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fe8d-839a76fd73df\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"1a210370019-534024145152\",\"related_kind\":\"statement\",\"related_content\":\"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments\",\"direction\":\"incoming\",\"operator_id\":\"1a21036fe8d-839a76fd73df\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b\",\"related_kind\":\"statement\",\"related_content\":\"Buying our own refrigerated van needs 48,000 pounds of capital spending\",\"direction\":\"incoming\",\"operator_id\":\"1a21036ff42-2a150ef5fcc6\",\"related_status\":\"live\"},{\"predicate\":\"\",\"mechanism\":\"IMPL\",\"related_id\":\"1a21036ffa1-35d87bd8d4db\",\"related_kind\":\"statement\",\"related_content\":\"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments\",\"direction\":\"incoming\",\"operator_id\":\"1a21036ff42-2a150ef5fcc6\",\"related_status\":\"live\"}]"
+    ]
+  },
+  "sources": {
+    "tool": "tortoise_list_knowledge",
+    "args": {
+      "kind": "source",
+      "limit": 20
+    },
+    "ok": true,
+    "reply": [
+      "[{\"url\":\"session:doc-02\",\"sourceKind\":\"agentSession\",\"points\":13},{\"url\":\"session:doc-01\",\"sourceKind\":\"agentSession\",\"points\":13},{\"url\":\"session:doc-05\",\"sourceKind\":\"agentSession\",\"points\":12},{\"url\":\"session:doc-04\",\"sourceKind\":\"agentSession\",\"points\":11},{\"url\":\"session:doc-03\",\"sourceKind\":\"agentSession\",\"points\":8}]"
+    ]
+  },
+  "provenance": {
+    "artifact": "census3.json",
+    "producer": "run_census3.py",
+    "producer_path": "docs/evidence/14592-operating-model-validation/run_census3.py",
+    "artifact_status": "pre-producer",
+    "produced_by_committed_producer": false,
+    "provenance_key_shape": "absent",
+    "renamed_receipt_key": null,
+    "missing_producer_keys": [
+      "graph",
+      "provenance",
+      "ok",
+      "resolved"
+    ],
+    "hardcoded_point_ids": [
+      "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+      "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078"
+    ],
+    "regenerate_with": "TORTOISE_VENV=<checkout>/.venv TORTOISE_DB_URI=<uri to xv14592_operating_model> ./run.sh run_census3.py",
+    "note": "Carried from the 2026-11-25 run, made before this producer was committed, so it is NOT this script's output. It cannot be regenerated: xv14592_operating_model lived in a lane container that was torn down (REPORT.md \u00a79). The deviations above are measured by stamp_provenance.py, not asserted.",
+    "stamp_probe": "stamp_provenance.py"
+  }
+}

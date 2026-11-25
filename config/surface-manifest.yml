@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
+cut_at_commit: d4b2df6d826224f26d226a98bfb8e341ead10305
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -2980,11 +2980,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.graph_overview.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, engine, mcp-handler, other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, mcp-handler, other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, engine, mcp-handler, other-tooling'
+  reason: 'no MCP tool binds it; callers: cli, documentation, engine, mcp-handler, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
