@@ -101,10 +101,17 @@ _DOOR_HOOK_CALLS = {
      "ensure_default_graph_row"): 3,
     # ONE each: only the arm that MINTS. The PATCH arms of both functions write
     # to a row that already existed, which is `backfill`/`sweep`'s population and
-    # deliberately outside the hook's scope (§A8.3.13's scope note). A count of 1
-    # is the pin that a tidy-up cannot "simplify" the call away, and that a later
-    # edit which moves it to function entry (where it would fire for custom rows
-    # too) reds here rather than only in production.
+    # deliberately outside the hook's scope (§A8.3.13's scope note).
+    # ⛔ WHAT THIS COUNT GRADES — stated from the mutation, not from the intent
+    # (#14624 review P3-1/P3-2): it is EXACT (`!=`, in the pin below), so it reds
+    # on the call being DELETED and on a SECOND call added anywhere in the same
+    # body — including `set_graph_recording`'s CUSTOM-row arm, which no
+    # behavioural half drove before. It does NOT catch a call MOVED to function
+    # entry: the count is unchanged, and that shape is graded by
+    # `test_the_two_mint_on_demand_doors_arm_the_graph_they_create`'s
+    # existing-default-row half, which reds because the hook then fires for a row
+    # the door did not create. A FLOOR would have caught neither the second call
+    # nor the move.
     ("tortoise/supabase_control.py", "set_graph_name"): 1,
     ("tortoise/supabase_control.py", "set_graph_recording"): 1,
 }
@@ -243,7 +250,7 @@ def test_every_creation_door_calls_the_hook():
     DOOR, because a helper that still calls the hook proves only that the helper
     is intact.
     """
-    missing = []
+    wrong = []
     for rel, function, callee in _DOORS:
         node = _functions(rel).get(function)
         assert node is not None, (
@@ -253,14 +260,20 @@ def test_every_creation_door_calls_the_hook():
             f"and pin the new name rather than deleting this check")
         want = _DOOR_HOOK_CALLS[(rel, function)]
         got = _hook_calls(node, callee)
-        if got < want:
-            missing.append(f"{rel}::{function} calls {callee}× (want {want})")
-    assert not missing, (
-        "these creation doors no longer call the record-cursor hook: "
-        f"{missing}. A graph they create is born UNCUT — every record it writes "
-        "is refused `cursor_not_active` while `write_live_record` (fail-soft by "
-        "contract) reports success, so nothing reds and the loss only shows at a "
-        "rebuild")
+        # ⛔ EXACT, not a floor (#14624 review P3-1/P3-2). A floor let a SECOND
+        # call into the same body pass: the hook fires for a row the door did not
+        # create, which is the widening §A8.3.13's scope note rules out.
+        if got != want:
+            wrong.append(f"{rel}::{function} calls {callee}×{got} (want {want})")
+    assert not wrong, (
+        "these creation doors no longer call the record-cursor hook the pinned "
+        f"number of times: {wrong}. FEWER means a graph the door creates is born "
+        "UNCUT — every record it writes is refused `cursor_not_active` while "
+        "`write_live_record` (fail-soft by contract) reports success, so nothing "
+        "reds and the loss only shows at a rebuild. MORE means the hook reached "
+        "an arm that must not arm: a row the door did not create is "
+        "`backfill`/`sweep`'s population (§A8.3.13's scope note), and arming it "
+        "from a rename or a toggle widens the hook's population past its door")
 
 
 def test_the_door_helpers_reach_the_writers_hook():
@@ -359,9 +372,19 @@ def test_the_two_mint_on_demand_doors_arm_the_graph_they_create(monkeypatch):
     while its cursor row is missing is `backfill`/`sweep`'s population,
     deliberately outside the hook's scope
     (`docs/plans/2026-11-15-issue-12894-storage-shape.md` §A8.3.13's scope
-    note). Grading both halves is what makes this a proof of the SHAPE of the
-    fix: a call moved to function entry would fire on custom rows and on every
-    rename, and this row reds on the second half.
+    note). THREE halves make this a proof of the SHAPE rather than of the call's
+    presence, and each grades a DIFFERENT mutation (#14624 review P3-1/P3-2
+    measured all three; an earlier revision claimed the existing row alone
+    covered the custom one):
+
+    * MINT — reds if the call is deleted.
+    * EXISTING DEFAULT ROW — reds if the call is MOVED to function entry (or any
+      arm above this one): the hook then fires for a row the door did not create.
+    * CUSTOM ROW (`set_graph_recording`, which has an arm the default row does
+      not) — reds if the call is added to the arm that PATCHes a custom graph.
+      ⛔ That arm needed its own half: the existing-row half drives
+      `graph_id='default'` only and could not see it, and a FLOOR in
+      `_DOOR_HOOK_CALLS` could not either.
     """
     from tortoise import supabase_control
 
@@ -409,6 +432,32 @@ def test_the_two_mint_on_demand_doors_arm_the_graph_they_create(monkeypatch):
             f"CREATE ({calls}) — a pre-existing default row without a cursor row "
             "is `backfill`/`sweep`'s population (§A8.3.13's scope note), and "
             "arming it from a rename is the quiet widening that note rules out")
+
+    # ── the CUSTOM-ROW arm: `set_graph_recording` also PATCHes a row it did not
+    # create, and it is the ONE arm above that no half so far reached ────────
+    # `set_graph_name` has no custom-row arm (it is the default row's own name),
+    # so this is pinned on the function that does. A hook added here would fire
+    # for every recording toggle on a custom graph — a population `insert_graph`
+    # creates (`_provision_graph` already hooks it), not a missing door.
+    calls, record = _hook_recorder()
+    monkeypatch.setattr(
+        supabase_control, "_provision_default_graph_record", record,
+        raising=True)
+    custom = _MintOnlyControlPlane(existing=[{
+        "id": "g_custom", "kind": "custom", "status": "active",
+        "namespace": "org_ns", "name": "custom", "recording": None,
+    }])
+    assert supabase_control.set_graph_recording(
+        custom, "org-14582", "g_custom", True) is True
+    assert custom.posted == [], (
+        f"a custom-row toggle MINTED a default row: {custom.posted}")
+    assert len(custom.patched) == 1, (
+        f"a custom-row toggle must PATCH that row: {custom.patched}")
+    assert calls == [], (
+        f"set_graph_recording called the creation hook for a CUSTOM row "
+        f"({calls}) — a custom graph is created by `insert_graph`, which "
+        "`_provision_graph` already hooks, so arming it from a toggle widens "
+        "the hook's population past its doors (§A8.3.13's scope note)")
 
 
 def test_the_hooks_own_door_list_matches_the_doors_that_call_it():

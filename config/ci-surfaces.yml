@@ -3010,8 +3010,11 @@ surfaces:
   # and `tortoise/record_writer.py`, so `core` is its surface (the same
   # `--changed-files` measurement the two `test_12894` rows above record).
   - test_13043_record_allocator_cli.py
-  # #14582: the creation hook, its three doors, `/health`'s `armed_but_uncut`
-  # fold, and the `backfill` verb. `core`, MEASURED not stylistic: its subjects
+  # #14582: the creation hook and every door it is wired into, `/health`'s
+  # `armed_but_uncut` fold, and the `backfill` verb. ⛔ NO DOOR COUNT here on
+  # purpose: the number is graded structurally by `_DOORS`/`_DOOR_HOOK_CALLS`, and
+  # a count repeated in prose is what staled when the two mint-on-demand doors
+  # were wired (#14624). `core`, MEASURED not stylistic: its subjects
   # are `tortoise/record_writer.py`, `tortoise/record_allocator.py`,
   # `tortoise/hosted_api.py`, `tortoise/supabase_control.py`, `tortoise/sdk.py`
   # and `tools/record_allocator_cli.py` — `--changed-files
