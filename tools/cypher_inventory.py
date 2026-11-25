@@ -862,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="census every tracked surface, not only the product")
     args = parser.parse_args(argv)
 
-    # ⛔ `--render` AND `--all-surface` CONTRADICT EACH OTHER — refuse the pair.
+    # ⛔ NEITHER VERB MAY RUN THE WIDE CENSUS UNDER THE SOURCE'S PRODUCT PINS.
     # The source's 25 pins are PRODUCT-surface counts (`census(("tortoise",))`),
     # and `--render` appends the run's rows under those pins. Rendering the
     # all-surface census would write a document whose §0 pin reads `sites = 1327`
@@ -871,15 +871,56 @@ def main(argv: list[str] | None = None) -> int:
     # prose, which is the class this file exists to refuse. The refusal is loud
     # rather than a silent scope-narrowing: a lane that asked for the wide census
     # and got the product one would believe it had rendered the wide table.
-    if args.render is not None and args.all_surface:
+    if args.all_surface and (args.render is not None or args.check is not None):
+        verb = "--render" if args.render is not None else "--check"
         print(
-            "--render writes the PRODUCT-surface document: the source's 25 pins are\n"
-            "product counts, so an all-surface appendix under them contradicts the\n"
-            "pins. Render without --all-surface, or take the wide census from\n"
-            "`--markdown --all-surface` instead.",
+            f"`{verb} --all-surface` contradicts the source's pins: the 25 pins are\n"
+            "PRODUCT-surface counts, so the wide census can never satisfy --check and\n"
+            "would sit under an appendix that contradicts it under --render. Take the\n"
+            "wide census from `--markdown --all-surface` (or `--json`) instead.",
             file=sys.stderr,
         )
         return 2
+
+    # ⛔ `--render` MUST NOT OVERWRITE A TRACKED PATH. The refusal inside `render()`
+    # guards the SOURCE'S CONTENT (a source that already carries rows), never the
+    # DESTINATION — so `--render docs/architecture/CYPHER-INVENTORY.src.md` read the
+    # clean source, passed that refusal, and wrote source+1,327 rows over the tracked
+    # file. That is self-locking: afterwards `--check` exits 1 ("carries N census
+    # row(s)") and `--render` exits 2 (refuses the rowed source), so the tool can
+    # neither grade nor repair the tree it just corrupted. A mistyped path is the
+    # plausible route here — §7 tells every lane to run this verb — and the same
+    # clobber applies to any other tracked doc. Refused before the census runs, so the
+    # refusal costs nothing. `git ls-files` answers "is this path in the index", which
+    # is exactly the invariant (`--render`'s output is never committed); outside a git
+    # work tree (exit 128) it simply does not fire.
+    if args.render is not None:
+        target = (ROOT / args.render).resolve()
+        if target == DOC_SRC.resolve():
+            print(
+                f"refusing to render over the SOURCE ({args.render}): the document is\n"
+                "`--render`'s output and the source is hand-authored. Pick another\n"
+                "path (the default writes the gitignored `CYPHER-INVENTORY.md`).",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            rel = target.relative_to(ROOT.resolve()).as_posix()
+        except ValueError:
+            rel = None
+        if rel is not None:
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", rel],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            if tracked.returncode == 0:
+                print(
+                    f"refusing to render over a TRACKED path ({rel}): the document is\n"
+                    "`--render`'s output, which is never committed. Pick an untracked\n"
+                    "path (the default is gitignored).",
+                    file=sys.stderr,
+                )
+                return 2
 
     prefixes: tuple[str, ...] = ("tortoise",)
     if args.all_surface:
