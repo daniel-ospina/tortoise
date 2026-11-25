@@ -32,6 +32,7 @@ fails under the concatenation.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -265,6 +266,95 @@ def test_both_halves_describe_the_fusion_never_the_removed_concatenation():
             assert phrase not in doc, f"{name} still states the removed merge: {phrase!r}"
 
 
+# ── The pair-condition PROSE pin, as a grader rather than as a one-off search, so
+#    its non-vacuity is an assertion instead of a lab note (#14597 review P2). ──
+_PAIR_CONDITION = re.compile(
+    r"\(\s*61\s*\+\s*h1\s*\)\s*\(\s*61\s*\+\s*h2\s*\)\s*/\s*"
+    r"\(\s*122\s*\+\s*h1\s*\+\s*h2\s*\)\s*[-\u2212]\s*61")
+_REFUTED_FORM = re.compile(
+    r"r\s*<\s*\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)\s*/\s*2")
+_ONE_RANK_BOUND = re.compile(r"(<=|\u2264)\s*61")
+#: The phrases a carrier uses to INTRODUCE the win condition. A clause carrying
+#: one of them must carry the true pair form, because that is the clause a reader
+#: takes the condition from — the two sites in ``expansion_merge`` and the one site
+#: in each of the other two carriers, measured, not assumed.
+_WIN_ARITHMETIC = (
+    "beats a single-list candidate",
+    "only while",
+    "can pass an incumbent",
+)
+#: A clause may QUOTE the refuted form only if it also says, in that clause, that
+#: the form is the refuted one. Deliberately narrow and explicit: the linter
+#: pattern this copies (a `noqa` suppression carrying its rule code / `nosec` /
+#: `//nolint`) puts the suppression ON the offending line and NAMES the rule rather
+#: than blanket-silencing a file — Ruff's own ``unused-noqa`` (RUF100) exists
+#: because a suppression that stops matching is itself a defect.
+_CORRECTION = re.compile(
+    r"\u26d4|\bfalse\b|\brefuted\b|\bwrong\b|\bdisagrees\b|\bcorrected\b"
+    r"|\buntil now\b|\bno longer\b")
+#: Clause boundaries as the carriers actually punctuate them. The lookahead is
+#: what keeps ``i.e.`` and ``e.g.`` from splitting a clause in half: a real
+#: boundary here is followed by a capital, an open paren, a bold marker, a
+#: backtick span or a ⛔.
+_CLAUSE_BOUNDARY = re.compile(r"(?<=[.;])\s+(?=[A-Z(\u26d4*`])")
+
+
+def _carriers() -> dict:
+    """Every carrier that publishes the merge rule's condition, keyed by the
+    site a reader finds it at. The README and the SDK docstring are read from
+    disk/source, never imported, so this stays a ``core``-surface property."""
+    root = Path(__file__).resolve().parent.parent
+    return {
+        "tortoise/expansion_merge.fuse_expansion_pass": " ".join(
+            (expansion_merge.fuse_expansion_pass.__doc__ or "").split()),
+        "sdk._entity_key_dense_pass": _half_docstrings()["_entity_key_dense_pass"],
+        "docs/evidence/14344-expansion-fusion/README.md": " ".join(
+            (root / "docs" / "evidence" / "14344-expansion-fusion"
+             / "README.md").read_text().split()),
+    }
+
+
+def _pair_condition_violations(text: str) -> list[str]:
+    """Every CLAUSE that states the two-term advantage without the true pair
+    condition, and every clause that re-publishes the refuted closed form without
+    marking it as the refuted one.
+
+    ⛔ CLAUSE-SCOPED ON PURPOSE (#14597 review P2). The first cut asserted
+    ``pair_condition.search(whole_carrier_text)``, and a carrier that states the
+    bound twice was satisfied by ONE surviving true occurrence — so the refuted
+    form could be put back at the site a reader hits FIRST while the suite stayed
+    green (reproduced at ``3c2d3464``: that carrier's own row stayed ``12 passed``).
+    Grading per clause is what makes the pin about every SITE rather than about the
+    carrier's existence.
+
+    The one exemption is co-located, and this function is also the anti-over-block
+    proof: all three carriers QUOTE the refuted form today, and each quote carries
+    its correction marker in the same clause, so a clean run exercises the
+    exemption instead of proving the string absent everywhere.
+
+    Stated residual, not a silent one: a NEW site that states the bound while
+    using neither a ``_WIN_ARITHMETIC`` phrase nor the refuted form is not graded
+    here (it re-words past the trigger set). Closing that fully would need a
+    parser for the prose, and the measured defect — the refuted form returning at
+    the headline — is what this closes.
+    """
+    violations = []
+    for clause in _CLAUSE_BOUNDARY.split(text):
+        corrective = bool(_CORRECTION.search(clause))
+        if _REFUTED_FORM.search(clause) and not corrective:
+            violations.append(
+                "re-publishes the refuted closed form `r < (h1 + h2 - 61) / 2` "
+                f"without saying it is the refuted one: {clause[:180]!r}")
+        if corrective or _PAIR_CONDITION.search(clause):
+            continue
+        if any(phrase in clause for phrase in _WIN_ARITHMETIC):
+            violations.append(
+                "states the two-term advantage without the PAIR condition "
+                "`r > (61+h1)(61+h2)/(122+h1+h2) - 61` in the same clause: "
+                f"{clause[:180]!r}")
+    return violations
+
+
 def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     """#14396 review (P2-1): "an id both passes carry OUTRANKS either pass alone"
     is a guarantee this fusion does not give, and it was stated in four places.
@@ -294,51 +384,91 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     ⛔ AND ROUND 18 STILL PUBLISHED A FALSE CLOSED FORM, which is why this row now
     names the ONE true one (#14597 review, P2-1): the sentence it graded said
     ``r < (h1 + h2 - 61) / 2``, wrong in both directions, and the regex pinned that
-    string instead of the arithmetic. The closed form is now graded positively AND
-    the refuted one negatively, so a carrier cannot re-publish it; that the form is
-    the ENGINE's is `test_the_published_pair_condition_is_the_fusions_arithmetic`.
-    """
-    import re
+    string instead of the arithmetic. That the form is the ENGINE's is
+    `test_the_published_pair_condition_is_the_fusions_arithmetic`.
 
-    root = Path(__file__).resolve().parent.parent
-    carriers = {
-        "tortoise/expansion_merge.fuse_expansion_pass": " ".join(
-            (expansion_merge.fuse_expansion_pass.__doc__ or "").split()),
-        "sdk._entity_key_dense_pass": _half_docstrings()["_entity_key_dense_pass"],
-        "docs/evidence/14344-expansion-fusion/README.md": " ".join(
-            (root / "docs" / "evidence" / "14344-expansion-fusion"
-             / "README.md").read_text().split()),
-    }
+    ⛔ AND THE PIN ITSELF WAS A PRESENCE CHECK, which this row's own docstring
+    claimed was not the case ("so a carrier cannot re-publish it") until the
+    #14597 re-review MEASURED the opposite at ``3c2d3464``: the true form stated
+    twice in one docstring meant one surviving occurrence satisfied the regex for
+    the whole carrier, so the refuted form could be restored at the FIRST bullet —
+    the sentence a reader hits first — with this row still green. The grade is
+    therefore ``_pair_condition_violations``, CLAUSE-scoped in both directions, and
+    `test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check` is the
+    executed proof that the same restoration now reds.
+    """
+    carriers = _carriers()
     unbounded = "outranks either pass alone"
-    bound = re.compile(r"(<=|\u2264)\s*61")
-    # ⛔ The POSITIVE half round 18 found missing from every carrier: the condition
-    # is a pair of ranks, so a carrier that states only the symmetric `<= 61` case
-    # publishes it as a NECESSARY condition and is false whenever either rank is 1
-    # — and round 18's own closed form was false too, so the form itself is now
-    # graded (see the arithmetic row) rather than only its presence. Both the ASCII
-    # and the typographic minus are accepted, since the README uses U+2212.
-    pair_condition = re.compile(
-        r"\(\s*61\s*\+\s*h1\s*\)\s*\(\s*61\s*\+\s*h2\s*\)\s*/\s*"
-        r"\(\s*122\s*\+\s*h1\s*\+\s*h2\s*\)\s*[-\u2212]\s*61")
-    # ⚠️ The REFUTED form `r < (h1 + h2 - 61) / 2` is deliberately NOT pinned
-    # negatively: every carrier QUOTES it to say it was wrong, and a regex would
-    # have to tell a correction from a re-publication — exactly the fail-closed
-    # over-block this repo does not add gates for. The TRUTH of the form is
-    # graded by `test_the_published_pair_condition_is_the_fusions_arithmetic`
-    # below, which is the instrument that would have caught round 18's error.
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
             "rank only under the pair condition "
             "r > (61+h1)(61+h2)/(122+h1+h2) - 61")
-        assert bound.search(text), (
+        assert _ONE_RANK_BOUND.search(text), (
             f"{where} states the two-term advantage without its bound — the "
             "`<= 61` clause is what makes the SYMMETRIC half of the claim true")
-        assert pair_condition.search(text), (
+        assert _PAIR_CONDITION.search(text), (
             f"{where} publishes the `<= 61` case without the PAIR condition "
             "`r > (61+h1)(61+h2)/(122+h1+h2) - 61` — the `<= 61` reading is the "
             "symmetric case only, and a shared id holding the TOP slot in either "
             "list beats every single-list term whatever its other rank (round 18, P2-1)")
+        violations = _pair_condition_violations(text)
+        assert not violations, \
+            f"{where} — " + " | ".join(violations)
+        # Coverage FLOOR, so a re-word cannot silently reduce this row back to the
+        # per-carrier presence checks above without anyone noticing: the grader must
+        # actually inspect at least one clause here.
+        inspected = [
+            clause for clause in _CLAUSE_BOUNDARY.split(text)
+            if _REFUTED_FORM.search(clause)
+            or any(phrase in clause for phrase in _WIN_ARITHMETIC)]
+        assert inspected, (
+            f"{where} no longer contains a clause this pin can grade — the prose "
+            "was re-worded past `_WIN_ARITHMETIC` and past the refuted form, so the "
+            "row would pass vacuously")
+
+
+def test_the_pair_condition_pin_is_clause_scoped_not_a_presence_check():
+    """Non-vacuity for the row above, EXECUTED rather than remembered (#14597
+    re-review, P2).
+
+    The attack it reproduces is the one that was MEASURED at ``3c2d3464``: restore
+    the refuted closed form at the site a reader hits FIRST, leave the later
+    paragraph (which still states the true form) untouched, and the suite stayed
+    green because the pin was a whole-carrier presence check. The mutation below
+    does exactly that mechanically — it replaces the FIRST occurrence of the true
+    form and keeps the second — so it asserts the old pin would STILL be satisfied
+    (``_PAIR_CONDITION.search`` on the mutated carrier) and the new one is not.
+
+    It also asserts the exemption is exercised rather than merely unused: the
+    carrier really does quote the refuted form today, and quoting it with its
+    correction marker is not a violation.
+    """
+    doc = _carriers()["tortoise/expansion_merge.fuse_expansion_pass"]
+    assert not _pair_condition_violations(doc)
+
+    # The exemption is LIVE: this carrier quotes the refuted form, in a clause that
+    # names it as the refuted one, and that is not a violation.
+    quoted = [clause for clause in _CLAUSE_BOUNDARY.split(doc)
+              if _REFUTED_FORM.search(clause)]
+    assert quoted, (
+        "the carrier no longer quotes the refuted form — this row would then not "
+        "exercise the co-located-correction exemption at all")
+    assert all(_CORRECTION.search(clause) for clause in quoted), (
+        "a correction clause lost its correction marker: "
+        + " | ".join(c[:180] for c in quoted if not _CORRECTION.search(c)))
+
+    first = _PAIR_CONDITION.search(doc)
+    assert first, "the carrier no longer states the true pair form"
+    mutated = doc[:first.start()] + "r < (h1 + h2 - 61) / 2" + doc[first.end():]
+    assert _PAIR_CONDITION.search(mutated), (
+        "the mutation removed EVERY true occurrence — it would not reproduce the "
+        "headline-site attack, which leaves the later paragraph intact")
+    violations = _pair_condition_violations(mutated)
+    assert violations, (
+        "the refuted form restored at the carrier's FIRST site went ungraded — the "
+        "pin is a presence check again, which is the defect this row exists for")
+    assert any("refuted closed form" in v for v in violations), violations
 
 
 def test_the_published_pair_condition_is_the_fusions_arithmetic():
@@ -357,8 +487,14 @@ def test_the_published_pair_condition_is_the_fusions_arithmetic():
     below in both directions. The sibling row
     ``test_the_two_term_advantage_is_bounded_at_1based_61`` could not see it: that
     row grades the ENGINE at its own fixtures but never compares the published
-    FORM with it, so the formula's error was invisible there — this is the first
-    assertion that reads the form at all.
+    FORM with it, so the formula's error was invisible there. And the shape row
+    above reads the form only for PRESENCE — it grades the string a carrier must
+    contain, never the arithmetic that string claims — so this is the first
+    assertion that compares the form with ``rrf_fusion`` itself. The two rows are
+    not interchangeable, which the #14597 re-review measured: a carrier can satisfy
+    the shape pin at one site while the bound is stated at another, and only this
+    row can say the FORM is true while only the shape row can say every SITE
+    carries it.
 
     Rational arithmetic decides the published bound (``Fraction``) and
     ``rrf_fusion`` itself decides the engine, so the equality case is decided by

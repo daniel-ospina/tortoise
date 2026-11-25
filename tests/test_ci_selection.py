@@ -9263,8 +9263,10 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on a block of this shape — thousands of words, the spliced fold's was ~2,950
-#: — rather than a remembered head count, which rots with every fold. jscpd's clone taxonomy draws the same line: divergent
+#: bounds the read on a block of this shape — thousands of words, the spliced fold's was 3,043
+#: (measured at `45dd35ba9a` and `14b8322eb2`, the two trees that carried that splice) — rather
+#: than a remembered head count, which rots with every fold. jscpd's clone taxonomy draws
+#: the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
 #:
