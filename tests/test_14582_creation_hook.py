@@ -1307,6 +1307,47 @@ def test_the_halted_remedy_names_reopen(caplog):
         rw._uncut_warned_at.clear()
 
 
+def test_the_divergence_remedy_does_not_print_a_floor_the_seed_refuses():
+    """⛔ `--enumerated-floor 0` CANNOT REACH A DIVERGENT GRAPH (#14587 review P3).
+
+    `_warn_uncut_graph(reason="provision_refused:divergence")` printed the
+    un-halted sequence with floor `0`. `SEED_SQL` writes a row only
+    `WHERE observed.row_max <= observed.enumerated_floor`, and `divergence` IS
+    `row_max > floor`, so the first printed command is refused by the same guard
+    and the sequence cannot reach the state the message names — the same class as
+    the halted arm above, on a third population.
+
+    The floor that works is the record's own max: with `floor = MAX(seq)` the
+    guard's `row_max <= floor` holds, and it is the number
+    `tools/record_allocator_cli.py backfill` prints in the `remedy` field of a
+    graph it refused `divergence`.
+
+    Mutant: drop the `provision_refused:divergence` branch in
+    `_remedy_for_reason` → the emitted line carries a floor-`0` seed command
+    again and the first assertion reds.
+    """
+    remedy = rw._remedy_for_reason(
+        "org-14582", "graph-divergent", "provision_refused:divergence")
+    # The assertion is about the COMMAND the operator would run, not about the
+    # word `0` anywhere in the paragraph: the message names the refused form on
+    # purpose, and matching the bare literal would red on its own explanation.
+    assert ("seed --org-id org-14582 --graph-id graph-divergent "
+            "--enumerated-floor 0") not in remedy, (
+        "the divergence remedy prints a seed command the guard refuses: "
+        f"{remedy}")
+    assert "--enumerated-floor <the record's own MAX(seq)>" in remedy, (
+        f"the divergence remedy does not name the floor that works: {remedy}")
+    assert remedy.index("seed") < remedy.index("arm"), remedy
+    # The un-halted population keeps the `0` sequence: its record holds no
+    # position beyond the enumeration, so `0` is the correct floor there and the
+    # new arm must not swallow it. It also names the fallback, so an operator
+    # whose `0` seed comes back `divergence` is not sent round the loop twice.
+    unarmed_gap = rw._remedy_for_reason("org-14582", "graph-new", "no_cursor_row")
+    assert ("seed --org-id org-14582 --graph-id graph-new --enumerated-floor 0"
+            in unarmed_gap), unarmed_gap
+    assert "divergence" in unarmed_gap and "MAX(seq)" in unarmed_gap, unarmed_gap
+
+
 def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
     """⛔ #14587 review P1-2 — the printed remedy could not reach the population.
 

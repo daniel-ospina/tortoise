@@ -3285,6 +3285,16 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
     a halted graph — `reopen` (`halted -> seeded`) is the missing verb, and it is
     exactly the order `record_allocator`'s own halt message prints
     (`halt` -> `seed` -> `reopen` -> `arm`).
+
+    ⛔ AND A DIVERGENT GRAPH IS A THIRD POPULATION (#14587 review P3):
+    `seed --enumerated-floor 0` is REFUSED for it, because `SEED_SQL` writes a
+    row only `WHERE observed.row_max <= observed.enumerated_floor` and
+    `divergence` IS `row_max > floor`. The sequence that DOES reach it passes the
+    record's own `MAX(seq)` as the floor — the number
+    `tools/record_allocator_cli.py backfill` prints in the `remedy` field of a
+    graph it refused, and the one the seed's guard accepts (`row_max <= floor`).
+    Printing `0` there sent the operator to a command the same guard refuses,
+    which is the failure mode this function exists to avoid.
     """
     if reason == f"mode_{record_projection.MODE_HALTED}":
         return (
@@ -3295,10 +3305,24 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
             f"{graph_id} --enumerated-floor 0`, then `reopen --org-id {org_id} "
             f"--graph-id {graph_id}`, then `arm --org-id {org_id} --graph-id "
             f"{graph_id} --acknowledge-cutover`.")
+    if reason == "provision_refused:divergence":
+        return (
+            f"Remedy, PER GRAPH (this graph's record holds positions its journal "
+            f"enumeration does NOT reproduce, so `--enumerated-floor 0` is "
+            f"REFUSED for it — `SEED_SQL`'s guard needs the floor at or above the "
+            f"record's own max): `tools/record_allocator_cli.py seed --org-id "
+            f"{org_id} --graph-id {graph_id} --enumerated-floor <the record's "
+            f"own MAX(seq)>` — the number `backfill` prints in the `remedy` field "
+            f"of a graph it refused `divergence` — then `arm --org-id {org_id} "
+            f"--graph-id {graph_id} --acknowledge-cutover`.")
     return (
         f"Remedy, PER GRAPH: `tools/record_allocator_cli.py seed --org-id "
         f"{org_id} --graph-id {graph_id} --enumerated-floor 0`, then `arm "
-        f"--org-id {org_id} --graph-id {graph_id} --acknowledge-cutover`.")
+        f"--org-id {org_id} --graph-id {graph_id} --acknowledge-cutover`. If "
+        f"`seed` refuses `divergence`, this graph's record holds positions its "
+        f"journal enumeration does not reproduce — re-run it with the RECORD's "
+        f"own `MAX(seq)` as `--enumerated-floor` instead of `0` (that is the "
+        f"number `backfill` prints in the `remedy` field of a graph it refused).")
 
 
 def _halted_note_for_reason(reason: str) -> str:

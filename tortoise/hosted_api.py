@@ -31039,7 +31039,8 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
             "--graph-id %s --enumerated-floor 0` then `arm --org-id %s "
             "--graph-id %s --acknowledge-cutover` (a graph with existing record "
             "rows is REFUSED `divergence` rather than seeded, so the floor is "
-            "never silently wrong)",
+            "never silently wrong: if `seed` does refuse it, re-run with the "
+            "RECORD's own `MAX(seq)` as `--enumerated-floor`)",
             graph_id, org_id, org_id, graph_id, org_id, graph_id,
             exc_info=True)
         with contextlib.suppress(Exception):

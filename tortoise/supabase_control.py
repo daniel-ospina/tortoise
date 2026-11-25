@@ -4384,7 +4384,9 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
             "GRAPH: `uv run python tools/record_allocator_cli.py seed "
             "--org-id %s --graph-id %s --enumerated-floor 0`, then `arm "
             "--org-id %s --graph-id %s --acknowledge-cutover` (`backfill` "
-            "cannot reach a graph the record has never seen write)",
+            "cannot reach a graph the record has never seen write; if `seed` "
+            "refuses `divergence`, re-run with the RECORD's own `MAX(seq)` as "
+            "`--enumerated-floor`)",
             graph_id, org_id, org_id, graph_id, org_id, graph_id,
             exc_info=True)
         with contextlib.suppress(Exception):
