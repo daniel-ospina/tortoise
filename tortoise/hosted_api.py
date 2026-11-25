@@ -15816,6 +15816,32 @@ def _layer_kind_vocabulary(label: str) -> frozenset[str]:
     return frozenset(known_kinds(KIND_PROP[label.lower()]))
 
 
+def _names_this_layer(kind: str, vocabulary: frozenset[str]) -> bool:
+    """Does ``kind`` name a value ``this`` layer declares, under a legal spelling?
+
+    ⛔ NOT ``declared_layers(kind)``, and the reason is a measured fail-open: that
+    authority deliberately strips **any** namespace (``domain_loader.kind_is_known``
+    splits on ``:``), so ``?kind=zzz:goal`` was admitted as an Object kind —
+    ``declared_layers('zzz:goal') == ['object', 'point']`` — and the route answered
+    ``200 {"objects": [], "count": 0, "truncated": false}``, the exact answer this
+    refusal exists to remove. ``?kind=zzz:team`` was refused on the Subject route,
+    so the two layers graded the same input differently.
+
+    The spellings admitted here are the ones the write doors actually write:
+    the layer vocabulary's own bare names, and the repo's ``core:`` namespaced
+    form of those names. ⚠️ A pack-namespaced spelling that the graph does not
+    carry yet is REFUSED rather than assumed legal — fail-closed on purpose: the
+    alternative (strip the namespace) is the fail-open above, and a legal spelling
+    becomes admissible the moment ONE row carries it (the ``carried`` arm). The
+    residual is stated rather than hidden: ``?kind=<pack-ns>:<kind>`` on a graph
+    with no such row answers 400, and the refusal lists the bare spelling to use.
+    """
+    if kind in vocabulary:
+        return True
+    namespace, sep, bare = kind.partition(":")
+    return bool(sep) and namespace == "core" and bare in vocabulary
+
+
 async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
                                      *, surface: str) -> None:
     """Refuse a ``kind`` filter that names nothing this layer can answer.
@@ -15829,16 +15855,28 @@ async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
     the sibling read route already refuses the same input: ``list_points``
     answers ``400 kind must be one of [...]`` via ``known_kinds()``.
 
-    Admission is the UNION of two authorities, and the split is load-bearing:
+    Admission is the UNION of three authorities, and each is load-bearing:
 
-    * the DECLARED vocabulary (:func:`tortoise.kind_layers.declared_layers`) —
-      the repo's ONE kind↔layer authority, so the point↔object overlap the #7813
-      owner ruling permits (``goal``/``plan``/``strategy``/``target``) is
-      admitted on BOTH layers rather than refused on one;
+    * the LAYER'S OWN vocabulary (``_layer_kind_vocabulary``) under a legal
+      spelling — the bare name, or the repo's ``core:``-namespaced form of it
+      (``_names_this_layer``). ⛔ NOT ``kind_layers.declared_layers``: that
+      authority deliberately strips ANY namespace, so it admitted ``zzz:goal``
+      (measured: ``declared_layers('zzz:goal') == ['object', 'point']``) and the
+      route answered the empty-and-complete page this function removes — while
+      the Subject route refused ``zzz:team``. Exact spellings keep the point↔
+      object overlap the #7813 owner ruling permits (``goal``/``plan``/
+      ``strategy``/``target`` are in the Object vocabulary, measured) without
+      admitting a namespace nobody declares;
+    * the NIL kinds (``kind_layers.NIL_KINDS``) — ``other``/``core:other`` are
+      the fold's ON CREATE default on EVERY entity layer, so they are always
+      answerable. They are also in the ``allowed`` list below, and a refusal that
+      names a value it rejects is a false block (measured before this arm:
+      ``?kind=other`` answered 400 whose message listed ``'other'``);
     * the kinds the graph CARRIES (``entity_reads.layer_kind_values``) — read
-      only when the declared vocabulary does not answer, because the write doors
-      are open on this property and a stored off-vocabulary kind must stay
-      readable by filter.
+      only when the vocabulary does not answer, because the write doors are open
+      on this property and a stored off-vocabulary kind must stay readable by
+      filter. This is also what makes a pack-namespaced spelling admissible: one
+      carried row is enough.
 
     ⛔ The graph's own data WINS over the vocabulary, never the reverse: a kind
     this layer actually holds is admitted even when nothing declares it. Refusing
@@ -15852,16 +15890,21 @@ async def _refuse_unknown_layer_kind(sdk: TortoiseSDK, label: str, kind: str,
     400ing it would invent a refusal the data does not support.
     """
     from tortoise import entity_reads
-    from tortoise.kind_layers import declared_layers
+    from tortoise.kind_layers import NIL_KINDS
 
-    if label.lower() in declared_layers(kind):
+    vocabulary = _layer_kind_vocabulary(label)
+    # ⛔ The NIL kinds are admitted OUTSIDE the vocabulary: §5's subject vocabulary
+    # deliberately excludes `other` (`subject_kind_names`' own rule), so a
+    # vocabulary-only arm refused `core:other` on /v1/subjects while the refusal's
+    # `allowed` list named it — a false block on the fold's own ON CREATE default.
+    if kind in NIL_KINDS or _names_this_layer(kind, vocabulary):
         return
     carried = await _read_offload(
         lambda: entity_reads.layer_kind_values(sdk._get_proj(), label),
         op=f"{surface}.kind_vocabulary")
     if kind in carried:
         return
-    allowed = sorted(_layer_kind_vocabulary(label) | carried)
+    allowed = sorted(vocabulary | carried | NIL_KINDS)
     raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
 
 
@@ -16210,7 +16253,15 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
             baseline_set=entity.get("baseline_set") is True,
         ),
         measured=not is_terminal_status(
-            entity.get("status"), bool(entity.get("outdated"))),
+            entity.get("status"), bool(entity.get("outdated")),
+            # ⛔ the POSITION axis too (#13034): `_resolve_entity` hands back
+            # `properties(n)`, so `isClosed`/`pipelineSlot` are already in hand,
+            # and `is_terminal_status`'s docstring says a caller that fetched
+            # them must pass them. Without this an Object closed on that axis
+            # with a stored posterior still answered `ep_state: "measured"` —
+            # measured: isClosed=true / pipelineSlot='terminal' both did.
+            is_closed=entity.get("isClosed"),
+            stage_slot=entity.get("pipelineSlot")),
     )
     has_belief = belief_state != EP_STATE_ABSENT
     view = None

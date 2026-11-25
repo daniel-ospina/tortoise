@@ -406,6 +406,62 @@ def test_layer_lists_admit_a_declared_kind_this_graph_does_not_carry(tmp_path):
         assert t.json()["truncated"] is False, t.json()
 
 
+def test_layer_lists_refuse_an_invented_NAMESPACE_but_read_a_carried_one(tmp_path):
+    """⛔ review P2: a namespaced `kind` was admitted by stripping the namespace.
+
+    The first validator asked `kind_layers.declared_layers(kind)`, which
+    deliberately strips ANY namespace (`domain_loader.kind_is_known` splits on
+    `:`). Measured: `declared_layers('zzz:goal') == ['object', 'point']`, so
+    `?kind=zzz:goal` answered the empty-and-complete page the validator exists to
+    remove, while `?kind=zzz:team` was refused on the Subject route — the two
+    layers grading one input differently. Admission now takes the layer's own
+    EXACT spellings (bare, or the repo's `core:` form) plus whatever the graph
+    CARRIES, so a namespace nobody declares is refused …
+
+    …and a namespaced kind the graph really holds is still readable (the
+    fail-closed fix must not become a false block): both directions in one test.
+    """
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        for route, kind in (("/v1/objects", "zzz:goal"),
+                            ("/v1/subjects", "zzz:team")):
+            r = client.get(route, params={"kind": kind})
+            assert r.status_code == 400, (route, kind, r.text)
+            assert "kind must be one of " in r.json()["detail"], r.json()
+        # A row the write door ACCEPTED under that spelling makes it readable.
+        client.post("/v1/objects", json={"name": "NS", "objectKind": "zzz:goal"})
+        ok = client.get("/v1/objects", params={"kind": "zzz:goal"})
+        assert ok.status_code == 200, ok.text
+        assert [o["name"] for o in ok.json()["objects"]] == ["NS"], ok.json()
+
+
+def test_layer_lists_admit_the_nil_kind_and_never_name_a_value_they_refuse(tmp_path):
+    """⛔ review P2: `other` was REFUSED while the refusal listed it as allowed.
+
+    `declared_layers('other')` is `frozenset()` BY DESIGN (`NIL_KINDS`), so the
+    declared arm could never admit it and only a carried row could — yet the 400's
+    `allowed` list is built from the layer vocabulary, which names `other`. A
+    refusal that names a value it rejects is a false block, and `other` is the
+    fold's ON CREATE default on EVERY entity layer, so it is always answerable.
+    """
+    from tortoise.kind_layers import NIL_KINDS
+
+    assert NIL_KINDS  # the arm exists to be exercised, not assumed
+    with _graph(str(tmp_path / "g.db")), _rest_client() as client:
+        client.post("/v1/objects", json={"name": "ACME", "objectKind": "goal"})
+        for route in ("/v1/objects", "/v1/subjects"):
+            for kind in sorted(NIL_KINDS):
+                r = client.get(route, params={"kind": kind})
+                assert r.status_code == 200, (route, kind, r.text)
+                assert r.json()["truncated"] is False, r.json()
+        # …and a refused kind's `allowed` list never names the value it refused.
+        bad = client.get("/v1/objects", params={"kind": "org"})
+        allowed = bad.json()["detail"].removeprefix("kind must be one of ")
+        for kind in sorted(NIL_KINDS):
+            assert repr(kind) in allowed or f'"{kind}"' in allowed, (kind, allowed)
+
+
+
 def test_layer_list_treats_a_blank_kind_as_no_filter(tmp_path):
     """#9572's rule at the READ door: blank is not a kind.
 
@@ -892,6 +948,46 @@ def test_belief_does_not_report_a_terminal_claims_decayed_posterior_as_measured(
         # nulled): the state is what stops them reading as a measurement.
         assert body["current"]["alpha"] == 1.0, body
         assert body["current"]["beta"] == 1.0, body
+
+
+def test_belief_folds_the_POSITION_axis_into_the_terminal_state(tmp_path):
+    """⛔ review P2: the terminal fold passed the STATUS axis only.
+
+    `live.is_terminal_status` is total over three axes (status, the legacy
+    `outdated` flag, and the position axis `isClosed`/`pipelineSlot`, #13034), and
+    its own docstring says a caller that fetched those properties must pass them.
+    `_resolve_entity` returns `properties(n)`, so they ARE in hand here. Measured
+    before this arm: an Object with `isClosed=true` (and, separately,
+    `pipelineSlot='terminal'`) and a stored posterior answered
+    `ep_state: "measured"` — an ended claim reported as a measurement, the same
+    fail-open one axis over from the retracted-Point case above.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        closed = client.post("/v1/objects", json={
+            "name": "CLOSED", "objectKind": "goal"}).json()
+        staged = client.post("/v1/objects", json={
+            "name": "STAGED", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) SET n.posterior_alpha = 7.0, "
+                "n.posterior_beta = 3.0",
+                params={"id": closed["id"]}, read_only=False)
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) SET n.posterior_alpha = 7.0, "
+                "n.posterior_beta = 3.0",
+                params={"id": staged["id"]}, read_only=False)
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) SET n.isClosed = true",
+                params={"id": closed["id"]}, read_only=False)
+            sdk._get_proj().g._query(
+                "MATCH (n:Object {id:$id}) SET n.pipelineSlot = 'terminal'",
+                params={"id": staged["id"]}, read_only=False)
+        finally:
+            sdk.close()
+        for entity in (closed, staged):
+            body = client.get(f"/v1/entities/{entity['id']}/belief").json()
+            assert body["ep_state"] == "baseline", (entity["name"], body)
 
 
 def test_relations_keeps_an_inbound_neighbour_that_carries_no_identity(tmp_path):
