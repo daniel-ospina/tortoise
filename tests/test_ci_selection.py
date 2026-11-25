@@ -9169,25 +9169,43 @@ _HISTORICAL_LETTERS_RE = re.compile(
 #: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
 #: A test file the block calls a `durations` ROW. The map's own vocabulary separates a ROW (an
-#: entry in `durations`, and the ONLY thing that records a weight) from a surface REGISTRATION (a
-#: `core`/`api` entry, which only puts the file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT`
-#: apply), so calling a registration a row is a false claim about the map.
+#: entry in `durations`) from a surface REGISTRATION (a `core`/`api` entry, which only puts the
+#: file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT` apply), so calling a registration a row is
+#: a false claim about the map.
+#: ⛔ The row is NOT the map's only place a weight is recorded, and this arm must not claim it is:
+#: `durations_floors` can additionally PIN a declared value (`{value: N, pinned: true}`, e.g.
+#: `test_lane_stash.py`), so a pinned file's weight appears in both blocks. The distinction graded
+#: here is row-vs-REGISTRATION, not "the only carrier of a weight".
 #: ⛔ MEASURED 2026-11-25 on `4cdd732ab7ab`: `tests/test_fly_secret_declaration_report.py` is
 #: `core`-registered on `main` and carries NO `durations` row (measured: 0 rows in the map), which
 #: is why this PR's own review had the clause read "drift-reporter registration". The fold kept
 #: `main`'s copy of that paragraph — where it reads "drift-reporter row" — and silently REVERTED
 #: the fix. The diff is comment-only, so no executable arm could notice; the WORD is the whole
 #: claim, which is why the word is graded rather than the sentence trusted.
-#: Both spellings the block uses are read, because a matcher narrowed to one shape is how the same
-#: word rotted twice: `<file>` row, and `row (<file>`.
-_ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[A-Za-z0-9_]+\.py)`\s+rows?\b")
-_ROW_CLAIM_BEFORE_FILE_RE = re.compile(r"\brows?\s*\(`tests/(?P<file>[A-Za-z0-9_]+\.py)`")
+#: Both reversion shapes are read, because a matcher narrowed to one shape is how the same word
+#: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
+#: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
+#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs 0
+#: times, so the second pattern is exercised by the fixture below and NOT by live text; saying
+#: "both spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
+#: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
+#: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
+_ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`\s+rows?\b")
+_ROW_CLAIM_BEFORE_FILE_RE = re.compile(r"\brows?\s*\(`tests/(?P<file>[\w/.-]+\.py)`")
 
 
 def _row_claims(header: str) -> list[str]:
-    """Every test file the block calls a `durations` ROW, in either spelling it uses."""
-    found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(header)}
-    found |= {m.group("file") for m in _ROW_CLAIM_BEFORE_FILE_RE.finditer(header)}
+    """Every test file the block calls a `durations` ROW, in either reversion shape.
+
+    Double-quoted spans are masked FIRST, for the reason `_repeated_header_spans` masks them
+    (`_QUOTED_SPAN_RE`, below): this block legitimately QUOTES dead claims for the record, and
+    the record of a dead claim is not a live claim. Without the mask, a quotation would red this
+    arm and its "say `registration`" message would be the wrong repair for history.
+    """
+    unquoted = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+    found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
+    found |= {m.group("file") for m in _ROW_CLAIM_BEFORE_FILE_RE.finditer(unquoted)}
     return sorted(found)
 
 
@@ -9820,8 +9838,9 @@ fast_shards: 11
 def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
     """#14612: a file the block calls a `durations` ROW must actually have one.
 
-    The block's vocabulary is load-bearing: a ROW records a weight, while a surface REGISTRATION
-    merely puts the file in `fast_pool()` and lets `DEFAULT_FAST_WEIGHT` apply. Measured
+    The block's vocabulary is load-bearing: a ROW records a weight (and `durations_floors` can
+    additionally PIN one), while a surface REGISTRATION merely puts the file in `fast_pool()` and
+    lets `DEFAULT_FAST_WEIGHT` apply. Measured
     2026-11-25: `tests/test_fly_secret_declaration_report.py` is `core`-registered on `main` and
     carries NO `durations` row, so this PR's review had the clause read "drift-reporter
     registration". The `4cdd732ab7ab` fold kept `main`'s copy of the paragraph, where it reads
@@ -9844,15 +9863,24 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "no row for it. A REGISTRATION (a `core`/`api` surface entry) only puts the file in "
         "`fast_pool()`; its weight then comes from `DEFAULT_FAST_WEIGHT`, which is not a row. "
         "Say `registration`, or add the row.")
-    # …and BOTH spellings are read while `registration` is deliberately not: measured on this PR,
-    # a one-spelling matcher is exactly how this word survived one review round and one fold.
+    # …and BOTH reversion shapes are read while `registration` is deliberately not, and while a
+    # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
+    # one-spelling matcher is exactly how this word survived one review round and one fold, and a
+    # bare-`tests/*.py` matcher would leave `durations`' 50 slash-carrying keys ungraded.
     fixture = (
         "`#1`'s `tests/test_row_claim_after.py` row, `#2`'s drift-reporter row "
-        "(`tests/test_row_claim_before.py`, `core`, flat 2.0 s) and `#3`'s "
-        "`tests/test_registration_not_a_row.py` registration")
-    assert _row_claims(fixture) == ["test_row_claim_after.py", "test_row_claim_before.py"], (
-        "the row-claim matcher no longer reads BOTH spellings the block uses (a file then `row`, "
-        "and `row (` then the file) — or it reads a `registration` as a row: "
+        "(`tests/test_row_claim_before.py`, `core`, flat 2.0 s), `#3`'s "
+        "`tests/test_registration_not_a_row.py` registration, `#4`'s "
+        "`tests/eval/retrieval/test_row_claim_subdir.py` row, and — quoted for the record, so not "
+        "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\"")
+    assert _row_claims(fixture) == [
+        "eval/retrieval/test_row_claim_subdir.py",
+        "test_row_claim_after.py",
+        "test_row_claim_before.py",
+    ], (
+        "the row-claim matcher no longer reads BOTH reversion shapes (a file then `row`, and "
+        "`row (` then the file), or it misses a SUBDIRECTORY row, or it reads a `registration` "
+        "as a row, or it grades a QUOTED dead claim as a live one: "
         f"{_row_claims(fixture)!r}")
 
 
