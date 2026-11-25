@@ -1665,10 +1665,10 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
 #: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — the
 #: guards behind these rows landed in different changes, some in the very change
 #: that added the row. This file PINS each choice, and its newest row is
-#: `tools/fly_secret_declaration_report.py` (`#5128`). Only the table below is
-#: authoritative about which rows exist: counts and enumerations in this comment
-#: have gone stale before, so none is written here — and the
-#: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
+#: `tools/fly_secret_declaration_report.py` (`#5128`) — and the verdict code it
+#: spares, or reuses on purpose. Only the table below is authoritative about which
+#: rows exist: counts and enumerations in this comment have gone stale before, so
+#: none is written here. `SystemExit(<message>)` exits 1 in
 #: CPython, and for several of these files 1 is already the tool's own verdict —
 #: for instance `gen_placement_table --check` prints `STALE` and returns 1,
 #: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
@@ -1678,7 +1678,7 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
 #: (`#4053`, `#13121`), and otherwise one reused on purpose because the refusal
 #: cannot be read as a finding — `cache_evict` takes 1, already its usage code
 #: (`CACHE_EVICTION_EXIT_USAGE`, verdicts 2/3/4), and `capstone_ledger` reuses
-#: `EXIT_INVALID` rather than extend a closed 0-4 set.
+#: `EXIT_INVALID`, its 0-5 set closed and spent (5 is `EXIT_USAGE`).
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
 #: per-tool contract decision, not a property of the guard shape. Pinning it here
@@ -1728,10 +1728,10 @@ REFUSAL_WHY: dict[str, str] = {
         "guard takes 4, which the tool otherwise never returns"
     ),
     "tools/capstone_ledger.py": (
-        "the set 0-4 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
-        "ADVISORY), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
+        "the set 0-5 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
+        "ADVISORY/USAGE), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
         "— it is the fail-closed neighbour, and closing a row is not reaching a "
-        "verdict. Adding 5 to the tool's set would change a documented public "
+        "verdict. Adding a sixth code would change a documented public "
         "contract to satisfy a lint, which is the wrong trade"
     ),
     "tools/build_site_icons.py": (
