@@ -5628,7 +5628,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # and FIVE doors retired forward into them and into `graph_overview`
     # (`create_edge`, `create_operator`, `events_poll`, `delete`, `list_graphs`, −5) — so
     # 40 + 4 − 5 = 39, with no SDK movement (all four SDK methods already had a `def`).
-    assert live["mcp"] == manifest["counts"]["tools"] == 39
+    # #11609 LANE P11 (the nine envelope doors): 39 -> 30, again with a single term —
+    # NINE doors retire forward once the read/query containers carry the list envelope at
+    # the handler (`_row_section_envelope`), and no container row arrives because all four
+    # destinations were already advertised. 39 - 9 = 30, with no SDK movement.
+    assert live["mcp"] == manifest["counts"]["tools"] == 30
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
