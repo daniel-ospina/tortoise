@@ -63,6 +63,11 @@ The hosted endpoint is `https://api.premiselabs.co/mcp/`. Your agent reaches it 
 One command writes the entry AND verifies it with a live call:
 
 ```bash
+# `pi`: writes the `mcp-client` EXTENSION's files (.mcp.json / ~/.pi/agent/.mcp.json).
+# If pi's BUILT-IN loader is what runs on your box, it reads .pi/mcp.json and
+# ~/.pi/agent/mcp.json instead — put the same entry there (pi 1.2.0:
+# `dist/extensions/mcp/config.js:107-108`). `tortoise mcp-status --harness pi`
+# reports which layer it graded.
 tortoise onboard --harness pi   # claude | codex | cursor | pi
 ```
 
