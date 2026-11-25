@@ -124,11 +124,14 @@ test('#14686: the alerts are a bell with a count, not banner blocks in the page'
   assert.equal(control.getAttribute('aria-label'), 'Notifications — 2 unresolved')
   assert.equal(control.getAttribute('aria-expanded'), 'false')
   assert.equal(container.querySelector('.notif-badge').textContent, '2')
-  // No banner: the previous surface's heading and its one clearing control are
-  // gone from the document, so nothing can push the dashboard content down.
-  assert.equal(container.querySelector('.overview'), null)
+  // WHAT THIS CANNOT PROVE: that the alerts are gone from the page FLOW. This
+  // component renders only itself, so `.overview === null` here is true wherever it
+  // is mounted — the placement pin is in `securityAlerts.test.js` (the bell is in
+  // `header.dash-header`, before `<main>`, and nothing mounts the old panel). What
+  // IS proved here: this component never renders the register headings or the
+  // per-row Acknowledge control of the surface it replaces.
   assert.doesNotMatch(container.textContent, /Security alerts/)
-  assert.doesNotMatch(container.textContent, /Acknowledge/)
+  assert.doesNotMatch(container.textContent, /Acknowledge for everyone/)
   // …and the panel is CLOSED until asked for.
   assert.equal(panel(container), null)
 })
@@ -160,6 +163,24 @@ test('#14686: the panel unfolds from the bell and closes again', () => {
   assert.ok(panel(container))
   fireEvent.pointerDown(document.body)
   assert.equal(panel(container), null)
+})
+
+test('#14686: a failed or cut read is visible in the HEADER, without opening the panel', () => {
+  // Round-2 finding: moving the feed into a panel that only speaks when opened made
+  // "we could not read your alerts" and "you have none" the same pixel.
+  const failed = renderBell({ alerts: [], unavailable: true })
+  assert.match(bell(failed.container).getAttribute('aria-label'), /could not read alert history/)
+  assert.ok(failed.container.querySelector('.notif-badge-warn'), 'a visible warning mark')
+  failed.unmount()
+
+  const cut = renderBell({ alerts: [], scanSaturated: true })
+  assert.match(bell(cut.container).getAttribute('aria-label'), /alert window may be full/)
+  cut.unmount()
+
+  // A healthy org keeps the plain bell (no warning, no badge when nothing is open).
+  const quiet = renderBell({ alerts: [] })
+  assert.equal(bell(quiet.container).getAttribute('aria-label'), 'Notifications')
+  assert.equal(quiet.container.querySelector('.notif-badge-warn'), null)
 })
 
 test('#14686: the ledger is newest-first, grouped ×N, with a stamp and a relative age', () => {
@@ -208,6 +229,23 @@ test('#14686: an activity row is chipped as a measurement, an incident row as an
   // The alarm weight is carried by the incident row only.
   assert.ok(incident.className.includes('notif-row-incident'))
   assert.ok(!activity.className.includes('notif-row-incident'))
+})
+
+test('#14686: a row we could not classify says so, and does NOT claim to be an activity row', () => {
+  // `registerOf` fail-quiets an unknown register into the activity register, so a
+  // two-valued chip labelled an unclassified row "activity" while its own detail view
+  // said "We could not classify this alert" (review finding). Reachable in the window
+  // where the API deploys a new alert type before this bundle.
+  const { container } = renderBell({
+    alerts: [alert({ type: 'brand_new', register: undefined, message: 'unknown kind' })],
+  })
+  fireEvent.click(bell(container))
+  const row = rows(container)[0]
+  assert.match(row.textContent, /unclassified/)
+  assert.ok(!/activity/.test(row.querySelector('.notif-chip').textContent))
+  // …and the detail view agrees with the chip.
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.match(container.querySelector('.notif-detail').textContent, /could not classify/i)
 })
 
 // ── 3. Snooze ──────────────────────────────────────────────────────────────
@@ -277,6 +315,25 @@ test('#14686: Escape from inside the panel restores focus to the bell', () => {
   assert.equal(document.activeElement, bell(container))
 })
 
+test('#14686: Escape from inside the DETAIL view returns to the ledger, not to nowhere', () => {
+  const { container } = renderBell({ alerts: [alert({ message: 'detail escape' })] })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.ok(container.querySelector('.notif-detail'))
+  const back = container.querySelector('.notif-back')
+  back.focus()
+  // Round-2 finding: this keydown was handled only by the panel's own listener, so
+  // once focus fell to <body> a SECOND Escape did nothing and the panel stayed open.
+  fireEvent.keyDown(back, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-detail'), null, 'back to the ledger')
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+  // …and Escape still closes from there.
+  fireEvent.keyDown(document, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-panel'), null)
+  assert.equal(document.activeElement, bell(container))
+})
+
 test('#14686: the trigger declares what it controls', () => {
   const { container } = renderBell({ alerts: [alert()] })
   const control = bell(container)
@@ -284,7 +341,11 @@ test('#14686: the trigger declares what it controls', () => {
   const panelEl = panel(container)
   assert.ok(panelEl.id, 'the panel needs an id for aria-controls to point at')
   assert.equal(control.getAttribute('aria-controls'), panelEl.id)
-  assert.equal(control.getAttribute('aria-haspopup'), 'true')
+  // No `aria-haspopup`: it maps `true` to a MENU, and this popup is a `role="group"`
+  // disclosure — declaring a menu without roving arrow-key focus is exactly what the
+  // component header refuses to do (review finding).
+  assert.equal(control.getAttribute('aria-haspopup'), null)
+  assert.equal(panelEl.getAttribute('role'), 'group')
   // The panel's own title is a real heading, reachable by heading navigation.
   assert.equal(panelEl.querySelector('h2').textContent, 'Notifications')
 })

@@ -98,7 +98,7 @@ test('a dismissal survives a reload: the SAME storage hides the row afterwards',
   assert.deepEqual(before.state, emptyState())
 
   const episode = entryKeyOf(alert())
-  const next = dismiss(before.state, episode, NOW)
+  const next = dismiss(before.state, episode, alert(), NOW)
   assert.equal(writeState(storage, key, next), true)
 
   // A reload = a fresh read of the same storage. The row is still dismissed.
@@ -114,7 +114,7 @@ test('a dismissal is scoped: another Organization and another user still see the
   const storage = fakeStorage()
   const mine = storageKey({ userId: 'u1', orgId: 'org-a' })
   const episode = entryKeyOf(alert())
-  writeState(storage, mine, dismiss(emptyState(), episode, NOW))
+  writeState(storage, mine, dismiss(emptyState(), episode, alert(), NOW))
 
   for (const key of [
     storageKey({ userId: 'u1', orgId: 'org-b' }),
@@ -128,9 +128,62 @@ test('a dismissal is scoped: another Organization and another user still see the
 
 test('a dismissal can be undone', () => {
   const episode = entryKeyOf(alert())
-  const state = undismiss(dismiss(emptyState(), episode, NOW), episode)
+  const state = undismiss(dismiss(emptyState(), episode, alert(), NOW), episode)
   assert.equal(isDismissed(state, episode), false)
   assert.equal(buildLedger({ alerts: [alert()], state, now: NOW }).unresolved, 1)
+})
+
+test('a dismissal covers the WINDOW it was made for, not the alert class forever', () => {
+  // Review finding (P1, round 2): for a `flag` the customer message is a CONSTANT
+  // and the discriminating subject (the rule) is deliberately not shipped, so an
+  // identity-only dismissal silenced every future bout of that class forever, with
+  // the badge reading 0. Dismissals now carry the window the reader saw and hide
+  // only overlapping rows — the same device `_episode_acknowledged` uses server-side
+  // to survive a sliding `first_at`.
+  const dismissed = alert({
+    message: 'Suspicious activity flagged on this Organization',
+    first_at: new Date(NOW.getTime() - 3 * HOUR).toISOString(),
+    at: new Date(NOW.getTime() - 40 * MIN).toISOString(),
+    count: 7,
+  })
+  const state = dismiss(emptyState(), entryKeyOf(dismissed), dismissed, NOW)
+
+  // The SAME bout, one window later: the server re-derived it with a moved
+  // `first_at` and a new episode key. Its window still overlaps -> stays quiet.
+  const grown = {
+    ...dismissed,
+    episode: 'flag||rekeyed',
+    first_at: new Date(NOW.getTime() - 5 * HOUR).toISOString(),
+    at: new Date(NOW.getTime() + 5 * MIN).toISOString(),
+    count: 12,
+  }
+  assert.equal(buildLedger({ alerts: [grown], state, now: NOW }).unresolved, 0,
+    'a growing bout must not resurrect a dismissal')
+
+  // A DIFFERENT bout of the same class, a week later: no overlap -> VISIBLE. This
+  // is the arm the old implementation failed.
+  const newBout = alert({
+    message: 'Suspicious activity flagged on this Organization',
+    at: new Date(NOW.getTime() + 7 * DAY).toISOString(),
+    first_at: new Date(NOW.getTime() + 7 * DAY).toISOString(),
+    episode: 'flag||other-rule',
+  })
+  const later = buildLedger({ alerts: [newBout], state, now: new Date(NOW.getTime() + 7 * DAY) })
+  assert.equal(later.unresolved, 1, 'a NEW bout of the same class must still be shown')
+  assert.equal(later.dismissed.length, 0)
+
+  // Two dismissals of the same identity are independent windows.
+  const twice = dismiss(state, entryKeyOf(newBout), newBout, new Date(NOW.getTime() + 7 * DAY))
+  assert.equal(twice.dismissed[entryKeyOf(newBout)].length, 2)
+  assert.equal(
+    buildLedger({ alerts: [grown, newBout], state: twice, now: new Date(NOW.getTime() + 7 * DAY) })
+      .unresolved,
+    0,
+  )
+  // A row with no usable timestamp falls back to identity matching, so a dismissal
+  // the reader made is never discarded by a missing field.
+  const noStamp = { type: 'flag', message: 'Suspicious activity flagged on this Organization' }
+  assert.equal(isDismissed(state, entryKeyOf(noStamp), noStamp), true)
 })
 
 // ── Snooze ─────────────────────────────────────────────────────────────────
@@ -253,7 +306,7 @@ test('every row lands in exactly one bucket, and the badge counts only actionabl
   ]
   const keyOfMessage = (m) => rows.find((r) => r.message === m).type + '|' + m
   let state = snooze(emptyState(), keyOfMessage('snoozed row'), periodMs('1d'), NOW)
-  state = dismiss(state, keyOfMessage('dismissed row'), NOW)
+  state = dismiss(state, keyOfMessage('dismissed row'), rows.find((r) => r.message === 'dismissed row'), NOW)
 
   const ledger = buildLedger({ alerts: rows, state, now: NOW })
   const listed = [
@@ -329,7 +382,7 @@ test('two rows that share an identity render as ONE row, and the newest wins', (
   assert.equal(reversed.current[0].countLabel, '×9')
   // One dismissal covers both, which is the same "one episode, one decision"
   // trade-off documented on `entryKeyOf`.
-  const state = dismiss(emptyState(), entryKeyOf(newerBout), NOW)
+  const state = dismiss(emptyState(), entryKeyOf(newerBout), newerBout, NOW)
   assert.equal(buildLedger({ alerts: [olderBout, newerBout], state, now: NOW }).unresolved, 0)
 })
 
@@ -404,7 +457,7 @@ test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect
     count: 12,
   }
   assert.equal(entryKeyOf(rekeyed), key, 'a growing bout keeps its identity')
-  const state = dismiss(emptyState(), key, NOW)
+  const state = dismiss(emptyState(), key, rekeyed, NOW)
   assert.equal(buildLedger({ alerts: [rekeyed], state, now: NOW }).unresolved, 0)
 
   // A DIFFERENT subject is a different identity: the `auth_ip` message embeds the
@@ -449,6 +502,14 @@ test('a detail payload is shown only through the customer-safe allow-list', () =
   const json = JSON.stringify(shown.extra)
   assert.ok(!json.includes('point_create'))
   assert.ok(!json.includes('scope'))
+})
+
+test('a detail payload with only EMPTY values carries nothing either', () => {
+  // The `details: {}` fix one step narrower (review finding): counting KEYS said a
+  // payload whose only value is an empty string carried machine detail.
+  for (const details of [{ country: '' }, { country: null }, { ip: undefined }]) {
+    assert.equal(detailOf(alert({ details }), NOW).detailState, 'none', JSON.stringify(details))
+  }
 })
 
 test('an EMPTY detail payload carries nothing, and is not reported as carrying detail', () => {

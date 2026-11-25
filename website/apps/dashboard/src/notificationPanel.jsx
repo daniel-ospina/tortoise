@@ -31,7 +31,8 @@
 //     words, because that absence is the second half of the owner's complaint.
 //
 // A11Y: the disclosure pattern the account menu settled on (#1148-ux, P2-1) —
-// `aria-expanded` + `aria-controls` + `aria-haspopup` on the trigger, a labelled
+// `aria-expanded` + `aria-controls` on the trigger (NO `aria-haspopup`: it maps
+// `true` to a menu, and this popup is a `role="group"` disclosure), a labelled
 // `role="group"` panel whose title is a real heading, plain buttons, Escape closes
 // and returns focus to the bell (from inside the panel too, not only from the
 // trigger), and a pointerdown outside closes. No `role="menu"`: the APG menu
@@ -51,12 +52,16 @@ import {
   DETAIL_UNDISPLAYABLE,
   DISMISS,
   DISMISSED_HIDE,
+  DISMISSED_LOCAL_NOTE,
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
   LEDGER_EMPTY,
   OLDER_HIDE,
   OLDER_TOGGLE,
   PANEL_TITLE,
+  REGISTER_CHIP_ACTIVITY,
+  REGISTER_CHIP_INCIDENT,
+  REGISTER_CHIP_UNKNOWN,
   RESTORE,
   SAVE_FAILED,
   SNOOZED_HIDE,
@@ -125,7 +130,13 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
           <strong>{entry.label}</strong>
           {entry.countLabel ? <span className="alert-count"> {entry.countLabel}</span> : null}
           {/* The register, in the reader's words: whether anything happened. */}
-          <span className="notif-chip">{entry.isIncident ? 'alert' : 'activity'}</span>
+          <span className="notif-chip">
+            {entry.isIncident
+              ? REGISTER_CHIP_INCIDENT
+              : entry.registerKnown
+                ? REGISTER_CHIP_ACTIVITY
+                : REGISTER_CHIP_UNKNOWN}
+          </span>
         </span>
         <span className="notif-message">{entry.message}</span>
         <span className="dim small">
@@ -275,6 +286,7 @@ export function NotificationBell({
   const [saveFailed, setSaveFailed] = React.useState(false)
   const [lastKey, setLastKey] = React.useState(key)
   const rootRef = React.useRef(null)
+  const panelRef = React.useRef(null)
   const bellRef = React.useRef(null)
   // The panel's id, so the bell's `aria-expanded` has something to control. `useId`
   // rather than a literal: two bells on one page (a future surface) would otherwise
@@ -296,6 +308,17 @@ export function NotificationBell({
     setSaveFailed(false)
   }
 
+  // A snooze that runs out while the panel sits open must expire. Without a tick the
+  // clock is frozen at the last interaction, so a row snoozed at 09:00 was still
+  // hidden at 14:00 in the same tab, and "snoozed in 5 min" stayed 5 min forever
+  // (review finding). One coarse tick only while the panel is open: no timer runs
+  // when nobody is looking.
+  React.useEffect(() => {
+    if (!open || nowProp) return undefined
+    const id = setInterval(() => setOpenedAt(new Date()), 30_000)
+    return () => clearInterval(id)
+  }, [open, nowProp])
+
   const persist = (next) => {
     const ok = writeState(storage, key, next)
     setSaveFailed(!ok)
@@ -311,10 +334,15 @@ export function NotificationBell({
   const freshClock = () => (nowProp ? new Date(nowProp) : new Date())
 
   const handleSnooze = (entry, ms) => {
-    persist(snooze(ledger.state, entry.key, ms, clock))
+    // `freshClock()`, not `clock`: `clock` is when the panel was OPENED, so a snooze
+    // clicked 40 minutes in was 20 minutes long while labelled "1 hour" (review
+    // finding). The period the reader chose starts when they chose it.
+    persist(snooze(ledger.state, entry.key, ms, freshClock()))
   }
   const handleDismiss = (entry) => {
-    persist(dismiss(ledger.state, entry.key, clock))
+    // `entry.alert` travels with the dismissal: the store scopes it to the window
+    // the reader actually saw (see `dismiss`).
+    persist(dismiss(ledger.state, entry.key, entry.alert, clock))
     // The detail view of a notification that is no longer in the ledger has
     // nothing left to show; go back to the list.
     if (detailKey === entry.key) setDetailKey(null)
@@ -342,24 +370,38 @@ export function NotificationBell({
     }
   }
 
-  /** Close the panel and hand focus back to the bell. */
-  const closePanel = () => {
-    setOpen(false)
-    setDetailKey(null)
-    if (bellRef.current) bellRef.current.focus()
-  }
-
   // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
   // the underlying control activates, and the press that dismisses is not also
-  // the press that presses something behind it.
+  // the press that presses something behind it. Both handlers also RESTORE FOCUS:
+  // Escape from the panel used to close it and leave `document.activeElement` on
+  // `<body>`, and Escape from the detail view did nothing at all because the
+  // keydown never reached a handler bound inside the panel (review findings).
   React.useEffect(() => {
     if (!open) return undefined
     const onPointerDown = (e) => {
       if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
     }
+    // Escape is handled on the DOCUMENT, not only on the panel: a keydown that
+    // starts outside the panel's subtree (focus on `<body>` after the detail view
+    // re-rendered, or focus moved by the browser) never reaches a handler bound
+    // inside it, and the panel was left open with no Escape route (review finding).
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return
+      if (detailKey) {
+        setDetailKey(null)
+        if (panelRef.current) panelRef.current.focus()
+      } else {
+        setOpen(false)
+        if (bellRef.current) bellRef.current.focus()
+      }
+    }
     document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [open])
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, detailKey])
 
   const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
   const entries = [...ledgerView.current]
@@ -384,7 +426,20 @@ export function NotificationBell({
   // decision. A count that dropped because the panel was opened would be a lie
   // about the account's state.
   const count = ledgerView.unresolved
-  const bellLabel = count ? `${BELL_LABEL} — ${count} unresolved` : BELL_LABEL
+  // The feed's two "we could not see everything" facts must be visible in the
+  // HEADER. They used to render on the page (the old mount condition included
+  // `unavailable`/`scanSaturated`); moving the feed into a panel that only speaks
+  // when opened made a broken alert read and a quiet Organization the same pixel —
+  // on the one surface whose job is not to hide incidents (review finding).
+  const readFailed = unavailable
+  const readCut = !readFailed && scanSaturated && alerts.length === 0
+  const trouble = readFailed || readCut
+  const bellLabel = [
+    BELL_LABEL,
+    count ? `${count} unresolved` : '',
+    readFailed ? 'could not read alert history' : '',
+    readCut ? 'alert window may be full' : '',
+  ].filter(Boolean).join(' — ')
 
   return (
     <div className="notif-root" ref={rootRef}>
@@ -393,16 +448,15 @@ export function NotificationBell({
         className="notif-bell"
         ref={bellRef}
         onClick={toggleOpen}
-        onKeyDown={(e) => {
-          // Escape from the bell itself (focus is still on the trigger).
-          if (e.key === 'Escape' && open) closePanel()
-        }}
         aria-expanded={open}
         aria-controls={panelId}
-        aria-haspopup="true"
         aria-label={bellLabel}
       >
         <span className="notif-glyph" aria-hidden="true">🔔</span>
+        {/* Both can show at once: a read problem must never SUPPRESS the unresolved
+            count (that would hide alerts behind a warning about reading them). The
+            warning sits on the other corner for exactly that reason. */}
+        {trouble ? <span className="notif-badge notif-badge-warn" aria-hidden="true">!</span> : null}
         <Badge count={count} />
       </button>
 
@@ -410,17 +464,10 @@ export function NotificationBell({
         <div
           className="notif-panel"
           id={panelId}
+          ref={panelRef}
+          tabIndex={-1}
           role="group"
           aria-label={PANEL_TITLE}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              // Inside the panel, Escape must also RESTORE FOCUS — the bell's own
-              // handler cannot fire while focus is in here, so the panel closed and
-              // left `document.activeElement` on `<body>` (review finding).
-              if (detailKey) setDetailKey(null)
-              else closePanel()
-            }
-          }}
         >
           <div className="notif-panel-head">
             {/* A real heading, not a `<strong>`: the panel is a surface a reader
@@ -438,7 +485,10 @@ export function NotificationBell({
               onAcknowledge={onAcknowledge}
               ackPending={ackPending}
               ackError={ackError}
-              onBack={() => setDetailKey(null)}
+              onBack={() => {
+                setDetailKey(null)
+                if (panelRef.current) panelRef.current.focus()
+              }}
               onDismiss={handleDismiss}
             />
           ) : (
@@ -538,7 +588,7 @@ export function NotificationBell({
                         <li key={entry.key} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
-                            <span className="dim small"> · dismissed for you</span>
+                            <span className="dim small"> · {DISMISSED_LOCAL_NOTE}</span>
                           </span>
                           <button
                             type="button"

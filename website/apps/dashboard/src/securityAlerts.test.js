@@ -328,7 +328,9 @@ test('#14686: the alerts no longer render as blocks inside the dashboard content
   const main = readFileSync(join(here, 'main.jsx'), 'utf8')
   assert.doesNotMatch(main, /<SecurityAlertsPanel/,
     'the alert panel must not be mounted in the page flow — that is the bug')
-  assert.match(main, /<NotificationBell/, 'the header must carry the notifications control')
+  // EXACTLY ONE mount: `indexOf` alone passes a second bell mounted inside `<main>`.
+  assert.equal((main.match(/<NotificationBell\b/g) || []).length, 1,
+    'the header must carry the notifications control, and only the header')
   // The bell is mounted in the header cluster, not inside <main>.
   const headerAt = main.indexOf('<header className="dash-header">')
   // The FIRST <main> AFTER the dashboard header, not the first in the file: the

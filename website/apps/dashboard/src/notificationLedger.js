@@ -118,6 +118,9 @@ export function storageKey({ userId, orgId } = {}) {
   return `${STORAGE_PREFIX}:${userId || 'anonymous'}:${orgId || 'no-org'}`
 }
 
+/** How many dismissed WINDOWS a single identity keeps. See `dismiss`. */
+const MAX_DISMISS_WINDOWS = 12
+
 /** A complete, empty store. */
 export function emptyState() {
   return { v: 1, snoozed: {}, dismissed: {} }
@@ -180,14 +183,22 @@ export function readState(storage, key, now = new Date()) {
   const dismissedEntries = Object.entries(
     isPlainObject(parsed.dismissed) ? parsed.dismissed : {},
   )
-  // Newest-first cap: the entries we keep are the most recent dismissals, which
-  // are the ones an in-window episode can still match.
+  // Newest-first cap on the number of KEYED identities: the identities we keep are
+  // the ones dismissed most recently, which are the ones an in-feed episode can
+  // still match. Each entry keeps its own window list (see `dismiss`), and a
+  // numeric entry — the shape this store allowed before it carried windows — is
+  // normalised to a zero-width window instead of being dropped.
   dismissedEntries
-    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .map(([episode, value]) => {
+      const windows = normalizeWindows(value)
+      const newest = windows.reduce((max, w) => Math.max(max, w.at), 0)
+      return { episode, windows, newest }
+    })
+    .filter((entry) => entry.windows.length > 0)
+    .sort((a, b) => b.newest - a.newest)
     .slice(0, MAX_DISMISSED)
-    .forEach(([episode, at]) => {
-      const atMs = Number(at)
-      dismissed[episode] = Number.isFinite(atMs) ? atMs : 0
+    .forEach(({ episode, windows }) => {
+      dismissed[episode] = windows
     })
   return { state: { v: 1, snoozed, dismissed }, persisted: true }
 }
@@ -226,14 +237,42 @@ export function unsnooze(state, episode) {
   return { ...base, snoozed }
 }
 
-/** Dismiss one notification locally. */
-export function dismiss(state, episode, now = new Date()) {
+/** Dismiss one notification locally.
+ *
+ * ⛔ THE DISMISSAL IS SCOPED TO THE EPISODE'S WINDOW, not to its identity alone.
+ * The local key is `type|message` (see `entryKeyOf`) and for the highest-severity
+ * class — `flag` — the message is a CONSTANT that deliberately omits the rule,
+ * which is the server's real subject. Identity-only dismissal therefore meant one
+ * click silently silenced every future bout of that class, forever, with the badge
+ * reading 0: an alert made invisible AND uncountable on a security surface (review
+ * P1, round 2). That is the same failure round 1 removed from the ack axis.
+ *
+ * So the store keeps the WINDOW the reader dismissed — `[first_at, at]` off the
+ * row they clicked — and a later row is hidden only when its own window OVERLAPS
+ * it. That is exactly how `_episode_acknowledged` survives the server's sliding
+ * `first_at`: a bout that keeps growing still overlaps the window that was
+ * dismissed (so it stays quiet), while a genuinely new bout a week later does not
+ * (so it is shown). A naive `at <= dismissedAt` test would fail both ways — it
+ * would resurrect a growing bout on its next window AND hide a new bout.
+ *
+ * `windows` is the row's `[first, at]` in ms, or null when the row carries no
+ * usable timestamp; null falls back to identity matching, because a dismissal the
+ * reader made must not be discarded by a missing field.
+ */
+export function dismiss(state, episode, windows = null, now = new Date()) {
   const base = state || emptyState()
   if (!episode) return base
-  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
+  const window = normalizeWindow(windows) || windowOfAlert(windows) || zeroWindow(now)
+  const existing = normalizeWindows((base.dismissed || {})[episode])
   return {
     ...base,
-    dismissed: { ...base.dismissed, [episode]: nowMs },
+    dismissed: {
+      ...base.dismissed,
+      // Bounded per key: a reader who dismisses the same identity repeatedly should
+      // not grow the blob without limit, and the number of windows that can still
+      // match an in-feed row is small.
+      [episode]: [...existing, window].slice(-MAX_DISMISS_WINDOWS),
+    },
   }
 }
 
@@ -256,9 +295,71 @@ export function snoozedUntil(state, episode, now = new Date()) {
   return until > nowMs ? until : 0
 }
 
-/** True when the episode is locally dismissed. */
-export function isDismissed(state, episode) {
-  return Boolean(state && state.dismissed && episode in state.dismissed)
+/** True when `alert` falls inside a window this key was dismissed for.
+ *
+ * Two dismissals of the same identity are independent windows, so a row is hidden
+ * if it overlaps ANY of them. An unparseable window falls back to identity match
+ * (see `dismiss`).
+ */
+export function isDismissed(state, episode, alert = null) {
+  if (!state || !state.dismissed || !(episode in state.dismissed)) return false
+  const windows = normalizeWindows(state.dismissed[episode])
+  if (windows.length === 0) return false
+  const target = alert ? windowOfAlert(alert) : null
+  if (!target) return true // no usable window on the row: identity match
+  return windows.some((w) => overlaps(w, target))
+}
+
+/** `[first_at, at]` in ms for an alert row, or null when it carries neither. */
+export function windowOfAlert(alert) {
+  if (!alert) return null
+  const at = tsOf(alert.at)
+  const first = tsOf(alert.first_at)
+  if (at === null && first === null) return null
+  const end = at === null ? first : at
+  const start = first === null ? end : Math.min(first, end)
+  return { first: start, at: end }
+}
+
+function tsOf(value) {
+  if (value === undefined || value === null || value === '') return null
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+function normalizeWindow(value) {
+  if (!value || typeof value !== 'object') return null
+  const first = Number(value.first)
+  const at = Number(value.at)
+  if (!Number.isFinite(first) || !Number.isFinite(at)) return null
+  return { first: Math.min(first, at), at: Math.max(first, at) }
+}
+
+/** Stored windows, tolerating the numeric shape this store allowed before it
+ *  carried windows (a bare dismissal timestamp), and junk. */
+function normalizeWindows(value) {
+  if (value === undefined || value === null) return []
+  const raw = Array.isArray(value) ? value : [value]
+  const out = []
+  for (const item of raw) {
+    const window = normalizeWindow(item)
+    if (window) out.push(window)
+    else {
+      const ms = Number(item)
+      if (Number.isFinite(ms) && ms > 0) out.push({ first: ms, at: ms })
+    }
+  }
+  return out
+}
+
+function zeroWindow(now) {
+  const ms = now instanceof Date ? now.getTime() : Date.parse(now)
+  const at = Number.isFinite(ms) ? ms : Date.now()
+  return { first: at, at }
+}
+
+function overlaps(a, b) {
+  return a.first <= b.at && b.first <= a.at
 }
 
 /** The server's opaque episode key — the key the ack route takes. */
@@ -283,12 +384,15 @@ export function episodeOf(alert) {
  * carries the subject for every type — `auth_ip` embeds the country, the rate
  * detectors embed the scope/id (`_read_velocity_message`), and the flag types
  * embed nothing because their subject is the rule, which the customer-facing
- * feed deliberately does not ship. Consequence, stated rather than hidden: two
- * SEPARATE flag bouts of the same type are one local identity, so dismissing one
- * hides the next until it is restored. That is the same "one episode, one
- * decision" trade-off `_episode_key` documents server-side, it errs toward
- * quiet, and it is reversible — the ledger keeps a Dismissed group (with
- * Restore) so nothing is destroyed by it.
+ * feed deliberately does not ship.
+ *
+ * ⚠️ THAT COLLISION IS WHY A DISMISSAL IS WINDOW-SCOPED AND A SNOOZE IS NOT. Two
+ * separate `flag` bouts share this key, so a dismissal keyed on the identity alone
+ * would silence the class forever (review P1). `dismiss` therefore stores the
+ * window the reader dismissed and hides only overlapping rows, while `snooze`
+ * stays identity-wide because it is bounded by the period the reader chose — the
+ * blast radius is the hour, day or week they asked for, and it is visible in the
+ * "Snoozed (N)" list the whole time. Neither is silent, and both are reversible.
  */
 export function entryKeyOf(alert) {
   if (!alert) return ''
@@ -331,6 +435,13 @@ export function entryOf(alert, now = new Date()) {
     message: (alert && alert.message) || '',
     register: registerOf(alert),
     isIncident: registerOf(alert) === REGISTER_ALERT,
+    //: The register the SERVER stamped, if it stamped one. `registerOf` fail-quiets
+    //: an unrecognised row into the activity register, so `isIncident` alone cannot
+    //: tell "a detector measured a rate" from "we do not know what this is" — and a
+    //: two-valued chip derived from it labels an unknown row "activity", which
+    //: contradicts what the same row's detail view says (review finding).
+    registerKnown: Boolean(alert)
+      && (alert.register === REGISTER_ALERT || alert.register === REGISTER_ACTIVITY),
     countLabel: episodeCountLabel(alert),
     rangeLabel: episodeRangeLabel(alert),
     atMs: at && !Number.isNaN(at.getTime()) ? at.getTime() : 0,
@@ -409,7 +520,7 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
       acked.push(entry)
       continue
     }
-    if (isDismissed(state, entry.key)) {
+    if (isDismissed(state, entry.key, alert)) {
       dismissed.push(entry)
       continue
     }
@@ -436,6 +547,9 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
 //: The detail view's `Kind` line, one sentence per register. `KIND_UNCLASSIFIED`
 //: exists because `registerOf` fail-quiets an unrecognised row: asserting that an
 //: unclassified event "changed nothing" is a claim about a row we cannot read.
+export const REGISTER_CHIP_INCIDENT = 'alert'
+export const REGISTER_CHIP_ACTIVITY = 'activity'
+export const REGISTER_CHIP_UNKNOWN = 'unclassified'
 export const KIND_INCIDENT = 'Something happened on this Organization.'
 export const KIND_ACTIVITY =
   'A rate measurement from an abuse detector. It changed nothing.'
@@ -501,7 +615,9 @@ export function detailOf(alert, now = new Date()) {
     : []
   // An EMPTY payload carries nothing, so it must not be reported as carrying
   // machine detail the dashboard hides (review finding: `{}` said exactly that).
-  const hasPayload = Boolean(extra) && Object.keys(extra).length > 0
+  const hasPayload = Boolean(extra) && Object.values(extra).some(
+    (v) => v !== undefined && v !== null && v !== '',
+  )
   return {
     entry,
     fields,
@@ -558,9 +674,9 @@ export const DETAIL_UNDISPLAYABLE =
 //: for episode identity) and simply does not ship it here. What is true is that the
 //: dashboard's alert feed does not carry the per-event records.
 export const DETAIL_NO_DETAIL_LEAD =
-  'The alert feed carries the description above; it does not include the '
-  + 'per-event records (which key, which source, the measured rate). Ask '
-  + 'support@premiselabs.co if you need them.'
+  'This notification carries only the description above. The per-event records '
+  + 'behind it (which key, which source, the measured rate) are not shipped to '
+  + 'the dashboard — ask support@premiselabs.co if you need them.'
 export const STORAGE_UNAVAILABLE =
   'Your browser blocked local notification storage, so snooze and dismiss '
   + 'cannot be remembered here. Server-side dismissals still apply on reload.'
