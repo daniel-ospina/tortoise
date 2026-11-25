@@ -1001,6 +1001,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # ⛔ THE TWO VERBS ARE TWO RUNS, AND A COMBINATION MUST NOT SILENTLY DROP ONE.
+    # `--check`'s branch returns before `--render`'s, so `--check --render /tmp/x.md`
+    # printed `check: 25 pinned counts match`, exited **0**, and NEVER WROTE the file
+    # (measured at #14625's round-4 review). That is the no-op-gate shape this module
+    # exists to refuse: a lane running §7's two halves as one command reads a green
+    # check and believes it has regenerated the document. No §7 sentence declares a
+    # precedence, so none is invented here — the pair is refused (2 = could not run)
+    # and the message names the two-step form, which is §7's own order.
+    if args.check is not None and args.render is not None:
+        print(
+            "`--check` and `--render` are two runs: --check's branch returns before\n"
+            "--render's, so combining them would silently DROP the write. Run\n"
+            "`--render` first and `--check` second (that is §7's order), one per\n"
+            "command.",
+            file=sys.stderr,
+        )
+        return 2
+
     # ⛔ `--render` MUST NOT OVERWRITE A TRACKED PATH. The refusal inside `render()`
     # guards the SOURCE'S CONTENT (a source that already carries rows), never the
     # DESTINATION — so `--render docs/architecture/CYPHER-INVENTORY.src.md` read the
@@ -1024,6 +1042,21 @@ def main(argv: list[str] | None = None) -> int:
             src_resolved = DOC_SRC.resolve()
         except (OSError, RuntimeError) as err:
             print(f"render: could not resolve {args.render}: {err}", file=sys.stderr)
+            return 2
+        # ⛔ A DIRECTORY IS REFUSED AS A DIRECTORY, not as a "TRACKED path".
+        # `git ls-files --error-unmatch -- <dir>` exits 0 for any directory that
+        # merely CONTAINS tracked files, so the probe below claimed
+        # `--render docs/architecture` and prescribed "Pick an untracked path", while
+        # the real error is EISDIR — which the write guard names only for a directory
+        # holding no tracked file (measured at #14625's round-4 review: exit 2 in both
+        # cases, so the exit STATUS was right and the diagnosis was not).
+        if target.is_dir():
+            print(
+                f"render: could not write {args.render}: [Errno 21] Is a directory.\n"
+                f"{target} is a DIRECTORY — --render needs a FILE destination; the\n"
+                "default writes the gitignored `CYPHER-INVENTORY.md`.",
+                file=sys.stderr,
+            )
             return 2
         if target == src_resolved:
             print(
