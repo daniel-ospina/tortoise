@@ -3092,8 +3092,26 @@ def armed_but_uncut() -> dict[str, int]:
     ⛔ IT IS NOT THE DEPLOYMENT'S POPULATION — it is what THIS PROCESS has
     observed, on the write path or at creation. The org-wide population is a
     QUERY and `/health` collects no I/O (#2850: an unreachable record must never
-    delay or fail a liveness probe), so the authoritative list is
-    `tools/record_allocator_cli.py sweep|backfill`.
+    delay or fail a liveness probe), so this field is a WINDOW, not a census.
+
+    ⛔ AND THE DISCOVERY VERBS ARE NOT A CENSUS EITHER (#14587 review P1-2).
+    `tools/record_allocator_cli.py sweep|backfill` enumerate
+    `public.journal_event` LEFT JOIN the cursor row — a graph the RECORD has seen
+    writing. On an armed deployment a graph with no usable cursor row writes no
+    `journal_event` row at all (`ALLOCATION_SQL` is scoped to `mode='active'`, so
+    the door refuses and the line stays in its JSONL file), which is exactly the
+    population this field exists to surface. So no verb can list this field's
+    graphs as a whole; the PER-GRAPH command that heals one is
+    `seed --graph-id … --enumerated-floor 0` then `arm`.
+
+    ⛔ IT RETRACTS ON THAT GRAPH'S NEXT USABLE WRITE, OR ON A RESTART — nothing
+    else (#14587 review P2-2). The only runtime clearers are a successful
+    `provision_graph_record` and a usable row read in `record_owns_position`, both
+    in THIS process, and a CLI heal runs in ANOTHER. So after an operator heals
+    every uncut graph, this field keeps reporting them (`ok: false`) until each
+    graph writes again or the process restarts — which is why the remedy text says
+    so rather than promising an instant green. A declarative re-probe from
+    `/health` is NOT the fix: the endpoint collects no I/O (#2850).
 
     `armed_but_uncut` is exact up to :data:`UNCUT_GRAPH_CAP` distinct graphs;
     `armed_but_uncut_untracked_observations` counts the LIFETIME OBSERVATIONS
@@ -3170,10 +3188,20 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     """Say, rate-limited per TENANT, that this graph's record leg is off.
 
     The remedy is named, because the two populations have different ones: a graph
-    created before the hook landed (or whose hook failed) needs
-    `record_allocator_cli.py` `seed`/`backfill`; a graph an operator halted needs
-    its halt respected. Saying "check the cursor" without the verb is how an
-    operator re-runs the wrong thing.
+    created before the hook landed (or whose hook failed) needs `seed` + `arm` for
+    THAT graph; a graph an operator halted needs its halt respected. Saying
+    "check the cursor" without the verb is how an operator re-runs the wrong
+    thing.
+
+    ⛔ `backfill` IS NOT THE REMEDY HERE, and printing it first was the #14587
+    review's P1-2. `backfill` seeds `sweep`'s population, and `sweep` reads
+    `public.journal_event` — so it can only reach a graph the RECORD has already
+    seen writing. On an armed deployment a graph whose cursor row is unusable
+    writes NO `journal_event` row (`ALLOCATION_SQL` is scoped to `mode='active'`,
+    so the door refuses and the line stays in the JSONL file), which means the
+    graph this warning is about is permanently absent from `backfill`. The
+    per-graph `seed` + `arm` is the command that works, so it is printed first
+    and the discovery verbs are described as what they are.
     """
     key = f"{org_id}\u0000{graph_id}"
     now = time.monotonic()
@@ -3189,12 +3217,17 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     _logger.warning(
         "the record's cursor for %s/%s is not usable (%s), so every record this "
         "graph writes is REFUSED and its journal lines are the only durable "
-        "copy — `/health` reports this under `record.armed_but_uncut`. Remedy: "
-        "`tools/record_allocator_cli.py status --org-id %s --graph-id %s`, then "
-        "`backfill` (or `seed` + `arm` for this one graph) if it should be cut "
-        "over; a `halted` graph stays halted BY DESIGN until an operator "
-        "reopens it. This line repeats at most once per %.0fs per graph",
-        org_id, graph_id, reason, org_id, graph_id, UNCUT_GRAPH_WARN_SECONDS,
+        "copy — `/health` reports this under `record.armed_but_uncut` and stops "
+        "reporting it on this graph's next usable write or a process restart. "
+        "Remedy, PER GRAPH: `tools/record_allocator_cli.py seed --org-id %s "
+        "--graph-id %s --enumerated-floor 0`, then `arm --org-id %s "
+        "--graph-id %s --acknowledge-cutover`. `sweep`/`backfill` reach only "
+        "graphs the RECORD has already seen writing, so a graph whose writes "
+        "are being refused is NOT in their population — do not wait for it to "
+        "appear there. A `halted` graph stays halted BY DESIGN until an "
+        "operator reopens it. This line repeats at most once per %.0fs per graph",
+        org_id, graph_id, reason, org_id, graph_id, org_id, graph_id,
+        UNCUT_GRAPH_WARN_SECONDS,
     )
 
 
@@ -3204,8 +3237,19 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     """The CREATION HOOK the doors call (#14582): give a new graph its counter row.
 
     Called from every graph-creation door the census found
-    (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`,
-    `sdk._graph_create`'s registry arm).
+    (`hosted_api._provision_graph`'s SUPABASE arm,
+    `supabase_control.ensure_default_graph_row`'s three id-yielding arms).
+
+    ⛔ `sdk._graph_create` IS **NOT** ONE OF THE DOORS, and neither is
+    `hosted_api._provision_graph`'s registry arm: `record_cursor` carries
+    `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id)`, and
+    neither of those persists such a row (a Falkor `:Graph` node is not one — see
+    `record_tenant_for`). Hooking either manufactures a permanently-red
+    `armed_but_uncut` over a deployment with no gap; both absences are pinned
+    (`test_the_doors_that_cannot_be_hooked_stay_unhooked`,
+    `test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row`). This
+    sentence named `sdk._graph_create` as a caller until the #14587 review's P3,
+    which is the rot the sdk comment's own pin was meant to prevent.
 
     THREE PROPERTIES, each of which a tidy-looking variant would lose:
 
@@ -3224,7 +3268,11 @@ def provision_graph_record(*, org_id: str, graph_id: str,
        different connection), so a hard failure here would leave an orphan row
        behind every refusal AND 500 the create. The failure is therefore made
        LOUD and VISIBLE instead: counted and named on `/health` as
-       `armed_but_uncut`, and healed by `record_allocator_cli.py backfill`.
+       `armed_but_uncut`, and healed PER GRAPH by
+       `record_allocator_cli.py seed --graph-id … --enumerated-floor 0` then
+       `arm`. ⛔ NOT by `backfill`: it seeds `sweep`'s population, and `sweep`
+       reads `public.journal_event`, so a graph whose record writes are being
+       REFUSED has no row there to find (#14587 P1-2).
     3. ⛔ **IT COMMITS, ONCE, AND ONLY ON SUCCESS.** The seed and the arm are one
        transaction (`record_allocator.provision_graph_record` does not commit),
        so a graph is never left in the state that allocates nothing.
@@ -3281,9 +3329,14 @@ def provision_graph_record(*, org_id: str, graph_id: str,
         _logger.warning(
             "the graph's record cursor could NOT be provisioned for %s/%s "
             "(%s: %s) — the graph was created and every record it writes is "
-            "refused until it is seeded (`record_allocator_cli.py backfill`). "
-            "`/health` reports this under `record.armed_but_uncut`",
-            org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+            "refused until it is seeded. Remedy, PER GRAPH (a graph the record "
+            "has never seen is NOT in `backfill`'s population, so do not wait "
+            "for it there): `record_allocator_cli.py seed --org-id %s "
+            "--graph-id %s --enumerated-floor 0`, then `arm --org-id %s "
+            "--graph-id %s --acknowledge-cutover`. `/health` reports this under "
+            "`record.armed_but_uncut`",
+            org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
+            org_id, graph_id, org_id, graph_id)
         return {"provisioned": False, "reason": "provision_failed"}
     else:
         try:
@@ -3292,9 +3345,13 @@ def provision_graph_record(*, org_id: str, graph_id: str,
             note_uncut_graph(org_id, graph_id, reason="provision_failed")
             _logger.warning(
                 "the graph's record cursor could not be COMMITTED for %s/%s "
-                "(%s: %s) — the graph exists and is uncut; remedy: "
-                "`record_allocator_cli.py backfill --org-id <org>`",
-                org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+                "(%s: %s) — the graph exists and is uncut; remedy, PER GRAPH: "
+                "`record_allocator_cli.py seed --org-id %s --graph-id %s "
+                "--enumerated-floor 0`, then `arm --org-id %s --graph-id %s "
+                "--acknowledge-cutover` (`backfill` cannot reach a graph the "
+                "record has never seen write)",
+                org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
+                org_id, graph_id, org_id, graph_id)
             return {"provisioned": False, "reason": "commit_failed"}
         # The graph IS cut over now, so any earlier observation of it is stale.
         clear_uncut_graph(org_id, graph_id)

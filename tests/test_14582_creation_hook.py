@@ -589,6 +589,317 @@ def test_a_halted_overflow_is_counted_not_silently_dropped(monkeypatch):
         rw.reset_uncut_graphs()
 
 
+# ── DB-free: the hook's REACH, and the two feeders that keep it honest ─────
+#
+# #14587 review: P1-1 (the hook fired on an arm whose graph `public.graphs`
+# never holds) and P1-3 (the write-path feeder and the allocator's `active`
+# short-circuit could both be deleted with the suite green). Each pin below
+# names the mutant it reds on.
+
+
+def _parent_map(node: ast.AST) -> dict[ast.AST, ast.AST]:
+    """`{child: parent}` for one parsed function."""
+    parents: dict[ast.AST, ast.AST] = {}
+    for sub in ast.walk(node):
+        for child in ast.iter_child_nodes(sub):
+            parents[child] = sub
+    return parents
+
+
+def _enclosing_if_tests(node: ast.AST,
+                        parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
+    """Every `if` TEST above `node`, nearest first — the guards around a line."""
+    tests: list[ast.AST] = []
+    cur = node
+    while cur in parents:
+        cur = parents[cur]
+        if isinstance(cur, ast.If):
+            tests.append(cur.test)
+    return tests
+
+
+def _names(node: ast.AST) -> set[str]:
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+
+def _calls_to(node: ast.AST, callee: str) -> list[ast.Call]:
+    out: list[ast.Call] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == callee:
+            out.append(sub)
+    return out
+
+
+def test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row():
+    """⛔ #14587 review P1-1 — THE HOOK MUST NOT FIRE ON THE REGISTRY ARM.
+
+    `record_cursor` carries `FOREIGN KEY (org_id, graph_id) REFERENCES
+    public.graphs (org_id, id)`. `insert_graph` persists such a row on the
+    Supabase arm; `sdk._graph_create` does NOT (it returns a Falkor `:Graph` id,
+    `record_writer.record_tenant_for` states registry graphs are never in
+    `public.graphs`). `_provision_graph` took the registry branch and still
+    called the hook, so on any selfhost/registry install that sets
+    `TORTOISE_RECORD_DSN` EVERY graph create failed the FK (`23503`, or `42P01`
+    with no graphs table), counted `provision_failed`, and — because a registry
+    tenant never reaches `record_owns_position` to retract it — pinned `/health`
+    at `ok: false` for the life of the process over a deployment with NO gap.
+
+    Mutants this reds: (a) drop the `if control_plane_owns_graph:` guard → the
+    call has no enclosing `if` naming the flag; (b) set the flag True in the
+    `else` (registry) arm → its assignment is not guarded by
+    `is_supabase_enabled()`; (c) never set it True → the `True` assignment is
+    gone. The `_UNHOOKED` pin cannot see any of them: it grades
+    `sdk._graph_create`'s own body, and this is a caller one frame up that
+    composes the same id into the same hook.
+    """
+    rel, door = "tortoise/hosted_api.py", "_provision_graph"
+    func = _functions(rel).get(door)
+    assert func is not None, f"{rel}::{door} is gone — re-run the door census"
+    parents = _parent_map(func)
+    calls = _calls_to(func, "_provision_graph_record")
+    assert len(calls) == 1, (
+        f"`{door}` calls `_provision_graph_record` {len(calls)}× — expected "
+        f"exactly one gated call site")
+    guards: set[str] = set()
+    for test in _enclosing_if_tests(calls[0], parents):
+        guards |= _names(test)
+    assert "control_plane_owns_graph" in guards, (
+        "the creation hook is not gated on `control_plane_owns_graph`: it runs "
+        "for the REGISTRY arm too, where the graph id is a Falkor `:Graph` node "
+        "that `public.graphs` never holds — `record_cursor`'s FK refuses every "
+        "such create, and a registry tenant never reaches the write path that "
+        "would retract the entry, so `/health` reads `ok: false` forever")
+    trues = [n for n in ast.walk(func)
+             if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name)
+                     and t.id == "control_plane_owns_graph" for t in n.targets)
+             and isinstance(n.value, ast.Constant) and n.value.value is True]
+    assert len(trues) == 1, (
+        f"`control_plane_owns_graph` is set True {len(trues)}× in `{door}` — "
+        f"it must be set True exactly once, and only where `insert_graph` "
+        f"persisted the row")
+    assert any(_calls_to(test, "is_supabase_enabled")
+               for test in _enclosing_if_tests(trues[0], parents)), (
+        "`control_plane_owns_graph = True` is not inside the "
+        "`if is_supabase_enabled():` arm — the flag that gates the hook is now "
+        "set by the arm whose graph has no `public.graphs` row")
+
+
+class _FakeConn:
+    """What `record_writer` accepts as a connection: commit/rollback/close."""
+
+    def __init__(self) -> None:
+        self.committed = 0
+        self.closed = 0
+
+    def commit(self) -> None:
+        self.committed += 1
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_the_write_path_observation_feeds_the_registry(monkeypatch):
+    """⛔ #14587 review P1-3 (first instance) — THE FEEDER HAD NO PIN.
+
+    `record_owns_position` is the ONLY observation that runs in the normal course
+    (`record_owns_position` reads the graph's cursor row on every armed write),
+    so it is what keeps `armed_but_uncut` honest for the graphs that PREDATE the
+    hook, the graphs a failed hook left behind, and every graph an operator later
+    breaks. Reverting its `note_uncut_graph`/`clear_uncut_graph` pair to the bare
+    `return row is not None and row[1] == active` reddens NOTHING before this
+    test: every other assertion in this file drove the registry BY HAND. With the
+    feeder gone, `/health` only moves at creation time and reads green forever
+    over exactly the population this PR exists to surface.
+
+    Driven the way `tests/test_12894_record_cursor.py` drives `replay()` — an
+    injected connection and a cursor row — so the three arms are exercised
+    without a database.
+    """
+    from tortoise import record_allocator as ra
+
+    state: dict = {"row": None}
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: True)
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
+    monkeypatch.setattr(ra, "read_cursor",
+                        lambda _conn, *, org_id, graph_id: state["row"])
+    monkeypatch.setattr(rw, "_uncut_warned_at", {})
+
+    # (1) NO ROW — the born-uncut graph. The observation must be TRACKED.
+    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is False
+    assert rw.armed_but_uncut()["armed_but_uncut"] == 1, (
+        "a write to a graph with no cursor row did not reach the registry — the "
+        "write-path feeder is gone and `/health` can no longer see a graph the "
+        "hook missed")
+    assert rw.armed_but_uncut_reasons() == {"no_cursor_row": 1}
+
+    # (2) A ROW THAT IS NOT `active` — the mode is named, not collapsed.
+    state["row"] = (0, "seeded")
+    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is False
+    assert rw.armed_but_uncut_reasons() == {"mode_seeded": 1}, (
+        "a `seeded` graph must be tracked with its OWN reason — the row exists "
+        "but allocates nothing (`ALLOCATION_SQL` is scoped to `active`)")
+
+    # (3) THE SAME READ THAT OBSERVES THE GAP OBSERVES ITS REPAIR.
+    state["row"] = (0, "active")
+    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is True
+    assert rw.armed_but_uncut()["armed_but_uncut"] == 0, (
+        "a healed graph is still tracked — the clearer is unreachable from the "
+        "write path, so `/health` is a LATCH and only a restart clears it")
+    assert rw.armed_but_uncut_reasons() == {}
+
+
+class _CountingCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, _sql, _params=None):
+        pass
+
+    def fetchone(self):
+        return (2,)          # the journal's COUNT — a gapped `1, 2, 4` axis
+
+    def close(self):
+        pass
+
+
+class _CountingConn:
+    def cursor(self):
+        return _CountingCursor()
+
+
+def test_the_active_short_circuit_removes_a_false_divergence(monkeypatch):
+    """⛔ #14587 review P1-3 (second instance) — the short-circuit had no pin.
+
+    `record_allocator.provision_graph_record` reads the row BEFORE seeding, and
+    its own docstring says that read is *"not an optimisation — it removes a
+    FALSE DIVERGENCE"*: on an ALREADY `active` graph with a gapped journal,
+    `floor = COUNT(*)` is 2 while `MAX(seq)` is 3, so `SEED_SQL` would refuse
+    `divergence` and the hook would publish a healthy cut-over graph as uncut.
+    Deleting the short-circuit left the suite GREEN (on a dense journal the
+    `armed` refusal arm returns the same answer), so the only input that
+    separates them — active + GAPPED journal — is built here.
+
+    Mutant: delete the `existing is not None and existing[1] == MODE_ACTIVE`
+    return → `seed` is reached, refuses, and this test fails on `seen == []`.
+    """
+    from tortoise import record_allocator as ra
+
+    seen: list[str] = []
+    monkeypatch.setattr(ra, "read_cursor",
+                        lambda _conn, *, org_id, graph_id: (3, ra.MODE_ACTIVE))
+    monkeypatch.setattr(ra, "scope_tenant", lambda _conn, _org: None)
+
+    def seed_that_would_refuse(*_a, **_kw):
+        seen.append("seed")
+        raise ra.SeedRefused(
+            "the record holds positions this journal cannot reproduce",
+            reason="divergence", row_max=3, enumerated_floor=2)
+
+    monkeypatch.setattr(ra, "seed", seed_that_would_refuse)
+    result = ra.provision_graph_record(_CountingConn(), org_id="org-14582",
+                                       graph_id="graph-14582")
+    assert seen == [], (
+        "an ALREADY `active` graph was sent through `seed` — with a gapped "
+        "journal that refuses `divergence`, so a healthy cut-over graph is "
+        "published as uncut and `/health` reds for nothing")
+    assert result.already_cut_over is True
+    assert (result.seq, result.mode) == (3, ra.MODE_ACTIVE)
+    assert result.seeded is False
+
+
+def test_the_provision_connect_is_bounded_by_its_own_timeout(monkeypatch):
+    """⛔ THE ONE BOUND THIS CHANGE ADVERTISES WAS UNTESTED (#14587).
+
+    The hook runs synchronously from `async` endpoints, so its connect is capped
+    at `PROVISION_CONNECT_TIMEOUT_SECONDS` (3 s) rather than the live door's 10 —
+    a record outage must not cost a create endpoint the full live budget.
+    Mutating the kwarg back to the module default reddened nothing.
+    """
+    from tortoise import record_allocator as ra
+
+    seen: dict = {}
+
+    def connect(_dsn, *, connect_timeout=None):
+        seen["connect_timeout"] = connect_timeout
+        return _FakeConn()
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", connect)
+    monkeypatch.setattr(ra, "provision_graph_record", lambda *_a, **_kw: (
+        SimpleNamespace(seq=0, mode="active", already_cut_over=False,
+                        seeded=True, healed_tail=False, burned=False)))
+
+    assert rw.provision_graph_record(org_id="o", graph_id="g")[
+        "provisioned"] is True
+    assert seen["connect_timeout"] == rw.PROVISION_CONNECT_TIMEOUT_SECONDS, (
+        f"the provision connect is not bounded by its own timeout (got "
+        f"{seen.get('connect_timeout')!r}) — a record outage then blocks a "
+        f"create endpoint for the live door's "
+        f"{rw.CONNECT_TIMEOUT_SECONDS}s budget")
+    assert seen["connect_timeout"] < rw.CONNECT_TIMEOUT_SECONDS
+
+
+def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
+    """⛔ #14587 review P1-2 — the printed remedy could not reach the population.
+
+    Every failure path printed `backfill` as THE remedy, and `backfill` seeds
+    `sweep`'s population: `public.journal_event` minus `record_cursor`. On an
+    armed deployment a graph whose hook failed writes NO `journal_event` row —
+    `ALLOCATION_SQL` is scoped to `mode='active'`, so the door refuses and the
+    line stays in the JSONL file — so the operator followed the printed remedy,
+    got `considered: 0 / seeded: 0 / refused: 0` with exit 0, read a CLEAN
+    pre-flight, and was left with a hand-typed command whose id `/health` does
+    not publish. The per-graph `seed` + `arm` is the command that works, so it is
+    what the text must print — first, and with the ids filled in.
+
+    Mutant: revert either message to `backfill --org-id <org>` → the assertion
+    reds on the missing `--enumerated-floor 0`.
+    """
+    from tortoise import record_allocator as ra
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
+
+    def boom(_conn, **_kw):
+        raise RuntimeError("the record is unreachable")
+
+    monkeypatch.setattr(ra, "provision_graph_record", boom)
+    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
+        assert rw.provision_graph_record(
+            org_id="org-14582", graph_id="graph-14582")["reason"] == (
+                "provision_failed")
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert any("seed --org-id org-14582 --graph-id graph-14582 "
+               "--enumerated-floor 0" in line for line in lines), lines
+    assert any("arm --org-id org-14582" in line for line in lines), lines
+
+    caplog.clear()
+    monkeypatch.setattr(rw, "_uncut_warned_at", {})
+    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
+        rw._warn_uncut_graph("org-14582", "graph-14582",
+                             reason="no_cursor_row")
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert any("seed --org-id org-14582 --graph-id graph-14582" in line
+               for line in lines), lines
+    assert any("NOT in their population" in line for line in lines), (
+        "the warning still lets an operator wait for a graph to appear in "
+        "`sweep`/`backfill`'s population, where an armed deployment guarantees "
+        f"it never will: {lines}")
+
+
 # ── the live legs: a real record database ──────────────────────────────────
 
 pytestmark_live = pytest.mark.skipif(

@@ -303,10 +303,16 @@ JOURNAL_COUNT_SQL = (
 #: not a preference: `tortoise_record_app` has no privilege on `public.graphs`
 #: (the tenancy migration grants the record tables and nothing else), so a sweep
 #: over `graphs` would fail `InsufficientPrivilege` on exactly the role the CLI
-#: must connect as. The consequence is stated rather than hidden: a graph that
-#: has NEVER been written is invisible here — and it has also lost nothing yet,
-#: so the first write is the point at which this becomes actionable (and, for a
-#: born-uncut graph, the point at which its first line's row is lost).
+#: must connect as. The consequence is stated rather than hidden, and it is
+#: WIDER than "a graph that has never been written is invisible here":
+#: ⛔ ON AN ARMED DEPLOYMENT THE FIRST WRITE DOES **NOT** MAKE A BORN-UNCUT GRAPH
+#: APPEAR (#14587 review P1-2). `ALLOCATION_SQL` is scoped to `mode='active'`, so
+#: the door refuses and NO `journal_event` row is ever written for that graph —
+#: it stays invisible here however many times it writes (its JSONL line still
+#: exists; only the record's copy is missing). So this population is NOT "the
+#: born-uncut graphs": it is the graphs the record has SEEN writing. The
+#: per-graph `record_allocator_cli.py seed --graph-id … --enumerated-floor 0` +
+#: `arm` is the command that reaches the rest.
 UNCUT_GRAPHS_SQL = (
     "SELECT DISTINCT j.graph_id FROM public.journal_event j "
     f"LEFT JOIN public.{RECORD_CURSOR_TABLE} c "

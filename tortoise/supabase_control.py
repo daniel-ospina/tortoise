@@ -4320,13 +4320,25 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
 
     Called at every arm of :func:`ensure_default_graph_row` that yields a row id:
     the active-row short-circuit, the mint, and the convergent adopt. ⛔ ALL
-    THREE, deliberately — the short-circuit is not just an optimisation here, it
-    is the **self-heal**: every credential resolver in the tree reaches this
-    function through :func:`default_graph_id_for_credential`, so an org whose
-    default graph was missed (the hook failed, or the graph predates it) is
-    provisioned on its next authenticated request instead of waiting for an
-    operator. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
+    THREE, deliberately — the short-circuit is not just an optimisation here: a
+    re-entered provisioning call must not publish a healthy pre-existing graph as
+    uncut. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
     repeat costs one scoped read.
+
+    ⛔ THE SHORT-CIRCUIT IS **NOT** A REQUEST-PATH SELF-HEAL, and until the #14587
+    review's P2-1 this docstring sold it as one. The reach, stated exactly:
+    :func:`default_graph_for_credential` returns BEFORE the mint whenever the
+    graphs row EXISTS, and :func:`ensure_default_graph_row` is reached only
+    through :func:`_mint_default_graph_row_best_effort` — on a read MISS, or from
+    the two provisioning wrappers (:func:`provision_org`,
+    :func:`provision_org_with_token`). A default graph that exists with no cursor
+    row is a read HIT: no mint, no call here, no heal on any request. So this arm
+    reconciles a **RE-PROVISIONED** org and the convergent-mint race (a concurrent
+    mint's row appeared after this call's read), not "the graph predates the
+    hook". The pre-existing population is healed by the operator verb
+    (`record_allocator_cli.py seed` + `arm` for that graph) or on its next write,
+    which ``record_writer.record_owns_position`` observes — a different component,
+    on a different path.
 
     ⛔ IT HEALS THE PRE-EXISTING GRAPH TOO, and that is why the floor is not this
     caller's business: `default_graph_id_for_credential` only reaches the mint
@@ -4355,9 +4367,13 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
         _logger.error(
             "the default graph row %s (%s) exists but its record cursor could "
             "NOT be provisioned (the record seam is unimportable) — every "
-            "record this org writes is refused until it is seeded: run "
-            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
-            graph_id, org_id, org_id, exc_info=True)
+            "record this org writes is refused until it is seeded. Remedy, PER "
+            "GRAPH: `uv run python tools/record_allocator_cli.py seed "
+            "--org-id %s --graph-id %s --enumerated-floor 0`, then `arm "
+            "--org-id %s --graph-id %s --acknowledge-cutover` (`backfill` "
+            "cannot reach a graph the record has never seen write)",
+            graph_id, org_id, org_id, graph_id, org_id, graph_id,
+            exc_info=True)
 
 
 def ensure_default_graph_row(cp, org_id: str,

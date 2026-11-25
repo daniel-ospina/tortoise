@@ -474,9 +474,14 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "floor_is_the_journals_count": (
             None if not entries else entries[0]["floor_is_the_journals_count"]),
         "cannot_see": (
-            "a graph that has never been written (no journal_event row) — the "
-            "record role has no grant on public.graphs; such a graph has lost "
-            "nothing yet"),
+            "a graph the record has never seen write (no `journal_event` row) "
+            "— the record role has no grant on public.graphs. ⛔ ON AN ARMED "
+            "DEPLOYMENT THAT IS THE BORN-UNCUT POPULATION ITSELF, and it does "
+            "NOT 'lose nothing yet': its record writes are REFUSED "
+            "(`cursor_not_active`), so it accumulates no `journal_event` row "
+            "however many times it writes and never appears in this list. "
+            "Seed one per graph with `seed --graph-id … --enumerated-floor 0` "
+            "then `arm`; `/health`'s `record.armed_but_uncut` names them"),
     }
     if payload["floor_is_the_journals_count"] is None:
         # ⛔ THE REASON MUST NAME THE CAUSE THE `null` ACTUALLY HAD (#13043
@@ -516,11 +521,16 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     """SEED `sweep`'s population — the graphs the creation hook did not reach (#14582).
 
     WHY THIS VERB EXISTS AT ALL. `#14582`'s hook is BEST-EFFORT by design (a
-    record outage at creation must not 500 a user's graph), so there are always
-    two populations it cannot cover: the graphs created BEFORE it landed, and the
-    ones whose hook failed. Without a verb those graphs are findable (`sweep`)
-    and unfixable without a hand-typed `--enumerated-floor` per graph, which is
-    how a reconciliation step becomes an operator's afternoon.
+    record outage at creation must not 500 a user's graph), so there are two
+    populations it cannot cover: the graphs created BEFORE it landed, and the
+    ones whose hook failed — and ⛔ ONLY THE FIRST IS THIS VERB'S (#14587 review
+    P1-2). The population below is `public.journal_event` minus `record_cursor`:
+    the graphs the RECORD has SEEN writing. On an armed deployment a graph whose
+    hook failed writes no `journal_event` row at all (`ALLOCATION_SQL` is scoped
+    to `mode='active'`, so the door refuses), so it is ABSENT here for as long as
+    it is broken and `considered: 0` is NOT evidence that it is healthy. Those
+    graphs need `seed --graph-id … --enumerated-floor 0` + `arm` per graph, which
+    `/health`'s `record.armed_but_uncut` warning prints with the ids filled in.
 
     ⛔ THE FLOOR IS THE JOURNAL'S **COUNT**, and that is the seed's own quantity:
     "how many records a replay of this graph's journal enumerates". It is read
@@ -668,10 +678,23 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "cannot_see": (
             "a graph that has NEVER been written (no `journal_event` row) — the "
             "record role has no grant on `public.graphs`. A graph the creation "
-            "hook reached is not in this population at all; one it missed and "
-            "that has never been written appears here only after its first "
-            "write (and it loses that first line's row, which is the gap this "
-            "verb exists to bound)"),
+            "hook reached is not in this population at all; one it MISSED "
+            "NEVER appears here: on an armed deployment its record writes are "
+            "REFUSED (`cursor_not_active`), so it accumulates no "
+            "`journal_event` row however many times it writes. Seed those per "
+            "graph with `seed --graph-id … --enumerated-floor 0` then `arm` — "
+            "`/health`'s `record.armed_but_uncut` names them"),
+        # ⛔ THE HEAL IS NOT INSTANT ON `/health` (#14587 review P2-2). The field
+        # is PROCESS state in the WRITER; this verb runs in another process, so a
+        # graph healed here keeps reddening that field until it writes again or
+        # the writer restarts. Saying it here is the minimum the review asked
+        # for; a `/health` re-probe is not the fix (`/health` collects no I/O,
+        # #2850).
+        "health_clears": (
+            "`/health`'s `record.armed_but_uncut` is in-process state in the "
+            "writer, so a graph healed by this verb stops appearing there on "
+            "its NEXT USABLE WRITE or on a writer restart — not when this "
+            "command returns"),
     }
 
 

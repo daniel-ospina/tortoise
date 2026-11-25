@@ -30992,10 +30992,26 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     here can undo a graph; and a record outage must not 500 a user's graph
     creation when the record itself is optional and `write_live_record` is
     fail-soft by contract. What is NOT acceptable is silence, and that is what
-    `/health`'s `record.armed_but_uncut` + `record_allocator_cli.py backfill`
+    `/health`'s `record.armed_but_uncut` and the per-graph `seed` + `arm` remedy
     are for. (The atomic form the plan asked for — §A7.8 item 8's
     one-transaction RPC — is not buildable from here: the record's app role has
     no grant on `public.graphs`. Tracked against #14582.)
+
+    ⛔ IT IS CALLED FOR THE SUPABASE ARM ONLY, and that is `control_plane_owns_graph`
+    at the call site rather than a judgement here. `record_cursor` carries
+    `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id)`, so a
+    cursor row may exist ONLY for an id some control plane actually inserted —
+    which is exactly what `insert_graph` did on the Supabase arm, and exactly
+    what the registry arm does NOT do (`sdk._graph_create` returns a Falkor
+    `:Graph` id; `record_writer.record_tenant_for` states that registry graphs are
+    never inserted into `public.graphs`). Calling this for the registry arm was
+    the #14587 review's P1-1: every registry create would fail the FK (`23503`, or
+    `42P01` with no graphs table), count `provision_failed`, and — because a
+    registry tenant never reaches `record_owns_position` to retract it — pin
+    `/health` at `ok: false` for the life of the process over a deployment with no
+    gap. That is the permanent false red F3 forbids, so the call site is GATED on
+    the arm that persisted the row and pinned by
+    `test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row`.
     """
     try:
         from tortoise.record_writer import provision_graph_record
@@ -31006,8 +31022,13 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
             "graph %s (%s) was created but its record cursor could NOT be "
             "provisioned (the record seam is unimportable) — every record this "
             "graph writes is refused until it is seeded: run "
-            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
-            graph_id, org_id, org_id, exc_info=True)
+            "`uv run python tools/record_allocator_cli.py seed --org-id %s "
+            "--graph-id %s --enumerated-floor 0` then `arm --org-id %s "
+            "--graph-id %s --acknowledge-cutover` (a graph with existing record "
+            "rows is REFUSED `divergence` rather than seeded, so the floor is "
+            "never silently wrong)",
+            graph_id, org_id, org_id, graph_id, org_id, graph_id,
+            exc_info=True)
 
 
 async def _graph_quota_gate(org: dict) -> None:
@@ -31089,6 +31110,11 @@ def _provision_graph(org: dict, name: str,
     graph = None
     minted = None
     applied_packs = None
+    #: ⛔ DID THIS MINT PERSIST A `public.graphs` ROW? Only the Supabase arm does
+    #: (`insert_graph` below), and only a persisted row may own a `record_cursor`
+    #: row — the FK has no other arm. See the hook's call site and
+    #: `_provision_graph_record`'s docstring (#14587 review P1-1).
+    control_plane_owns_graph = False
     try:
         # Graph write (both modes). Supabase: graphs row via the seam
         # (C1 deferred the INSERT; C2 owns it). Registry: _graph_create
@@ -31111,6 +31137,9 @@ def _provision_graph(org: dict, name: str,
             graph = {"id": gid, "name": name, "kind": "custom",
                      "namespace": ns, "status": "active",
                      "created_at": now}
+            # The row is REACHABLE from the record's role by foreign key — the
+            # only thing that makes a `record_cursor` row legal.
+            control_plane_owns_graph = True
         else:
             g = sdk._graph_create(org["id"], name, kind="custom")
             graph = {"id": g["graph_id"], "name": name, "kind": "custom",
@@ -31185,10 +31214,17 @@ def _provision_graph(org: dict, name: str,
         # alias), which is why the hook is here and not at either endpoint: a
         # per-endpoint call site is how the NEXT create path ships without one.
         #
-        # It provisions BOTH arms: on Supabase, `insert_graph` persisted this id
-        # above; on the registry the `:Graph` node exists. The FLOOR is DERIVED by
-        # the hook from the record's own journal enumeration (never assumed `0`),
-        # and `SEED_SQL`'s guard REFUSES rather than seeds when the two disagree.
+        # ⛔ THE SUPABASE ARM ONLY, and the gate is the fact that decided the arm
+        # (`control_plane_owns_graph`, set where `insert_graph` persisted the row).
+        # The registry arm's `:Graph` node is NOT a `public.graphs` row, and
+        # `record_cursor`'s FK references that table — so hooking it would fail
+        # every registry create and pin `/health` red forever over a deployment
+        # with no gap (#14587 review P1-1; `sdk._graph_create` is left unhooked
+        # for the same reason, one frame down).
+        #
+        # The FLOOR is DERIVED by the hook from the record's own journal
+        # enumeration (never assumed `0`), and `SEED_SQL`'s guard REFUSES rather
+        # than seeds when the two disagree.
         #
         # ⚠️ THIS FUNCTION IS SYNC AND CALLED FROM `async` ENDPOINTS, so the hook's
         # connect blocks the loop exactly as the control-plane calls above it
@@ -31198,7 +31234,8 @@ def _provision_graph(org: dict, name: str,
         # endpoint the full live-path budget. Moving the whole mint off the loop is
         # the larger fix and is NOT taken here: it would change the locking story of
         # a 55-line flow this PR otherwise does not touch.
-        _provision_graph_record(org["id"], graph["id"])
+        if control_plane_owns_graph:
+            _provision_graph_record(org["id"], graph["id"])
         result = {
             "graph": {
                 "id": graph["id"], "name": graph["name"],
