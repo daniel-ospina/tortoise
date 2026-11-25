@@ -264,10 +264,10 @@ re-cut with the folds that caused it — `#14560` (`3bbe5567df`, +20 lines) and 
 (`939e37f664`, +16 more, both ABOVE the declaration) each grew this module and each left the
 citation behind, so `main` was RED on
 `tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
-(`cited 2343, that line is "#   * `sdk._update_entity`'s target-aware guard…"`) until this
+(reporting the cited line as the retirement block's reader bullet, not the declaration)
+until this
 re-measure — the pointer follows the SYMBOL, so a fold that moves the symbol owes this line) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
-
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
 heading down to `### The one interface that must not be broken` — the
 interface-map table AND the prose under it — are as-of the frontmatter's
