@@ -151,7 +151,25 @@ DOC_OUT = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md"
 #: A source that carries a census row: the defect this split exists to make
 #: impossible (someone pastes the appendix back into the tracked file, and the
 #: conflict engine returns). `--render` and `--check` both refuse it.
-CENSUS_ROW = re.compile(r"^\| `[^`]+:\d+` \|", re.MULTILINE)
+#:
+#: ⛔ IT MATCHES THE GENERATED ROW, NOT "ANY TABLE THAT STARTS WITH A `file:line`".
+#: The broad `^\| `file:line` \|` matched a TWO-cell hand-authored prose row as
+#: readily as a six-cell generated one, so a source whose first table column held
+#: a site address was refused by `--render` (exit 2, "Delete the rows") and read by
+#: `--check` as DRIFT (exit 1) — with correct pins. The remedy the first message
+#: prescribes is then to delete CORRECT PROSE, and `cypher-diff.yml` reads that 1 as
+#: "the doc's numbers are wrong" (#13098 review, P2). The appended table's own
+#: first five cells (`markdown_table`) are the shape nothing but the generator
+#: emits, and they still match a pasted appendix — measured against the tracked
+#: document on `main` (`git show origin/main:docs/architecture/CYPHER-INVENTORY.md`):
+#: 1327 of 1327 rows, zero prose rows.
+#:
+#: ⚠️ A CHANGE TO `markdown_table`'s COLUMNS MUST RE-CUT THIS PATTERN: the arm
+#: `test_a_hand_authored_prose_row_is_not_read_as_a_census_row` grades the pattern
+#: against `markdown_table`'s own output, so a generator change reds there instead
+#: of leaving the guard silently blind.
+CENSUS_ROW = re.compile(
+    r"^\| `[^`]+:\d+` \| `[^`]*` \| [a-z_]+ \| [a-z_]+ \|", re.MULTILINE)
 
 #: Files whose statements are the PRODUCT's. Everything else is measured, never
 #: folded in — the census unit is named above.
@@ -910,10 +928,23 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             rel = None
         if rel is not None:
-            tracked = subprocess.run(
-                ["git", "ls-files", "--error-unmatch", "--", rel],
-                cwd=ROOT, capture_output=True, text=True,
-            )
+            # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent
+            # `git` binary raises FileNotFoundError here, and nothing catches it: the
+            # interpreter then exits 1, which this tool reserves for the DRIFT verdict
+            # — so a lane reads "the census drifted" from a box that could not answer
+            # at all (#13098 review, P2). Same class, same status as every other
+            # refusal in this module.
+            try:
+                tracked = subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", rel],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+            except OSError as err:
+                print(
+                    f"render: could not probe {rel} for tracking: {err}",
+                    file=sys.stderr,
+                )
+                return 2
             if tracked.returncode == 0:
                 print(
                     f"refusing to render over a TRACKED path ({rel}): the document is\n"
@@ -934,8 +965,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.render is not None:
         out = ROOT / args.render
         text = render(DOC_SRC, result)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        # ⛔ AND NEITHER DOES A WRITE THAT CANNOT HAPPEN. `--render` has NO drift
+        # verdict, so an uncaught IsADirectoryError/PermissionError/OSError (read-only
+        # mount, ENOSPC) exits 1 — the status this tool reserves for "the pins drifted"
+        # — and §7 tells every lane to run this verb, so a lane that rendered into a
+        # path it cannot write re-cuts 25 correct pins. "Could not run" is 2, and the
+        # message names the path and the error (#13098 review, P2).
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text, encoding="utf-8")
+        except OSError as err:
+            print(f"render: could not write {out}: {err}", file=sys.stderr)
+            return 2
         print(f"render: wrote {len(text.splitlines())} lines to {out}")
         return 0
     if args.json:
