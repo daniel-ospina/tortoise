@@ -13648,6 +13648,15 @@ def _cmd_mcp_status(args) -> int:
 
     from tortoise import mcp_selfcheck
 
+    # `--live` is the explicit spelling of the default; it exists so the remedy
+    # sentence every abstention prints (`prove it: tortoise mcp-status --live`)
+    # is a command that works. It cannot be combined with its opposite —
+    # silently letting one win would make the flag a no-op again.
+    if getattr(args, "live", False) and getattr(args, "offline", False):
+        print("mcp-status: --live and --offline are opposites — pass one",
+              file=__import__("sys").stderr)
+        return 2
+
     verdict = mcp_selfcheck.check(
         getattr(args, "harness", "pi") or "pi",
         project_dir=_Path(getattr(args, "dir", ".") or "."),
@@ -18736,7 +18745,9 @@ def main(argv: list[str] | None = None) -> int:
              "MCP (credential-free bridge), verify it with a live call, install "
              "the capture + per-turn recall seam, and write the two MCP-first "
              "sentences into AGENTS.md/CLAUDE.md (shown as a diff, idempotent, "
-             "reversible with --uninstall)")
+             "reversible with --uninstall). ⚠️ `pi` targets the `mcp-client` "
+             "extension's convention (.mcp.json / ~/.pi/agent/.mcp.json); pi's "
+             "built-in loader reads .pi/mcp.json and ~/.pi/agent/mcp.json")
     onboard.add_argument(
         "--url", default=None,
         help="MCP endpoint the bridge forwards to (default: the hosted "
@@ -18764,7 +18775,10 @@ def main(argv: list[str] | None = None) -> int:
         help="With --harness: which config to register the MCP in — `project` "
              "(default: the repo's .mcp.json, reviewable in a diff) or `user` "
              "(the harness's global catalog, ~/.pi/agent/.mcp.json or "
-             "~/.claude.json)")
+             "~/.claude.json). `project` resolves inside the given directory "
+             "(or its git top-level) and never writes an ancestor: outside a git "
+             "work tree it stays in that directory. Harnesses that read no "
+             "repo-level config (codex) have no project scope")
     onboard.add_argument(
         "--uninstall", action="store_true", default=False,
         help="With --harness: remove ONLY the marked instruction block this "
@@ -18779,7 +18793,10 @@ def main(argv: list[str] | None = None) -> int:
     mcp_status.add_argument(
         "--harness", default="pi",
         choices=["claude", "claude-code", "pi", "codex", "cursor"],
-        help="Harness whose config to inspect (default: pi)")
+        help="Harness whose config to inspect (default: pi). The verdict names "
+             "the loader its paths belong to — for `pi` these are the "
+             "`mcp-client` extension's files, and an OK proves the ENDPOINT, not "
+             "that pi itself loads the file")
     mcp_status.add_argument(
         "--dir", default=".",
         help="Project directory holding the harness config (default: cwd)")
@@ -18789,10 +18806,10 @@ def main(argv: list[str] | None = None) -> int:
              "reads UNVERIFIED (exit 3) when the entry resolves — an unprobed "
              "config is never green")
     mcp_status.add_argument(
-        "--live", action="store_true", default=True,
-        help="Make ONE real call to the endpoint (default). Its failure is "
-             "reported as its own class — transport vs auth — never folded "
-             "into a credential verdict")
+        "--live", action="store_true", default=False,
+        help="Explicit form of the default: a live call IS made unless --offline "
+             "is passed. Accepted so the remedy line `tortoise mcp-status "
+             "--live` works verbatim; conflicts with --offline")
     mcp_status.add_argument(
         "--json", action="store_true", default=False,
         help="Machine-readable verdict (status, detail, fix, source, exit code)")

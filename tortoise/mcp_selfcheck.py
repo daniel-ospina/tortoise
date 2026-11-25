@@ -28,10 +28,16 @@ DESIGN CONSTRAINTS (stated, because each one is a way this could silently rot):
   ever tested for blankness.
 * **The class names the layer; the line names the fix.** A class without a fix is
   a dead end, and a dead end is what this issue is about.
-* **It reads the config the HARNESS reads.** The paths per harness are declared in
-  `HARNESS_CONFIG_PATHS` and are the ones this repo verified; a harness whose file
-  moves is a new class (``entry-absent``) that says which files were read, so the
-  message can never be a lie about a file nobody looked at.
+* **It reads the config the harness's MCP layer reads.** The paths per harness are
+  declared in `HARNESS_CONFIG_PATHS` and are the ones this repo verified; a harness
+  whose file moves is a new class (``entry-absent``) that says which files were
+  read, so the message can never be a lie about a file nobody looked at.
+  ⛔ WHICH LAYER DIFFERS BY HARNESS, and is stated rather than implied: for `pi` the
+  paths are the **`mcp-client` extension's** convention, NOT pi's built-in loader
+  (which reads `.pi/mcp.json` and `~/.pi/agent/mcp.json`). `HARNESS_LOADER_NOTES`
+  carries that per harness, and every resolved verdict appends it — because a
+  verdict that proves the ENDPOINT without saying which loader reads the file is a
+  green about a config the harness may never load.
 """
 from __future__ import annotations
 
@@ -108,7 +114,10 @@ _INTERP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: (first match wins per server name, which is how both pi and Claude Code
 #: resolve a project entry over a user entry). `~` is expanded at use.
 HARNESS_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
-    # pi: project `.mcp.json` overrides the user-level catalog.
+    # pi: the `mcp-client` EXTENSION's convention — project `.mcp.json` overrides
+    # the extension's user-level catalog. ⛔ NOT pi's built-in loader: that one
+    # reads `<cwd>/.pi/mcp.json` and `~/.pi/agent/mcp.json`
+    # (`dist/extensions/mcp/config.js:107-108`). See `HARNESS_LOADER_NOTES`.
     "pi": (".mcp.json", "~/.pi/agent/.mcp.json"),
     # Claude Code: project `.mcp.json`; user scope lives in `~/.claude.json`
     # (which also carries other state, so only `mcpServers` is read).
@@ -125,6 +134,23 @@ HARNESS_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
 #: never parsed — an absence claim about an unread file is exactly the kind of
 #: false negative this module exists to remove.
 _TOML_HARNESSES = frozenset({"codex"})
+
+#: WHICH LOADER the declared paths belong to, where that is not the harness itself.
+#: Appended to every RESOLVED verdict so a green names the layer it graded: a
+#: verdict that proves the ENDPOINT is not a proof that the harness LOADS the file,
+#: and for `pi` the two are different components (the `mcp-client` extension vs
+#: pi's built-in loader). Empty for harnesses whose own loader reads these paths.
+HARNESS_LOADER_NOTES: dict[str, str] = {
+    "pi": (
+        " — ⚠️ these paths are the `mcp-client` EXTENSION's convention; pi's "
+        "built-in loader reads `.pi/mcp.json` and `~/.pi/agent/mcp.json`. If pi's "
+        "native stack is what runs on this box, register the server there."),
+}
+
+
+def _loader_note(harness: str) -> str:
+    """The per-harness 'which loader reads this file' suffix ("" when unambiguous)."""
+    return HARNESS_LOADER_NOTES.get(harness, "")
 
 #: The credential stores, in the product's own documented order (#1708 D5).
 CREDENTIAL_ENV_NAMES = ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")
@@ -656,6 +682,26 @@ def _header_carries_credential(entry: dict) -> bool:
     return False
 
 
+def _declares_credential(entry: dict) -> bool:
+    """Does THIS ENTRY carry (or configure) a credential of its own?
+
+    ⛔ The scope is the entry, never the caller's shell. An `http` entry's request
+    carries only what the entry declares — the harness adds no bearer from an
+    environment variable (Claude Code's documented behaviour: header or OAuth,
+    never ambient env; and our own `mcp-client` extension builds the transport as
+    `requestInit: headers ? { headers } : undefined`). So a key that merely
+    resolves in the environment is NOT evidence about this request, and treating
+    it as one is the fail-open this predicate closes.
+
+    Two declared shapes count: a non-blank `Authorization` header, or a declared
+    `oauth` provider (the harness then obtains the token itself).
+    """
+    if _header_carries_credential(entry):
+        return True
+    oauth = entry.get("oauth")
+    return bool(oauth)
+
+
 def classify(harness: str, *, project_dir: Path | None = None
              ) -> Verdict:
     """Static classification — files and environment only, no network.
@@ -839,12 +885,13 @@ def classify(harness: str, *, project_dir: Path | None = None
         return Verdict(
             status=RESOLVES_UNPROBED,
             detail="stdio entry resolves and would start (NOT probed — run with "
-                   "`--live` to prove the endpoint answers)",
+                   "`--live` to prove the endpoint answers)"
+                   + _loader_note(harness),
             fix="prove it: `tortoise mcp-status --live`",
             source=source, transport=transport, configs_read=read)
 
     # http
-    if not _header_carries_credential(entry) and not credentials_present(project_dir):
+    if not _declares_credential(entry):
         # ⛔ A loopback daemon may not WANT a credential: the shipped compose default
         # is `auth_mode=none` with an empty key ("optional while the daemon stays
         # loopback-bound"), so asserting DOWN here reported a working self-hosted
@@ -857,21 +904,37 @@ def classify(harness: str, *, project_dir: Path | None = None
                 detail=("the entry names a LOOPBACK endpoint and carries no "
                         "credential — a local daemon may not require one "
                         "(auth_mode=none), so this cannot be called down; the "
-                        "static pass cannot prove it either"),
+                        "static pass cannot prove it either")
+                        + _loader_note(harness),
                 fix="prove it: `tortoise mcp-status --live`",
                 source=source, transport=transport, configs_read=read)
+        shell = credentials_present(project_dir)
+        # ⛔ The presence of a credential in the SHELL is not a property of this
+        # entry's request. Reporting `resolves-unprobed` here made the verifier
+        # grade the caller's environment instead of the config, and `check(live=1)`
+        # then had the probe supply that same shell key — so a config whose own
+        # request carries NOTHING printed `OK`, and `onboard` wrote "reads go
+        # through the MCP" on an unauthenticated install. Say which shape works.
         return Verdict(
             status=NO_CREDENTIAL,
-            detail=("the entry carries no credential and no credential resolves "
-                    "in the environment or either store — the request goes out "
-                    "unauthenticated"),
-            fix=("mint or supply a key (`tortoise signup`, or "
-                 "`tortoise init --api-key tt_…`), then re-verify"),
+            detail=("the entry declares NO credential of its own — an `http` "
+                    "entry's request carries only what it declares, and no "
+                    "bearer is added from the environment. "
+                    + (f"({', '.join(shell)} resolves in this shell, but this "
+                       "entry never sends it.) " if shell else
+                       "No credential resolves in the environment or either "
+                       "store either. ")
+                    + "the request goes out unauthenticated"),
+            fix=("declare it in the entry — `\"headers\": {\"Authorization\": "
+                 "\"Bearer ${TORTOISE_API_KEY}\"}` — or use the credential-free "
+                 "bridge, which resolves the key per request: "
+                 "`tortoise onboard --harness <harness>` (it writes the bridge)"),
             source=source, transport=transport, configs_read=read)
     return Verdict(
         status=RESOLVES_UNPROBED,
-        detail="http entry resolves and carries a credential (NOT probed — run "
-               "with `--live` to prove the endpoint accepts it)",
+        detail=("http entry resolves and carries a DECLARED credential (NOT "
+                "probed — run with `--live` to prove the endpoint accepts it)"
+                + _loader_note(harness)),
         fix="prove it: `tortoise mcp-status --live`",
         source=source, transport=transport, configs_read=read)
 
