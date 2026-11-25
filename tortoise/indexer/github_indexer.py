@@ -1375,8 +1375,10 @@ class GitHubIndexer:
         # terminal (`terminal-guard`), so every poll minted another `-closed`
         # into the journal and the graph said open FOR EVER (measured:
         # poll1/2/3 each `events_minted=1`, row never moves).
-        # `is_position_ended` reads `isClosed` by `bool()` and strips the slot,
-        # matching `apply_stage_fold` and every other position read.
+        # `is_position_ended` reads `isClosed` by `bool()` and compares the slot
+        # EXACTLY (`stage_slot == 'terminal'`, no `.strip()`), matching
+        # `PipelineStage.is_terminal` (`pipeline.py:303-304`) and every other
+        # position read.
         #
         # `cancelled` is terminal too, so a cancelled item reads as closed —
         # which is right for THIS question: both mean "not open", and a later

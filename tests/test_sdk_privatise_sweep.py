@@ -504,6 +504,30 @@ def _git(*args: str) -> str:
     return done.stdout
 
 
+def _remote_branches_containing(rev: str) -> list[str]:
+    """`origin`'s BRANCH refs that contain `rev` — ⛔ never `refs/remotes/pull/*`.
+
+    The block's narrow claim is about BRANCHES, and `git branch -r --contains` is the
+    wrong instrument for it: `git branch -r` lists EVERY ref under `refs/remotes/`,
+    including GitHub's MERGE refs. Measured red on run 45556103584 / job 139014092267:
+    the arm printed `pull/14108/merge` — a merge ref for the very PR the block is
+    ABOUT — so the premise read as false while the claim it grades was true.
+
+    Why that ref exists on a CI runner: `actions/checkout` writes
+    `refs/remotes/pull/<n>/merge`, and a SELF-HOSTED runner reuses its workspace, so
+    merge refs from EARLIER jobs survive into this one (`pull/14108/merge` came from
+    another PR's run). A merge ref is not a branch; grading it made this arm's verdict
+    a function of which PRs that runner had served.
+
+    Restricted to `refs/remotes/origin/` (this repo's branch namespace) and excluding
+    `origin/HEAD`, which is a symbolic alias for a branch already listed.
+    """
+    out = _git("for-each-ref", "--contains", rev, "--format=%(refname)",
+               "refs/remotes/origin/")
+    return [line.strip() for line in out.splitlines()
+            if line.strip() and not line.strip().endswith("/HEAD")]
+
+
 def _ref_sha(ref: str) -> str | None:
     """The sha `ref` resolves to in THIS clone, or None when it is not fetched here.
 
@@ -1147,6 +1171,36 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
             "not for one sha")
 
 
+def test_the_branch_containment_arm_reads_branches_only(monkeypatch):
+    """A GitHub MERGE ref is not a branch — the arm below must not read one as one.
+
+    `git branch -r --contains` lists every ref under `refs/remotes/`, so on a
+    self-hosted runner whose workspace carries a previous job's
+    `refs/remotes/pull/<n>/merge` it answered "a remote branch contains it" about a
+    MERGE ref — the red that reached THIS head (run 45556103584 / job 139014092267,
+    `pull/14108/merge`), on a claim that was true.
+
+    The REFSPEC is the assertion: the arm must ask git only for this repo's branch
+    namespace, and `origin/HEAD` (a symbolic alias for a branch listed beside it)
+    must not be counted as a second branch.
+    """
+    seen: dict[str, tuple[str, ...]] = {}
+
+    def _fake_git(*args: str) -> str:
+        seen["args"] = args
+        return ("refs/remotes/origin/HEAD\n"
+                "refs/remotes/origin/fix/13450-ep-position-axis\n")
+
+    monkeypatch.setattr(sys.modules[__name__], "_git", _fake_git)
+    found = _remote_branches_containing(RESIDUE_ABBREV)
+    assert "refs/remotes/origin/" in seen["args"], (
+        "the arm must restrict git to this repo's BRANCH namespace; a bare "
+        "`branch -r --contains` also lists `refs/remotes/pull/*` merge refs")
+    assert seen["args"][0] == "for-each-ref"
+    assert found == ["refs/remotes/origin/fix/13450-ep-position-axis"], (
+        f"expected origin branches only (no alias, no merge ref), got {found}")
+
+
 def test_the_history_clause_premises_hold_in_this_clone():
     """The REPO-STATE half of finding 3 — the premises the prose arm below is graded against.
 
@@ -1192,9 +1246,9 @@ def test_the_history_clause_premises_hold_in_this_clone():
     assert on_main.returncode == 1, (
         "premise: the commit is NOT on `origin/main` (rc 1 = not an ancestor; anything else "
         "means the measurement did not run)")
-    assert _git("branch", "-r", "--contains", RESIDUE_ABBREV).strip() == "", (
+    assert _remote_branches_containing(RESIDUE_ABBREV) == [], (
         "premise: no remote BRANCH contains it — which is the only part of the block's "
-        "narrow claim that is about branches",)
+        "narrow claim that is about branches")
 
 
 def test_the_history_clause_is_only_quoted_as_falsified():

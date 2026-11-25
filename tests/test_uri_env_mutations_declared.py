@@ -1585,6 +1585,45 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
+    # #13450: `test_13450_ep_position_axis_participation.py` — the same "module
+    # landed without its entry" shape as the `test_13034` row directly above, on
+    # a file copied from it: SIX raw URI mutations (module scope + autouse
+    # fixture) and no declaration, so this gate reds on the PR head (#14600).
+    # Nothing else can cover it — a `ci-surfaces` row cannot, because this guard
+    # scans the FILES, not the manifest.
+    #
+    # All six are DELIBERATE_URI, and none is this guard's vacuity vector (a
+    # docker-half test silently constructing embedded): the module's SUBJECT is
+    # a LIVE Docker/FalkorDB graph, so the docker DSN is pinned at BOTH entry
+    # points and restored afterwards. Nothing here claims a docker-half green on
+    # a URI it did not set.
+    #   :64      the module-level `FALKORDB_AVAILABLE` probe. The pin IS the
+    #            point: `DB_URI` is `_live_utils.docker_uri(...)`, the probe
+    #            constructs a real SDK and runs `RETURN 1`, and the `finally`
+    #            restores. Without the pin the probe would ride whatever ambient
+    #            URI the box has, so the `skipif` would be decided by the
+    #            environment rather than by a reachable Docker.
+    #   :86/:88  the probe's restore pair — assign the saved value back, or pop
+    #            it when the prior value was unset. A restore, not a second
+    #            mutation; the pair is why the module-scope write cannot leak
+    #            into a later test in the same process.
+    #   :97      the `autouse` `_isolated_db_uri` fixture — seeds the same docker
+    #            DSN per test so no case inherits an ambient one, and the
+    #            assertion target is the graph `DB_URI` names.
+    #   :100/:102 the fixture's restore pair (same save/restore contract, run at
+    #         teardown).
+    #
+    # The arms are the sibling's, anchored the same way and for the same reason
+    # (`_is_declared` matches each censused line on its own, so `^`…`$` keeps a
+    # commented-out or near-miss spelling from riding along), and the same LIMIT
+    # carries verbatim: the POP arm is bound by nothing —
+    # `pop(\"TORTOISE_DB_URI\", None)` is byte-identical whether it RESTORES a
+    # saved value or UNSETS the URI to force the embedded lane — so a FUTURE pop
+    # in this file is silenced by this row and must be triaged BY HAND.
+    "test_13450_ep_position_axis_participation.py": [
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
+        r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
     # ── test_13098_cypher_inventory.py — DELIBERATE_URI, one SET site ──────
     # The SET site in
     # `test_the_store_targets_are_named_never_inherited_from_the_environment`:

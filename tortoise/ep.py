@@ -29,10 +29,10 @@ from .live import (
     _live_only,
     _terminal_excluded,
     direction_flows,
+    ending_axes,
     epistemic_disjunction,
     epistemic_identity,
     epistemic_label_queries,
-    TERMINAL_EXCLUDED_STATUSES,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,6 +218,31 @@ except Exception:  # pragma: no cover - import-environment guard
 #: re-raised untouched.
 _QUERY_TIMEOUT_RE = re.compile(r"query\s+timed\s+out|query\s+timeout",
                                re.IGNORECASE)
+
+
+def _input_status_label(status, ending: tuple[str, ...]) -> str:
+    """The skipped-factor DISPLAY for one operator input (#992, #13450).
+
+    The status word alone was the whole display, so a node ended on another axis
+    printed exactly like a live one: ``live`` for an ``isClosed`` input and for
+    a ``terminal``-slot input. The ``outdated`` flag was the first axis to be
+    named here (``live(outdated)``) because a flag-dead Point keeps its status
+    word; #13450's position axis is the second, and both come from the SAME
+    ``live.ending_axes`` answer the participation test reads — never a re-test.
+
+    ``status`` is reported verbatim (it IS the word axis's own name, and a
+    terminal word is the whole answer); every OTHER axis is appended in
+    parentheses, in ``ending_axes`` order, so ``superseded`` reads plainly and
+    ``live(isClosed)``/``live(pipelineSlot)`` name what actually ended the input.
+
+    ⛔ The mark is the AXIS NAME ``ending_axes`` emits (``isClosed``), not the
+    prose word for the concept: a docstring naming ``live(closed)`` would point a
+    later lane at a string no code path produces, and "aligning" the code to it
+    would silently break the display this function's tests pin.
+    """
+    base = status or "live"
+    marks = [axis for axis in ending if axis != "status"]
+    return f"{base}({'+'.join(marks)})" if marks else base
 
 
 class EPSubgraphHopError(_ResponseError):
@@ -2196,11 +2221,13 @@ class TortoiseEP:
         # that tells a caller the operator contributed nothing).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
-        # Raw input statuses for diagnostic surfacing (#992): when an operator
-        # goes degenerate we name every input's status (incl. the legacy
+        # Raw input ENDINGS for diagnostic surfacing (#992): when an operator
+        # goes degenerate we name what ended every input (the legacy
         # outdated=true flag — #2422 review: a flag-dead input shows status
-        # 'live' but is EP-dead, so the display must distinguish flag-dead)
-        # so the silent-confidence-zero is traceable to the offending inputs.
+        # 'live' but is EP-dead, so the display must distinguish flag-dead —
+        # and, since #13450, the POSITION axis: a closed input also reads
+        # status 'live') so the silent-confidence-zero is traceable to the
+        # offending inputs.
         op_input_status: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         # idx_known flags operators whose EVERY input edge carries an idx —
         # create_operator always writes idx (source=0 first). Legacy/migrated
@@ -2225,13 +2252,20 @@ class TortoiseEP:
             # (see the note above the input dicts). #2351 projects its own two
             # columns on the SAME statement: the loop body below reads all
             # three, so the clause carries all three.
+            # #13450: the ending rule's POSITION axis is projected too
+            # (``isClosed`` / ``pipelineSlot``). The participation test below
+            # used to read only the two WORD columns this statement fetched, so
+            # a node ended by ``isClosed`` or a terminal stage still voted. Both
+            # columns come on the SAME statement — the strip needs no extra
+            # round trip, and the diagnostic can name the axis.
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
+            "       coalesce(c.isClosed, false), c.pipelineSlot, "
             "       coalesce(c.claimClass, 'asserted'), labels(c), c.is_operator "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for (op_id, claim_id, idx, status, outdated,
+        for (op_id, claim_id, idx, status, outdated, is_closed, stage_slot,
              input_cls, input_labels, is_operator) in rows:
             op_inputs[op_id].append(claim_id)
             # ``claimClass`` lives only on :Point (#7902 lets an operator input
@@ -2239,15 +2273,28 @@ class TortoiseEP:
             # class, so ``None`` — never the asserted default (#2351 review).
             op_input_class[op_id].append(
                 input_cls if "Point" in (input_labels or ()) else None)
-            # Participation is UNCONDITIONAL on status (#2422): a terminal
-            # input (retracted / superseded / outdated / archived /
-            # deprecated status — the SAME vocabulary as the Cypher
-            # predicate, derived from TERMINAL_EXCLUDED_STATUSES so the two
-            # cannot drift) or the legacy outdated=true flag (which
-            # invalidate_point writes without touching status) is DEAD for EP
-            # and NEVER participates — include_draft=True re-includes DRAFTS
-            # only (the #780 escape hatch), never terminal points. A None
-            # status = legacy live node.
+            # Participation is UNCONDITIONAL on the ending (#2422): an ended
+            # input is DEAD for EP and NEVER participates — include_draft=True
+            # re-includes DRAFTS only (the #780 escape hatch), never an ended
+            # node. A None status = legacy live node.
+            #
+            # #13450: "ended" is answered by the SHARED predicate over BOTH
+            # axes, not by the two columns this arm used to read. Since #13034
+            # the rule has two SOURCES (design §6): the lifecycle WORD
+            # (``status`` in the terminal vocabulary, or the legacy
+            # ``outdated=true`` flag ``invalidate_point`` writes without
+            # touching status) and the POSITION axis (the durable ``isClosed``
+            # marker, or a stage in the ``terminal`` pipeline slot). Either one
+            # alone is an ending. Reading only the word was the defect: a
+            # closed Point/Object and a terminal-slot node kept voting with
+            # whatever posterior they held (measured 1.63906 / 1.03267 and
+            # 1.77685 / 0.95610 against a live control of 1.63906 / 1.03267).
+            # ⛔ The vocabulary is the POINT family's, as it always was here
+            # (``is_terminal_status``'s default) — the family seam is a
+            # separate question (#3301) and this arm is not the place to open
+            # it. ``ending_axes`` is the ONE declaration of the rule: the
+            # boolean and the axis names the diagnostic prints are the same
+            # answer, so they cannot disagree.
             # #9269: an OPERATOR-SHAPED input never participates, under BOTH
             # modes (it is not a claim, so no escape hatch applies). The value
             # test is IDENTITY against None/False, not truthiness: it must match
@@ -2255,22 +2302,25 @@ class TortoiseEP:
             # exactly, and `0 == False` in Python would wrongly admit a numeric
             # spelling the engine excludes (`0 = false` is false in Cypher).
             is_operator_shaped = not (is_operator is None or is_operator is False)
-            is_terminal = status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+            ending = ending_axes(status, outdated, is_closed=is_closed,
+                                 stage_slot=stage_slot)
+            is_terminal = bool(ending)
             participates = (not is_terminal
                             and (status != "draft" or include_draft)
                             and not is_operator_shaped)
             op_input_live[op_id].append(participates)
-            # Display: status + flag marker so the #992 diagnostic names a
-            # flag-dead input accurately (status 'live' + outdated flag shows
-            # as "live(outdated)"), and an operator-shaped one by its SHAPE —
-            # it is not dead by status, so a `live` label would misdirect
+            # Display: the status word plus EVERY axis that ended it, so the
+            # #992 diagnostic names the ending rather than leaving a dead input
+            # looking live (a flag-dead input was already "live(outdated)";
+            # #13450 adds the position axis, which printed a closed node as
+            # plain "live"). An operator-shaped input is named by its SHAPE —
+            # it is not dead by currency, so a status label would misdirect
             # whoever reads the skipped-factor record.
             if is_operator_shaped:
                 op_input_status[op_id].append("operator-shaped")
             else:
                 op_input_status[op_id].append(
-                    f"{status or 'live'}(outdated)" if outdated else (status or 'live')
-                )
+                    _input_status_label(status, ending))
             if idx is None:
                 op_idx_known[op_id] = False
 
@@ -2305,20 +2355,27 @@ class TortoiseEP:
                     # keeping this factor would renumber a live target into
                     # the source slot and invert directional semantics
                     # (#780 review-fix; #2422 extends to terminal sources).
+                    # #13450: the stripped source is NAMED by its ending — the
+                    # axis is what a reader needs to know why the factor went
+                    # (a closed source, a terminal-slot source, a dead word).
                     logger.warning(
-                        "Operator %s: source stripped — factor skipped "
-                        "(non-bidirectional with stripped source, #780/#2422)",
+                        "Operator %s: source stripped (%s) — factor skipped "
+                        "(non-bidirectional with stripped source, "
+                        "#780/#2422/#13450)",
                         op_id,
+                        op_input_status[op_id][0]
+                        if op_input_status[op_id] else "unknown",
                     )
                     skip_reason = "source_stripped"
                 elif len(input_ids) < 2 <= len(full_inputs):
                     # Degradation below 2 participating inputs — the factor
                     # must change NO live posterior (#780); matches the SVBP-
-                    # path convention. Name every input's status so the
-                    # silent zero-confidence is traceable (#992).
+                    # path convention. Name every input's ENDING so the
+                    # silent zero-confidence is traceable (#992, and #13450 for
+                    # the position axis).
                     logger.warning(
                         "Operator %s: %d/%d inputs stripped — factor skipped "
-                        "(degenerate, #780/#2422). Inputs: [%s]",
+                        "(degenerate, #780/#2422/#13450). Inputs: [%s]",
                         op_id, stripped, len(full_inputs),
                         ", ".join(
                             f"{cid.split('-')[-1]}={s}"

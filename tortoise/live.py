@@ -127,6 +127,75 @@ TERMINAL_EXCLUDED_STATUSES = (
 TERMINAL_STAGE_SLOT = "terminal"
 
 
+def ending_axes(status, outdated: bool = False, *, is_closed=None,
+                stage_slot=None) -> tuple[str, ...]:
+    """WHICH sources record this thing as ENDED — the ONE declaration of the rule.
+
+    The currency rule has two axes and four markers (§6):
+
+    * the LIFECYCLE WORD — ``status`` in :data:`TERMINAL_EXCLUDED_STATUSES`, or
+      the legacy ``outdated`` flag (``invalidate_point`` sets the flag and
+      leaves the status untouched);
+    * the POSITION AXIS — the durable ``isClosed`` marker, or a stage in the
+      ``terminal`` pipeline slot (§4/§6).
+
+    Any ONE of them is an ending. Empty tuple = still current.
+
+    ⛔ WHY A TUPLE AND NOT A BOOL. The two callers of this rule need different
+    halves of ONE answer, and they used to get there by re-spelling it: a
+    PARTICIPATION decision needs the boolean, and a DIAGNOSTIC needs to say
+    which axis ended the record — and the pre-#13450 spelling of the diagnostic
+    printed a closed node as ``live`` because it only knew about the word. The
+    boolean is therefore DERIVED from the names here
+    (:func:`is_terminal_status` / :func:`is_position_ended`), so a predicate and
+    its diagnostic cannot disagree by construction. Every marker is reported
+    (not first-match-wins): a record ended on two axes must not hide one.
+
+    ``status``/``outdated`` are the word axis, read exactly as they always were
+    — ``(status or "")`` so an ABSENT status is LIVE (the legacy-node rule, and
+    since #9974 R1 the ordinary birth state of a status-less
+    Object/Subject), and ``outdated`` by ``bool()``. ``is_closed`` is read by
+    ``bool()`` too, matching how ``advance_stage`` reads the marker
+    (``bool(cur.get("isClosed"))``), so a truthy non-boolean legacy value is an
+    ending on both reads. A stage the caller did not resolve (``None``) is NOT
+    an ending, and neither is a slot in ``entry``/``active``/``suspended``:
+    those say how far along a thing is, never whether the commitment still
+    stands (§4). ⛔ The slot is compared to the ROLE, never a stage NAME — a pack
+    may call its terminal stage ``released``/``written-off``/``signed`` (§4.1).
+
+    ⛔ ``goalState`` is deliberately NOT a fifth marker: it is a legacy arm in
+    ``derived_invalidation``, not part of this rule (§6).
+
+    ⛔ THE SLOT IS COMPARED EXACTLY, NEVER STRIPPED (#13450 review, P3). An
+    earlier spelling of this rule read ``stage_slot.strip() ==
+    TERMINAL_STAGE_SLOT``, which made ``" terminal "`` an ending HERE while
+    every Cypher reader (:func:`_terminal_excluded` /
+    :func:`_terminal_expression`, ``coalesce(n.pipelineSlot, '') <>
+    'terminal'``) served it as CURRENT — the silent-drop direction, and the one
+    value that disagreed by construction. The exact comparison is also what
+    ``pipeline`` does where it compares a SLOT — ``PipelineStage.is_terminal``
+    and its declaration/transition validations, NOT the stage RESOLVER (which
+    strips its probe: it resolves by id/label) — so the padded value agrees.
+
+    The CYPHER twin is :func:`_terminal_excluded` (the KEEP direction); it is a
+    second REPRESENTATION of this one rule because it has to be, and
+    ``tests/test_13034_currency_rule_reads_position.py`` pins the two together
+    over every BOOLEAN combination of those inputs rather than leaving agreement
+    to inspection — ``" terminal "`` included, which used to fall outside the
+    enumeration while the two sides disagreed on it.
+    """
+    axes: list[str] = []
+    if (status or "") in TERMINAL_EXCLUDED_STATUSES:
+        axes.append("status")
+    if bool(outdated):
+        axes.append("outdated")
+    if is_closed is not None and bool(is_closed):
+        axes.append("isClosed")
+    if isinstance(stage_slot, str) and stage_slot == TERMINAL_STAGE_SLOT:
+        axes.append("pipelineSlot")
+    return tuple(axes)
+
+
 def is_position_ended(*, is_closed=None, stage_slot=None) -> bool:
     """True when the POSITION axis records this thing as ended.
 
@@ -150,10 +219,14 @@ def is_position_ended(*, is_closed=None, stage_slot=None) -> bool:
     served as current?" asks :func:`is_terminal_status` (or
     :func:`_terminal_excluded` in Cypher), which composes this with the
     lifecycle word — never this alone.
+
+    Derived from :func:`ending_axes` (its two position markers) rather than
+    re-testing the marker and the slot here: the rule is declared ONCE, so this
+    predicate, :func:`is_terminal_status` and the axes a diagnostic prints
+    cannot drift apart.
     """
-    if is_closed is not None and bool(is_closed):
-        return True
-    return isinstance(stage_slot, str) and stage_slot.strip() == TERMINAL_STAGE_SLOT
+    return bool(ending_axes(None, False, is_closed=is_closed,
+                            stage_slot=stage_slot))
 
 
 def _terminal_excluded(clause: str, excluded=None, *,
@@ -400,10 +473,13 @@ def is_terminal_status(status, outdated: bool = False, *,
     alone — correct for a ``:Point``/``:Subject``/``:Event`` row (no pipeline),
     and the residual for an ``:Object`` row whose query did not fetch the two
     props. Fetch them and pass them; do not re-spell the test.
+
+    The composition itself is :func:`ending_axes` — the ONE declaration — so
+    this boolean and the marker list a diagnostic prints (#13450) are the same
+    answer, not two spellings of it.
     """
-    return ((status or "") in TERMINAL_EXCLUDED_STATUSES
-            or bool(outdated)
-            or is_position_ended(is_closed=is_closed, stage_slot=stage_slot))
+    return bool(ending_axes(status, outdated, is_closed=is_closed,
+                            stage_slot=stage_slot))
 
 
 #: The display prefix a mitigation's stored content carries.

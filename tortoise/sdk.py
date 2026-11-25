@@ -10783,6 +10783,12 @@ def _endpoint_is_terminal(info: dict) -> bool:
     ``create_direct_edge`` widens or coerces that test, this helper and the two
     guards must move with it (the cross-check is
     ``tests/test_ingest_event_endpoint.py``'s terminal-status pins).
+
+    ⛔ It reads the LIFECYCLE WORD only, matching the primitive (#13450): the
+    position axis (``isClosed`` / a ``terminal`` pipeline slot) is deliberately
+    NOT part of this prediction, because the primitive does not refuse it.
+    Adding it here without the primitive would make Phase 1 refuse bundles step
+    3 accepts; adding it to BOTH is the open decision #13450 records.
     """
     status = info.get("status")
     return bool(
@@ -29180,6 +29186,17 @@ class TortoiseSDK:
             escape hatch today. The emitted OperatorAdded event carries the
             draft status so JSONL replay preserves it
             (projection/entities.py coalesce default is 'live').
+
+        ⛔ ENDPOINT CURRENCY IS NOT GUARDED HERE, on either axis (#13450): a
+        source or target that has ENDED — a terminal lifecycle word, the legacy
+        ``outdated`` flag, ``isClosed``, or a ``terminal`` pipeline slot — is
+        accepted, and the factor's participation is decided on the READ
+        (``TortoiseEP._affected_factors`` Batch 2, which strips it) and the strip
+        is REPORTED, named by axis, only when the factor is DROPPED. Stated here
+        because it was previously unstated, and pinned by
+        ``tests/test_13450_ep_position_axis_participation.py`` — see the note at
+        the existence probe below for why this door does not copy
+        ``create_direct_edge``'s refusal.
         """
         # #4937 (F1 ruling on #2552, 2026-09-23): MITIGATES is NOT an operator
         # kind — a mitigation damps the operator bridge it attacks
@@ -37046,6 +37063,14 @@ class TortoiseSDK:
           - terminal-endpoint guard: `status NOT IN {superseded, retracted}`
             (a direct edge incident to a terminal point would recreate the
             terminal-point propagation hazard).
+            ⛔ This guard reads the LIFECYCLE WORD only — knowingly (#13450): a
+            position-axis ending (``isClosed`` / a ``terminal`` pipeline slot)
+            is NOT refused here. The edge is stored and priced by nothing (EP's
+            direct-edge arm filters with the shared Cypher predicate), which is
+            the residual #13450 names; widening it means widening
+            ``_endpoint_is_terminal`` too, and that is a separate decision about
+            which ingest bundles abort. Pinned by
+            ``tests/test_13450_ep_position_axis_participation.py``.
         op_type ∈ {IMPL, NAND}.
 
         Promotion (CYCLE-24 promotion-on-created-only pin): `promote_source`

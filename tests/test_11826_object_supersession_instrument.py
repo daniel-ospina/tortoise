@@ -4,10 +4,10 @@ The defect this file is about (#11826, measured 2026-11-11): an Object
 supersession moves **no edges**. ``_fold_object_superseded`` writes
 ``status``/``supersededBy``/``supersededAt`` and nothing else, so an operator
 edge stays anchored to a node the supersession just made terminal for EP. EP
-then strips that input (``1/2 inputs stripped — factor skipped (degenerate,
-#780/#2422)``), the factor stops funding the successor, and NOTHING reports it:
-``audit.audit_graph``'s supersession checks were ``MATCH (n:Point)`` on both
-sides, so the shape had no instrument at all.
+strips that input — the run's ``degenerate`` skip record names the axis and the
+inputs since #13450 — the factor stops funding the successor, and NO AUDIT
+CHECK reported it: ``audit.audit_graph``'s supersession checks were
+``MATCH (n:Point)`` on both sides, so the shape had no instrument at all.
 
 What is pinned here is the INSTRUMENT (and the two honesty fixes in the same
 issue's "also measured" list), never the transfer:
