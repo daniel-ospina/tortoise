@@ -382,7 +382,7 @@ def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_pa
             f"(directly, or through `report()`); that second call must answer 2 too")
 
 
-def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift():
+def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatch):
     """A closed pipe or a full disk is 2 (could not run), never 1 (DRIFT) and never 120.
 
     ⛔ `--markdown` IS the appendix table — the verb a lane pipes (`| head`) or
@@ -422,6 +422,15 @@ def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift():
         "a full disk on `--markdown`'s 1,327-row payload must answer 2 — 1 is DRIFT")
     assert census.emit("x", Failing(BrokenPipeError(32, "Broken pipe"))) == 2, (
         "`--markdown | head` must answer 2 — 1 is DRIFT")
+    # ⛔ AND THE `None` STREAM: with fd 1 closed at start CPython makes `sys.stdout`
+    # `None`, and `None.write` raises AttributeError — which exits 1, the DRIFT code.
+    # The bare `print()` this writer replaced was a NO-OP on a None stream, so the
+    # guard would otherwise have been the one path that INTRODUCED the misclassification
+    # it exists to remove (measured: `--markdown >&-` exited 0 before it, 1 after it).
+    monkeypatch.setattr(sys, "stdout", None)
+    assert census.emit("x") == 2, (
+        "a closed fd 1 (sys.stdout is None) must answer 2 — 1 is DRIFT")
+    monkeypatch.undo()
     ok = Recording()
     assert census.emit("row", ok) == 0 and ok.text == "row\n", (
         "the writer still writes when it can")
@@ -2328,6 +2337,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_the_renderer_refuses_the_all_surface_combination",
         "test_the_renderer_reports_a_probe_failure_as_could_not_run",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
+        # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
+        # and the render-WRITE arm while its own comment claimed "a run that cannot
+        # read/probe/write answers 2", so deleting any of these three left BOTH
+        # structural pins GREEN — measured by removing each `def` block and re-running
+        # the pin's own AST logic. The stdout arm is the only thing in the tree that
+        # asserts `emit`'s 2-not-1 contract, so it is named here for the same reason.
+        "test_the_renderer_reports_an_unreadable_source_as_could_not_run",
+        "test_check_reports_an_unreadable_document_as_could_not_run",
+        "test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift",
         "test_a_hand_authored_prose_row_is_not_read_as_a_census_row",
     }
     missing = sorted(split_arms - defined)
