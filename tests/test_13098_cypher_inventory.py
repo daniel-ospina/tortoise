@@ -515,7 +515,7 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     # past an `except OSError` in this very guard and exited 1 (measured on a latin-1
     # byte). Same verb, same reserve of the DRIFT code.
     latin1 = tmp_path / "latin1.md"
-    latin1.write_bytes("<!-- cypher-inventory:sites = 1327 -->\n".encode("utf-8") + b"\xff\xfe\n")
+    latin1.write_bytes(b"<!-- cypher-inventory:sites = 1327 -->\n" + b"\xff\xfe\n")
     assert census.check(latin1, {"sites": []}) == 2, (
         "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
 

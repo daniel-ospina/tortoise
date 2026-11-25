@@ -125,6 +125,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import contextlib
 import json
 import os
 import re
@@ -949,10 +950,8 @@ def emit(text: str, stream=None) -> int:
 
 def _detach_stdout(out) -> None:
     """Re-point a failed stdout at devnull so Python's shutdown flush cannot re-raise."""
-    try:
+    with contextlib.suppress(OSError, ValueError, AttributeError):
         os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
-    except (OSError, ValueError, AttributeError):
-        pass
 
 
 def main(argv: list[str] | None = None) -> int:
