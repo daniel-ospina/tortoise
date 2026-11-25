@@ -1770,8 +1770,11 @@ _INVERSION_FORMS = (
     #     admitted every complement, and redded "… once the tools have stopped
     #     appearing" — the simple-tense twin this form must keep GREEN
     #     (measured).
+    #     The leading `only` needs no arm of its own — `re.search` finds `once …`
+    #     after it — so none is written (an optional prefix no row can depend on
+    #     is dead weight, and it was).
     _inversion_form(
-        r"\b(?:only\s+)?once\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
+        r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
         r"(?:are|is|appear|show|exist|load|listed|visible)\b"
     ),
     _PRE_CUE_ONLY,
@@ -1800,8 +1803,11 @@ _CONFIG_PREP_RE = re.compile(
 # (a) never saw the tools) and redded forward copy ("…, e.g. quit and reopen the
 # app, then confirm the tools are there"). Both measured. A `;` or an em dash
 # breaks when followed by whitespace; a `.` breaks only when what follows looks
-# like the start of a sentence (or the text ends).
-_STATEMENT_BREAK_RE = re.compile(r"(?:[;—]\s+|\.\s+(?=[A-Z\"'`(\[]|$))")
+# like the start of a sentence.
+# The lookahead is what keeps `e.g. quit` inside one statement; the cost is that a
+# sentence beginning lower case ("… . otherwise, once the tools …") is graded as
+# though it continued, which is pinned as RED below rather than left implicit.
+_STATEMENT_BREAK_RE = re.compile(r"(?:[;—]\s+|\.\s+(?=[A-Z\"'`(\[]))")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
@@ -1915,7 +1921,14 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = flat.index(_RESTART_CUE)
     before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
-    pre_clauses = [c.strip() for c in re.split(r"[,.;]", before.lstrip(" \t,.;:—–-"))
+    # ⛔ STATEMENT BREAKS FIRST, then clauses — the same reason the post-cue side
+    # does it. A bare `[,.;]` cut inside `v1.2`/`e.g.` and ignored the em dash, so
+    # a pre-cue form (f) inversion went GREEN ("Confirm the tools appear after the
+    # v1.2 upgrade. Restart your client …", "Delete the old entry — but first
+    # confirm the tools are actually there") while the comma twin was RED.
+    pre_statement = _STATEMENT_BREAK_RE.split(
+        before.lstrip(" \t,.;:—–-"))[-1]
+    pre_clauses = [c.strip() for c in re.split(r"[,;]", pre_statement)
                    if c.strip()][-1:]
     # The cue's OWN sentence, on the same reasoning: a `.` OR a `;` ends the
     # window (both begin a new statement — grading past them read a subordinate
@@ -1935,6 +1948,18 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # while the dash was inside the window), exactly as the `;` twin is.
     post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,"), maxsplit=1)[0]
     post_clauses = [c.strip() for c in post_sentence.split(",")]
+    # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE. Splitting at the comma
+    # made the second half its own clause, which the forward-sequencer skip then
+    # dropped whole — so "after confirming the config is right, AND the tools are
+    # actually there" passed, while the no-comma twin is RED (measured). Merging
+    # first lets the config-conjunction rule see both halves.
+    merged: list[str] = []
+    for clause in post_clauses:
+        if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
+            merged[-1] = f"{merged[-1]}, {clause}"
+        else:
+            merged.append(clause)
+    post_clauses = merged
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
             continue
@@ -2222,6 +2247,42 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after checking the `.mcp.json` lists the tools.",
      False),
     ("Restart your client after checking the config lists the tools.", False),
+    # ── pre-cue shapes that were GREEN before the statement-break fix ────────
+    ("Confirm the tools appear after the v1.2 upgrade. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Confirm the tools are listed in v1.2. Restart your client, then confirm "
+     "the tools are actually there.", True),
+    ("Delete the old entry — but first confirm the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
+    # ── an `and`-led clause continues the previous one ───────────────────────
+    ("Restart your client after confirming the config is right, and the tools "
+     "are actually there.", True),
+    ("Restart your client after confirming the config is right, and that the "
+     "tools are actually there.", True),
+    # ── one row per arm the comments name, each GREEN today and RED without it ─
+    ("Restart your client, and once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, next once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, afterwards once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client after checking the tools are actually there.", True),
+    ("Restart your client after ensuring the tools are actually there.", True),
+    ("Restart your client if you check the tools first.", True),
+    ("Restart your client after checking the installer lists the tools.", False),
+    # form (c)'s `beforehand` before the predicate (the other row's sits after it,
+    # so it is form (d) that catches that one):
+    ("Restart your client, though beforehand you confirmed the tools are "
+     "actually there.", True),
+    # form (d)'s two trailing-marker arms (post-cue, so form (f) is skipped):
+    ("Restart your client, confirm the tools are actually there before "
+     "restarting.", True),
+    ("Restart your client, confirm the tools are actually there before you "
+     "restart.", True),
+    # a sentence that begins lower case is graded as though it continued — the
+    # cost of the lookahead that keeps `e.g. quit` inside one statement:
+    ("Restart your client. otherwise, after confirming the tools are actually "
+     "there, run `tortoise mcp-status`.", True),
     # the PRE-cue config exclusion: a file-side check before the cue is forward,
     # and nothing else in this table depends on that arm (measured):
     ("After verifying the config lists the tools, Restart your client and "
