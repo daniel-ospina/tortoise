@@ -759,6 +759,37 @@ def test_a_handshake_with_zero_tools_is_a_failure_not_a_pass(
     assert "DOWN [server-error]" in verdict.line()
 
 
+def test_an_entry_supplied_credential_is_graded_as_the_entry_names_it(
+        auth_endpoint, monkeypatch):
+    """The probe sends the ENTRY's bearer — and a refusal of it is `auth-rejected`.
+
+    Two defects in one place, both measured before this test existed: the probe
+    resolved the credential from the SHELL (so an entry naming a different key was
+    graded with an unrelated one), and `_FixedBearer` never recorded what it sent,
+    so the classifier re-resolved the shell and reported a REJECTED entry key as
+    `no-credential` — "supply one" — while the key was already in the config. The
+    class for one entry must not depend on whether some other variable happens to
+    be exported.
+    """
+    for name in mcp_selfcheck.CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(mcp_selfcheck, "CREDENTIAL_FILES", ())
+    _write_config({
+        "type": "http",
+        "url": auth_endpoint,
+        "headers": {"Authorization": "Bearer tt_revoked_14607"},
+    })
+    endpoint = mcp_selfcheck.declared_endpoint("pi")
+    verdict = mcp_selfcheck.probe(url=endpoint, token="tt_revoked_14607")
+    assert verdict.status == mcp_selfcheck.AUTH_REJECTED, (
+        "a credential WAS sent (the entry's own) and the server refused it — this "
+        "is an auth verdict, never `no-credential`: " + verdict.line())
+    assert "supply one" not in verdict.line()
+
+    accepted = mcp_selfcheck.probe(url=endpoint, token=RIGHT_KEY_14607)
+    assert accepted.ok, accepted.line()
+
+
 def test_a_server_advertising_someone_elses_tools_is_not_a_pass(
         foreign_tool_endpoint, monkeypatch):
     """THE SAME FAIL-OPEN, ONE CASE OVER: the count is not the surface.
@@ -971,14 +1002,61 @@ def test_a_real_block_is_removed_while_the_fenced_example_survives():
         "the real block must still be removed")
 
 
-def test_a_marker_inside_an_unclosed_fence_is_not_ours():
-    """An unterminated fence runs to EOF: refuse to guess inside a half-written example."""
+def test_an_unclosed_fence_is_REFUSED_not_read_as_fenced_to_eof():
+    """⛔ "FENCED TO EOF" HID EVERY REAL MARKER BELOW IT — and appended forever.
+
+    My first cut of the fence rule read an unterminated fence as covering the rest
+    of the file, so `_marker_pair` saw (0, 0) = "nothing to do" and
+    `write_instructions` APPENDED one more copy of the block per run — inside the
+    open fence, where `--uninstall` could then never remove it: measured, three runs
+    produced three BEGINS and the removal still wrote the file while deleting
+    nothing. The sibling installer learned the same lesson (`fenceopen`: *"An
+    UNCLOSED fence would hide every real marker below it, and 'no markers' means
+    APPEND — one more copy per run"*). Refusing by name costs a clear error instead
+    of an unreversible file.
+    """
     text = ("# House rules\n\n```md\n" + harness_onboard.BEGIN_MARK +
             "\nhalf-written example\n")
-    # No END outside the fence ⇒ the pair is (0, 0) ⇒ well-formed for "nothing to do",
-    # and nothing is removed.
+    ok, why = harness_onboard._markers_well_formed(text)
+    assert ok is False, "an unclosed fence must be refused, never read as (0, 0)"
+    assert "line 3" in why, why
+
+
+def test_a_four_space_indented_example_is_not_ours_either():
+    """A fence inside a LIST ITEM is indented — CommonMark agrees, so must we.
+
+    `indent <= 3` excluded it, so a 4-space-indented documentation example read as
+    the real block: measured, `--uninstall` deleted the example's body and exited 0
+    with no refusal. `MarkdownIt("commonmark")` parses the same input as a fence
+    whose content is the example, and the sibling installer refuses this shape for
+    exactly that reason.
+    """
+    text = ("1. Document the block:\n\n    ```md\n    " + harness_onboard.BEGIN_MARK +
+            "\n    example body\n    " + harness_onboard.END_MARK +
+            "\n    ```\n\nMy own notes: keep.\n")
     assert harness_onboard._markers_well_formed(text) == (True, "")
-    assert "half-written example" in harness_onboard._strip_block(text)
+    assert "example body" in harness_onboard._strip_block(text), (
+        "a 4-space-indented example was deleted")
+
+
+def test_a_prose_mention_of_a_marker_is_not_the_block():
+    """The marker must be ALONE on its line — a substring match ate the prose.
+
+    Measured before the fix: `"Our installer writes <BEGIN>" … "and <END> at the
+    end."` lost BOTH lines, and `"<BEGIN><END>"` on one line swallowed everything
+    after it. The sibling installer matches the anchored form; so does this now.
+    """
+    prose = ("# House\n\nOur installer writes " + harness_onboard.BEGIN_MARK +
+             "\nat the top, and " + harness_onboard.END_MARK + " at the end.\n\nkeep.\n")
+    assert harness_onboard._markers_well_formed(prose) == (True, "")
+    stripped = harness_onboard._strip_block(prose)
+    assert harness_onboard.BEGIN_MARK in stripped, "a prose mention was removed"
+    assert "keep." in stripped
+
+    shared = ("# House\n\n" + harness_onboard.BEGIN_MARK +
+              harness_onboard.END_MARK + "\n\nkeep.\n")
+    assert "keep." in harness_onboard._strip_block(shared), (
+        "a line carrying both markers swallowed everything after it")
 
 
 # ── 11 · `credentials_present` reads `./.tortoise` ───────────────────────

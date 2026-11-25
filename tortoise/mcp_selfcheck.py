@@ -1110,7 +1110,7 @@ def probe(*, project_dir: Path | None = None, url: str | None = None,
     """
     try:
         from . import mcp_client
-        from .mcp_client import _BearerProvider, _client
+        from .mcp_client import Connection, _BearerProvider, _client
     except Exception as exc:
         return Verdict(
             status=PROBE_UNKNOWN,
@@ -1128,6 +1128,20 @@ def probe(*, project_dir: Path | None = None, url: str | None = None,
 
         def auth_flow(self, request):
             request.headers["Authorization"] = f"Bearer {token}"
+            # ⛔ RECORD WHAT WAS SENT, or the classifier re-resolves the SHELL's
+            # credential. `_raise_if_credential_was_missing` classifies from
+            # `sent`, and with `sent is None` it re-resolved the environment: an
+            # entry-supplied key the server REJECTED was reported
+            # `no-credential` — "no credential resolved on the client … supply
+            # one" — while the key was sitting in the config. Measured: the same
+            # entry gave `no-credential` with no shell key and `auth-rejected` with
+            # one, so the class for one config depended on an unrelated variable:
+            # the wrong-layer diagnosis this module exists to remove.
+            self.sent = Connection(
+                url=self.url, key=token,
+                source="the entry's Authorization header",
+                sources=("the entry's Authorization header",),
+                declared=True)
             yield request
 
     async def _call() -> list:
