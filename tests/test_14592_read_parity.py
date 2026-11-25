@@ -411,7 +411,8 @@ def test_layer_lists_refuse_an_invented_NAMESPACE_but_read_a_carried_one(tmp_pat
 
     The first validator asked `kind_layers.declared_layers(kind)`, which
     deliberately strips ANY namespace (`domain_loader.kind_is_known` splits on
-    `:`). Measured: `declared_layers('zzz:goal') == ['object', 'point']`, so
+    `:`). Measured: `declared_layers('zzz:goal') == frozenset({'object', 'point'})`,
+    so
     `?kind=zzz:goal` answered the empty-and-complete page the validator exists to
     remove, while `?kind=zzz:team` was refused on the Subject route — the two
     layers grading one input differently. Admission now takes the layer's own
@@ -591,6 +592,58 @@ def test_source_payload_is_filtered_on_the_route(tmp_path):
 
 
 # ── GET /v1/entities/{id}/relations ────────────────────────────────────────
+
+def test_relations_never_republishes_a_source_neighbours_denied_payload(tmp_path):
+    """#3998 / D30 + #5196: a `:Source`'s raw text is DENIED on every read bag,
+    and the edge preview must not be a second way round the filter.
+
+    The preview's name is built INSIDE Cypher (`coalesce(m.name, m.content,
+    m.url)`), so it never meets `projection.entities.filter_source_props` —
+    which is why the query has to select the Source arm itself.
+
+    ⛔ MUTANT (the one this test exists for): restore the label-agnostic
+    `coalesce(m.name, m.content, m.url)` in EITHER UNION branch of
+    `entity_reads.entity_relations` and `other.name` becomes the planted raw
+    text below, on a route that never asked for a payload — while
+    `/v1/sources/{id}` keeps denying it, so the two routes would disagree.
+    """
+    url = "https://example.test/relations-source-14592"
+    raw = "RAW DOCUMENT TEXT THAT MUST NOT LEAK"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        carrier = client.post(
+            "/v1/objects", json={"name": "CARRIER", "objectKind": "goal"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._create_point("statement", "extracted", extractedFrom=url)
+            # A WRITE with no door, deliberately: the payload-bearing `:Source`
+            # (`content`, no `name`) is the legacy shape #5196 measured in the
+            # wild, and the write door refuses to produce it. Planted below the
+            # door so the READ is what is under test.
+            sdk._get_proj().g._query(
+                "MATCH (s:Source {url:$u}) SET s.content = $t REMOVE s.name",
+                params={"u": url, "t": raw},
+                read_only=False)
+            sdk._get_proj().g._query(
+                "MATCH (a {id:$a}), (s:Source {url:$u}) MERGE (a)-[:mentions]->(s)",
+                params={"a": carrier["id"], "u": url},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        # The by-id read denies it …
+        denied = client.get(f"/v1/sources/{quote(url, safe='')}").json()
+        assert "content" not in denied, denied
+        assert raw not in repr(denied), denied
+
+        # … and so must the relation preview, which is a SECOND route to the
+        # same node. A `:Source`'s name is its url, never its raw text.
+        body = client.get(f"/v1/entities/{carrier['id']}/relations").json()
+        others = [r["other"] for r in body["relations"]]
+        sources = [o for o in others if o["label"] == "Source"]
+        assert sources, body
+        assert sources[0]["name"] == url, sources
+        assert raw not in repr(body), body
+
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:

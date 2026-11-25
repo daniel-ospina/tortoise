@@ -293,12 +293,19 @@ def _endpoint_preview(row: Any) -> dict:
     ⛔ Deliberately NOT ``properties(m)``. Two reasons, and the second is not
     stylistic: (1) a relation list's payload is per-EDGE, so returning whole
     nodes multiplies a dense node's fan-out by its neighbours' size; (2) a
-    ``:Source`` neighbour would hand back its stored payload — the exact
-    disclosure ``#3998``'s filter exists to stop, on a route that never asked for
-    it. The name falls back through each layer's own primary text property
-    (``name`` for Object/Subject/Event, ``content`` for Point, ``url`` for
-    Source), which is the same coalesce ``search_engine.get_relationships`` uses
-    for ``related_content``.
+    ``:Source`` neighbour must not hand back its stored payload — the exact
+    disclosure ``#3998``'s filter exists to stop, on a route that never asked
+    for it.
+
+    ⛔ THE NAME COALESCE IS LABEL-AWARE, NOT PAYLOAD-FREE BY CONSTRUCTION — which
+    is the distinction that makes point (2) true rather than merely intended. A
+    ``:Source``'s text is its ``url`` (or its declared ``name``), NEVER its
+    ``content``, because ``projection.entities._SOURCE_NODE_PROP_NAMES`` drops
+    ``content`` from every `:Source` read bag (#3998 / D30, #5196). Coalescing
+    ``m.content`` into a neighbour's name inside Cypher would put that raw text
+    on a route that never asked for it, so the query selects the Source arm
+    first (see ``entity_relations``). Everything else keeps ``content`` as its
+    primary text (a ``:Point``'s body), then ``name``, then the identity keys.
     """
     labels = row[1] or []
     return {
@@ -395,7 +402,12 @@ def entity_relations(
     inner = (
         f"MATCH (n:{root_label} {{{root_key}:$eid}})-[r]->(m) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        "       coalesce(m.name, m.content, m.url) AS name, "
+        # ⛔ `:Source` FIRST, and its arm omits `content` — a `:Source`'s stored
+        # ``content`` is a DENIED property (#3998/D30), so coalescing it into a
+        # neighbour's name would republish what `/v1/sources/{id}` withholds.
+        "       CASE WHEN 'Source' IN labels(m) "
+        "            THEN coalesce(m.name, m.url) "
+        "            ELSE coalesce(m.name, m.content, m.url) END AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'out' AS direction, id(r) AS rid "
         "UNION ALL "
@@ -415,7 +427,9 @@ def entity_relations(
         # and no neighbour is filtered out for lacking a name.
         "WHERE id(m) <> id(n) "
         "RETURN coalesce(m.id, m.eventId, m.url) AS oid, labels(m) AS labels, "
-        "       coalesce(m.name, m.content, m.url) AS name, "
+        "       CASE WHEN 'Source' IN labels(m) "
+        "            THEN coalesce(m.name, m.url) "
+        "            ELSE coalesce(m.name, m.content, m.url) END AS name, "
         "       type(r) AS mechanism, coalesce(r.label, '') AS declared, "
         "       r.idx AS idx, 'in' AS direction, id(r) AS rid"
     )
@@ -456,10 +470,13 @@ def entity_relations(
         "entity": {
             "id": entity_id,
             "label": root_label,
-            # The root's own name, on the same coalesce as a neighbour's, so the
-            # two sides of a relation render the same way.
-            "name": (root.get("name") or root.get("content")
-                     or root.get("url") or root.get("eventId")),
+            # The root's own name, on the SAME label-aware rule as a neighbour's
+            # (see `_endpoint_preview`): a `:Source` root answers its name or its
+            # url, never its denied `content`.
+            "name": ((root.get("name") or root.get("url") or root.get("eventId"))
+                     if root_label == "Source" else
+                     (root.get("name") or root.get("content")
+                      or root.get("url") or root.get("eventId"))),
         },
         "relations": relations,
         "count": len(relations),
