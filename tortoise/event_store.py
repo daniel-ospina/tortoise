@@ -1027,9 +1027,19 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
 #: and therefore NOT this change's decision to make silently.
 LATEST_FOR_NODE_SCAN = 1000
 
+#: The keys that make a ``ConfidenceChanged`` a BELIEF TRANSITION rather than a
+#: bare stamp. One event type carries two kinds of fact (see ``latest_for_node``'s
+#: ``require_any``), and a reader that asks "when did this belief last move" must
+#: count only a row that carries at least one of these. Stated once, here, so the
+#: reader and the ``/v1/entities/{id}/belief`` route cannot drift apart; a CLEAR
+#: carries all three and is therefore still a transition (its values are ``None``,
+#: which is the fact, not the absence of one).
+CONFIDENCE_TRANSITION_KEYS = ("confidence", "posterior_alpha", "posterior_beta")
+
 
 def latest_for_node(proj, type_: str, node_id: str, *,
-                    scan: int = LATEST_FOR_NODE_SCAN) -> dict | None:
+                    scan: int = LATEST_FOR_NODE_SCAN,
+                    require_any: tuple[str, ...] = ()) -> dict | None:
     """The NEWEST event of ``type_`` whose payload names ``node_id``.
 
     ``read_after`` is a forward cursor: it answers "what happened after X",
@@ -1064,6 +1074,19 @@ def latest_for_node(proj, type_: str, node_id: str, *,
     cannot be the node's transition (its id is unreadable), and losing the answer
     to it would make one bad write hide every later one.
 
+    ⛔ ``require_any`` exists because ONE event type can carry SEVERAL kinds of
+    fact, and a caller asking "when did this change" must not be handed a row that
+    changed nothing it asked about. ``ConfidenceChanged`` is exactly that type: the
+    dream pass stamps ``lastDreamedAt`` on a converging claim
+    (``dream.py``: ``emit("ConfidenceChanged", id=cid, lastDreamedAt=now)``) and
+    the posterior CLEAR writes the three keys as ``None`` (``ep.py``) — so a
+    payload-shape-blind read reports the STAMP as the newest belief write, i.e. a
+    time at which the belief demonstrably did not move. Passing the transition's
+    own keys makes the read answer the question it documents: a row counts only if
+    it CARRIES at least one of them, so a clear (present, ``None``) still counts and
+    a stamp (absent) does not. Default `()` keeps the generic read for callers with
+    one kind of payload.
+
     Ordering is ``seq DESC``, the store's own total order — the same key
     ``read_after`` pages by — so "newest" cannot depend on wall-clock ``ts``
     ties within one write burst.
@@ -1092,6 +1115,11 @@ def latest_for_node(proj, type_: str, node_id: str, *,
         if not isinstance(payload, dict):
             continue
         if payload.get("id") != node_id:
+            continue
+        if require_any and not any(key in payload for key in require_any):
+            # A payload that carries NONE of the transition's keys did not move the
+            # thing the caller asked about (`lastDreamedAt`-only stamps are the
+            # measured case) — skipping it is what keeps the answer honest.
             continue
         out = dict(props)
         out["payload"] = payload

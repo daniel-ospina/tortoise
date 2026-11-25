@@ -778,6 +778,97 @@ def _plant_confidence_event(sdk, point_id: str, *, confidence: float,
     return seq
 
 
+def _plant_raw_confidence_event(sdk, point_id: str, payload_extra: dict) -> int:
+    """Write a `ConfidenceChanged` row with a CALLER-CHOSEN payload.
+
+    The other fixture writes the full transition shape. This one exists for the
+    payload SHAPES the EP emitters also produce but the full-transition fixture
+    cannot express: the dream pass's bare `lastDreamedAt` stamp (`dream.py`:
+    `emit("ConfidenceChanged", id=cid, lastDreamedAt=now)`) and the posterior
+    CLEAR (`ep.py`: the three keys present with `None`). Without this fixture no
+    assertion can vary under a payload-shape mutant — that is why the arm below
+    exists rather than trusting the docstring.
+    """
+    from tortoise import event_store
+
+    proj = sdk._get_proj()
+    seq = event_store.next_seq(proj)
+    payload = {"id": point_id, **payload_extra}
+    ok = event_store.append_event(
+        proj, seq, "ConfidenceChanged", payload, f"ev-14592-raw-{point_id}-{seq}")
+    assert ok is True, "the fixture could not write the event it asserts on"
+    return seq
+
+
+def test_belief_skips_a_stamp_that_committed_no_belief(tmp_path):
+    """A NEWER `ConfidenceChanged` that moved no belief must not be 'the last write'.
+
+    ⛔ The measured defect this pins: `ConfidenceChanged` is ALSO the dream pass's
+    bare `lastDreamedAt` stamp, whose payload carries no posterior. A payload-shape
+    blind read reports that stamp as `lastBeliefWrite` — a time at which the belief
+    demonstrably did not move — in a shape byte-identical to a real write, so a
+    client cannot tell "stamped" from "changed". The route's own sentence says
+    "the newest `ConfidenceChanged` event that COMMITTED A VALUE", so this is the
+    code being made to match it.
+
+    MUTANT this reds: `latest_for_node` ignoring `require_any` (or the route not
+    passing `event_store.CONFIDENCE_TRANSITION_KEYS`) — the stamp's seq would be
+    reported, and every `committed` value would be `None`.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "stamped after being measured", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            real_seq = _plant_confidence_event(
+                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
+            # NEWER, and it moves nothing: `seq` orders the store, so this WOULD be
+            # the answer for any reader that matches on the id alone.
+            stamp = _plant_raw_confidence_event(
+                sdk, p["id"], {"lastDreamedAt": "2099-01-01T00:00:00+00:00"})
+            assert stamp > real_seq, "the fixture must plant the stamp NEWER"
+        finally:
+            sdk.close()
+
+        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        assert body["lastBeliefWrite"]["seq"] == real_seq, body
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
+        }, body
+        # The stamp is a real row the store retains — skipping it is the READ's
+        # choice, not a claim that no such event exists.
+        assert body["lastBeliefWriteScan"]["eventType"] == "ConfidenceChanged"
+
+
+def test_belief_reports_a_CLEAR_as_the_last_write(tmp_path):
+    """A posterior CLEAR is a transition: all three keys present, values `None`.
+
+    The counterpart of the arm above, and the reason the filter is on KEY PRESENCE
+    rather than on truthiness: `ep.py`'s clear writes `confidence=None`,
+    `posterior_alpha=None`, `posterior_beta=None`. A `if payload.get("confidence")`
+    filter would silently drop the one event that says the belief was withdrawn —
+    reporting an older measurement as the most recent movement.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "measured then cleared", "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            _plant_confidence_event(
+                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
+            cleared = _plant_raw_confidence_event(sdk, p["id"], {
+                "confidence": None, "posterior_alpha": None,
+                "posterior_beta": None})
+        finally:
+            sdk.close()
+
+        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        assert body["lastBeliefWrite"]["seq"] == cleared, body
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": None, "posteriorAlpha": None, "posteriorBeta": None,
+        }, body
+
+
 def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         p = client.post("/v1/points", json={

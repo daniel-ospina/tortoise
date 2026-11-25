@@ -16149,6 +16149,14 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     THIS node (so *when* it last moved is answered from the store's own record
     rather than inferred), and the evidence chain behind the claim.
 
+    ⛔ **"THAT COMMITTED A VALUE" IS ENFORCED, not asserted.** ``ConfidenceChanged``
+    is also the dream pass's bare ``lastDreamedAt`` stamp, whose payload carries no
+    posterior at all; the read is therefore filtered to payloads carrying at least
+    one of ``event_store.CONFIDENCE_TRANSITION_KEYS``. Without that filter this
+    field would report a moment at which the belief demonstrably did not move, in
+    the same shape as one where it did — and a posterior CLEAR (all three values
+    present and ``None``) is still a transition, so filtering cannot hide it.
+
     ⚠️ **THIS GET CAN WRITE — but only for a node that HAS a persisted belief.**
     ``TortoiseSDK.check_confidence(claim_id=…)`` reaches ``get_confidence``,
     whose lazy-consistency pass dreams a DIRTY root; that is why the
@@ -16201,8 +16209,10 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
 
     ⛔ ``lastBeliefWrite`` is what a ``ConfidenceChanged`` event COMMITS (the
     values EP wrote), not a before→after delta — one event does not carry the
-    prior. The delta, and a decision-level ``PreferenceFlipped`` event, are
-    Phase C and are NOT claimed here.
+    prior. ``committed`` is therefore ``null``-valued only for a CLEAR, and never
+    all-``null`` by accident: a row carrying none of those keys is not selected at
+    all (see the filter above). The delta, and a decision-level
+    ``PreferenceFlipped`` event, are Phase C and are NOT claimed here.
 
     ⛔ ``entity_id`` is a single path segment, so a URL cannot be passed here: a
     **url-keyed** ``:Source`` (which carries no ``id``) has its document read at
@@ -16316,8 +16326,15 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     # `last.get(...)` read as an inline graph call. Both spellings run the open
     # in the worker; this one also states which statement does the graph work.
     def _latest_belief_write():
+        # ⛔ `require_any=CONFIDENCE_TRANSITION_KEYS`: a `ConfidenceChanged` is ALSO
+        # the dream pass's `lastDreamedAt` stamp, which commits no belief. Without
+        # the filter this reports a time at which nothing moved, rendered
+        # byte-identically to a real write — the same indistinguishability class
+        # `current` removes one field over. A clear carries the keys with `None`
+        # values and therefore still counts.
         return event_store.latest_for_node(
-            sdk._get_proj(), "ConfidenceChanged", entity_id)
+            sdk._get_proj(), "ConfidenceChanged", entity_id,
+            require_any=event_store.CONFIDENCE_TRANSITION_KEYS)
 
     last = await _read_offload(
         _latest_belief_write, op="get_entity_belief.last")
