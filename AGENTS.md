@@ -1,7 +1,7 @@
 # AGENTS.base.md — Universal Agent Instructions
 
 > Shared base for all repos using agent-infra. Copy to your repo as `AGENTS.md` and customize. 70% of rules are universal — extend or override in repo-specific sections below.
-
+>
 > ⛔ **Prerequisite:** `AGENT_INFRA_PATH` must be set in your shell profile (e.g., `~/.zshrc`).
 > The auto-sync extension, pre-commit version gate, and bootstrap CLI all require it.
 > Run `echo $AGENT_INFRA_PATH` to verify. See [agent-infra README](https://github.com/premise-labs/agent-infra#prerequisites) for setup.

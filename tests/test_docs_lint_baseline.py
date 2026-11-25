@@ -1866,8 +1866,23 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # The removal was measured, not assumed: `markdownlint-cli2@0.23.3` on that
     # file reports `0 issues` and the baseline differ reports `0 new, 0 known`.
     # Both numbers moved WITH the list in this commit, per the #9193 lesson above.
+    # 2026-11-25 (#14607): burned down by ONE, and the entry had STOPPED
+    # REPRODUCING at the pinned linter before it was fixed — this is a hole in the
+    # ceiling, not a change of taste. The row was recorded as
+    # `AGENTS.md|MD028|1|Blank line inside blockquote` while
+    # `markdownlint-cli2@0.23.3` reports that finding at **line 4** (the blank line
+    # between the file's two opening blockquotes), and `markdownlint_key` is the
+    # exact `path|rule|line|detail` join — so the inherited finding matched NOTHING
+    # in the snapshot and every change that touched `AGENTS.md` was charged for
+    # debt already on main (measured on `origin/main`'s own `AGENTS.md`, same
+    # finding, same line). The deficit was repaired at the SOURCE and the row burnt
+    # down with it: `AGENTS.md:4` now carries a bare `>` (the blockquote's own
+    # continuation marker), where the pinned linter reports `0 issues` on the file
+    # and the changed-set differ reports `0 new, 0 known`. The rendered page is
+    # unchanged; the two blockquotes were always one blockquote with a blank line
+    # in it, which is exactly what MD028 names.
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "ba19cd42b57bbf10f44bf1e27e0de92ea47cea364ef04cb40f630e77ac176a12"
+        "df12d1b614112e91d2e3fdbe1665aacc7d79a57f360da730cb8bbb670bbdb67c"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"

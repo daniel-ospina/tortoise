@@ -54,10 +54,11 @@ The hosted endpoint is `https://api.premiselabs.co/mcp/`. Your agent reaches it 
 
 > ⛔ **Never put the credential — or `${TORTOISE_API_KEY}` — in a config file.** An `${VAR}` in a
 > config is a *capture* of an environment variable your client read once, at spawn: unset, it expands
-> to `""`, the request goes out as `Authorization: Bearer ` (empty), and the server can only answer
-> `-32001 invalid or missing Bearer token` — a message about the key's VALUE when the fault is that
-> the client never had one. The bridge carries no credential, so there is nothing to expand, and a
-> missing key is a named `MCP-KEY-EMPTY` refusal instead of a silent empty bearer.
+> to `""`, the request goes out carrying an `Authorization: Bearer` header with an EMPTY token, and
+> the server can only answer `-32001 invalid or missing Bearer token` — a message about the key's
+> VALUE when the fault is that the client never had one. The bridge carries no credential, so there
+> is nothing to expand, and a missing key is a named `MCP-KEY-EMPTY` refusal instead of a silent
+> empty bearer.
 
 One command writes the entry AND verifies it with a live call:
 
