@@ -55,6 +55,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import os
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -591,7 +592,7 @@ def test_every_graph_minting_site_is_declared():
     unknown = sorted({
         verdict for verdict in _GRAPH_MINT_SITES.values()
         if verdict not in {"hooked", "delegated"}
-        and not verdict.startswith("residual:")})
+        and not _is_residual_verdict(verdict)})
     assert not unknown, (
         f"_GRAPH_MINT_SITES carries verdicts outside the closed set "
         f"{sorted(known)} / `residual:<issue> — <why>`: {unknown}. An unrecognised "
@@ -637,6 +638,56 @@ def _first_call(source: str) -> ast.AST:
     """The first `Call` in `source` — the node :func:`_is_graphs_insert` takes."""
     return next(node for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.Call))
+
+
+#: The ONLY accepted shape of an exempting verdict: `residual:#<issue> — <why>`.
+#:
+#: ⛔ A PREFIX CHECK IS NOT A FORMAT CHECK (#14587 review P3-4). The closed set in
+#: :func:`test_every_graph_minting_site_is_declared` used
+#: `verdict.startswith("residual:")`, which accepts the bare `"residual:"` a
+#: half-typed entry leaves — and that value exempts its site from BOTH the
+#: `hooked` and the `delegated` arm, i.e. exactly the exemption the closed set
+#: exists to prevent, reached by TYPING LESS rather than more. Requiring the issue
+#: number and a reason is what makes the marker reviewable: an unexplained
+#: residual is not a residual, it is an omission with a label.
+_RESIDUAL_VERDICT = re.compile(r"residual:#\d+ — \S")
+
+
+def _is_residual_verdict(verdict: str) -> bool:
+    """Is `verdict` a well-formed `residual:#<issue> — <why>`?"""
+    return bool(_RESIDUAL_VERDICT.match(verdict))
+
+
+def test_a_residual_verdict_must_be_well_formed_not_merely_prefixed():
+    """⛔ `startswith("residual:")` EXEMPTS A HALF-TYPED ENTRY (#14587 review P3-4).
+
+    The closed set exists so an unrecognised verdict cannot exempt a site from
+    BOTH the `hooked` and the `delegated` arm. A PREFIX test defeats that in the
+    cheapest way available: the table's own message names the shape
+    `residual:<issue> — <why>`, and `"residual:"` — what a half-typed entry
+    leaves behind — satisfied the prefix, so the site it named was exempt from
+    both arms while reading as a declared residual.
+
+    Mutant: revert :func:`_is_residual_verdict` to
+    `verdict.startswith("residual:")` → every half-typed row below is accepted
+    and this test fails.
+    """
+    assert _is_residual_verdict(
+        "residual:#14582 — the door mints through a helper this pin cannot see")
+    for half_typed in (
+            "residual:",
+            "residual: ",
+            "residual:#14582",                       # no reason at all
+            "residual:14582 — no hash, so no issue link",
+            "residuals:#14582 — the wrong word",
+            "residual:#14582—nospace-em-dash",
+            "residual: #14582 — a leading space breaks the marker"):
+        assert not _is_residual_verdict(half_typed), (
+            f"{half_typed!r} is accepted as a residual verdict, so a site can be "
+            "exempted from the hooked AND delegated arms by typing less")
+    # The defect this replaces, stated as the measurement it is: every rejected
+    # shape above PASSED the prefix test, including the bare marker.
+    assert all(case.startswith("residual:") for case in ("residual:", "residual: "))
 
 
 def test_the_mint_census_is_not_vacuous():
@@ -1825,6 +1876,41 @@ def test_the_divergence_remedy_does_not_print_a_floor_the_seed_refuses():
     assert ("seed --org-id org-14582 --graph-id graph-new --enumerated-floor 0"
             in unarmed_gap), unarmed_gap
     assert "divergence" in unarmed_gap and "MAX(seq)" in unarmed_gap, unarmed_gap
+
+
+def test_the_seeded_remedy_is_the_one_verb_that_state_needs():
+    """⛔ `mode_seeded` IS NOT THE `0`-FLOOR POPULATION (#14587 review P3).
+
+    It fell through to the generic sequence, which seeds first. `seed` is BOTH
+    unnecessary and refusable there: the row already exists in the one state
+    `arm` leaves, while `SEED_SQL`'s guard is `row_max <= enumerated_floor` — so
+    `--enumerated-floor 0` is refused `divergence` for every `seeded` row whose
+    journal holds positions, which is exactly what a seed-only `backfill` writes.
+    A re-seed could not escape it either: the `ON CONFLICT` sets only `seq`,
+    never `mode`. `arm` alone is the sequence, and it is the same decision the
+    arm pass makes for these rows.
+
+    Mutant: delete the `mode_seeded` branch → the generic sequence returns, its
+    floor-`0` seed command is printed again and the first assertion reds.
+    """
+    remedy = rw._remedy_for_reason("org-14582", "graph-seeded", "mode_seeded")
+    assert ("seed --org-id org-14582 --graph-id graph-seeded "
+            "--enumerated-floor 0") not in remedy, (
+        f"the seeded remedy prints a seed command the guard refuses: {remedy}")
+    assert ("arm --org-id org-14582 --graph-id graph-seeded "
+            "--acknowledge-cutover") in remedy, (
+        f"the seeded remedy does not print the verb that reaches it: {remedy}")
+    assert "DO NOT seed it first" in remedy, remedy
+    # A `seeded` row is NOT halted, so `reopen` would be refused (`wanted=halted`).
+    assert "reopen" not in remedy, remedy
+    # The bulk form reaches the same rows in one pass, WITHOUT re-seeding them.
+    assert "backfill --arm" in remedy, remedy
+    assert "without" in remedy and "re-seeding" in remedy, remedy
+    # Non-vacuity of the population distinction: the generic sequence still
+    # seeds, so the branch is not just a copy of the fallback.
+    generic = rw._remedy_for_reason("org-14582", "graph-new", "no_cursor_row")
+    assert "--enumerated-floor 0" in generic, generic
+    assert generic != remedy
 
 
 def test_a_re_provisioned_halted_graph_keeps_its_published_entry(monkeypatch):

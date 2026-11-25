@@ -3346,6 +3346,17 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
     sequence therefore names the `reopen` step CONDITIONALLY rather than
     assuming the row is `seeded` — the two populations are not disjoint and the
     printed sequence must reach the state in both.
+
+    ⛔ AND `mode_seeded` IS A FOURTH POPULATION, WITH A ONE-VERB SEQUENCE (#14587
+    review P3). It fell through to the generic sequence, which SEEDS FIRST — and
+    `seed` is both unnecessary and refusable for it: the row already exists in
+    the one state `arm` exists to leave, while `SEED_SQL`'s guard compares the
+    JOURNAL's `MAX(seq)` with the floor, so `--enumerated-floor 0` is refused
+    `divergence` for every `seeded` row whose journal holds positions (exactly
+    what a seed-only `backfill` writes, and the reason the arm pass arms those
+    rows rather than re-seeding them). `arm` alone is the whole sequence, and
+    the sequence printed for this population used to be a command the guard
+    refuses followed by the one that was needed all along.
     """
     if reason == f"mode_{record_projection.MODE_HALTED}":
         return (
@@ -3356,6 +3367,21 @@ def _remedy_for_reason(org_id: str, graph_id: str, reason: str) -> str:
             f"{graph_id} --enumerated-floor 0`, then `reopen --org-id {org_id} "
             f"--graph-id {graph_id}`, then `arm --org-id {org_id} --graph-id "
             f"{graph_id} --acknowledge-cutover`.")
+    if reason == f"mode_{record_projection.MODE_SEEDED}":
+        return (
+            f"Remedy, PER GRAPH (this row is SEEDED but NOT ARMED, and `arm` is "
+            f"the ONLY verb it needs — the row exists in the one state `arm` "
+            f"leaves, so ⛔ DO NOT seed it first: `SEED_SQL`'s guard refuses "
+            f"`--enumerated-floor 0` `divergence` on any seeded row whose journal "
+            f"holds positions). `tools/record_allocator_cli.py arm --org-id "
+            f"{org_id} --graph-id {graph_id} --acknowledge-cutover` cuts it over. "
+            f"`backfill --arm --org-id {org_id} --acknowledge-cutover` is the bulk "
+            f"form: it reads the org's `seeded` rows and arms them, without "
+            f"re-seeding (a re-seed would re-run the divergence guard over a "
+            f"floor already chosen). If `arm` refuses because the row is no "
+            f"longer `seeded`, the mode moved under a concurrent actor — re-read "
+            f"it with `status --org-id {org_id} --graph-id {graph_id}` and follow "
+            f"the reason it reports.")
     if reason == "provision_refused:divergence":
         return (
             f"Remedy, PER GRAPH (this graph's record holds positions its journal "
