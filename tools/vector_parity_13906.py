@@ -470,7 +470,7 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         # The `None` branch is DEFENSIVE, and an earlier draft of this comment
         # said it was reachable through the record leg: it is not.
         # `record_vector.vector_search` builds
-        # `WHERE t.embedding_vec IS NOT NULL` (`tortoise/record_vector.py:2805`),
+        # `WHERE t.embedding_vec IS NOT NULL` (`tortoise/record_vector.py:2813`),
         # so `(embedding_vec <=> %s)` cannot be NULL for a served row. It is kept
         # because "no distance" from ANY leg must never read as a verified one,
         # and because a future `WHERE` is not this comparator's to assume.

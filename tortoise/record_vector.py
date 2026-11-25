@@ -267,7 +267,7 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: operator shape that carries a vector at all — measured on a scratch graph
 #: (`tests/test_14560_operator_vectors.py`, with the docker lane's URI): a
 #: `create_operator` Point lands NO
-#: `embedding` in either store (operators store no content, `#548`), while a hybrid
+#: VECTOR in either store (operators store no content, `#548`), while a hybrid
 #: Point lands one in the graph AND journals it, so its record row is filled by the
 #: same write.
 #:
@@ -286,9 +286,17 @@ GRAPH_KIND_FILTER: dict[str, str] = {
 def graph_kind_filter(entity_type: str) -> str:
     """The graph-node predicate narrowing ``entity_type``'s LABEL, or ``""``.
 
-    ``""`` for every entity type that IS its own label (`point`, `object`, `subject`,
-    `event`, `source`, `document`) — a whole-label count is the right population
-    there, so the caller splices nothing.
+    ``""`` for the entity types that ARE their own label (`point`, `object`, `subject`,
+    `event`) — a whole-label count is the right population there, so the caller splices
+    nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason: they
+    are not their own population, they are an UNDECLARED SLICE. :data:`tortoise.security.ENTITY_TYPE_LABELS`
+    maps BOTH to the one `Source` label, and the discriminator that WOULD narrow them —
+    `documentKind` — is deliberately absent from :data:`GRAPH_KIND_FILTER` (see the note
+    above that dict: the pair is not measured as blocking anything, `#14552` read `:Source`
+    at 0 vector-bearing nodes, and adding them is one line when a measurement asks). So
+    ``""`` here is a stated GAP, not a population claim — reading it as "the whole label is
+    this type's population" is the inversion these notes exist to prevent (see
+    :data:`Coverage`).
 
     ⛔ THE RETURNED STRING IS CYPHER SPLICED INTO A STATEMENT, so it must only ever
     come from :data:`GRAPH_KIND_FILTER` — a closed dict keyed by a validated entity
@@ -761,8 +769,16 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: keeps the graph as a named fallback on `point`, the primary retrieval label, exactly as
 #: `main` answered (`#13617` review F1). ⛔ `#13971` retires the STORED `:Point` vectors and
 #: gates the two writers that place a redundant copy (`sdk::_update_entity` and
-#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — so
-#: this set must stay without `point`, which
+#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — and
+#: since `#14552` the OTHER two declared `:Point` writers ask too, PER ROW but in two
+#: different shapes (conflating them is how a lane concludes the CAPTURE is protected by a
+#: per-turn record read, which it is NOT): the CAPTURE answers `mirror_required("point")` per
+#: row on the lane where `record_writer.record_holds_turns(...)` — a DEPLOYMENT predicate —
+#: says the record is expected to hold the turns, and RE-ATTACHES the vector per turn for any
+#: turn the record then REFUSES; the PASS-1B snapshot restore is the one that asks the RECORD
+#: per ID (`record_read.point_vector_keys` — does it SERVE a vector for THIS id). So
+#: `tools/strip_graph_entity_vectors.py`'s census no longer refuses `:Point` on its writers.
+#: This set still stays without `point`, which
 #: `test_13610_graph_vector_copy.py::
 #: test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback` pins.
 #:

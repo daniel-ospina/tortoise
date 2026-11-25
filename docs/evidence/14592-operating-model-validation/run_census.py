@@ -1,0 +1,287 @@
+#!/usr/bin/env python
+"""#14592 Phase D — step 3: the operating-model census, MCP ONLY.
+
+Step 2 answered "does search find the corpus facts". This step answers the
+structural half the brief asks for:
+
+  * which Object / Subject / Event / Source nodes exist, and does each carry a
+    corpus fact?
+  * which relation classes were written (IMPL / NAND / performs / owns /
+    extractedFrom), and were any invented?
+  * is EP present and sane per object?
+  * is the doc-05 contradiction represented as a real epistemic conflict?
+
+Every answer comes from a `tortoise_*` MCP tool. Nothing here imports the SDK,
+builds Cypher, or touches the record store.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "out"
+WT = Path(__file__).resolve().parents[3]
+GRAPH = "xv14592_operating_model"
+
+#: Keys the producer writes unconditionally. `stamp_provenance.py` reads this to
+#: tell a producer-written artifact from a hand-carried one.
+WRITTEN_KEYS = ("graph", "provenance", "decision_search", "reversal_search")
+
+
+def _provenance() -> dict:
+    body = Path(__file__).read_bytes()
+    return {
+        "probe_path": str(Path(__file__).resolve().relative_to(WT)),
+        "probe_sha256": hashlib.sha256(body).hexdigest(),
+        "graph": GRAPH,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+async def _call(client, tool, args):
+    try:
+        res = await client.call_tool(tool, args)
+        out = getattr(res, "structured_content", None)
+        if out is None:
+            out = getattr(res, "data", None)
+        if out is None:
+            out = [getattr(c, "text", str(c))
+                   for c in (getattr(res, "content", None) or [])]
+        return {"tool": tool, "args": args, "ok": True, "reply": out}
+    except Exception as exc:
+        return {"tool": tool, "args": args, "ok": False,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _rows(reply):
+    """Normalise a tool reply to a list of dict rows."""
+    if isinstance(reply, dict):
+        for k in ("result", "results", "nodes", "items", "points", "data"):
+            if isinstance(reply.get(k), list):
+                return reply[k]
+        return []
+    if isinstance(reply, list):
+        if len(reply) == 1 and isinstance(reply[0], str):
+            try:
+                v = json.loads(reply[0])
+                return v if isinstance(v, list) else []
+            except Exception:
+                return []
+        return [r for r in reply if isinstance(r, dict)]
+    return []
+
+
+def _norm(text: object) -> str:
+    """Whitespace- and case-normalised content, for identity comparison."""
+    return " ".join(str(text or "").lower().split())
+
+
+def pick_point(rows, claim):
+    """The Point whose content IS the claim — by identity, never by search order.
+
+    Returns ``None`` (a refusal) rather than a near-miss. The previous revision
+    ranked a `startswith` preference ahead of `contains`, and measured across
+    every row this corpus produced that term was **False for all of them** (both
+    extracted forms are sentences that *contain* their marker), so the tie fell
+    through to whatever the search listed first. That is how the committed run
+    could record `decision_point_id: null` beside a graph that holds the
+    sentence, and how doc-05's refutation ("Two of ColdPath's vehicles could not
+    show a validated cold-chain certificate…") could be expanded as if it were
+    the claim it refutes.
+
+    Identity is the discriminating signal the corpus provides, so it is the only
+    one used: a row is the claim when its normalised content EQUALS the claim
+    sentence. A driver that cannot find its own target must say so, not pick the
+    most similar sentence it can see.
+    """
+    target = _norm(claim)
+    for row in rows or []:
+        if isinstance(row, dict) and _norm(row.get("content")) == target:
+            return row
+    return None
+
+
+async def _pick(client, out, key, claim):
+    """Search WITH the claim sentence and pick the Point by identity.
+
+    The claim is both the query and the identity the selected row must match, so
+    there is no separate marker that a nearby sentence could also satisfy.
+
+    `limit=8`, not 5: the committed run's decision probe did not surface the
+    decision inside its first five hits, so its expand arm recorded
+    `decision_point_id: null` and never ran — a failed read that the artifact
+    presented as a graph fact.
+    """
+    r = await _call(client, "tortoise_search", {"query": claim, "limit": 8})
+    out[f"{key}_search"] = r
+    point = pick_point(_rows(r.get("reply")), claim)
+    pid = (point or {}).get("id") or (point or {}).get("point_id")
+    out[f"{key}_point_id"] = pid
+    print(f"\n=== {key} point: {pid} — {str((point or {}).get('content'))[:90]}")
+    return pid
+
+
+def verdict(out: dict) -> int:
+    """0 only when every target resolved AND every relation read returned rows.
+
+    `relation_read_findings` used to be PRINTED while `run()` returned 0, so a
+    run whose relation evidence was missing committed cleanly and exited green.
+    """
+    return 1 if out.get("relation_read_findings") else 0
+
+
+def relation_rows(reply, keys=("result", "relationships", "nodes")):
+    """Rows from an expansion reply, in the three shapes the server uses."""
+    if isinstance(reply, str):
+        try:
+            return relation_rows(json.loads(reply), keys)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(reply, dict):
+        for k in keys:
+            if isinstance(reply.get(k), list):
+                return reply[k]
+        return []
+    if isinstance(reply, list):
+        if len(reply) == 1 and isinstance(reply[0], str):
+            return relation_rows(reply[0], keys)
+        return [row for row in reply if isinstance(row, dict)]
+    return []
+
+
+async def run() -> int:
+    from fastmcp import Client
+    from fastmcp.client.transports import PythonStdioTransport
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(WT)
+    base = env["TORTOISE_DB_URI"]
+    env["TORTOISE_DB_URI"] = base.rsplit("/", 1)[0] + "/" + GRAPH
+    transport = PythonStdioTransport(
+        "tortoise/mcp_server.py", python_cmd=sys.executable, env=env, cwd=str(WT))
+
+    out: dict = {"graph": GRAPH, "provenance": _provenance()}
+    async with Client(transport, timeout=300) as client:
+        # ── 1. every Object / Subject / Event, full-scan ────────────────
+        for typ in ("object", "subject", "event", "source"):
+            r = await _call(client, "tortoise_search",
+                            {"entity_type": typ, "limit": 100})
+            out[f"fullscan_{typ}"] = r
+            rows = _rows(r.get("reply"))
+            print(f"\n=== full-scan {typ}: {len(rows)} rows ===")
+            for row in rows[:60]:
+                print(f"  {row.get('id','')[:14]:<14} {row.get('point_kind',''):<24} "
+                      f"{str(row.get('content',''))[:110]}")
+
+        # ── 2. the operator census: IMPL / NAND / others ────────────────
+        r = await _call(client, "tortoise_query",
+                        {"kind": "operator", "limit": 200})
+        out["query_operators"] = r
+        print("\n=== tortoise_query kind=operator ===")
+        print(json.dumps(r, indent=1, default=str)[:1500])
+
+        # ── 3. per-object EP + degree, via recall (graph beliefs) ───────
+        # recall:state on the operating-model vocabulary returns objects with
+        # EP, degree and their rank — the "is EP sane per object" read.
+        for label, q in [
+            ("people", "Marta Reyes Dev Patel Priya Nair who owns what"),
+            ("vendors", "NordicFreight ColdPath Logistics delivery partner"),
+            ("constraints", "cold chain below four degrees temperature log licence"),
+            ("goal", "forty restaurant accounts by December growth goal"),
+            ("decision", "we choose ColdPath Logistics as our delivery partner"),
+            ("reversal", "revert to NordicFreight ColdPath failed the audit"),
+        ]:
+            r = await _call(client, "tortoise_recall",
+                            {"query": q, "mode": "state", "limit": 5})
+            out[f"recall_{label}"] = r
+            print(f"\n=== recall:state [{label}] ===")
+            for row in _rows(r.get("reply")):
+                ep = row.get("ep") or {}
+                rr = row.get("recall_ranking") or {}
+                print(f"  {str(row.get('content',''))[:95]}")
+                print(f"     kind={row.get('point_kind')} conf={ep.get('confidence_mean')} "
+                      f"ep_state={ep.get('ep_state')} contested={row.get('contested')} "
+                      f"degree={rr.get('degree')} subject={(row.get('subject') or {}).get('name')}")
+
+        # ── 4. the contradiction: is doc-05 wired against doc-01? ───────
+        # Search both sides, then expand the doc-01 decision point's edges.
+        # Every id is DISCOVERED by content and a failed pick is recorded, so a
+        # missing id can no longer be written down as a successful read.
+        dec_id = await _pick(client, out, "decision",
+                             "We choose ColdPath Logistics as our delivery partner")
+
+        rev_id = await _pick(
+            client, out, "reversal",
+            "We revert to NordicFreight as our delivery partner and stop using "
+            "ColdPath Logistics")
+
+        out["relation_read_findings"] = []
+        if not dec_id:
+            out["relation_read_findings"].append(
+                "no decision point was selected — expand/explore never ran")
+
+        if dec_id:
+            out["expand_decision"] = await _call(
+                client, "tortoise_expand_relationships", {"point_id": dec_id})
+            print("\n=== expand_relationships(decision) ===")
+            print(json.dumps(out["expand_decision"].get("reply"),
+                             indent=1, default=str)[:4000])
+            out["explore_decision"] = await _call(
+                client, "tortoise_explore_connections",
+                {"node_id": dec_id, "hops": 2, "include_content": True})
+            print("\n=== explore_connections(decision, 2 hops) ===")
+            print(json.dumps(out["explore_decision"].get("reply"),
+                             indent=1, default=str)[:4000])
+            if not relation_rows(out["expand_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({dec_id}) returned no relations")
+            if not relation_rows(out["explore_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"explore_connections({dec_id}) returned no connected nodes")
+
+        if rev_id:
+            out["expand_reversal"] = await _call(
+                client, "tortoise_expand_relationships", {"point_id": rev_id})
+            print("\n=== expand_relationships(reversal) ===")
+            print(json.dumps(out["expand_reversal"].get("reply"),
+                             indent=1, default=str)[:3000])
+            if not relation_rows(out["expand_reversal"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({rev_id}) returned no relations")
+
+        for issue in out["relation_read_findings"]:
+            print(f"!! RELATION READ INCOMPLETE: {issue}")
+
+        # ── 5. provenance: can the product trace a claim to its source? ──
+        # ⛔ NOT the `provenance` artifact key. This is a CALL RECEIPT for a
+        # `check_confidence(include_provenance=True)` read, and naming it
+        # `provenance` made `census.json` look like it self-described its
+        # producing code when it did not — there was no provenance block in the
+        # artifact at all. The receipt keeps its own name; the block lives under
+        # `provenance` above, written by `_provenance()`.
+        out["confidence_provenance_read"] = await _call(
+            client, "tortoise_check_confidence",
+            {"topic": "cold chain constraint", "include_provenance": True, "limit": 5})
+        print("\n=== check_confidence(include_provenance) ===")
+        print(json.dumps(out["confidence_provenance_read"].get("reply"),
+                         indent=1, default=str)[:3000])
+
+    code = verdict(out)
+    out["ok"] = code == 0
+    (OUT / "census.json").write_text(json.dumps(out, indent=2, default=str) + "\n")
+    print(f"\nwrote {OUT / 'census.json'}")
+    if code:
+        print("!! census NOT OK: a target did not resolve to its claim sentence or "
+              "a relation read returned no rows")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(run()))
