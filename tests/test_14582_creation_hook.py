@@ -468,6 +468,35 @@ def test_health_is_ok_on_an_unarmed_deployment_that_has_seen_nothing(monkeypatch
         rw.reset_uncut_graphs()
 
 
+def test_health_stays_ok_when_an_unarmed_deployment_carries_an_uncut_graph(monkeypatch):
+    """⛔ THE FOLD IS GATED ON `armed`, AND NOTHING ELSE PINNED THAT.
+
+    MEASURED (#14610 review, mutation attribution): deleting the
+    ``block["armed"] and`` conjunct from `hosted_api._record_health`'s fold
+    leaves the WHOLE of this file green (41 passed) and
+    `tests/test_9548_record_arming_health.py` green (36 passed). The sibling test
+    above cannot catch it, because it clears the registry first — the count is 0,
+    so the fold is never reached. Nothing in the tree exercised "unarmed AND
+    count > 0" at all, so the fold's own comment claiming `armed` gates it was
+    decoration: a mutant that drops the conjunct SURVIVED the suite.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        rw.note_uncut_graph("org-14582", "graph-14582", reason="no_cursor_row")
+        block = _health(monkeypatch, dsn=None)
+        assert block["armed"] is False
+        assert block["armed_but_uncut"] == 1, (
+            "the control: the registry really does carry the row, so a green "
+            "below cannot be a green over an empty population")
+        assert block["ok"] is True, (
+            "an UNARMED deployment writes no record at all, so a graph missing "
+            "its cursor row there costs nothing and must not red the "
+            "deployment: without this leg the fold's `armed` conjunct is "
+            "unpinned and a mutant that drops it survives the whole suite")
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_health_cannot_report_ok_with_an_uncut_armed_graph(monkeypatch):
     """FALSIFIER (c). Red before this change: `armed_but_uncut` did not exist and
     `ok` stayed `true` for exactly this state — production's measured shape."""
