@@ -82,12 +82,14 @@ version: 1
 # human decision. The emission arm below DOES red on a weight move — even 0.1 s regroups the bins —
 # but its remedy is "re-run the verb and paste its figures", which leaves a quoted weight in place
 # and green, so the figure is not written rather than graded by an arm that would not look for it.
-# ⛔ That rule is scoped to the derivation, and the `2.0` rows named further down are the contrast
-# that proves it is a rule and not an oversight: those ARE quoted with their value, and
+# ⛔ That rule binds ANY weight beside a file that nothing grades; the derivation above is just
+# where it bites first. The `2.0` rows named further down are the contrast that proves it is a rule
+# and not an oversight: those ARE quoted with their value, and
 # `test_the_fast_shards_header_block_grades_the_carry_row_spelling` reads the number BOTH ways
 # (a row that moved to `3.1` under a sentence still claiming `2.0` reds it), which is what makes
-# quoting them a graded claim instead of a stale. ⛔ The set is named by VALUE and never counted —
-# see the no-row-count rule below.
+# quoting them a graded claim instead of a stale — the test of the rule is GRADED-OR-ABSENT, not
+# which paragraph the figure sits in. ⛔ The set is named by VALUE and never counted — see the
+# no-row-count rule below.
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
 # in `durations` — among the files named above, `#14597`'s
 # `tests/test_expansion_fusion_14344.py` row, `#14560`'s

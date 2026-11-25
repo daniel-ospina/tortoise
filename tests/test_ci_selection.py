@@ -10141,7 +10141,7 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
 #: The registration half is TRUE; the ROW half is FALSE — `e66997b81e76` (`#14544`, on `main`) rewrote
 #: that row's weight in the same commit whose subject is the cut — and the weight is the SHARD-LAYOUT
 #: input, so the sentence told the reader the opposite of what it exists to establish. It also
-#: contradicted the row's own note, three thousand lines below it.
+#: contradicted the row's own note, further down this same file.
 #: ⛔ THE ANAPHOR IS THE DEFECT, not the nouns: `neither of which` re-binds whatever nouns PRECEDE it,
 #: so one sentence can be true of one noun and false of the other with nothing in the text marking
 #: which — and a fold that re-wraps or re-orders the nouns silently repoints it. This paragraph may
@@ -10149,13 +10149,23 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
 #: for the same reason `_unquoted_block` refuses an odd quote count, because it cannot be read
 #: reliably.
 _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT claim")
+#: `neither of which … #14544` AND the paraphrase a fold would reach for instead, `#14544` never
+#: touched it. The anaphor form was the shipped defect; the paraphrase is the same claim spelled
+#: without the pronoun, so banning only the pronoun would grade the wording rather than the claim.
 _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
-    r"neither\s+of\s+which[\s\S]{0,80}?#14544", re.IGNORECASE)
-#: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit. Without
-#: this direction a fold could satisfy the anaphor ban by simply DELETING the row clause, which loses
-#: the correction rather than making it — the absence claim this PR exists to stop re-introducing.
+    r"neither\s+of\s+which[\s\S]{0,80}?#14544"
+    r"|#14544[`]?['\u2019]?(?:s)?\s+(?:[a-z]+\s+){0,3}(?:never|not)\s+(?:\w+\s+){0,2}touch(?:ed|es|ing)?",
+    re.IGNORECASE)
+#: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
+#: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
+#: certified the exact false sentence this PR deletes (measured: `IS` -> `is NOT` kept it GREEN), and
+#: without the direction at all a fold could satisfy the anaphor ban by simply DELETING the row
+#: clause, which loses the correction rather than making it. The window is generous on purpose: a
+#: reflow inside a TRUE clause reds this arm (a false block) rather than letting a false claim
+#: through, and the clause runs 39 characters today.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
-    r"row\s+in\s+`durations`[\s\S]{0,240}?#14544[`]?['\u2019]?s\s+own\s+edit", re.IGNORECASE)
+    r"row\s+in\s+`durations`[\s\S]{0,400}?row\s+IS[\s#]{0,8}`#14544`['\u2019]s\s+own\s+edit",
+    re.IGNORECASE)
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
@@ -10216,6 +10226,24 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the provenance pattern reads the RETIRED sentence as stating the row's provenance, so the "
         "positive direction proves nothing: the old clause says `neither of which `#14544` "
         "touched`, which is the opposite claim")
+    # ⛔ POLARITY, measured rather than assumed: flipping `row IS` to `row is NOT` in the LIVE
+    # paragraph must lose the match. Without this the pattern certified the false sentence it exists
+    # to delete, because it bound `#14544`'s own edit` without reading the word before it.
+    flipped = paragraph.replace("row IS", "row is NOT", 1)
+    assert flipped != paragraph, (
+        "the live `#14544` paragraph no longer says `row IS`, so the polarity check below grades "
+        "nothing — re-point it at the sentence the block uses")
+    assert not _H_14544_ROW_PROVENANCE_RE.search(flipped), (
+        "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
+        "own edit`) — it reads the row's name and the words `own edit` without the polarity, so a "
+        "fold that restored the false reading would keep this arm GREEN")
+    # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for.
+    for paraphrase in (
+            "`#14544` never touched that row",
+            "`#14544`'s cut did not touch the row"):
+        assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(paraphrase), (
+            f"the anaphor ban misses the paraphrase {paraphrase!r} — it grades the pronoun rather "
+            "than the claim, so the same false reading returns in other words")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
