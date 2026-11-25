@@ -66,6 +66,12 @@ PRO_HARD_STOP_MB = PRO_CAP_MB * _STORAGE_BAND.cap_band.refuse_at
 #: The figure measured on the deployed graph when the defect was found.
 MEASURED_USED_MB = 329.0
 
+#: How old this file's meter reading may be. Generous next to the 300 s offset the
+#: fixture uses, and far below `allowance_gate.STALE_AFTER_SECONDS` — the point is
+#: to catch a LITERAL date (thousands of seconds old within a day of merging, or
+#: negative when future-dated), not to squeeze the offset.
+_FRESH_FIXTURE_MAX_AGE_S = 360
+
 
 def test_the_cap_under_test_is_the_artifact_number_not_a_literal():
     """`PRO_CAP_MB` is derived so the 1.5x arithmetic survives a price revision.
@@ -101,8 +107,24 @@ def _single_sample_meter(used: float):
     one staleness bound later at 2026-11-25T02:00Z, with no commit in between. A
     fixture that must be FRESH is written as an offset from now, always: the bound
     is the thing under test, so the fixture must not be racing it.
+
+    ⛔ And the RULE is asserted, not just described (P3 on this repair's review):
+    a bare docstring left the class open — a future-dated literal
+    (``2027-06-01T00:00:00+00:00``) passed all ten tests, because a date in the
+    future is a bomb with a later fuse and ``_stale()`` cannot see a negative age.
+    So the age is bounded on BOTH sides below: any hardcoded literal is outside
+    ``[-60 s, 360 s]`` by construction, while the offset above is 300 s old and
+    cannot drift out from under it.
     """
     measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    age = (datetime.now(UTC) - datetime.fromisoformat(measured_at)).total_seconds()
+    assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
+        f"this fixture's reading is {age:.0f}s old; it must be written as an offset "
+        f"from now (0 <= age <= {_FRESH_FIXTURE_MAX_AGE_S}s), never as a literal date. "
+        "A literal is a calendar bomb: past the 24 h bound the cap goes UNARMED, the "
+        "gate SERVES the write, and the refusal these tests pin is never composed "
+        "— which reddens the required `test (e)` shard one bound after it merges, "
+        "with no commit in between (#9127, third recurrence).")
     return lambda _org: MeterReading(
         used=used,
         measured_at=measured_at,
