@@ -58,11 +58,12 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` `4b2fba3e8a` folded in, carrying
-# `#14597`'s `tests/test_expansion_fusion_14344.py` row, `#14415`'s two batch rows, `#14548`'s
-# residue RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule
-# row, `#14574`'s drift-reporter registration (`tests/test_fly_secret_declaration_report.py`),
-# `#14552`'s `tests/test_record_read_point_vector_keys.py` row, `#14592`'s
-# `tests/test_14592_operating_model_evidence.py` row and `#14607`'s two registrations
+# `#14597`'s `tests/test_expansion_fusion_14344.py` row, `#14415`'s batch rows, `#14548`'s
+# residue RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14565`'s
+# `tests/test_14559_reaper_schedule.py` row, `#14574`'s drift-reporter registration
+# (`tests/test_fly_secret_declaration_report.py`), `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` row, `#14592`'s
+# `tests/test_14592_operating_model_evidence.py` row and `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb packs the pool
 # into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s (c, d, h), so
 # `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
@@ -73,15 +74,23 @@ version: 1
 # `tests/test_sdk_privatise_sweep.py` at **28.0 s** — a `core` file whose weight is not flat, so do
 # not read that list as "all 2.0 s".
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
-# in `durations` — among the files named above, `#14597`'s, `#14560`'s, `#14552`'s and `#14592`'s,
-# plus the RATCHET's. A REGISTRATION is a surface entry on ANY `surfaces` key — `fast_pool()` folds
+# in `durations` — among the files named above, `#14597`'s, `#14560`'s, `#14565`'s,
+# `#14552`'s, `#14592`'s and `#14415`'s, plus the RATCHET's own
+# `tests/test_sdk_privatise_sweep.py` row. ⛔ THAT ENUMERATION IS COMPLETE, and it is a
+# completeness claim about the files this paragraph names BY PATH, not a count of anything: those are
+# the named files that carry a `durations` entry, and `#14574`'s file plus `#14607`'s are the named
+# ones that do not. Spelling it without a numeral is deliberate — the doctrine sentence below says
+# no pool size and no row count is stated here, and a spelled-out "two" is still a count (measured
+# 2026-11-25: an earlier revision said "`#14415`'s two batch rows" and "`#14607`'s two
+# registrations", which the sentence below contradicted inside one block).
+# A REGISTRATION is a surface entry on ANY `surfaces` key — `fast_pool()` folds
 # every one of them (its `for s, files in manifest["surfaces"].items(): classified.update(files)`) —
 # and it is NECESSARY but NOT sufficient for pool membership: the same call then subtracts
 # `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand`, so a file registered on three
 # surfaces can still be outside the pool. For a file that IS in the pool, a registration is what
 # puts it there and lets the header's `DEFAULT_FAST_WEIGHT` apply. `core` is the common case but is
 # not the definition: the `#14544` sentence below is carried by an `eval` registration ALONE. That is
-# why `#14574`'s file and `#14607`'s two are named as REGISTRATIONS — so calling any of them a
+# why `#14574`'s file and `#14607`'s are named as REGISTRATIONS — so calling any of them a
 # "row" asserts a `durations` entry the registration does not establish, and
 # `test_the_fast_shards_header_block_calls_a_row_only_what_has_one` reds when that entry is absent.
 # Nor is a row the map's only carrier of a weight: `durations_floors` can additionally PIN a declared
