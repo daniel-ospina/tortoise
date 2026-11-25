@@ -378,12 +378,13 @@ def test_every_delegating_creation_site_still_reaches_its_creation_door():
     """⛔ THE CENSUS'S OTHER HALF — the seven sites that create a graph BY DELEGATION.
 
     ⛔ The name says CREATION door, not "hooked door", and that is the fix to the
-    `#14587` review's P3-2: three of these rows (C1-C3, plus C4) reach
-    `sdk._graph_create`, which the sibling test pins UNHOOKED — so a name promising
-    a HOOKED door contradicted the file's own pin two functions above.
+    `#14587` review's P3-2: three of these rows (the two SDK verbs the census labels
+    C1-C3, plus C4) reach `sdk._graph_create`, which the sibling test pins UNHOOKED —
+    so a name promising a HOOKED door contradicted the file's own pin two functions
+    above.
 
     `_DOORS` pins the two sites that MINT an id AND hook it; these are the sites
-    that reach one of them — or, for the four SDK/signup rows, reach the third
+    that reach one of them — or, for the three SDK/signup rows, reach the third
     minting door, `sdk._graph_create`, which `_UNHOOKED` pins the opposite way.
     They are the quiet half: a door keeps calling the hook perfectly while an
     alias drifts off the route, and the graph the alias creates is born uncut with no
