@@ -33,6 +33,8 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from tortoise import pricing
@@ -88,10 +90,22 @@ def _single_sample_meter(used: float):
 
     ``repeats`` is None, so the gate takes its single-sample arm and composes the
     refusal this test is about (``… the reading comes from a single sample``).
+
+    ⛔ ``measured_at`` is RELATIVE TO THE RUN, never a literal date (#9127, third
+    recurrence): this dimension is bounded by ``allowance_gate.STALE_AFTER_SECONDS``
+    (24 h), and ``_stale()`` treats a reading past that bound as stale — which
+    leaves the cap UNARMED and the gate serving the write, so the refusal this file
+    pins stops being composed at all. The literal this replaces
+    (``2026-11-24T02:00:00+00:00``) was inside the bound when it merged
+    (`da4b76a5851c`, 2026-11-23) and reddened the required `test (e)` shard exactly
+    one staleness bound later at 2026-11-25T02:00Z, with no commit in between. A
+    fixture that must be FRESH is written as an offset from now, always: the bound
+    is the thing under test, so the fixture must not be racing it.
     """
+    measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     return lambda _org: MeterReading(
         used=used,
-        measured_at="2026-11-24T02:00:00+00:00",
+        measured_at=measured_at,
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )
