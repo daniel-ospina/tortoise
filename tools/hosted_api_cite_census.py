@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 28567
+    uv run python tools/hosted_api_cite_census.py --pivot 28602
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -165,7 +165,7 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py`'s
 #: `test_the_census_sees_and_restates_its_own_fallback_pivot` reds on the pre-row
 #: table (it exited 0 there).
-DEFAULT_PIVOT = 28567
+DEFAULT_PIVOT = 28602
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
