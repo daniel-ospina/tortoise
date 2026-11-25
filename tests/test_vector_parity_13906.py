@@ -1552,7 +1552,7 @@ def test_a_none_distance_is_not_a_verified_one(harness):
 
     ⛔ The `None` arm is DEFENSIVE, not reachable through the record leg:
     `record_vector.vector_search` builds `WHERE t.embedding_vec IS NOT NULL`
-    (`tortoise/record_vector.py:2813`), so `(embedding_vec <=> %s)` cannot be NULL
+    (`tortoise/record_vector.py:2815`), so `(embedding_vec <=> %s)` cannot be NULL
     for a served row. (An earlier draft of this docstring claimed it was
     reachable, and an `ORDER BY … ASC` that supposedly sorted the NULLs last —
     false, and it invited "fixing" a correct guard on a false premise.) The

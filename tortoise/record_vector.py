@@ -289,8 +289,10 @@ def graph_kind_filter(entity_type: str) -> str:
     ``""`` for the entity types that ARE their own label (`point`, `object`, `subject`,
     `event`) — a whole-label count is the right population there, so the caller splices
     nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason: they
-    are not their own population, they are an UNDECLARED SLICE. :data:`tortoise.security.ENTITY_TYPE_LABELS`
-    maps BOTH to the one `Source` label, and the discriminator that WOULD narrow them —
+    are not their own population, they are a slice ONLY THE RECORD LEG DECLARES — `LABEL_SERVED`
+    narrows `source` on `document_kind IS NULL` and `document` on `document_kind IS NOT NULL`,
+    so the gap is :data:`GRAPH_KIND_FILTER`'s alone. :data:`tortoise.security.ENTITY_TYPE_LABELS`
+    maps BOTH to the one `Source` label, and the graph discriminator that WOULD narrow them —
     `documentKind` — is deliberately absent from :data:`GRAPH_KIND_FILTER` (see the note
     above that dict: the pair is not measured as blocking anything, `#14552` read `:Source`
     at 0 vector-bearing nodes, and adding them is one line when a measurement asks). So
