@@ -169,6 +169,17 @@ _INFLIGHT: dict[tuple[str, str], float] = {}                # key -> attempt tok
 #: submit). `_reap_locked` does not decrement it. The gate is `_RESERVED >=
 #: _MAX_INFLIGHT`.
 _RESERVED = 0
+#: Reservation GENERATION, bumped by ``reset_operator_alert_state_for_tests``. A
+#: dispatch admitted in an earlier generation releases NOTHING: the reset already
+#: discarded that reservation, so the release would spend the budget of an
+#: admission made AFTER it. In a process that never resets, the generation never
+#: changes and every release is honoured — production behaviour is unchanged; the
+#: guard exists because the reset is what makes an unowned ``_RESERVED -= 1``
+#: unsafe, and a test-side leak lands in the NEXT test. Measured on PR #14645
+#: (shard ``test (b)``): ``test_a_shed_never_clears_an_admitted_latch`` failed its
+#: own "the bound is saturated" precondition (``assert 4 == 5``) because a worker
+#: wedged by the PREVIOUS test released into the shed test's admissions.
+_GEN = 0
 #: future -> submitted ts. Used by `join_operator_alerts` and by _reap_locked for
 #: dead-handle housekeeping — NOT by the shed gate (that reads _RESERVED).
 _HANDLES: dict[Any, float] = {}
@@ -396,9 +407,17 @@ def _reap_locked(now: float) -> None:
             _HANDLES.pop(f, None)
 
 
-def _release_locked() -> None:
-    """Release one admission reservation (caller holds ``_LOCK``); floors at 0."""
+def _release_locked(gen: int | None = None) -> None:
+    """Release one admission reservation (caller holds ``_LOCK``); floors at 0.
+
+    *gen* is the generation the reservation was taken in. A release from a
+    PRE-reset generation is IGNORED — ``reset_operator_alert_state_for_tests``
+    already discarded that reservation, and the decrement would otherwise cancel a
+    reservation a later admission is holding (see ``_GEN``).
+    """
     global _RESERVED
+    if gen is not None and gen != _GEN:
+        return
     if _RESERVED > 0:
         _RESERVED -= 1
 
@@ -450,7 +469,7 @@ def _due_locked(key: tuple[str, str], now: float) -> bool:
     return True
 
 
-def _run(store, key, kind, org_id, detail, token) -> None:
+def _run(store, key, kind, org_id, detail, token, gen=None) -> None:
     try:
         # Ownership check BEFORE the store write: a superseded attempt does not
         # spend a network call filing an incident its successor may already be
@@ -478,10 +497,10 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # callback release races the joining thread and makes `join → _RESERVED == 0`
         # flaky. `finally` runs before the future is marked done.
         with _LOCK:
-            _release_locked()
+            _release_locked(gen)
 
 
-def _forget(fut) -> None:
+def _forget(fut, gen=None) -> None:
     """Drop one dispatch's handle; release its reservation if the future was
     cancelled before ``_run`` started.
 
@@ -494,7 +513,7 @@ def _forget(fut) -> None:
     with _LOCK:
         _HANDLES.pop(fut, None)
         if fut.cancelled():
-            _release_locked()
+            _release_locked(gen)
             _logger.warning("operator alert cancelled before it ran")
 
 
@@ -504,6 +523,11 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
     key = (kind, org_id or "")
     now = time.monotonic()
     shed = False
+    # Initialised here only so every path below has a value; the AUTHORITATIVE
+    # snapshot is taken under `_LOCK`, because a reset between this line and the
+    # admission would otherwise tag a new-generation reservation as pre-reset (its
+    # release would then be ignored and the budget would leak upward).
+    gen = _GEN
     with _LOCK:
         _SINCE_SWEEP += 1
         if _SINCE_SWEEP >= _SWEEP_EVERY:
@@ -521,6 +545,7 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             _ATTEMPT[key] = (now, _RETRY_WINDOW_S)   # provisional; _run re-arms
             _ATTEMPT.move_to_end(key)
             token = now
+            gen = _GEN
             _RESERVED += 1
             _INFLIGHT[key] = token
     if shed:
@@ -537,22 +562,23 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             # reservation.
             if _INFLIGHT.get(key) == token:
                 _INFLIGHT.pop(key, None)
-            _release_locked()
+            _release_locked(gen)
         _logger.warning("operator alert not filed — no alert channel (kind=%s)", kind)
         return None
     try:
-        fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token)
+        fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token,
+                           gen)
     except Exception:  # pool shutting down — never drop the alert silently
         with _LOCK:
             if _INFLIGHT.get(key) == token:  # token-guarded
                 _INFLIGHT.pop(key, None)
-            _release_locked()
+            _release_locked(gen)
         _logger.warning("operator alert dispatch failed (kind=%s)", kind,
                         exc_info=True)
         return None
     # Register the settle callback before recording the handle, and record the handle
     # only while the future is unsettled (both under _LOCK).
-    fut.add_done_callback(_forget)
+    fut.add_done_callback(lambda f: _forget(f, gen))
     with _LOCK:
         if not fut.done():
             _HANDLES[fut] = time.monotonic()
@@ -590,15 +616,21 @@ def reset_operator_alert_state_for_tests() -> None:
     ``_RESERVED`` and ``_HANDLES`` are reset WITH the maps: a reservation left by
     a test that wedged a worker would silently shrink the budget every later test
     sees, and a stale handle would be joined (or counted) by the next test.
+    ``_GEN`` is bumped in the SAME block, so a worker that outlived its own test
+    cannot release a reservation this test takes afterwards: the reset discards its
+    reservation, so its release must be discarded too (a worker reaped from
+    ``_HANDLES`` is invisible to ``join_operator_alerts``, which is why the fixture
+    cannot wait for it).
     ``_SINCE_SWEEP`` is reset so a test that pins the amortised sweep is not
     dependent on how many admissions earlier tests happened to make.
     """
-    global _RESERVED, _SINCE_SWEEP, _LAST_SHED_LOG
+    global _RESERVED, _SINCE_SWEEP, _LAST_SHED_LOG, _GEN
     with _LOCK:
         _ATTEMPT.clear()
         _INFLIGHT.clear()
         _HANDLES.clear()
         _RESERVED = 0
+        _GEN += 1
         _SINCE_SWEEP = 0
         # Also the shed-log rate limit, or the first test to shed would silence the
         # warning for every later test inside _SHED_LOG_INTERVAL_S.
