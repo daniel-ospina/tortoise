@@ -3426,10 +3426,36 @@ class TestCimdOccupancy3669:
         """BEHAVIOURAL OCCUPIED-LOOP PROOF (fails without the fix).
 
         A heartbeat coroutine ticks every 5 ms on the SAME event loop while a
-        CIMD fetch is parked for 0.4 s. With the fetch on the loop the beat
-        count stalls (~0 ticks); with the offload the loop keeps beating. This
-        drives the REAL ASGI app through an async transport, so it does not
-        depend on a thread NAME (the mutation is reverting the offload).
+        CIMD fetch is parked for ``park_s`` on a worker. With the fetch on the
+        loop the loop cannot turn AT ALL for the whole park; with the offload
+        the beat keeps its cadence. This drives the REAL ASGI app through an
+        async transport, so it does not depend on a thread NAME (the mutation
+        is reverting the offload).
+
+        ⛔ THE MEASUREMENT IS SCOPED TO THE FETCH WINDOW — the first cut
+        asserted ``max_gap < park_s / 2`` over the WHOLE
+        run, which also spans the client connect, the ASGI dispatch and every
+        other on-loop stall, so a stall that had nothing to do with the fetch
+        was still reported as "the fetch is occupying the loop" (#14640's CI
+        red, measured). Run 45640298872 / job 139306954188 went RED at
+        1.692 s, and that row's own call duration was 3.70 s = ``0.05 settle
+        + ~1.7 s that is NOT the fetch + the 2.0 s park``: the stall it
+        reported was sequential WITH the park, not inside it. Two ambient
+        causes were reproduced on a loaded box — the request's first lazy
+        import (``importlib._fill_cache`` on the loop thread) and cyclic-GC
+        pauses — neither of which is the fetch.
+
+        What this row can actually prove is "the loop keeps turning inside the
+        fetch window", and its falsifier is that the loop serves NOTHING there:
+        a reverted offload blocks the loop for exactly that window, so no turn
+        is recorded inside it (and the one that resumes after it owns the whole
+        window). Scoping the stall measure to the window, and to the part of a
+        stall that actually LIES IN it, keeps that falsifier whole while an
+        ambient stall — a GC pause, a lazy import, a descheduled box — stops
+        reading as fetch occupancy. RESIDUAL, stated rather than implied: a
+        stall inside the window longer than ``park_s / 2`` still reds this row,
+        which is inherent to any wall-clock bound; the bound is the one that
+        still separates the mutant (a full ``park_s``) from the fix (~5 ms).
         """
         from tortoise import cimd
 
@@ -3438,26 +3464,33 @@ class TestCimdOccupancy3669:
 
         park_s = 2.0
         threads: list[str] = []
+        fetch_window: list[tuple[float, float]] = []
 
         def _parked_fetch(_client_id):
             threads.append(threading.current_thread().name)
-            time.sleep(park_s)
-            raise cimd.CimdError("refused")
+            started = time.monotonic()
+            try:
+                time.sleep(park_s)
+                raise cimd.CimdError("refused")
+            finally:
+                fetch_window.append((started, time.monotonic()))
 
         monkeypatch.setattr(cimd, "fetch_client_metadata", _parked_fetch)
         verifier, challenge = _pkce()  # noqa: RUF059
         params = _authorize_params(challenge)
 
-        async def _run() -> tuple[int, float]:
-            loop = asyncio.get_running_loop()
-            gaps: list[float] = []
-            last = loop.time()
+        async def _run() -> tuple[int, list[tuple[float, float]]]:
+            # ONE clock on both sides — `time.monotonic()` — so the fetch
+            # window the worker records and the loop's turns are directly
+            # comparable (no `loop.time()`-vs-monotonic assumption).
+            turns: list[tuple[float, float]] = []      # (turn_at, gap_before)
+            last = time.monotonic()
 
             async def _heartbeat():
                 nonlocal last
                 while True:
-                    now = loop.time()
-                    gaps.append(now - last)
+                    now = time.monotonic()
+                    turns.append((now, now - last))
                     last = now
                     await asyncio.sleep(0.005)
 
@@ -3469,20 +3502,44 @@ class TestCimdOccupancy3669:
             hb.cancel()
             with __import__("contextlib").suppress(asyncio.CancelledError):
                 await hb
-            return r.status_code, max(gaps)
+            return r.status_code, turns
 
-        status, max_gap = asyncio.run(_run())
+        status, turns = asyncio.run(_run())
         assert status == 400
         # Deterministic half: the fetch ran on a worker, not the loop thread.
         assert threads and not threads[0].startswith("MainThread"), (
             f"the CIMD fetch ran on {threads} — the event-loop thread")
-        # Behavioural half: the loop was never stalled for anywhere near the
-        # park. A mutation that reverts the offload stalls it for the full
-        # `park_s`, so the threshold on HALF the park cleanly separates the two
-        # while tolerating the heaviest scheduler blips on a loaded box.
-        assert max_gap < park_s / 2, (
-            f"the event loop stalled {max_gap:.3f}s while a {park_s}s CIMD fetch "
-            "was in flight — the fetch is occupying the loop (#3669)")
+        # The window this row measures has to be REAL before any count below
+        # about it means anything: exactly one fetch, spanning its park.
+        assert len(fetch_window) == 1, (
+            f"the CIMD fetch ran {len(fetch_window)} times, expected once")
+        fetch_start, fetch_end = fetch_window[0]
+        window_s = fetch_end - fetch_start
+        assert window_s >= park_s * 0.9, (
+            f"the parked fetch spanned {window_s:.3f}s of its {park_s}s park — "
+            "the in-flight window is not real, so this row proves nothing")
+
+        # Behavioural half. A turn at `now` with a preceding gap of `gap`
+        # means the loop was UNAVAILABLE over [now - gap, now]. Only the part
+        # of that stretch which LIES INSIDE the fetch window is this row's
+        # subject: a stall that began before the fetch did, or that ends after
+        # it, is not the fetch occupying the loop.
+        in_window = [now for now, _ in turns if fetch_start < now < fetch_end]
+        blocked_in = [
+            min(now, fetch_end) - max(now - gap, fetch_start)
+            for now, gap in turns
+            if min(now, fetch_end) > max(now - gap, fetch_start)]
+        worst_in = max(blocked_in, default=window_s)
+        assert len(in_window) >= 3, (
+            f"the event loop turned {len(in_window)} times inside the "
+            f"{window_s:.2f}s CIMD fetch window (no-turn stretch "
+            f"{worst_in:.3f}s of a {park_s}s park) — the fetch is occupying "
+            "the loop (#3669)")
+        assert worst_in < park_s / 2, (
+            f"the event loop served nothing for {worst_in:.3f}s of the "
+            f"{window_s:.2f}s CIMD fetch window ({len(in_window)} turns in "
+            f"window) of a {park_s}s park — the fetch is occupying the loop "
+            "(#3669)")
 
     @pytest.mark.parametrize("door", [
         "authorize", "consent", "token_code", "token_refresh"])

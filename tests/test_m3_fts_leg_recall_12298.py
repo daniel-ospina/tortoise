@@ -1434,12 +1434,21 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # (`e0accb8fe63`), 21067/21510/21952 (`3bbe5567df24`) and 21191/21634/22076
     # (`939e37f664e5`). Uniform shift per hop is a MEASUREMENT here, not an
     # assumption — the symbol text is what moved the number, and neither changed.
-    ("tortoise/projection/__init__.py", 21191, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21191`"),
-    ("tortoise/projection/__init__.py", 21634, "def _create_fulltext_index(",
-     "`:21634`"),
-    ("tortoise/projection/__init__.py", 22076,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22076`"),
+    #
+    # ⛔ AND ONCE MORE, from this branch (the #14592 read-parity seam): its own
+    # `tortoise/projection/__init__.py` change (`+25/-8`, all four hunks at
+    # 21061–21124, i.e. ABOVE all three rows) is a net **+17**, so `origin/main`'s
+    # 21191/21634/22076 are 21208/21651/22093 here. Re-derived with
+    # `sed -n "<n>p"` on the live file, not by adding 17 to the old number, and
+    # the SYMBOLS are unchanged — only the lines. The rows are therefore no longer
+    # a delta against `main`; that is expected on a branch that edits this module,
+    # and the re-derivation is still the pin's own documented remedy.
+    ("tortoise/projection/__init__.py", 21208, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21208`"),
+    ("tortoise/projection/__init__.py", 21651, "def _create_fulltext_index(",
+     "`:21651`"),
+    ("tortoise/projection/__init__.py", 22093,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22093`"),
 )
 
 
