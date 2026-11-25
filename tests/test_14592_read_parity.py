@@ -366,7 +366,7 @@ def test_relations_pages_and_offset_actually_advances(tmp_path):
         sdk = _sdk(ha)
         try:
             for sp in spokes:
-                assert sdk._get_proj().create_edge(hub["id"], sp["id"], "related")
+                assert sdk._create_edge("related", hub["id"], sp["id"])
         finally:
             sdk.close()
 
@@ -398,7 +398,7 @@ def test_relations_reports_a_self_loop_once(tmp_path):
             "name": "SELF", "objectKind": "goal"}).json()
         sdk = _sdk(ha)
         try:
-            assert sdk._get_proj().create_edge(a["id"], a["id"], "related")
+            assert sdk._create_edge("related", a["id"], a["id"])
         finally:
             sdk.close()
         body = client.get(f"/v1/entities/{a['id']}/relations").json()
