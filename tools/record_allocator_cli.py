@@ -723,7 +723,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         else:
             conn.commit()
             entry["outcome"] = "seeded"
-            entry |= {"seq": result.seq, "mode": result.mode,
+            # ⛔ THE MODE IS THE COUNTER's mode AFTER THIS ENTRY (#14624 review F4).
+            # `result.mode` is what the SEED left, and when `--arm` then moved the
+            # row `seeded` → `active`, reporting the seed's answer beside
+            # `armed: true` printed one entry that contradicted itself — the same
+            # defect the last three rounds closed for `would_*` and `count_means`.
+            entry |= {"seq": result.seq,
+                      "mode": ra.MODE_ACTIVE if armed_now else result.mode,
                       "healed_tail": result.healed_tail,
                       "burned": result.burned}
             if arm_them:

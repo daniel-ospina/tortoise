@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import json
 import os
 import uuid
 from pathlib import Path
@@ -447,8 +448,17 @@ def test_the_registry_publishes_no_tenant_identifiers():
             yield value
 
     published = set(leaves(report)) | set(leaves(reasons))
-    assert "org-SECRET" not in published
-    assert "graph-SECRET" not in published
+    # ⛔ SUBSTRING, OVER THE WHOLE SERIALIZED PAYLOAD (#14624 review F1). This pin
+    # used to assert SET MEMBERSHIP of the leaf values, which is exact equality —
+    # and the registry's key is COMPOSITE (`f"{org_id}\u0000{graph_id}"`), so a
+    # payload leaking the keys verbatim stayed GREEN over the leak, on the one
+    # claim that must be airtight on an UNAUTHENTICATED endpoint (measured: the
+    # reviewer published `org-SECRET\u0000graph-SECRET` and all three assertions
+    # held). Every nested string is covered here, keys included.
+    blob = json.dumps({"report": report, "reasons": reasons},
+                      sort_keys=True, default=str)
+    assert "SECRET" not in blob, (
+        f"a tenant identifier reached the unauthenticated payload: {blob}")
     assert all(isinstance(v, (int, str)) for v in published)
 
 
@@ -641,6 +651,19 @@ def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
         # ...and it is published on the UNARMED arm too, because it is a constant
         # rather than a measurement (a `None` there would read as "not evaluated").
         assert _health(monkeypatch, dsn=None)["armed_but_uncut_clears"] == note
+        # ⛔ THE `armed` CONJUNCT IS GRADED HERE (#14624 review F3). This is the
+        # one arm where the registry holds an uncut graph AND the deployment is
+        # UNARMED, and the fold is `block["armed"] and uncut_count > 0`: an
+        # unarmed deployment has no record for a graph to be missing a row in, so
+        # the count must NOT degrade `ok`. Delete the conjunct and this reds.
+        unarmed = _health(monkeypatch, dsn=None)
+        assert unarmed["armed"] is False and unarmed["armed_but_uncut"] == 1, (
+            f"the control: the registry holds the graph, the deployment is "
+            f"unarmed — {unarmed}")
+        assert unarmed["ok"] is True, (
+            "an unarmed deployment cannot have an uncut graph: with no record "
+            "there is no row for one to be missing, so a process-memory entry "
+            "must not red `ok`")
     finally:
         rw.reset_uncut_graphs()
 
@@ -1377,7 +1400,10 @@ def test_a_non_arm_backfill_does_not_read_as_a_finished_cutover(
     assert (real["considered"], real["seeded"], real["refused"]) == (1, 1, 0)
     assert real["armed"] is None, "no --arm was passed, so nothing was armed"
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
-        "a graph with 3 position rows must seed to 3 — its next write is 4")
+        "a graph with 3 position rows must seed to 3 — the seed records the "
+        "FLOOR; a SEEDED counter allocates nothing (`ALLOCATION_SQL` is "
+        "`mode = 'active'`), so its next write is refused `cursor_not_active` "
+        "until `--arm`")
     assert "finish_the_cutover" in real, (
         "a run that leaves graphs SEEDED must say so in words: `seeded` is not "
         "cut over, and the operator's next step is `--arm`")
@@ -1504,6 +1530,12 @@ def test_a_dry_run_reports_would_counts_and_a_real_run_reports_the_writes(
     real_conn = _FakeRecordConn(answers)
     real = cli._cmd_backfill(real_conn, _backfill_args("o", arm_graphs=True))
     assert (real["seeded"], real["armed"]) == (2, 2), real
+    # ⛔ THE ENTRY'S MODE IS THE COUNTER's mode AFTER `--arm` (#14624 review F4).
+    # It used to be the SEED's answer, so a graph this very run cut over read
+    # `mode: "seeded"` beside `armed: true` — one entry contradicting itself.
+    # Grade the field: every armed entry must report `active`, which is `seed`'s
+    # answer only if `arm` did nothing.
+    assert {entry["mode"] for entry in real["graphs"]} == {"active"}, real
     assert (real["would_seed"], real["would_arm"]) == (None, None), real
     assert real_conn.commits == 2, "one transaction per graph"
 

@@ -8570,8 +8570,11 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, when the tenancy resolution could not be read, and when the
-    record is REFUSING writes RIGHT NOW (``degraded``, #10185/#10620) — a
+    not be read, when the tenancy resolution could not be read, when an ARMED
+    deployment reports an UNCUT graph (``record.armed_but_uncut`` > 0, #14582 —
+    every record that graph writes is refused while the fail-soft write path
+    reports success, so nothing else reds), and when the record is REFUSING
+    writes RIGHT NOW (``degraded``, #10185/#10620) — a
     monitoring surface that cannot read its own state must not report healthy,
     and one that reads "rows are being dropped" and still says ``ok`` is worse
     than one that cannot read at all. All of them fold into ``status`` (the
@@ -9329,8 +9332,11 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, an unread tenancy resolution, or an armed write REFUSED
-    inside ``RECORD_REFUSAL_WINDOW_SECONDS`` (``record.refusing`` feeding
+    counter snapshot, an unread tenancy resolution, a NON-ZERO
+    ``record.armed_but_uncut`` on an ARMED deployment (#14582: that graph's
+    record leg allocates nothing while the write path reports success), or an
+    armed write REFUSED inside ``RECORD_REFUSAL_WINDOW_SECONDS``
+    (``record.refusing`` feeding
     ``record.degraded``, #10185/#10620 — the record is dropping rows RIGHT NOW)
     degrades ``status``. A NON-ZERO ``record_write_failures`` whose last refusal
     is older than that window does NOT: the counters are cumulative since
@@ -54081,7 +54087,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
