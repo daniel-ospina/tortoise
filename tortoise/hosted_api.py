@@ -16139,6 +16139,16 @@ async def get_entity_relations(
     # wearing a total's clothes (``truncation.py``). A truncated page therefore
     # takes the contract's third state — incomplete, total unknown — and a
     # complete one is positively marked complete rather than left un-marked.
+    # ⛔ AND NO ``offset=`` HERE, unlike ``_paged`` — that is not an oversight.
+    # ``candidates`` is ``entity_reads.entity_relations``' POST-``SKIP``
+    # ``limit + 1`` probe (``entity_reads.py``), not a whole-population total, so
+    # the verdict already answers "is anything reachable past THIS page". Passing
+    # ``offset`` would compute ``offset + returned < candidates`` against an
+    # already-skipped probe and answer ``truncated: false`` while edges remain —
+    # fail-open, the exact defect ``truncation.py`` exists to prevent, and a
+    # client paging ``while truncated`` would drop them silently.
+    # (``tests/test_14592_read_parity.py::test_relations_pages_and_offset_actually_advances``
+    # closes the mutant: adding ``offset=offset`` reds it.)
     sink: dict = {}
     mark_truncation(sink, returned=body.get("count", 0),
                     candidates=candidates, exact=False)
@@ -54662,7 +54672,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (724 distinct
+# ABSOLUTE line number from 208 tracked files (725 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
