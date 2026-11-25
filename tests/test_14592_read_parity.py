@@ -866,6 +866,170 @@ def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
     assert provenance["delegation"][0]["props"]["text"] == secret
 
 
+# ── the by-id layer routes' own label-SET rule (#14593 review P1) ──────────
+
+
+def test_resolve_entity_carries_the_whole_label_set_additively(tmp_path):
+    """``_resolve_entity`` now ships ``labels(n)``, and ``label`` keeps its
+    BRANCH meaning — the additive contract every by-id disclosure rule reads.
+
+    The branch answers ONE label (``MATCH (n:Object) … RETURN 'Object' AS
+    label``), so it cannot answer "is this node also a ``:Source``?". Without the
+    additive set, ``_layer_payload`` had nothing to grade but the branch and a
+    hybrid rode the route (the end-to-end arms below). ``label`` is unchanged on
+    purpose: every existing consumer (``_get_entity``, ``create_edge``'s
+    resolution, the 13093/9836/4282 lanes) reads it as the branch that matched,
+    so moving it would be a shape change rather than a fix.
+    """
+    hybrid_id = "hybrid-resolve-14593"
+    with _graph(str(tmp_path / "g.db")) as ha:
+        sdk = _sdk(ha)
+        try:
+            # `:Object` FIRST on purpose: that is the allocation order the review
+            # measured the disclosure under (`labels(n)` order is not guaranteed
+            # by the engine), so the branch answers `Object` while the node also
+            # carries `Source`.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', "
+                "url:'https://example.test/hybrid-resolve-14593'})",
+                params={"i": hybrid_id}, read_only=False)
+            resolved = sdk._get_proj()._resolve_entity(hybrid_id)
+        finally:
+            sdk.close()
+    assert [r["label"] for r in resolved] == ["Object"], resolved
+    assert set(resolved[0]["labels"]) == {"Object", "Source"}, resolved[0]
+
+
+@pytest.mark.parametrize("route_label,label", [
+    ("objects", "Object"), ("subjects", "Subject")])
+def test_by_id_route_filters_a_hybrid_that_carries_a_Source_half(
+        tmp_path, route_label, label):
+    """#14593 review P1: ``_layer_payload`` graded the RESOLUTION BRANCH label.
+
+    ``_resolve_entity`` emits one entry per BRANCH, so a node carrying
+    ``:Object`` (or ``:Subject``) **and** ``:Source`` answered
+    ``label == "Object"`` — an allowed spelling — and this route published its
+    whole stored map, ``text``/``content`` included, while
+    ``GET /v1/sources/{url}`` withheld the same value. MEASURED pre-fix through
+    the public routes: ``GET /v1/objects/{id}`` answered 200 with the body in it.
+
+    ⛔ Reachability is the repo's own claim, not a contrived fixture:
+    ``mcp_server.py``'s #4649 blast-radius case names ``(:Object:Source {id:X})``
+    and ``tool_registry.py`` (citing #13114) names ``:Object:Source`` /
+    ``:Subject:Source`` as shapes the supersede path meets. The hybrid is written
+    below the doors on purpose — no public write creates it — which is the same
+    construction the delegation hybrid one section up uses.
+    """
+    secret = (f"HYBRID {label.upper()} SOURCE BODY THAT MUST NOT RIDE THE "
+              f"BY-ID ROUTE")
+    hybrid_id = f"hybrid-by-id-{label.lower()}-14593"
+    url = f"https://example.test/hybrid-by-id-{label.lower()}-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            cypher = (f"CREATE (n:{label}:Source {{id:$i, name:'HYBRID', url:$u, "
+                      f"text:$t, objectKind:'goal', subjectKind:'person'}})")
+            sdk._get_proj().g._query(
+                cypher, params={"i": hybrid_id, "u": url, "t": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/{route_label}/{hybrid_id}")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The route resolved THIS node and its non-Source half still reads back —
+        # otherwise a 404/other-node answer would pass the disclosure assertion
+        # vacuously (the non-vacuity half of the P1).
+        assert body.get("id") == hybrid_id, body
+        assert body.get("name") == "HYBRID", body
+        assert body.get("url") == url, body
+        assert "text" not in body, body
+        assert secret not in out.text, out.text
+
+
+def test_belief_never_puts_a_hybrid_sources_body_in_entity_name(tmp_path):
+    """#14593 review P1: ``/belief`` grades the same label SET as its siblings.
+
+    The route publishes ``_layer_payload(resolved[0])`` as the ``entity`` block and
+    coalesces ``name -> content -> url``. With the payload rule keyed on the
+    BRANCH label, a ``(:Object:Source)`` that carries no ``name`` fell through to
+    its ``content`` — a ``:Source``-only property ``filter_source_props`` drops
+    everywhere else — so the raw body was published as ``entity.name``.
+    MEASURED pre-fix: ``GET /v1/entities/{id}/belief`` answered 200 with the body
+    in ``entity.name``, while ``GET /v1/sources/{url}`` withheld it.
+    """
+    hybrid_id = "hybrid-belief-14593"
+    url = "https://example.test/hybrid-belief-14593"
+    secret = "HYBRID BELIEF BODY THAT MUST NOT RIDE entity.name"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            # NO `name` on purpose — that is what makes the `content` coalesce
+            # the live path, which is the leak this arm grades.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, url:$u, content:$c, "
+                "objectKind:'goal'})",
+                params={"i": hybrid_id, "u": url, "c": secret},
+                read_only=False)
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{hybrid_id}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        # The node was really resolved (the fixture reached the arm)…
+        assert body["entity"]["id"] == hybrid_id, body
+        # …and the name fell through to the identity, not to the body.
+        assert body["entity"]["name"] == url, body
+        assert secret not in out.text, out.text
+
+
+def test_layer_payload_grades_the_whole_label_set_not_the_branch_label():
+    """The DECISION under the by-id routes, pinned in both directions.
+
+    A rule that filtered everything would strip a legitimate layer's map (the
+    over-block arm), and a rule keyed on the branch label would publish a hybrid
+    (the leak arm). Both are asserted here, on hand-built entries, because the
+    allocation ORDER that reproduced the leak end-to-end is not something a dict
+    fixture has — the route arms above carry that half.
+    """
+    from tortoise.hosted_api import _layer_payload
+
+    secret = "RAW BODY THAT MUST NOT RIDE THE BY-ID ROUTE"
+
+    # (a) the hybrid: an ALLOWED branch label with a `:Source` half -> filtered
+    hybrid = {"label": "Object", "labels": ["Object", "Source"],
+              "properties": {"id": "o1", "name": "HYBRID", "url": "u",
+                             "text": secret, "objectKind": "goal"}}
+    out = _layer_payload(hybrid)
+    assert "text" not in out, out
+    assert out["name"] == "HYBRID" and out["id"] == "o1", out
+
+    # (b) a lone `:Source` — filtered, exactly as before this change
+    assert "text" not in _layer_payload(
+        {"label": "Source", "labels": ["Source"],
+         "properties": {"url": "u", "text": secret}})
+
+    # (c) a pure layer is returned AS STORED, so "deny by default" has not
+    # quietly become "filter everything"
+    pure = {"label": "Object", "labels": ["Object"],
+            "properties": {"name": "BETA", "objectKind": "goal",
+                           "confidence": 0.9}}
+    assert _layer_payload(pure) == pure["properties"]
+
+    # (d) an entry carrying ONLY the branch label (an older callee, or a
+    # hand-built chain) keeps the PREVIOUS behaviour rather than widening
+    assert "text" not in _layer_payload(
+        {"label": "Source", "properties": {"url": "u", "text": secret}})
+    assert _layer_payload(
+        {"label": "Object", "properties": {"name": "B"}}) == {"name": "B"}
+
+    # …and the input is not mutated in place: the route publishes what this
+    # returns, so a caller holding the resolved entry must not lose the payload.
+    assert hybrid["properties"]["text"] == secret
+
+
 # ── GET /v1/entities/{id}/relations ────────────────────────────────────────
 
 def test_relations_reports_direction_predicate_and_other_endpoint(tmp_path):

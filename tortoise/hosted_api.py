@@ -15703,30 +15703,84 @@ async def _resolve_entity_off_loop(org: dict, entity_id: str, *, surface: str
 def _layer_payload(entry: dict) -> dict:
     """One resolved node's properties, under its layer's own disclosure rule.
 
-    A ``:Source`` goes through ``projection.entities.filter_source_props`` — the
-    ONE home of the #3998 rule (the graph indexes the raw; it is not the raw
-    store) that ``get_entity`` itself applies, so this route cannot re-open a
-    disclosure that door closed. Every other layer's properties are returned as
-    stored.
+    A node whose label SET is not entirely publishable goes through
+    ``projection.entities.filter_source_props`` — the ONE home of the #3998 rule
+    (the graph indexes the raw; it is not the raw store) that ``get_entity``
+    itself applies, so this route cannot re-open a disclosure that door closed.
+
+    ⛔ THE WHOLE LABEL SET DECIDES, never the single resolution BRANCH label
+    (#14593 review P1). ``_resolve_entity`` emits one entry per BRANCH
+    (``MATCH (n:Object) … RETURN 'Object' AS label``), so ``entry["label"]`` is
+    the branch that matched, NOT ``labels(n)``. An earlier revision of this
+    function tested that string for equality against ``"Source"``, so a node
+    carrying ``:Object`` (or ``:Subject``) **and** ``:Source`` answered
+    ``label == "Object"`` — an allowed spelling — and its whole stored map was
+    published, ``text``/``content`` included, on routes whose own docstring says
+    they cannot re-open a disclosure that door closed. MEASURED through the
+    public routes before this fix: a raw-written ``(:Object:Source {text: …})``
+    answered ``GET /v1/objects/{id}`` 200 carrying the body, and ``/belief``
+    republished it as ``entity.name`` via the ``content`` coalesce, while
+    ``GET /v1/sources/{url}`` withheld the same value. Reachability is the
+    repo's own claim, not a contrived fixture: ``mcp_server.py``'s #4649
+    blast-radius case names ``(:Object:Source {id:X})``, and ``tool_registry.py``
+    (citing #13114) names ``:Object:Source`` / ``:Subject:Source`` as shapes the
+    supersede path meets.
+
+    The decision is the SAME one ``_delegation_entry_publishable`` makes for a
+    provenance neighbour — every label in the set must be publishable, deny by
+    default — because it is the same node-class question one helper away; a
+    second spelling of the rule is the drift this PR removed from the delegation
+    arm already. ``labels`` is additive on the resolved entry
+    (``_resolve_entity`` now returns ``labels(n)``); an entry carrying only the
+    branch label falls back to that one string, which is exactly the previous
+    behaviour rather than a widening.
     """
     props = dict(entry.get("properties") or {})
-    if entry.get("label") == "Source":
+    if not _label_set_publishable(_entry_label_set(entry, fallback_key="label")):
         from tortoise.projection.entities import filter_source_props
 
         props, _denied = filter_source_props(props)
     return props
 
 
-#: The labels whose WHOLE property map `/belief` may publish inside
-#: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
-#: ``(:Document:Source)``, or any label this file has never heard of — is filtered
-#: through ``projection.entities.filter_source_props`` (deny by default, #3998).
-#: Every label on the neighbour must be in this set — the WHOLE set, not the
-#: first one (``_delegation_entry_publishable``), because a hybrid
+#: The labels whose WHOLE property map a read route may publish. Everything else
+#: — a ``:Source``, a legacy ``(:Document:Source)``, or any label this file has
+#: never heard of — is filtered through ``projection.entities.filter_source_props``
+#: (deny by default, #3998). Every label on the node must be in this set — the
+#: WHOLE set, never the first one (``_label_set_publishable``), because a hybrid
 #: ``(:Object:Source)`` answers an allowed first label while carrying a
-#: ``:Source`` half. The callee now ships the label list alongside the single
-#: ``node_type`` that the wire shape keeps.
-_PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
+#: ``:Source`` half. Used by BOTH the by-id ``_layer_payload`` routes and
+#: ``/belief``'s ``evidence.provenance.delegation`` arm — one rule, two doors.
+_PUBLISHABLE_PAYLOAD_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
+
+
+def _entry_label_set(entry: dict, *, fallback_key: str) -> list[str]:
+    """Every label on one payload entry, else the single label it carries.
+
+    ``labels`` is the ADDITIVE label set (``_resolve_entity`` for a resolved
+    node, ``sdk._provenance`` for a delegation neighbour). When it is absent the
+    entry is from a hand-built chain or an older callee, which carries only one
+    spelling: ``fallback_key`` names that field per caller (``label`` on a
+    resolved branch entry, ``node_type`` on a provenance neighbour).
+    """
+    labels = entry.get("labels")
+    if isinstance(labels, (list, tuple)) and labels:
+        return [lbl for lbl in labels if lbl]
+    single = entry.get(fallback_key)
+    return [single] if single else []
+
+
+def _label_set_publishable(labels: list[str]) -> bool:
+    """Is EVERY label in this set one a read route may publish its map under?
+
+    ⛔ DENY BY DEFAULT includes ABSENCE: an empty set is not publishable.
+    ``all(... for lbl in [])`` is vacuously True, which would let a label-less
+    node through — the mutant a review measured passing this rule before the
+    absence arm was pinned.
+    """
+    if not labels:
+        return False
+    return all(lbl in _PUBLISHABLE_PAYLOAD_LABELS for lbl in labels)
 
 
 def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
@@ -15827,19 +15881,8 @@ def _delegation_entry_publishable(entry: dict) -> bool:
     hand-built chain) that carries only ``node_type`` falls back to that single
     string, which is exactly the previous behaviour rather than a widening.
     """
-    labels = entry.get("labels")
-    if isinstance(labels, (list, tuple)) and labels:
-        readable = [lbl for lbl in labels if lbl]
-    else:
-        # An older callee (or a hand-built chain) carries only the single string.
-        readable = [entry.get("node_type")] if entry.get("node_type") else []
-    if not readable:
-        # ⛔ DENY BY DEFAULT includes ABSENCE. An entry with no readable label is
-        # filtered, never trusted: `all(... for lbl in [] if lbl)` is vacuously
-        # True, which would let a label-less neighbour through — the mutant a
-        # review measured passing this filter before the arm was pinned.
-        return False
-    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in readable)
+    labels = _entry_label_set(entry, fallback_key="node_type")
+    return _label_set_publishable(labels)
 
 
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
@@ -54918,7 +54961,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (725 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
