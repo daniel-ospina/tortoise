@@ -15721,9 +15721,11 @@ def _layer_payload(entry: dict) -> dict:
 #: ``evidence.provenance.delegation``. Everything else — a ``:Source``, a legacy
 #: ``(:Document:Source)``, or any label this file has never heard of — is filtered
 #: through ``projection.entities.filter_source_props`` (deny by default, #3998).
-#: ⚠️ The callee reports ONE label (``labels(n)[0]``), so this set is checked
-#: against that label alone; the multi-label residual and why it needs the callee
-#: change are stated in ``_filter_delegation_payloads``' docstring.
+#: Every label on the neighbour must be in this set — the WHOLE set, not the
+#: first one (``_delegation_entry_publishable``), because a hybrid
+#: ``(:Object:Source)`` answers an allowed first label while carrying a
+#: ``:Source`` half. The callee now ships the label list alongside the single
+#: ``node_type`` that the wire shape keeps.
 _PUBLISHABLE_DELEGATION_LABELS = frozenset({"Point", "Object", "Subject", "Event"})
 
 
@@ -15749,21 +15751,26 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
     labels are touched; every other node's map is returned as stored, so no other
     arm's payload changes shape.
 
-    ⛔ THE RESIDUAL, stated because this filter CANNOT see it: the callee sends
-    ONE label (``labels(n)[0]``), so a node that carries a publishable label
-    FIRST and ``:Source`` as well — measured: ``(:Point:Source)``,
-    ``(:Object:Source)``, ``(:Event:Source)``, ``(:Subject:Source)`` — answers a
-    publishable ``node_type`` and its whole map rides, ``text`` included. Label
-    order is allocation-dependent (``CREATE (f:Source:Point)`` yields
-    ``['Point','Source']``), so no rule keyed on a single label can close it.
-    ⚠️ NOT reachable through product code today: the one ``SET n:Source`` writer
-    (``migrate_kinds``) also removes the legacy document label in the same
-    statement, and nothing writes ``:Point:Source`` — the reachable paths are
-    ``hosted_backup``'s operator remedy ("add a SERVED label") and an SDK/
-    direct-edge write. Closing it needs the callee to return ``labels(n)``, which
-    changes the ``tortoise_provenance`` payload and therefore belongs to #14630
-    (this file's claim is narrowed to what it can enforce: a single-label
-    neighbour, deny-by-default on unknown spellings).
+    ⛔ THE MULTI-LABEL RESIDUAL IS CLOSED HERE, and it was measured before it was
+    closed. The callee used to send ONE label (``labels(n)[0]``), so a node
+    carrying a publishable label FIRST and ``:Source`` as well — measured:
+    ``(:Point:Source)``, ``(:Object:Source)``, ``(:Event:Source)``,
+    ``(:Subject:Source)`` — answered a publishable ``node_type`` and its whole map
+    rode, ``text`` included. Label order is allocation-dependent (``CREATE
+    (f:Source:Point)`` yields ``['Point','Source']``), so no rule keyed on a
+    single label could ever close it: the filter now grades the WHOLE label SET
+    (``_delegation_entry_publishable``), which the callee carries as an ADDITIVE
+    ``labels`` key (``sdk._provenance``) while ``node_type`` keeps its single-label
+    meaning and wire type, so no consumer's shape moved. Reachability, for the
+    record: the one ``SET n:Source`` writer (``migrate_kinds``) also removes the
+    legacy document label in the same statement, and nothing writes
+    ``:Point:Source`` — the reachable paths were ``hosted_backup``'s operator
+    remedy ("add a SERVED label") and an SDK/direct-edge write. ⚠️ The callee-side
+    fix was contested as a surface change belonging to #14630; it landed here
+    because the alternative was shipping the disclosure behind a stated residual,
+    and an additive field on a returned map is not a tool/method surface change.
+    The fixture that proves it creates the hybrid with ``:Object`` FIRST, so the
+    disclosure reproduces instead of being assumed away.
 
     ⛔ DENY BY DEFAULT, and the reason is MEASURED, not stylistic. An earlier
     revision tested ``entry.get("node_type") == "Source"`` — and that field is
@@ -15788,12 +15795,47 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
 
     filtered: list = []
     for entry in delegation:
-        if (isinstance(entry, dict)
-                and entry.get("node_type") not in _PUBLISHABLE_DELEGATION_LABELS):
+        if isinstance(entry, dict) and not _delegation_entry_publishable(entry):
             props, _denied = filter_source_props(dict(entry.get("props") or {}))
             entry = {**entry, "props": props}
         filtered.append(entry)
     return {**provenance, "delegation": filtered}
+
+
+def _delegation_entry_publishable(entry: dict) -> bool:
+    """Is EVERY label on this delegation neighbour one the route may publish?
+
+    ⛔ THE WHOLE SET, never ``node_type`` alone, and the difference is a measured
+    disclosure (#14593 review P1). ``node_type`` is the neighbour's FIRST label
+    (``labels(n)[0]`` as the callee returned it), so a node carrying
+    ``[:Object, :Source]`` presented as ``node_type == "Object"`` — an allowed
+    label — and its ``properties(n)`` map was published untouched, ``:Source``
+    half included. That shape is not hypothetical: this repo's own product code
+    names the hybrids as production shapes (``mcp_server.py``'s #4649 blast-radius
+    case is ``(:Object:Source)``; #12914 and ``tool_registry.py`` citing #13114
+    name ``(:Object:Source)`` / ``(:Subject:Source)`` / ``(:Object:Event)`` as
+    shapes the supersede path meets), and ``relabel_legacy_documents``
+    (``migrate_kinds.py``) leaves ``:Document:Source`` behind on an interrupted
+    run — the same legacy provenance class one spelling over.
+
+    Deny by DEFAULT: an entry whose labels cannot be read at all is filtered, not
+    trusted. ``labels`` is additive on the payload; an older callee (or a
+    hand-built chain) that carries only ``node_type`` falls back to that single
+    string, which is exactly the previous behaviour rather than a widening.
+    """
+    labels = entry.get("labels")
+    if isinstance(labels, (list, tuple)) and labels:
+        readable = [lbl for lbl in labels if lbl]
+    else:
+        # An older callee (or a hand-built chain) carries only the single string.
+        readable = [entry.get("node_type")] if entry.get("node_type") else []
+    if not readable:
+        # ⛔ DENY BY DEFAULT includes ABSENCE. An entry with no readable label is
+        # filtered, never trusted: `all(... for lbl in [] if lbl)` is vacuously
+        # True, which would let a label-less neighbour through — the mutant a
+        # review measured passing this filter before the arm was pinned.
+        return False
+    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in readable)
 
 
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
