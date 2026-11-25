@@ -618,7 +618,16 @@ def _fence_scan_pass(
                 open_char, open_len, open_at, open_line = candidate, run, offset, number
                 open_indent = indent
         elif (is_fence and candidate == open_char and run >= open_len
-              and indent <= open_indent + allowance):
+              and indent <= open_indent + allowance
+              # ⛔ A CLOSER CARRIES NO INFO STRING (CommonMark). Without this clause
+              # ` ```bash ` closes a backtick fence, so every marker below it reads as
+              # OUTSIDE the fence and `--uninstall` deletes the user's own text with
+              # exit 0 — measured: a doc whose closing example line was ` ```bash `
+              # lost `user's own line — never delete this` and reported no refusal.
+              # The commonest real trigger is an example that shows a LANGUAGED fence
+              # while being closed by an unlabelled one, which is exactly what
+              # documentation about fenced blocks writes down.
+              and not stripped[run:].strip()):
             spans.append((open_at, offset + len(line)))
             open_char = None
         offset += len(line)

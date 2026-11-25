@@ -1058,6 +1058,42 @@ def test_an_unclosed_fence_is_REFUSED_not_read_as_fenced_to_eof():
     assert "line 3" in why, why
 
 
+def test_a_closer_carrying_an_INFO_STRING_does_not_close_the_fence(tmp_path):
+    """⛔ ` ```bash ` IS CONTENT, NOT A CLOSER (CommonMark) — and reading it as one
+    DELETED the user's own text.
+
+    The closer branch tested only the run of fence characters, never what followed
+    it. So in a document that shows a LANGUAGED fence inside an unlabelled one —
+    which is precisely what documentation about fenced blocks writes down — the
+    inner ` ```bash ` closed the OUTER fence early, every marker below it read as
+    outside the fence, and `--uninstall` removed the marked block *and whatever the
+    user had put between it and the end of the file*: measured, a doc carrying
+    `user's own line — never delete this` lost that line and reported NO refusal
+    (exit 0, file rewritten).
+
+    CommonMark: a closing fence carries no info string, so this document has ONE
+    fence, unclosed, and the refusal that already exists for that shape is the
+    correct answer — the file must not be touched.
+    """
+    text = ("# House files\n\n```\necho example\n```bash\n"
+            + harness_onboard.BEGIN_MARK +
+            "\nuser's own line — never delete this\n" + harness_onboard.END_MARK
+            + "\n")
+    ok, why = harness_onboard._markers_well_formed(text)
+    assert ok is False, (
+        "a closer carrying an info string must not close the fence — read as closed, "
+        "the markers below it look real and --uninstall deletes the user's text")
+    assert "unclosed code fence" in why and "line 3" in why, why
+
+    # The property that matters, end to end: the file is left BYTE-IDENTICAL.
+    tmp = tmp_path / "AGENTS.md"
+    tmp.write_text(text, encoding="utf-8")
+    result = harness_onboard.remove_instructions("pi", tmp.parent, dry_run=False)
+    assert result.refusals, "a malformed pair must refuse rather than remove"
+    assert tmp.read_text(encoding="utf-8") == text, (
+        "the user's own line was destroyed: " + repr(tmp.read_text(encoding="utf-8")))
+
+
 def test_a_four_space_indented_example_is_not_ours_either():
     """A fence inside a LIST ITEM is indented — CommonMark agrees, so must we.
 
