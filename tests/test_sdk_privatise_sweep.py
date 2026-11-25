@@ -256,8 +256,13 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2446 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on THIS fold of `origin/main` `5163c3ee8b`, which KEPT both sides' prose
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2449 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED LAST for the `#14396` review's P3: the ninth fold's LIVE-pair claim (“`--repin`
+    on THIS tree prints (11919, …)”) is retired in favour of the HISTORICAL reading the `#14548`
+    note at the top of the record declares, and the five earlier folds that asserted “the pair
+    below is `--repin`'s own output on the tree that SHIPS” now say it in the past tense of the
+    fold they describe — so the run is RE-MEASURED here (2446 -> 2449) rather than adjusted by
+    arithmetic; ⛔ RE-WALKED before that on THIS fold of `origin/main` `5163c3ee8b`, which KEPT both sides' prose
     blocks as every fold before it did; the LATEST earlier fold of `origin/main` `e216ca91b07e`
     kept both sides' blocks too, and the two parent readings are recorded rather than inherited —
     2294 is `main`'s own reading on `2cccf90f4dd4`'s folded tree, 2350 this branch's on the
@@ -1899,6 +1904,74 @@ def test_a_pair_bound_to_the_pair_below_is_the_pins_own_pair():
     for sentence in honest:
         assert not _pairs_bound_to_a_relative_tree(sentence), (
             f"an honest, rev-scoped measurement must NOT red this arm: {sentence!r}")
+
+
+#: The claim that the pin ABOUT TO SHIP is a LIVE `--repin` reading of the shipping tree —
+#: `the pair below is --repin's own output on the tree that SHIPS`. ⛔ NOTHING COULD GRADE IT
+#: BEFORE IT ROTTED: `--repin` walks every Python file in the tree (~74 s here), so no arm in this
+#: suite can re-derive the pair and falsify the claim, and the shipping tree moves with every fold
+#: — which is how the ninth fold's sentence survived two fresh-context reviews asserting
+#: `(11919, …)` on a tree whose `--repin` printed `(11912, "7b8ffb7fdb745f2d")` (#14396 review,
+#: P3), with an attribution ("`main`'s own new rows") that was false too.
+#:
+#: ⛔ THE CONTRACT IS THE ATTRIBUTION, NOT THE TENSE OF THE WHOLE BLOCK. A fold's own reading ("the
+#: pair below is `--repin`'s output on THIS tree") is HISTORY and is kept: it was true of the tree
+#: it stood on, and there are dozens of them. What may never be asserted is that the pair which
+#: SHIPS is a live reading of the tree that ships — after the `#14548` ratchet the pin is a
+#: HISTORICAL reading (the note at the top of the record says so), so that claim needs the REV
+#: that printed the pair, in the past tense, or it rots silently.
+_SHIPPING_TREE_AS_LIVE = re.compile(
+    r"(?i)(?:(?:the\s+pair\s+below|`SWEEP_RESIDUE`)[^.;]{0,120}?"
+    r"\b(?:is|remains|prints|reads|derives)\b[^.;]{0,100}?"
+    r"(?:the\s+tree\s+that\s+ships|the\s+shipping\s+tree)"
+    r"|(?:the\s+tree\s+that\s+ships|the\s+shipping\s+tree)[^.;]{0,120}?"
+    r"\b(?:prints|reads|derives|reports)\b[^.;]{0,40}?\(?\d{2,}\s*,\s*[\"'])")
+
+
+def _shipping_pin_live_claims(block: str) -> list[str]:
+    """Sentences presenting the SHIPPING pin as a LIVE reading of the tree that ships."""
+    flow = re.sub(r"\n#:\s?", " ", block)
+    return [m.group(0) for m in _SHIPPING_TREE_AS_LIVE.finditer(flow)]
+
+
+def test_the_shipping_pin_is_never_presented_as_a_live_reading_of_the_shipping_tree():
+    """#14396 review P3 — the pin about to ship was asserted to be a LIVE pair, and it was false.
+
+    Measured at the head the review read: the ninth fold's paragraph said "the pair below is
+    `--repin`'s own output on the tree that SHIPS, and `--check` exits 0 on it. `--repin` on THIS
+    tree prints **(11919, \"cdf654fd000ceff2\")**", while `--repin` on that tree printed
+    `(11912, "7b8ffb7fdb745f2d")`. It survived two clean reviews because the pair DOES equal
+    `SWEEP_RESIDUE` — the only thing the neighbouring arm compares — and because no arm could
+    re-derive the live reading to refute it. Four earlier folds carried the same sentence, each
+    true only of its own fold; since the `#14548` ratchet the pin is a HISTORICAL reading, so the
+    shipping claim is retired everywhere and folds record their own readings in the past tense.
+    """
+    live = _shipping_pin_live_claims(_residue_block())
+    assert not live, (
+        "the pin must not be presented as a LIVE `--repin` reading of the tree that ships — "
+        f"nothing here can re-derive the pair, so the claim rots: {live[0]!r} — state it as the "
+        "historical reading it is (#14548), or bind the reading to the rev that printed it")
+    # ⛔ NON-VACUITY, ON THE REAL PRE-FIX SENTENCE, installed verbatim: it must be refused.
+    pre_fix = (
+        "The pair below is `--repin`'s own output on the tree that SHIPS, and `--check` exits 0 "
+        'on it. `--repin` on THIS tree prints **(11919, "cdf654fd000ceff2")**')
+    assert _shipping_pin_live_claims(pre_fix), (
+        "the PRE-FIX sentence must be refused — an arm that cannot see the wording it was written "
+        "for grades nothing")
+    # ⛔ AND THE HONEST FORMS STAY GREEN, so the arm cannot be satisfied by deleting the record:
+    # a fold's own past-tense reading, a rev-bound reading, the historical reading the ratchet
+    # note declares, and a fold's live reading of ITS OWN tree (history, not a shipping claim).
+    honest = [
+        "the pair below WAS `--repin`'s own output on THAT fold's tree, and `--check` exited 0",
+        '`--repin` on `5163c3ee8b`\'s tree printed `(11919, "cdf654fd000ceff2")`',
+        "since `#14548` the pin is a HISTORICAL reading rather than the gate",
+        "the pair below is `--repin`'s own output on THIS tree, never arithmetic on the last pin",
+        "`--repin` on THIS tree prints only the tuple",
+        "run `--repin` when you need this tree's reading",
+    ]
+    for sentence in honest:
+        assert not _shipping_pin_live_claims(sentence), (
+            f"an honest form must NOT red this arm: {sentence!r}")
 
 
 def test_the_capture_rewrites_parent_is_the_rev_the_block_names():

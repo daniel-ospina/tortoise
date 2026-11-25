@@ -1946,8 +1946,8 @@ SWEEP_NAMES = 66
 #: merged it. The merged tree reproduces `main`'s set bit-for-bit (same count AND the same digest),
 #: which is the cross-check that nobody here moved it; this branch's product, test and tool files
 #: carry **0** residue rows (`edits_for` returns an empty Counter for each), so the `+2` against
-#: `main`'s pin is not this branch's. The pair below is `--repin`'s own output on the tree that
-#: SHIPS, and `--check` exits 0 on it — which repairs `main`'s red as well.
+#: `main`'s pin is not this branch's. The pair below was `--repin`'s own output on THAT fold's tree,
+#: and `--check` exited 0 on it — which repaired `main`'s red as well.
 #: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
 #: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
 #: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
@@ -2075,8 +2075,7 @@ SWEEP_NAMES = 66
 #: test that greps for `os.environ.update(_mode_knobs(`), `h.update(` ×1 and `registry.query(` ×1 — and
 #: the observed delta (+4), which the artifact cannot decompose further. All five are ordinary-word
 #: receivers on test doubles, an `os.environ` map and a hash object, so they are DECLARED here rather
-#: than re-spelled to hold a count still. The pair below is `--repin`'s own output on the tree that
-#: SHIPS.
+#: than re-spelled to hold a count still. The pair below was `--repin`'s own output on THAT fold's tree.
 #: The last two re-cuts are attributable and worth knowing: 11896 -> 11900 was this PR's own batch
 #: surface at `4b7be98fb38b`; 11900 -> 11908 is the 402-copy tests added on the recut, whose new
 #: `ha.` / `est.` / `detail` attribute reads are untyped receivers the sweep deliberately leaves alone.
@@ -2402,8 +2401,8 @@ SWEEP_NAMES = 66
 #: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
 #: ⛔ A FIFTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `2cccf90f4dd4`, this merge) and
 #: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
-#: pin and no arithmetic crosses them. The pair below is `--repin`'s own output on the tree that
-#: SHIPS; `--check` exits 0 on it.
+#: pin and no arithmetic crosses them. The pair below was `--repin`'s own output on THAT fold's tree;
+#: `--check` exited 0 on it.
 #:
 #: ⛔ #14445 RE-CUT IT ON `main`'s BEHALF — a deliberate re-pin, `--repin`'s own output and never
 #: arithmetic on the last one. `main` pinned (11910, "adc8229295339239") while its OWN tree derives
@@ -2524,8 +2523,8 @@ SWEEP_NAMES = 66
 #: ⛔ A SIXTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `533e256f2c89`, this merge) and
 #: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
 #: pin and no arithmetic crosses them. `main` ships (11910, "3216395d35345904") and its OWN tree
-#: derived (11912, "73827c80583e139f") two folds ago; the pair below is `--repin`'s own output on the
-#: tree that SHIPS, and `--check` exits 0 on it.
+#: derived (11912, "73827c80583e139f") two folds ago; the pair below WAS `--repin`'s own output
+#: on THAT fold's tree, and `--check` exited 0 on it.
 #: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
 #: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
 #: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
@@ -2540,22 +2539,26 @@ SWEEP_NAMES = 66
 #: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
 #: ⛔ A SEVENTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `af40c97ca31`, this merge) and
 #: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
-#: pin and no arithmetic crosses them. The pair below is `--repin`'s own output on the tree that
-#: SHIPS; `--check` exits 0 on it.
+#: pin and no arithmetic crosses them. The pair below was `--repin`'s own output on THAT fold's tree;
+#: `--check` exited 0 on it.
 #: ⛔ AN EIGHTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `e627ca89375`, this merge) and
 #: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
-#: pin and no arithmetic crosses them. The pair below is `--repin`'s own output on the tree that
-#: SHIPS, and it reproduces `main`'s literal BIT-FOR-BIT (same count AND same digest) even though the
+#: pin and no arithmetic crosses them. The pair below WAS `--repin`'s own output on THAT fold's tree,
+#: and it reproduced `main`'s literal BIT-FOR-BIT (same count AND same digest) even though the
 #: tree carries this branch's `tortoise/expansion_merge.py` — the cross-check that this branch
 #: contributes no residue row, because that module's one dict-literal merge is written with `{**a,
 #: **b}` precisely to avoid the `x.update` shape these pins count. `--check` exits 0 on it.
 #: ⛔ A NINTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `5163c3ee8b`, this merge) and
 #: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
 #: pin and no arithmetic crosses them. `main` shipped (11913, "4953069e1b2ae57c") and this branch's
-#: pre-fold tree derived the same pair; the pair below is `--repin`'s own output on the tree that
-#: SHIPS, and `--check` exits 0 on it. `--repin` on THIS tree prints
-#: **(11919, "cdf654fd000ceff2")**; the movement is `main`'s own new rows (the `env.update`,
-#: `imported.update` and `e.update` families), re-measured here rather than carried from either pin.
+#: pre-fold tree derived the same pair; the pair below WAS `--repin`'s output on THAT fold's tree.
+#: ⛔ IT IS NOT THIS TREE'S READING ANY MORE, AND IT IS DELIBERATELY NOT RE-CUT (#14396 review, P3):
+#: since `#14548` the pin is a HISTORICAL reading rather than the gate, exactly as the note at the
+#: top of this record states — `--check` ratchets the COUNT against the merge base and names this
+#: pair `recorded pin (historical, no longer required)`, leaving the recorded values untouched. This
+#: tree's own `--repin` reading is NOT restated here in the present tense: the sweep walks the whole
+#: tree, no arm can re-derive the pair to falsify it, and every fold moves it — so a number written
+#: that way rots. Run `--repin` when you need this tree's.
 SWEEP_RESIDUE = (11919, 'cdf654fd000ceff2')
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
