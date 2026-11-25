@@ -15965,10 +15965,16 @@ async def list_objects(
     shared predicate. ⛔ The BY-ID half is deliberately NOT identical, and the
     difference is stated rather than implied: ``GET /v1/points/{id}`` refuses a
     ``retracted`` record by name (``#432``/``#689``), while this route answers it
-    with the stored properties — it delegates to ``sdk.get_entity``, which is
-    the documented behaviour of the MCP door it reuses, and a caller reading
-    `status` in the payload can see the row is ended. Measured both ways:
-    a retracted Object answers 200 here and 404 on ``/v1/points/{id}``.
+    with the stored properties — it delegates to
+    ``FalkorProjection._resolve_entity`` plus the layer's own
+    ``filter_source_props`` (the two functions ``TortoiseSDK.get_entity`` is
+    built on), and deliberately NOT to ``sdk.get_entity``: that door applies the
+    ``TORTOISE_RECORD_SERVE`` seam, which these routes do not consult (§2.0 of
+    ``tortoise.entity_reads``), so on an armed deployment it can answer
+    ``{"residency": "not-hot", …}`` or ``{}`` rather than the stored
+    properties. Either way a caller reading ``status`` in the payload can see
+    the row is ended. Measured both ways: a retracted Object answers 200 here
+    and 404 on ``/v1/points/{id}``.
 
     Delegates to :func:`tortoise.entity_reads.list_layer`. See
     ``/v1/objects/{id}`` for the single-node read.
