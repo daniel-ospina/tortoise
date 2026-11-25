@@ -1,0 +1,3603 @@
+{
+  "graph_name": "xv14592_operating_model",
+  "db_uri": "127.0.0.1:16467/tortoise_test_matrix",
+  "corpus": "corpus/corpus.json",
+  "documents": [
+    {
+      "doc_id": "doc-01",
+      "date": "2026-02-03",
+      "title": "Choosing a cold-chain delivery partner",
+      "turns": 8,
+      "ok": true,
+      "ack_seconds": 22.01,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-01",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-25T00:59:09.792422+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_df53bd5a3b0700e1a53ab6ecaf15c987d90cbac88bc5aa85950050dc3fe299",
+            "kind": "statement",
+            "text": "The delivery partner question was believed to be a simple incumbent-versus-alternative tradeoff",
+            "props": {
+              "quote": "We believed our delivery partner question was a simple incumbent-versus-alternative tradeoff.",
+              "search_keys": [
+                "incumbent versus alternative",
+                "delivery partner tradeoff",
+                "simple tradeoff",
+                "NordicFreight vs ColdPath"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_df53bd5a3b0700e1a53ab6ecaf15c987d90cbac88bc5aa85950050dc3fe299",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+            "kind": "statement",
+            "text": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots",
+            "props": {
+              "quote": "the incumbent, NordicFreight, is structurally unable to serve our morning restaurant slots \u2014 its 6pm order cutoff caused four missed slots in January",
+              "search_keys": [
+                "6pm cutoff",
+                "morning restaurant slots",
+                "NordicFreight cutoff",
+                "missed slots"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_29b3fcffbfcd862fbd1337d238b9cb38a90bf983426a6cf4a00391166e8b92",
+            "kind": "statement",
+            "text": "NordicFreight's 6pm order cutoff caused four missed morning restaurant slots in January",
+            "props": {
+              "quote": "its 6pm order cutoff caused four missed slots in January",
+              "search_keys": [
+                "four missed slots",
+                "January missed slots",
+                "missed slots",
+                "6pm cutoff"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_29b3fcffbfcd862fbd1337d238b9cb38a90bf983426a6cf4a00391166e8b92",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+            "kind": "statement",
+            "text": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots",
+            "props": {
+              "quote": "ColdPath Logistics supports the choice because it offers a 9pm cutoff that meets the morning slots",
+              "search_keys": [
+                "9pm cutoff",
+                "ColdPath cutoff",
+                "morning slots",
+                "ColdPath Logistics"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+            "kind": "statement",
+            "text": "ColdPath Logistics holds a validated cold-chain certificate",
+            "props": {
+              "quote": "holds a validated cold-chain certificate",
+              "search_keys": [
+                "cold-chain certificate",
+                "validated cold chain",
+                "ColdPath certificate"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+            "kind": "statement",
+            "text": "Buying our own refrigerated van needs 48,000 pounds of capital spending",
+            "props": {
+              "quote": "it needs 48,000 pounds of capital spending",
+              "search_keys": [
+                "48,000 pounds",
+                "capital spending",
+                "own van cost",
+                "refrigerated van"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+            "kind": "statement",
+            "text": "The cash buffer is 31,000 pounds and is already committed to the March supplier payments",
+            "props": {
+              "quote": "a cash buffer of 31,000 pounds that is already committed to the March supplier payments",
+              "search_keys": [
+                "31,000 pounds",
+                "cash buffer",
+                "March supplier payments",
+                "committed cash"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+            "kind": "statement",
+            "text": "Dev Patel ruled the capital spend for our own refrigerated van not approvable this quarter",
+            "props": {
+              "quote": "Dev Patel ruled the capital spend not approvable this quarter",
+              "search_keys": [
+                "not approvable",
+                "capital spend ruling",
+                "Dev Patel",
+                "this quarter"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_be1246fb14b68484f40178eb8764d1fb29b35294c16f9e540039aa0283da62",
+            "kind": "statement",
+            "text": "The affordability constraint tempers the own-van option out of contention entirely",
+            "props": {
+              "quote": "That affordability constraint tempers the own-van option out of contention entirely.",
+              "search_keys": [
+                "affordability constraint",
+                "own-van out of contention",
+                "van option rejected"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_be1246fb14b68484f40178eb8764d1fb29b35294c16f9e540039aa0283da62",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+            "kind": "statement",
+            "text": "We choose ColdPath Logistics as our delivery partner",
+            "props": {
+              "quote": "Decision: we choose ColdPath Logistics as our delivery partner.",
+              "search_keys": [
+                "ColdPath Logistics",
+                "delivery partner decision",
+                "chosen partner",
+                "switch to ColdPath"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_cdad0730d21568a3eb488ee9a8c7a72c431e1840887ff249172b9065e88238",
+            "kind": "statement",
+            "text": "Marta Reyes owns negotiating the ColdPath contract",
+            "props": {
+              "quote": "Marta Reyes owns negotiating the ColdPath contract",
+              "search_keys": [
+                "Marta Reyes",
+                "negotiate ColdPath contract",
+                "contract owner",
+                "negotiation"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_cdad0730d21568a3eb488ee9a8c7a72c431e1840887ff249172b9065e88238",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_bd598929772ee2eeaf431e4bfbb69138d50555b7bf363ecde748062023ff7b",
+            "kind": "statement",
+            "text": "Dev Patel owns approving the capital spending line",
+            "props": {
+              "quote": "Dev Patel owns approving the capital spending line",
+              "search_keys": [
+                "Dev Patel",
+                "capital spending approval",
+                "approval owner"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_bd598929772ee2eeaf431e4bfbb69138d50555b7bf363ecde748062023ff7b",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+            "kind": "statement",
+            "text": "The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows",
+            "props": {
+              "quote": "The own-van option needs 48,000 pounds of capital spending, which is more than our current cash buffer allows.",
+              "search_keys": [
+                "48,000 pounds",
+                "cash buffer allows",
+                "own-van affordability",
+                "capital spending exceeds buffer"
+              ],
+              "source_turn_id": 3,
+              "span_start": 241,
+              "span_end": 351
+            },
+            "dedup": "new",
+            "point_id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+            "status": "live",
+            "ep_updated": true
+          }
+        ],
+        "error": null,
+        "session_id": "doc-01",
+        "turns": 8,
+        "extracted": 13,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'The delivery partner question was believ' has no resolvable source turn (no quote match)",
+          "point 'NordicFreight's 6pm order cutoff cannot ' has no resolvable source turn (no quote match)",
+          "point when '2026-01' is not a valid ISO date \u2014 dropped",
+          "value-bearing point 'NordicFreight's 6pm order cutoff caused four missed morning ' resolved to turn 3 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "value-bearing point 'ColdPath Logistics offers a 9pm cutoff that meets the mornin' resolved to turn 3 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "source_turn_id 0 contradicts the quote's turn 7 \u2014 deterministic match wins",
+          "value-bearing point 'Buying our own refrigerated van needs 48,000 pounds of capit' resolved to turn 3 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "value-bearing point 'The cash buffer is 31,000 pounds and is already committed to' resolved to turn 5 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'The affordability constraint tempers the' has no resolvable source turn (no quote match)",
+          "source_turn_id 0 contradicts the quote's turn 7 \u2014 deterministic match wins",
+          "source_turn_id 0 contradicts the quote's turn 7 \u2014 deterministic match wins",
+          "source_turn_id 0 contradicts the quote's turn 7 \u2014 deterministic match wins",
+          "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_a7c9c3cbc5b84410283df8e792c0fae211f87' \u2192 'pt_f0a2b9650921173ef84fa14fd3756343a55e3') was not emitted as its own operator \u2014 added so the dampener has its target",
+          "S3 identity partial: the existing-item lookup did not run for 6 of 21 candidate(s)",
+          "value-normalizer: 6 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d76 (prose only \u2014 each value is a drop, never a guess)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 6,
+          "events": 2,
+          "points": 13,
+          "operators": 11,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 3,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 14.8,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 8,
+          "s4_merge": {
+            "s2_items": 27,
+            "s4_items": 4,
+            "merged_items": 31,
+            "corrected_by_s4": 0,
+            "verbatim_reemissions": 0,
+            "kept_from_s2": 27,
+            "added_by_s4": 4
+          },
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "llm": {
+            "calls": 3,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 25107,
+            "completion_tokens": 3193,
+            "prompt_cache_hit_tokens": 16256,
+            "prompt_cache_miss_tokens": 8851,
+            "cost_usd": 0.0,
+            "calls_without_cost": 3,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1921,
+                    "completion_tokens": 190,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 513,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 10087,
+                    "completion_tokens": 2565,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 871,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13099,
+                    "completion_tokens": 438,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7467,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2565,
+            "s4_out_tokens": 438
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 8,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 1011
+            },
+            "map": {
+              "items": {
+                "entities": 6,
+                "events": 2,
+                "points": 12,
+                "operators": 7
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 20,
+                "by_outcome": {
+                  "KEEP": 20
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 21,
+                "by_outcome": {
+                  "KEEP": 21
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 0,
+                "points": 0,
+                "events": 0
+              }
+            },
+            "merge": {
+              "merged_items": 31,
+              "s2_items": 27,
+              "s4_items": 4
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 6,
+              "events": 2,
+              "points": 13,
+              "operators": 11,
+              "committed": 13
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a21036f51d-f158cff53888",
+              "dst_id": "1a21036f594-64ce41ebe09d",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f52c-bd9822c36fa6",
+              "dst_id": "1a21036f594-64ce41ebe09d",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a21036f52c-bd9822c36fa6",
+              "predicate": "managedBy",
+              "write_path": "structural",
+              "stated_predicate": "managedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 3,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 3
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_df53bd5a3b0700e1a53ab6ecaf15c987d90cbac88bc5aa85950050dc3fe299",
+            "label": "The delivery partner question was believed"
+          },
+          {
+            "point_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+            "label": "NordicFreight's 6pm order cutoff cannot make"
+          },
+          {
+            "point_id": "pt_29b3fcffbfcd862fbd1337d238b9cb38a90bf983426a6cf4a00391166e8b92",
+            "label": "NordicFreight's 6pm order cutoff caused four"
+          },
+          {
+            "point_id": "pt_29d962a168ecb1eb1e29ed26049c5b6ab7baad57dae2f167bb8308107c7120",
+            "label": "ColdPath Logistics offers a 9pm cutoff"
+          },
+          {
+            "point_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+            "label": "ColdPath Logistics holds a validated cold-chain"
+          },
+          {
+            "point_id": "pt_a7c9c3cbc5b84410283df8e792c0fae211f87e65508b53b9d35e808bff7d0b",
+            "label": "Buying our own refrigerated van needs"
+          },
+          {
+            "point_id": "pt_894dec4724496c1076f8432a3634a9f60716cc7176adb0ff68607d2da2de60",
+            "label": "The cash buffer is 31,000 pounds"
+          },
+          {
+            "point_id": "pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8",
+            "label": "Dev Patel ruled the capital spend"
+          },
+          {
+            "point_id": "pt_be1246fb14b68484f40178eb8764d1fb29b35294c16f9e540039aa0283da62",
+            "label": "The affordability constraint tempers the own-van"
+          },
+          {
+            "point_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+            "label": "We choose ColdPath Logistics as our"
+          },
+          {
+            "point_id": "pt_cdad0730d21568a3eb488ee9a8c7a72c431e1840887ff249172b9065e88238",
+            "label": "Marta Reyes owns negotiating the ColdPath"
+          },
+          {
+            "point_id": "pt_bd598929772ee2eeaf431e4bfbb69138d50555b7bf363ecde748062023ff7b",
+            "label": "Dev Patel owns approving the capital"
+          },
+          {
+            "point_id": "pt_a9d9a2d586ab170b56c4e1e124fb155c90dd1e596340b7eb6ac53f54e48a2a",
+            "label": "The own-van option needs 48,000 pounds"
+          }
+        ],
+        "graph_ops": {
+          "total": 1048,
+          "read": 862,
+          "write": 186,
+          "by_phase": {
+            "session_store": {
+              "read": 27,
+              "write": 22,
+              "total": 49
+            },
+            "extraction": {
+              "read": 617,
+              "write": 0,
+              "total": 617
+            },
+            "commit": {
+              "read": 0,
+              "write": 121,
+              "total": 121
+            },
+            "belief": {
+              "read": 218,
+              "write": 43,
+              "total": 261
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-02",
+      "date": "2026-02-10",
+      "title": "Cold-chain constraint and audit requirement",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 25.21,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-02",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-25T00:59:31.691472+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae",
+            "kind": "statement",
+            "text": "The chilled-goods operation was believed to be runnable on standard delivery practice, with cold-chain discipline treated as a preference applied where practical",
+            "props": {
+              "quote": "We believed the chilled-goods operation could be run on standard delivery practice, with cold-chain discipline treated as a preference to be applied where practical.",
+              "search_keys": [
+                "standard delivery practice",
+                "cold chain as preference",
+                "prior belief about chilled goods",
+                "chilled delivery assumption"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+            "kind": "statement",
+            "text": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes",
+            "props": {
+              "quote": "The cold chain must stay below 4 degrees Celsius at all times from our loading bay to the customer's door, with no exception for short routes",
+              "search_keys": [
+                "4 degrees Celsius",
+                "cold chain floor",
+                "sub-4\u00b0C",
+                "no exception for short routes"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_fde1fd75797312b9dfbe74a860aa3e11a57140a9a0e2d304c9102ded219a6c",
+            "kind": "statement",
+            "text": "Route length cannot be used to justify a cold-chain lapse",
+            "props": {
+              "quote": "so route length cannot be used to justify a lapse",
+              "search_keys": [
+                "short route exception",
+                "route length justification",
+                "cold chain lapse"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_fde1fd75797312b9dfbe74a860aa3e11a57140a9a0e2d304c9102ded219a6c",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+            "kind": "statement",
+            "text": "The food safety auditor requires a temperature log for every single delivery, retained for twelve months",
+            "props": {
+              "quote": "Our food safety auditor requires a temperature log for every single delivery, and the log must be retained for twelve months.",
+              "search_keys": [
+                "temperature log",
+                "twelve months retention",
+                "audit log requirement",
+                "per-delivery log"
+              ],
+              "source_turn_id": 3,
+              "span_start": 31,
+              "span_end": 156
+            },
+            "dedup": "new",
+            "point_id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_76e490f7f96e09a63017f4e55f8f4bde4607bb9c823fe41677573063e4a478",
+            "kind": "statement",
+            "text": "Without a log entry for a delivery, that delivery cannot happen at all",
+            "props": {
+              "quote": "without a log entry for a delivery, that delivery cannot happen at all",
+              "search_keys": [
+                "log as precondition",
+                "no log no delivery",
+                "delivery blocked without log"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_76e490f7f96e09a63017f4e55f8f4bde4607bb9c823fe41677573063e4a478",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_a89214cb42b12779daa21c0cc7dc856845038c5bb2e7a32ef19744099884e5",
+            "kind": "statement",
+            "text": "The wholesale licence forbids subcontracting chilled-goods delivery to any partner that does not hold a validated cold-chain certificate",
+            "props": {
+              "quote": "Our wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate.",
+              "search_keys": [
+                "subcontracting ban",
+                "validated cold-chain certificate",
+                "wholesale licence constraint",
+                "uncertified partners"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_a89214cb42b12779daa21c0cc7dc856845038c5bb2e7a32ef19744099884e5",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_19d8e55033f7354df8ebe4a8d73e6eea0ebe942f9156657ab46c8f729e10fb",
+            "kind": "statement",
+            "text": "The subcontracting restriction is a licence constraint, not a preference",
+            "props": {
+              "quote": "That is a licence constraint, not a preference.",
+              "search_keys": [
+                "licence constraint not preference",
+                "hard constraint",
+                "mandatory subcontracting rule"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_19d8e55033f7354df8ebe4a8d73e6eea0ebe942f9156657ab46c8f729e10fb",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+            "kind": "statement",
+            "text": "The sub-4\u00b0C floor and the per-delivery log requirement together mean the log is a precondition of delivery, not documentation after the fact",
+            "props": {
+              "quote": "the sub-4\u00b0C floor and the per-delivery log requirement together mean the log is a precondition of delivery, not documentation after the fact",
+              "search_keys": [
+                "log as precondition",
+                "not after the fact",
+                "combined constraints",
+                "delivery flow"
+              ],
+              "source_turn_id": 2
+            },
+            "dedup": "new",
+            "point_id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_4df595e659bbdeb3e73127f8a0c8dfba7661d774e3a510bd6316ed7587ef85",
+            "kind": "statement",
+            "text": "Logging should be treated as part of the delivery flow itself",
+            "props": {
+              "quote": "which supports treating logging as part of the delivery flow itself",
+              "search_keys": [
+                "logging in delivery flow",
+                "integrated logging",
+                "log step"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_4df595e659bbdeb3e73127f8a0c8dfba7661d774e3a510bd6316ed7587ef85",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_bc497592bc4b8847863cafe5e3995842561d5a22e063e077e387225e41577c",
+            "kind": "statement",
+            "text": "The licence constraint on subcontracting undermines any plan to flex chilled capacity through third-party partners who lack certification",
+            "props": {
+              "quote": "The licence constraint on subcontracting undermines any plan to flex chilled capacity through third-party partners who lack certification",
+              "search_keys": [
+                "flex capacity via partners",
+                "uncertified third parties",
+                "capacity flexing blocked"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_bc497592bc4b8847863cafe5e3995842561d5a22e063e077e387225e41577c",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_27cbd158fd8306ff6d0713815bb9bc3f51fe6ccc97a629b07a47164b0b7fc3",
+            "kind": "statement",
+            "text": "The licence constraint tempers the appeal of using uncertified couriers for short or overflow routes",
+            "props": {
+              "quote": "tempers the appeal of using uncertified couriers for short or overflow routes",
+              "search_keys": [
+                "uncertified couriers",
+                "overflow routes",
+                "short routes couriers"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_27cbd158fd8306ff6d0713815bb9bc3f51fe6ccc97a629b07a47164b0b7fc3",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_3348906c77f41897f5fda6a3fb9b8ee4141ed7ab29539aafc18314e9b2a282",
+            "kind": "statement",
+            "text": "Ownership of the cold-chain and audit compliance rules sits with Marta Reyes as Operations Lead",
+            "props": {
+              "quote": "Ownership of these rules sits with Marta Reyes (Operations Lead) for cold-chain and audit compliance",
+              "search_keys": [
+                "rule owner",
+                "Marta Reyes ownership",
+                "Operations Lead",
+                "cold-chain compliance owner"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_3348906c77f41897f5fda6a3fb9b8ee4141ed7ab29539aafc18314e9b2a282",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_e613c542d96ecf74dfb4d6089fd83b2203df30947d876d47dfba04d63ac27d",
+            "kind": "statement",
+            "text": "Ownership of the licence constraint sits with Dev Patel as Finance Director",
+            "props": {
+              "quote": "and Dev Patel (Finance Director) for the licence constraint",
+              "search_keys": [
+                "licence constraint owner",
+                "Dev Patel ownership",
+                "Finance Director"
+              ],
+              "source_turn_id": 2
+            },
+            "dedup": "new",
+            "point_id": "pt_e613c542d96ecf74dfb4d6089fd83b2203df30947d876d47dfba04d63ac27d",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-02",
+        "turns": 6,
+        "extracted": 13,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'The chilled-goods operation was believed' has no resolvable source turn (no quote match)",
+          "value-bearing point 'The cold chain must stay below 4 degrees Celsius at all time' resolved to turn 1 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'Route length cannot be used to justify a' has no resolvable source turn (no quote match)",
+          "source_turn_id 0 contradicts the quote's turn 3 \u2014 deterministic match wins",
+          "source_turn_id 0 contradicts the quote's turn 5 \u2014 deterministic match wins",
+          "source_turn_id 0 contradicts the quote's turn 5 \u2014 deterministic match wins",
+          "value-bearing point 'The sub-4\u00b0C floor and the per-delivery log requirement toget' resolved to turn 2 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'Logging should be treated as part of the' has no resolvable source turn (no quote match)",
+          "point 'The licence constraint on subcontracting' has no resolvable source turn (no quote match)",
+          "point 'The licence constraint tempers the appea' has no resolvable source turn (no quote match)",
+          "point 'Ownership of the cold-chain and audit co' has no resolvable source turn (no quote match)",
+          "MITIGATES dropped: the target pair ('pt_bc497592bc4b8847863cafe5e3995842561d5a22e063e077e387225e41577c'\u2192'pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae') carries 'NAND', which a mitigation target cannot DECLARE (OperatorTarget.op_type is IMPL|coherence) \u2014 no bridge of the declared mechanism ('IMPL') exists to attach to",
+          "chain 'ruleLifecycle' emitted 'rule' but its next step 'rationale' is missing \u2014 the chain is incomplete",
+          "S3 identity partial: the existing-item lookup did not run for 9 of 24 candidate(s)",
+          "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 10,
+          "events": 1,
+          "points": 13,
+          "operators": 4,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 4,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 19.1,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 27035,
+            "completion_tokens": 4153,
+            "prompt_cache_hit_tokens": 16256,
+            "prompt_cache_miss_tokens": 10779,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1768,
+                    "completion_tokens": 291,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 360,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 10036,
+                    "completion_tokens": 3755,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 820,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 14275,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 8643,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 956,
+                    "completion_tokens": 67,
+                    "prompt_cache_hit_tokens": 0,
+                    "prompt_cache_miss_tokens": 956,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 3755,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 1547
+            },
+            "map": {
+              "items": {
+                "entities": 10,
+                "events": 1,
+                "points": 13,
+                "operators": 5
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 24,
+                "by_outcome": {
+                  "KEEP": 24
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 24,
+                "by_outcome": {
+                  "KEEP": 24
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 1,
+                "points": 7,
+                "events": 1
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 10,
+              "events": 1,
+              "points": 13,
+              "operators": 4,
+              "committed": 13
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a2103753ff-6c95c02e9034",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f586-adbeff52ccd8",
+              "dst_id": "1a21037540e-491edf3b47ab",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2103754e8-4120a46a353d",
+              "dst_id": "1a210375480-b497e8bf7cad",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2103754d5-084abce66665",
+              "dst_id": "1a2103754c4-8be478e68bab",
+              "predicate": "IMPL",
+              "write_path": "direct",
+              "stated_predicate": "causes",
+              "declared_by": null,
+              "mechanism": "IMPL",
+              "label": "causes",
+              "direction": "->",
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 4,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 3,
+            "direct": 1
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_3ce226c14fddf5758817649583f560cd598067e97f772526b81ec35d5b1cae",
+            "label": "The chilled-goods operation was believed to"
+          },
+          {
+            "point_id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+            "label": "The cold chain must stay below"
+          },
+          {
+            "point_id": "pt_fde1fd75797312b9dfbe74a860aa3e11a57140a9a0e2d304c9102ded219a6c",
+            "label": "Route length cannot be used to"
+          },
+          {
+            "point_id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+            "label": "The food safety auditor requires a"
+          },
+          {
+            "point_id": "pt_76e490f7f96e09a63017f4e55f8f4bde4607bb9c823fe41677573063e4a478",
+            "label": "Without a log entry for a"
+          },
+          {
+            "point_id": "pt_a89214cb42b12779daa21c0cc7dc856845038c5bb2e7a32ef19744099884e5",
+            "label": "The wholesale licence forbids subcontracting chi"
+          },
+          {
+            "point_id": "pt_19d8e55033f7354df8ebe4a8d73e6eea0ebe942f9156657ab46c8f729e10fb",
+            "label": "The subcontracting restriction is a licence"
+          },
+          {
+            "point_id": "pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d",
+            "label": "The sub-4\u00b0C floor and the per-delivery"
+          },
+          {
+            "point_id": "pt_4df595e659bbdeb3e73127f8a0c8dfba7661d774e3a510bd6316ed7587ef85",
+            "label": "Logging should be treated as part"
+          },
+          {
+            "point_id": "pt_bc497592bc4b8847863cafe5e3995842561d5a22e063e077e387225e41577c",
+            "label": "The licence constraint on subcontracting undermi"
+          },
+          {
+            "point_id": "pt_27cbd158fd8306ff6d0713815bb9bc3f51fe6ccc97a629b07a47164b0b7fc3",
+            "label": "The licence constraint tempers the appeal"
+          },
+          {
+            "point_id": "pt_3348906c77f41897f5fda6a3fb9b8ee4141ed7ab29539aafc18314e9b2a282",
+            "label": "Ownership of the cold-chain and audit"
+          },
+          {
+            "point_id": "pt_e613c542d96ecf74dfb4d6089fd83b2203df30947d876d47dfba04d63ac27d",
+            "label": "Ownership of the licence constraint sits"
+          }
+        ],
+        "graph_ops": {
+          "total": 1165,
+          "read": 1021,
+          "write": 144,
+          "by_phase": {
+            "session_store": {
+              "read": 24,
+              "write": 16,
+              "total": 40
+            },
+            "extraction": {
+              "read": 643,
+              "write": 0,
+              "total": 643
+            },
+            "commit": {
+              "read": 0,
+              "write": 93,
+              "total": 93
+            },
+            "belief": {
+              "read": 354,
+              "write": 35,
+              "total": 389
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-03",
+      "date": "2026-02-17",
+      "title": "Account growth goal for the year",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 24.3,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-03",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-25T00:59:56.899186+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+            "kind": "statement",
+            "text": "The year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+            "props": {
+              "quote": "the year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add",
+              "search_keys": [
+                "40 restaurant accounts",
+                "December target",
+                "22 more accounts",
+                "account growth goal"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+            "kind": "statement",
+            "text": "Growth is gated by delivery capacity, not sales effort",
+            "props": {
+              "quote": "growth is gated by delivery capacity, not sales effort",
+              "search_keys": [
+                "delivery capacity constraint",
+                "growth bottleneck",
+                "not sales effort"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+            "kind": "statement",
+            "text": "Every new restaurant account requires a morning delivery slot",
+            "props": {
+              "quote": "Every new account requires a morning delivery slot",
+              "search_keys": [
+                "morning delivery slot",
+                "new account requirement",
+                "delivery slot"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+            "kind": "statement",
+            "text": "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that slot",
+            "props": {
+              "quote": "cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that slot",
+              "search_keys": [
+                "below 4 degrees",
+                "cold chain compliance",
+                "cold-chain rule"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+            "kind": "statement",
+            "text": "The growth goal depends on the delivery partner keeping morning slots",
+            "props": {
+              "quote": "the goal depends on the delivery partner keeping morning slots",
+              "search_keys": [
+                "delivery partner dependency",
+                "morning slots",
+                "partner reliability"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "kind": "statement",
+            "text": "Priya Nair owns account onboarding",
+            "props": {
+              "quote": "Onboarding is owned by Priya Nair",
+              "search_keys": [
+                "onboarding owner",
+                "Priya Nair onboarding",
+                "account onboarding"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_13fd9b1351f42c2fc49e4b054a7ac691d61b48b975c288e675deb51fff7cae",
+            "kind": "statement",
+            "text": "An account only counts once it has a signed supply agreement and a first delivery with a temperature log",
+            "props": {
+              "quote": "an account only counts once it has a signed supply agreement and a first delivery with a temperature log",
+              "search_keys": [
+                "counted account definition",
+                "signed supply agreement",
+                "temperature log",
+                "first delivery"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_13fd9b1351f42c2fc49e4b054a7ac691d61b48b975c288e675deb51fff7cae",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_6458f1182ca40c28529f5e600932eb5d89b873bcd55b76a3429b15d295f6c9",
+            "kind": "statement",
+            "text": "The constraint on account growth is operational \u2014 delivery slots plus cold-chain compliance \u2014 and a counted account is a signed agreement plus a temperature-logged first delivery",
+            "props": {
+              "quote": "the constraint on account growth is operational (slots + cold-chain compliance), and the definition of a \"counted\" account is a signed agreement plus a temperature-logged first delivery",
+              "search_keys": [
+                "operational constraint",
+                "slots and cold-chain",
+                "counted account definition"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_6458f1182ca40c28529f5e600932eb5d89b873bcd55b76a3429b15d295f6c9",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-03",
+        "turns": 6,
+        "extracted": 8,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'The year's target is 40 restaurant accou' has no resolvable source turn (no quote match)",
+          "point 'Growth is gated by delivery capacity, no' has no resolvable source turn (no quote match)",
+          "value-bearing point 'Cold-chain rules forbid adding an account unless the cold ch' resolved to turn 3 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'The constraint on account growth is oper' has no resolvable source turn (no quote match)",
+          "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_0d218123c110d8a8ed797d58f5faa2688586e' \u2192 'pt_ee174d5e639bca64d1917faca3b501cfaaef3') was not emitted as its own operator \u2014 added so the dampener has its target",
+          "chain 'ruleLifecycle' emitted 'rule' but its next step 'rationale' is missing \u2014 the chain is incomplete",
+          "S3 identity partial: the existing-item lookup did not run for 2 of 17 candidate(s)",
+          "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 7,
+          "events": 2,
+          "points": 8,
+          "operators": 5,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 3,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 19.1,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 25800,
+            "completion_tokens": 2382,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 9416,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1783,
+                    "completion_tokens": 180,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 375,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9939,
+                    "completion_tokens": 2113,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 723,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13167,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7535,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 911,
+                    "completion_tokens": 49,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 783,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2113,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 891
+            },
+            "map": {
+              "items": {
+                "entities": 7,
+                "events": 2,
+                "points": 8,
+                "operators": 4
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 17,
+                "by_outcome": {
+                  "KEEP": 17
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 17,
+                "by_outcome": {
+                  "KEEP": 17
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 4,
+                "points": 14,
+                "events": 2
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 7,
+              "events": 2,
+              "points": 8,
+              "operators": 5,
+              "committed": 8
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a21037b672-0b943dc7dcfa",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b6db-fc82b4e2c384",
+              "dst_id": "1a21037b687-5f607ae2b25a",
+              "predicate": "IMPL",
+              "write_path": "direct",
+              "stated_predicate": "supports",
+              "declared_by": null,
+              "mechanism": "IMPL",
+              "label": "supports",
+              "direction": "->",
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b695-5e0eb2aba39c",
+              "dst_id": "1a21037b6eb-1b10b5ba39c2",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 3,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 2,
+            "direct": 1
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_0d218123c110d8a8ed797d58f5faa2688586e7c20b8344778f299662ad3f9b",
+            "label": "The year's target is 40 restaurant"
+          },
+          {
+            "point_id": "pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232",
+            "label": "Growth is gated by delivery capacity"
+          },
+          {
+            "point_id": "pt_1982a3a803fa87a7e996c48160c4402b257b1f7d5b5882d6a61036bbc24ada",
+            "label": "Every new restaurant account requires a"
+          },
+          {
+            "point_id": "pt_57d5f09c1c27a5dcff36fd081169b3999708a38c504cc1e86c3dfcd6041337",
+            "label": "Cold-chain rules forbid adding an account"
+          },
+          {
+            "point_id": "pt_952527eaa7217c66ea966642a1bb10f8a394739f256ea4393edc39e006e273",
+            "label": "The growth goal depends on the"
+          },
+          {
+            "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "label": "Priya Nair owns account onboarding"
+          },
+          {
+            "point_id": "pt_13fd9b1351f42c2fc49e4b054a7ac691d61b48b975c288e675deb51fff7cae",
+            "label": "An account only counts once it"
+          },
+          {
+            "point_id": "pt_6458f1182ca40c28529f5e600932eb5d89b873bcd55b76a3429b15d295f6c9",
+            "label": "The constraint on account growth is"
+          }
+        ],
+        "graph_ops": {
+          "total": 922,
+          "read": 808,
+          "write": 114,
+          "by_phase": {
+            "session_store": {
+              "read": 24,
+              "write": 16,
+              "total": 40
+            },
+            "extraction": {
+              "read": 532,
+              "write": 0,
+              "total": 532
+            },
+            "commit": {
+              "read": 0,
+              "write": 73,
+              "total": 73
+            },
+            "belief": {
+              "read": 252,
+              "write": 25,
+              "total": 277
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-04",
+      "date": "2026-02-24",
+      "title": "Who owns what",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 22.98,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-04",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-25T01:00:21.197023+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_909fb5abf542136ad51e6dedc39c7fb9251f0ce9edc9630ad4952355b033de",
+            "kind": "statement",
+            "text": "Ownership was ambiguous enough to need writing down",
+            "props": {
+              "quote": "We believed ownership was ambiguous enough to need writing down.",
+              "search_keys": [
+                "ownership ambiguity",
+                "unclear ownership",
+                "who owns what",
+                "accountability gap"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_909fb5abf542136ad51e6dedc39c7fb9251f0ce9edc9630ad4952355b033de",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_827e9ef78ce0dd70055a3039158da140299995c76e20a953a47df82c2ae727",
+            "kind": "statement",
+            "text": "The chosen resolution was single-named-owner accountability per function rather than shared or diffuse responsibility",
+            "props": {
+              "quote": "the chosen resolution was single-named-owner accountability per function rather than shared or diffuse responsibility",
+              "search_keys": [
+                "single named owner",
+                "named accountability",
+                "not shared responsibility",
+                "diffuse responsibility"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_827e9ef78ce0dd70055a3039158da140299995c76e20a953a47df82c2ae727",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_2d8de38ebfb4618449450a3d79d683abb430efa89e26f6cbdb92c67d84fda9",
+            "kind": "statement",
+            "text": "Marta Reyes owns delivery scheduling",
+            "props": {
+              "quote": "Marta Reyes owns delivery scheduling.",
+              "search_keys": [
+                "delivery scheduling owner",
+                "who schedules deliveries",
+                "Marta Reyes scheduling"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_2d8de38ebfb4618449450a3d79d683abb430efa89e26f6cbdb92c67d84fda9",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_0e8c65b884d27ac0252f316d50392b6d5cbf5ca42d330c2823be24ea8affa1",
+            "kind": "statement",
+            "text": "Marta Reyes owns the cold-chain temperature log",
+            "props": {
+              "quote": "Marta Reyes owns the cold-chain temperature log",
+              "search_keys": [
+                "cold-chain log owner",
+                "temperature log",
+                "who owns cold chain",
+                "Marta Reyes log"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_0e8c65b884d27ac0252f316d50392b6d5cbf5ca42d330c2823be24ea8affa1",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_42343e10b8c408edab87bd4e694e674234224236e015d52122c0a6421b77fa",
+            "kind": "statement",
+            "text": "If a cold-chain temperature log entry is missing, Marta Reyes is accountable for it",
+            "props": {
+              "quote": "if a log entry is missing, Marta Reyes is accountable for it",
+              "search_keys": [
+                "missing log entry",
+                "accountable for missing entry",
+                "cold-chain gap accountability"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_42343e10b8c408edab87bd4e694e674234224236e015d52122c0a6421b77fa",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_6395c0be5e482b8e9cb757ee612148d818510062c35d2b3d381fd27b12ff60",
+            "kind": "statement",
+            "text": "Dev Patel owns supplier payments",
+            "props": {
+              "quote": "Dev Patel owns supplier payments.",
+              "search_keys": [
+                "supplier payments owner",
+                "who pays suppliers",
+                "Dev Patel payments"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_6395c0be5e482b8e9cb757ee612148d818510062c35d2b3d381fd27b12ff60",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_104b52861b7c3213f353b56c5e09de57da9ce715ee1db7158522ced24ffaab",
+            "kind": "statement",
+            "text": "Dev Patel owns capital spending approvals",
+            "props": {
+              "quote": "Dev Patel owns capital spending approvals",
+              "search_keys": [
+                "capex approval owner",
+                "capital spend",
+                "who approves capital spending",
+                "Dev Patel approvals"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_104b52861b7c3213f353b56c5e09de57da9ce715ee1db7158522ced24ffaab",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_2ae10dd60b53442580ddca5fb7a7df45f053edfe588371df72d93188c4862f",
+            "kind": "statement",
+            "text": "No capital spend is approved unless Dev Patel approves it",
+            "props": {
+              "quote": "No capital spend is approved unless Dev Patel approves it.",
+              "search_keys": [
+                "no approval without Dev Patel",
+                "capital spend gate",
+                "capex sign-off"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_2ae10dd60b53442580ddca5fb7a7df45f053edfe588371df72d93188c4862f",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "kind": "statement",
+            "text": "Priya Nair owns account onboarding",
+            "props": {
+              "quote": "Onboarding is owned by Priya Nair",
+              "search_keys": "onboarding owner Priya Nair onboarding account onboarding",
+              "source_turn_id": 1
+            },
+            "dedup": "content_hash_hit",
+            "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_e78f71c2225ef696c8154141271852c46899066698866451e5eeeeefc99be0",
+            "kind": "statement",
+            "text": "Priya Nair owns the restaurant account pipeline",
+            "props": {
+              "quote": "Priya Nair owns the restaurant account pipeline.",
+              "search_keys": [
+                "restaurant pipeline owner",
+                "account pipeline",
+                "Priya Nair pipeline"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_e78f71c2225ef696c8154141271852c46899066698866451e5eeeeefc99be0",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_9f7335a266381282070b46dd1ae6c22d025ac784a69f1a0942e248375f25b5",
+            "kind": "statement",
+            "text": "Priya Nair reports the account count to the team every month",
+            "props": {
+              "quote": "Priya Nair reports the account count to the team every month.",
+              "search_keys": [
+                "monthly account count",
+                "account count reporting",
+                "monthly report",
+                "Priya Nair reports"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_9f7335a266381282070b46dd1ae6c22d025ac784a69f1a0942e248375f25b5",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+            "kind": "statement",
+            "text": "The cold-chain log and capital-spend clauses carry explicit accountability rules, which tempers any future assumption that these can be handled by others",
+            "props": {
+              "quote": "The cold-chain log and capital-spend clauses are the sharpest \u2014 both carry an explicit accountability rule",
+              "search_keys": [
+                "sharpest clauses",
+                "explicit accountability rule",
+                "cannot be handled by others",
+                "cold-chain and capex"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+            "status": "live",
+            "ep_updated": true
+          }
+        ],
+        "error": null,
+        "session_id": "doc-04",
+        "turns": 6,
+        "extracted": 12,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'Ownership was ambiguous enough to need w' has no resolvable source turn (no quote match)",
+          "point 'The chosen resolution was single-named-o' has no resolvable source turn (no quote match)",
+          "point 'The cold-chain log and capital-spend cla' has no resolvable source turn (no quote match)",
+          "S3 identity partial: the existing-item lookup did not run for 13 of 27 candidate(s)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 14,
+          "events": 1,
+          "points": 12,
+          "operators": 3,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 10,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 18.3,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 26655,
+            "completion_tokens": 3194,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 10271,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1741,
+                    "completion_tokens": 241,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 333,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9954,
+                    "completion_tokens": 2804,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 738,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13826,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 8194,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1134,
+                    "completion_tokens": 109,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 1006,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2804,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 1230
+            },
+            "map": {
+              "items": {
+                "entities": 14,
+                "events": 1,
+                "points": 12,
+                "operators": 3
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 27,
+                "by_outcome": {
+                  "KEEP": 27
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 27,
+                "by_outcome": {
+                  "KEEP": 27
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 9,
+                "points": 0,
+                "events": 3
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 14,
+              "events": 1,
+              "points": 12,
+              "operators": 3,
+              "committed": 12
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a2103753ff-6c95c02e9034",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f586-adbeff52ccd8",
+              "dst_id": "1a21037540e-491edf3b47ab",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a210381203-cca46e5b4e31",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a210381241-2d540672116e",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a21038124d-aa5c6c6cfc8f",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f586-adbeff52ccd8",
+              "dst_id": "1a21038125a-5058c9f40672",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21036f586-adbeff52ccd8",
+              "dst_id": "1a210381266-cfc6aa838e51",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a21037b672-0b943dc7dcfa",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a2103812b4-094f04d88d37",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a2103812bf-64134299530d",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 10,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 10
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_909fb5abf542136ad51e6dedc39c7fb9251f0ce9edc9630ad4952355b033de",
+            "label": "Ownership was ambiguous enough to need"
+          },
+          {
+            "point_id": "pt_827e9ef78ce0dd70055a3039158da140299995c76e20a953a47df82c2ae727",
+            "label": "The chosen resolution was single-named-owner acc"
+          },
+          {
+            "point_id": "pt_2d8de38ebfb4618449450a3d79d683abb430efa89e26f6cbdb92c67d84fda9",
+            "label": "Marta Reyes owns delivery scheduling"
+          },
+          {
+            "point_id": "pt_0e8c65b884d27ac0252f316d50392b6d5cbf5ca42d330c2823be24ea8affa1",
+            "label": "Marta Reyes owns the cold-chain temperature"
+          },
+          {
+            "point_id": "pt_42343e10b8c408edab87bd4e694e674234224236e015d52122c0a6421b77fa",
+            "label": "If a cold-chain temperature log entry"
+          },
+          {
+            "point_id": "pt_6395c0be5e482b8e9cb757ee612148d818510062c35d2b3d381fd27b12ff60",
+            "label": "Dev Patel owns supplier payments"
+          },
+          {
+            "point_id": "pt_104b52861b7c3213f353b56c5e09de57da9ce715ee1db7158522ced24ffaab",
+            "label": "Dev Patel owns capital spending approvals"
+          },
+          {
+            "point_id": "pt_2ae10dd60b53442580ddca5fb7a7df45f053edfe588371df72d93188c4862f",
+            "label": "No capital spend is approved unless"
+          },
+          {
+            "point_id": "pt_e78f71c2225ef696c8154141271852c46899066698866451e5eeeeefc99be0",
+            "label": "Priya Nair owns the restaurant account"
+          },
+          {
+            "point_id": "pt_9f7335a266381282070b46dd1ae6c22d025ac784a69f1a0942e248375f25b5",
+            "label": "Priya Nair reports the account count"
+          },
+          {
+            "point_id": "pt_06ce575c77e8b57396e0de23addd7d5a316afd5bd1012e0dd6f5590c303f8f",
+            "label": "The cold-chain log and capital-spend clauses"
+          }
+        ],
+        "graph_ops": {
+          "total": 912,
+          "read": 785,
+          "write": 127,
+          "by_phase": {
+            "session_store": {
+              "read": 24,
+              "write": 16,
+              "total": 40
+            },
+            "extraction": {
+              "read": 591,
+              "write": 0,
+              "total": 591
+            },
+            "commit": {
+              "read": 0,
+              "write": 82,
+              "total": 82
+            },
+            "belief": {
+              "read": 170,
+              "write": 29,
+              "total": 199
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-05",
+      "date": "2026-03-05",
+      "title": "ColdPath failed the cold-chain audit",
+      "turns": 8,
+      "ok": true,
+      "ack_seconds": 29.63,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-05",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-25T01:00:44.178601+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+            "kind": "statement",
+            "text": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+            "props": {
+              "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+              "search_keys": [
+                "ColdPath viable partner",
+                "chilled wholesale routes",
+                "delivery partner belief",
+                "ColdPath Logistics"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "kind": "statement",
+            "text": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+            "props": {
+              "quote": "two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+              "search_keys": [
+                "cold-chain certificate",
+                "validated certificate",
+                "two vehicles",
+                "audit finding"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+            "kind": "statement",
+            "text": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
+            "props": {
+              "quote": "our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
+              "search_keys": [
+                "wholesale licence",
+                "subcontracting chilled goods",
+                "licence constraint",
+                "validated cold-chain certificate"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_39611ee7e9cb3dcd37cc1e13b03c71f87c47d40974c80ec3919c97af5be235",
+            "kind": "statement",
+            "text": "The ColdPath choice is not viable \u2014 this is a licence constraint, not a preference, so it forecloses the option rather than merely tempering it",
+            "props": {
+              "quote": "the ColdPath choice is not viable \u2014 this is a licence constraint, not a preference, so it forecloses the option rather than merely tempering it",
+              "search_keys": [
+                "ColdPath not viable",
+                "licence constraint",
+                "forecloses the option",
+                "not a preference"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_39611ee7e9cb3dcd37cc1e13b03c71f87c47d40974c80ec3919c97af5be235",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+            "kind": "statement",
+            "text": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+            "props": {
+              "quote": "we revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+              "search_keys": [
+                "revert to NordicFreight",
+                "stop using ColdPath",
+                "delivery partner decision",
+                "revert"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_0ffba412ed47976bb6d94ad9b0a74beea65fc6391502b25d2116d748e98681",
+            "kind": "statement",
+            "text": "Marta Reyes owns renegotiating with NordicFreight",
+            "props": {
+              "quote": "Marta Reyes (Operations Lead) owns renegotiating with NordicFreight.",
+              "search_keys": [
+                "Marta Reyes",
+                "renegotiating NordicFreight",
+                "owner",
+                "Operations Lead"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_0ffba412ed47976bb6d94ad9b0a74beea65fc6391502b25d2116d748e98681",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72",
+            "kind": "statement",
+            "text": "The growth goal of 40 restaurant accounts by December stands",
+            "props": {
+              "quote": "The growth goal of 40 restaurant accounts by December stands",
+              "search_keys": [
+                "40 restaurant accounts",
+                "December",
+                "growth goal",
+                "Priya Nair"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+            "kind": "statement",
+            "text": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+            "props": {
+              "quote": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+              "search_keys": [
+                "6pm cutoff",
+                "morning restaurant slots",
+                "NordicFreight capacity",
+                "delivery cutoff"
+              ],
+              "source_turn_id": 7,
+              "span_start": 84,
+              "span_end": 157
+            },
+            "dedup": "new",
+            "point_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_0065823e3e04759175b333ace71b2f59f848d7e25e0d607e6be945cb079863",
+            "kind": "statement",
+            "text": "Delivery capacity \u2014 not demand \u2014 is now the binding limit on the growth goal",
+            "props": {
+              "quote": "delivery capacity \u2014 not demand \u2014 is now the binding limit on the growth goal",
+              "search_keys": [
+                "binding limit",
+                "delivery capacity",
+                "not demand",
+                "growth goal constraint"
+              ],
+              "source_turn_id": 7
+            },
+            "dedup": "new",
+            "point_id": "pt_0065823e3e04759175b333ace71b2f59f848d7e25e0d607e6be945cb079863",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+            "kind": "statement",
+            "text": "The revert does not restore full delivery capability",
+            "props": {
+              "quote": "the revert does not restore full delivery capability",
+              "search_keys": [
+                "revert does not restore",
+                "delivery capability",
+                "capacity gap",
+                "NordicFreight"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+            "kind": "statement",
+            "text": "The cold-chain audit failed ColdPath Logistics last week",
+            "props": {
+              "quote": "ColdPath Logistics failed its cold-chain audit last week.",
+              "search_keys": [
+                "cold-chain audit failure",
+                "audit last week",
+                "ColdPath audit",
+                "failed audit"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_c16f78b34d83298a04d5b3df09db781314e3e804e8fd70f0ec6de123f1869e",
+            "kind": "statement",
+            "text": "The revert to NordicFreight is forced by the licence constraint and the audit failure, not by preference",
+            "props": {
+              "quote": "The reason is that ColdPath failed its cold-chain audit and our licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate.",
+              "search_keys": [
+                "reason for revert",
+                "licence forces revert",
+                "audit failure reason",
+                "not a preference"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_c16f78b34d83298a04d5b3df09db781314e3e804e8fd70f0ec6de123f1869e",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-05",
+        "turns": 8,
+        "extracted": 12,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "entity 'the ColdPath choice' lifecycle=superseded with no supersedes ref is not expressible in the Layer-1 payload \u2014 set supersedes=<existing id/name> for the supersession to ride payload['supersessions']",
+          "value-bearing point 'Two of ColdPath's vehicles could not show a validated cold-c' resolved to turn 1 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'The ColdPath choice is not viable \u2014 this' has no resolvable source turn (no quote match)",
+          "value-bearing point 'The growth goal of 40 restaurant accounts by December stands' resolved to turn 7 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "source_turn_id 6 contradicts the quote's turn 7 \u2014 deterministic match wins",
+          "point 'The revert does not restore full deliver' has no resolvable source turn (no quote match)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): NAND dst named 'ColdPath Logistics holds a validated cold-chain certificate' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): MITIGATES dst named 'ColdPath Logistics offers a 9pm cutoff that meets the mornin' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): MITIGATES target_edge src named 'ColdPath Logistics offers a 9pm cutoff that meets the mornin' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): MITIGATES target_edge dst named 'The growth goal depends on the delivery partner keeping morn' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): IMPL dst named 'The growth goal depends on the delivery partner keeping morn' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "operator endpoint HELD not minted (#10997 S3 HOLD): MITIGATES target_edge dst named 'The growth goal depends on the delivery partner keeping morn' but the identity lookup was partial, so whether this endpoint already exists was never established \u2014 held with its edge, NOT persisted (no hold store was supplied)",
+          "NAND direction canonicalized (#909 \u2014 new-claim-attacks-existing): src was asserted before dst; swapped so the newer counter-claim is src ('pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b' \u2194 'pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55')",
+          "NAND direction canonicalized (#909 \u2014 new-claim-attacks-existing): src was asserted before dst; swapped so the newer counter-claim is src ('pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a2' \u2194 'pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55')",
+          "operator dropped: src/dst did not resolve to an emitted point/event ('The cold-chain audit failed ColdPath Logistics last week' \u2192 'ColdPath Logistics holds a validated cold-chain certificate')",
+          "operator dropped: src/dst did not resolve to an emitted point/event ('The cold-chain audit failed ColdPath Logistics last week' \u2192 'ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots')",
+          "operator dropped: src/dst did not resolve to an emitted point/event (\"NordicFreight's 6pm cutoff still cannot make our morning restaurant slots\" \u2192 'The growth goal depends on the delivery partner keeping morning slots')",
+          "MITIGATES target edge not emitted ('pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72'\u2192'' IMPL|coherence) \u2014 dropped",
+          "S3 HOLD (#10997): 3 candidate(s) held \u2014 identity UNRESOLVED (partial=6); run lookup was partial \u2014 not minted (I1) and not dropped (I2); NOT carried forward \u2014 no hold store was supplied",
+          "S3 identity partial: the existing-item lookup did not run for 11 of 25 candidate(s)",
+          "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 11,
+          "events": 2,
+          "points": 12,
+          "operators": 7,
+          "operator_endpoints_minted": 0,
+          "held": 3,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {
+            "partial": 6
+          },
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 6,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 23.9,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 8,
+          "s4_merge": {
+            "s2_items": 29,
+            "s4_items": 7,
+            "merged_items": 36,
+            "corrected_by_s4": 0,
+            "verbatim_reemissions": 0,
+            "kept_from_s2": 29,
+            "added_by_s4": 7
+          },
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 27268,
+            "completion_tokens": 4052,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 10884,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1862,
+                    "completion_tokens": 260,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 454,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 10103,
+                    "completion_tokens": 2852,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 887,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 14177,
+                    "completion_tokens": 869,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 8545,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1126,
+                    "completion_tokens": 71,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 998,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2852,
+            "s4_out_tokens": 869
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 8,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 1322
+            },
+            "map": {
+              "items": {
+                "entities": 11,
+                "events": 2,
+                "points": 10,
+                "operators": 6
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 23,
+                "by_outcome": {
+                  "KEEP": 23
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 25,
+                "by_outcome": {
+                  "KEEP": 25
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 8,
+                "points": 6,
+                "events": 4
+              }
+            },
+            "merge": {
+              "merged_items": 36,
+              "s2_items": 29,
+              "s4_items": 7
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 11,
+              "events": 2,
+              "points": 12,
+              "operators": 7,
+              "committed": 12
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a21036f576-4ff0e1fbd786",
+              "dst_id": "1a2103753ff-6c95c02e9034",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21037b619-821055548e7b",
+              "dst_id": "1a210381203-cca46e5b4e31",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21038820e-9508b38d44fa",
+              "dst_id": "1a21036f52c-bd9822c36fa6",
+              "predicate": "NAND",
+              "write_path": "direct",
+              "stated_predicate": "refutes",
+              "declared_by": null,
+              "mechanism": "NAND",
+              "label": "refutes",
+              "direction": "->",
+              "folded": []
+            },
+            {
+              "src_id": "1a2103754d5-084abce66665",
+              "dst_id": "1a2103882c6-cecb5363a98d",
+              "predicate": "NAND",
+              "write_path": "direct",
+              "stated_predicate": "refutes",
+              "declared_by": null,
+              "mechanism": "NAND",
+              "label": "refutes",
+              "direction": "->",
+              "folded": []
+            },
+            {
+              "src_id": "1a210388253-b38cc3526614",
+              "dst_id": "1a21038826e-cb0ada3ad574",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a21038820e-9508b38d44fa",
+              "dst_id": "1a2103754d5-084abce66665",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 6,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 4,
+            "direct": 2
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+            "label": "We believed ColdPath Logistics was a"
+          },
+          {
+            "point_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "label": "Two of ColdPath's vehicles could not"
+          },
+          {
+            "point_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+            "label": "Our wholesale licence forbids subcontracting chi"
+          },
+          {
+            "point_id": "pt_39611ee7e9cb3dcd37cc1e13b03c71f87c47d40974c80ec3919c97af5be235",
+            "label": "The ColdPath choice is not viable"
+          },
+          {
+            "point_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+            "label": "We revert to NordicFreight as our"
+          },
+          {
+            "point_id": "pt_0ffba412ed47976bb6d94ad9b0a74beea65fc6391502b25d2116d748e98681",
+            "label": "Marta Reyes owns renegotiating with NordicFreigh"
+          },
+          {
+            "point_id": "pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72",
+            "label": "The growth goal of 40 restaurant"
+          },
+          {
+            "point_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+            "label": "NordicFreight's 6pm cutoff still cannot make"
+          },
+          {
+            "point_id": "pt_0065823e3e04759175b333ace71b2f59f848d7e25e0d607e6be945cb079863",
+            "label": "Delivery capacity \u2014 not demand \u2014"
+          },
+          {
+            "point_id": "pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc",
+            "label": "The revert does not restore full"
+          },
+          {
+            "point_id": "pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5",
+            "label": "The cold-chain audit failed ColdPath Logistics"
+          },
+          {
+            "point_id": "pt_c16f78b34d83298a04d5b3df09db781314e3e804e8fd70f0ec6de123f1869e",
+            "label": "The revert to NordicFreight is forced"
+          }
+        ],
+        "graph_ops": {
+          "total": 1328,
+          "read": 1164,
+          "write": 164,
+          "by_phase": {
+            "session_store": {
+              "read": 26,
+              "write": 20,
+              "total": 46
+            },
+            "extraction": {
+              "read": 631,
+              "write": 0,
+              "total": 631
+            },
+            "commit": {
+              "read": 0,
+              "write": 109,
+              "total": 109
+            },
+            "belief": {
+              "read": 507,
+              "write": 35,
+              "total": 542
+            }
+          }
+        }
+      }
+    }
+  ],
+  "empty_before": {
+    "taxonomy": {
+      "Point": 0,
+      "Event": 0,
+      "Subject": 0,
+      "Object": 0,
+      "Source": 0
+    },
+    "structure": {
+      "gate0_jtbds": 0,
+      "gate1_use_cases": 0,
+      "gate2_user_journeys": 0,
+      "gate3_workflows": 0,
+      "gate4_requirements": 0,
+      "total": 0,
+      "operators": 0,
+      "gate_total": 0
+    },
+    "structure_check": [],
+    "pointkinds": [],
+    "tags": [],
+    "sources": [],
+    "namespaces": [
+      {
+        "namespace": "agent-ops",
+        "name": "Agent Operations",
+        "kind_count": 4
+      },
+      {
+        "namespace": "dev",
+        "name": "Development",
+        "kind_count": 32
+      },
+      {
+        "namespace": "portfolio",
+        "name": "Investment Portfolio Manager",
+        "kind_count": 6
+      },
+      {
+        "namespace": "marketing",
+        "name": "Marketing",
+        "kind_count": 11
+      },
+      {
+        "namespace": "product-strategy",
+        "name": "Product Strategy",
+        "kind_count": 21
+      },
+      {
+        "namespace": "pm",
+        "name": "Project Management",
+        "kind_count": 18
+      },
+      {
+        "namespace": "venture",
+        "name": "Venture",
+        "kind_count": 17
+      }
+    ],
+    "status": {
+      "connected": true,
+      "counts": {
+        "Point": 0,
+        "Event": 0,
+        "Subject": 0,
+        "Object": 0,
+        "Source": 0
+      },
+      "total_entities": 0
+    },
+    "stale": {
+      "stale": [],
+      "count": 0,
+      "cutoff": "30 days",
+      "limit": 50
+    },
+    "audit": {
+      "node_count": 0,
+      "edge_count": 0,
+      "checks": [],
+      "summary": {
+        "total_issues": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "clean": true
+      },
+      "exit_code": 0
+    },
+    "dream_health": {
+      "alarm_verdict": false,
+      "alarm_reason": "ok",
+      "stale_backlog": 0,
+      "last_pass_at": null,
+      "last_pass_output": 0,
+      "last_belief_write_count": null,
+      "no_op_reason": null,
+      "coverage_pct": 0.0,
+      "failure_rate": 0.0,
+      "operator_counts": 0,
+      "per_mode_counts": {},
+      "region_attempts": {},
+      "warm_skipped_updates": 0,
+      "propagation": {
+        "graph_live_claims": 0,
+        "ep_reachable_claims": 0,
+        "belief_present": 0,
+        "no_belief": 0,
+        "belief_coverage_pct": 0.0,
+        "stamped": 0,
+        "operator_less_claims": 0,
+        "unclassified_claims": 0,
+        "unavailable": null,
+        "last_pass": null,
+        "last_pass_reason": "no_pass_observed_by_this_sdk"
+      }
+    }
+  },
+  "graph_overview_after": {
+    "taxonomy": {
+      "Point": 120,
+      "Event": 13,
+      "Subject": 10,
+      "Object": 23,
+      "Source": 5
+    },
+    "structure": {
+      "gate0_jtbds": 0,
+      "gate1_use_cases": 0,
+      "gate2_user_journeys": 0,
+      "gate3_workflows": 0,
+      "gate4_requirements": 0,
+      "total": 96,
+      "operators": 24,
+      "gate_total": 0
+    },
+    "structure_check": [],
+    "pointkinds": [
+      {
+        "kind": "statement",
+        "count": 62,
+        "pack": ""
+      },
+      {
+        "kind": "event",
+        "count": 34,
+        "pack": ""
+      }
+    ],
+    "tags": [],
+    "sources": [
+      {
+        "url": "session:doc-02",
+        "sourceKind": "agentSession",
+        "points": 13
+      },
+      {
+        "url": "session:doc-01",
+        "sourceKind": "agentSession",
+        "points": 13
+      },
+      {
+        "url": "session:doc-05",
+        "sourceKind": "agentSession",
+        "points": 12
+      },
+      {
+        "url": "session:doc-04",
+        "sourceKind": "agentSession",
+        "points": 11
+      },
+      {
+        "url": "session:doc-03",
+        "sourceKind": "agentSession",
+        "points": 8
+      }
+    ],
+    "namespaces": [
+      {
+        "namespace": "agent-ops",
+        "name": "Agent Operations",
+        "kind_count": 4
+      },
+      {
+        "namespace": "dev",
+        "name": "Development",
+        "kind_count": 32
+      },
+      {
+        "namespace": "portfolio",
+        "name": "Investment Portfolio Manager",
+        "kind_count": 6
+      },
+      {
+        "namespace": "marketing",
+        "name": "Marketing",
+        "kind_count": 11
+      },
+      {
+        "namespace": "product-strategy",
+        "name": "Product Strategy",
+        "kind_count": 21
+      },
+      {
+        "namespace": "pm",
+        "name": "Project Management",
+        "kind_count": 18
+      },
+      {
+        "namespace": "venture",
+        "name": "Venture",
+        "kind_count": 17
+      }
+    ],
+    "status": {
+      "connected": true,
+      "counts": {
+        "Point": 120,
+        "Event": 13,
+        "Subject": 10,
+        "Object": 23,
+        "Source": 5
+      },
+      "total_entities": 171
+    },
+    "stale": {
+      "stale": [],
+      "count": 0,
+      "cutoff": "30 days",
+      "limit": 50
+    },
+    "audit": {
+      "node_count": 120,
+      "edge_count": 53,
+      "checks": [
+        {
+          "id": "missing_sourceKind_source",
+          "severity": "medium",
+          "count": 33,
+          "legacy": false,
+          "capped": false,
+          "samples": [
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'The delivery partner question was believed to be a simple incumbent-versus-alternative tradeoff') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'NordicFreight's 6pm order cutoff cannot make our morning restaurant slots') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'NordicFreight's 6pm order cutoff caused four missed morning restaurant slots in January') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'ColdPath Logistics holds a validated cold-chain certificate') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'Buying our own refrigerated van needs 48,000 pounds of capital spending') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'The cash buffer is 31,000 pounds and is already committed to the March supplier payments') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'Dev Patel ruled the capital spend for our own refrigerated van not approvable this quarter') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'We choose ColdPath Logistics as our delivery partner') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'The own-van option needs 48,000 pounds of capital spending, which is more than the current cash buffer allows') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'The chilled-goods operation was believed to be runnable on standard delivery practice, with cold-chain discipline treated as a preference applied where practical') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'The food safety auditor requires a temperature log for every single delivery, retained for twelve months') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'The sub-4\u00b0C floor and the per-delivery log requirement together mean the log is a precondition of delivery, not documentation after the fact') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'Logging should be treated as part of the delivery flow itself') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-02",
+              "detail": "Source 'session:doc-02' (backing evidence 'The licence constraint on subcontracting undermines any plan to flex chilled capacity through third-party partners who lack certification') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-02', tier='T0'..'T4') or tortoise_register_source('session:doc-02', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'The year's target is 40 restaurant accounts by December, against a current base of 18 \u2014 22 more to add') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'Growth is gated by delivery capacity, not sales effort') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'Every new restaurant account requires a morning delivery slot') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that slot') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'The growth goal depends on the delivery partner keeping morning slots') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'Ownership was ambiguous enough to need writing down') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'The chosen resolution was single-named-owner accountability per function rather than shared or diffuse responsibility') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'If a cold-chain temperature log entry is missing, Marta Reyes is accountable for it') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'No capital spend is approved unless Dev Patel approves it') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'The cold-chain log and capital-spend clauses carry explicit accountability rules, which tempers any future assumption that these can be handled by others') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'NordicFreight's 6pm cutoff still cannot make our morning restaurant slots') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'The revert does not restore full delivery capability') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-05",
+              "detail": "Source 'session:doc-05' (backing evidence 'The cold-chain audit failed ColdPath Logistics last week') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-05', tier='T0'..'T4') or tortoise_register_source('session:doc-05', kind, tier=...)"
+            }
+          ]
+        },
+        {
+          "id": "impl_instead_of_nand",
+          "severity": "low",
+          "count": 10,
+          "legacy": false,
+          "capped": true,
+          "samples": [
+            {
+              "node_id": "1a21036fdb8-f7b7900ef2f5",
+              "detail": "IMPL edge 1a21036fdb8-f7b7900ef2f5 \u2192 'NordicFreight's 6pm order cutoff cannot make our morning restaurant slots' (keyword: 'cannot') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21036fdb8-f7b7900ef2f5', ['pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362'])"
+            },
+            {
+              "node_id": "1a21036fe14-f8b801531161",
+              "detail": "IMPL edge 1a21036fe14-f8b801531161 \u2192 'Dev Patel ruled the capital spend for our own refrigerated van not approvable th' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21036fe14-f8b801531161', ['pt_9f2d4c5f01aedf96c4a92d18cedcc89f9ae37489749302017d245c055a49c8'])"
+            },
+            {
+              "node_id": "1a210375d80-9f4fea7e98b6",
+              "detail": "IMPL edge 1a210375d80-9f4fea7e98b6 \u2192 'The sub-4\u00b0C floor and the per-delivery log requirement together mean the log is ' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a210375d80-9f4fea7e98b6', ['pt_f920aeb0d4e62ed2d1dc047bf3fd6652de5ec779e18abfb01972216cfe090d'])"
+            },
+            {
+              "node_id": "1a21037bd18-dccade26063c",
+              "detail": "IMPL edge 1a21037bd18-dccade26063c \u2192 'Growth is gated by delivery capacity, not sales effort' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21037bd18-dccade26063c', ['pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232'])"
+            },
+            {
+              "node_id": "1a21037bd92-dd15aabed099",
+              "detail": "IMPL edge 1a21037bd92-dd15aabed099 \u2192 'Growth is gated by delivery capacity, not sales effort' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21037bd92-dd15aabed099', ['pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232'])"
+            },
+            {
+              "node_id": "1a21037be44-7ee2667a2578",
+              "detail": "IMPL edge 1a21037be44-7ee2667a2578 \u2192 'Growth is gated by delivery capacity, not sales effort' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21037be44-7ee2667a2578', ['pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232'])"
+            },
+            {
+              "node_id": "1a21037beb5-d3ee8c22b54e",
+              "detail": "IMPL edge 1a21037beb5-d3ee8c22b54e \u2192 'Growth is gated by delivery capacity, not sales effort' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21037beb5-d3ee8c22b54e', ['pt_ee174d5e639bca64d1917faca3b501cfaaef3625b44fd44d1f458263b97232'])"
+            },
+            {
+              "node_id": "1a2103888c6-46223b4e5bfb",
+              "detail": "IMPL edge 1a2103888c6-46223b4e5bfb \u2192 'Two of ColdPath's vehicles could not show a validated cold-chain certificate, so' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2103888c6-46223b4e5bfb', ['pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607'])"
+            },
+            {
+              "node_id": "1a21038891c-48081fb35e04",
+              "detail": "IMPL edge 1a21038891c-48081fb35e04 \u2192 'NordicFreight's 6pm cutoff still cannot make our morning restaurant slots' (keyword: 'cannot') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21038891c-48081fb35e04', ['pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12'])"
+            },
+            {
+              "node_id": "1a21038891c-48081fb35e04",
+              "detail": "IMPL edge 1a21038891c-48081fb35e04 \u2192 'The revert does not restore full delivery capability' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a21038891c-48081fb35e04', ['pt_b6cb7b1665b1416acccd4e414e6345762d43ce49e1569f5a4a531aea8d5bdc'])"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "total_issues": 43,
+        "high": 0,
+        "medium": 33,
+        "low": 10,
+        "clean": false
+      },
+      "exit_code": 1
+    },
+    "dream_health": {
+      "alarm_verdict": false,
+      "alarm_reason": "ok",
+      "stale_backlog": 0,
+      "last_pass_at": "2026-11-25T01:01:13.802761+00:00",
+      "last_pass_output": 17,
+      "last_belief_write_count": 12,
+      "no_op_reason": null,
+      "coverage_pct": 0.9193548387096774,
+      "failure_rate": 0.0,
+      "operator_counts": 5,
+      "per_mode_counts": {
+        "local": 5
+      },
+      "region_attempts": {},
+      "warm_skipped_updates": 0,
+      "propagation": {
+        "graph_live_claims": 62,
+        "ep_reachable_claims": 38,
+        "belief_present": 38,
+        "no_belief": 0,
+        "belief_coverage_pct": 1.0,
+        "stamped": 57,
+        "operator_less_claims": 24,
+        "unclassified_claims": 0,
+        "unavailable": null,
+        "last_pass": {
+          "mode": "local",
+          "max_hops": 2,
+          "affected": 17,
+          "window_reachable": 19,
+          "graph_ep_reachable": 38
+        },
+        "last_pass_reason": null
+      }
+    }
+  }
+}
