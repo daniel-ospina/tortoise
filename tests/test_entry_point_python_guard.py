@@ -1662,22 +1662,23 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — some of
-#: these guards landed in earlier changes and some in the very change that added
-#: their row, so "landed and pinned in one act" is a shape several rows share
-#: rather than a property of one of them, and no list here is exhaustive: a count
-#: or an enumeration in this comment has gone stale twice already. This file PINS
-#: each choice, and its newest row is `tools/fly_secret_declaration_report.py`
-#: (`#5128`) — and the
+#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) — the
+#: guards behind these rows landed in different changes, some in the very change
+#: that added the row. This file PINS each choice, and its newest row is
+#: `tools/fly_secret_declaration_report.py` (`#5128`). Only the table below is
+#: authoritative about which rows exist: counts and enumerations in this comment
+#: have gone stale before, so none is written here — and the
 #: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
 #: CPython, and for several of these files 1 is already the tool's own verdict —
 #: for instance `gen_placement_table --check` prints `STALE` and returns 1,
 #: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
 #: map that could not be read, `cypher_inventory --check` returns it for DRIFT, and
-#: `cypher_diff_harness` for DIFFERS — which is why each guard names a code its
-#: tool can spare (`#4053`, `#13121`) instead of accepting the bare message shape.
-#: `cache_evict` is the exception BECAUSE its 1 is
-#: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
+#: `cypher_diff_harness` for DIFFERS — which is why a guard here names a code the
+#: tool can tell apart from its verdicts: a spare one where the tool has one
+#: (`#4053`, `#13121`), and otherwise one reused on purpose because the refusal
+#: cannot be read as a finding — `cache_evict` takes 1, already its usage code
+#: (`CACHE_EVICTION_EXIT_USAGE`, verdicts 2/3/4), and `capstone_ledger` reuses
+#: `EXIT_INVALID` rather than extend a closed 0-4 set.
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
 #: per-tool contract decision, not a property of the guard shape. Pinning it here
