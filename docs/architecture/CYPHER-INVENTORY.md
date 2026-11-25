@@ -453,9 +453,12 @@ case-sensitive **2,117**, `-i` without the exclusion **2,478**, over the 313 fil
 **2,388**, exclusion dropped **2,116** / **2,391**). The **graded** figures in this paragraph — the
 two pins above — ARE re-derived, and they agree with `cypher_inventory.py --check`'s **25 pinned
 counts match**. Appendix
-A is regenerated with `--markdown` at the merged tree: **338 rows re-derived**, every one of them a
-`file:line` (this branch edits `tortoise/hosted_api.py` and `tortoise/record_writer.py` above sites
-both files carry; no row added, none removed — the table still lists **1327**).
+A is regenerated with `--markdown` at the merged tree and is byte-identical to that output: no row was
+added and none removed — the table still lists **1327**, and every `file:line` in it is the tool's own
+address at this head. ⛔ **No row COUNT is restated here.** A numstat is head-bound: the count this
+sentence used to carry was one commit's local delta rather than a main→head figure, so it was wrong
+when written and would be wrong again one merge later. The graded claim is the table plus
+`--check`, not a count of rows that moved.
 
 **Re-cut at the merge with `origin/main` `953c299c9b`, where `files_scanned` reads `313` and NO OTHER PIN MOVED.** `main`'s `#14423` added `tortoise/drain_claim.py` (the per-spool drain claimer), which is product surface carrying no door call and no `MATCH`/`MERGE`, so it moves the scanned-file count and nothing else: `sites` **1327**, `files` **102**, `unresolved` **105**, `candidates` **589**, `partial` **321**, `non_cypher_door_calls` **266**, `ast_door_calls` **1593** and every shape and shape-role pin are unchanged. Measured, not inferred: `git ls-tree` on the COMMITTED tree reads **313** and the tool's own `--json` agrees, and `--check` prints DRIFT for `files_scanned` alone. Appendix A was regenerated with `--markdown` at the merged tree and is byte-identical to it. ⛔ The paragraph below describes an EARLIER base of this same branch and is deliberately NOT re-cut — this section's stated convention.
 
