@@ -936,8 +936,18 @@ def main(argv: list[str] | None = None) -> int:
     # is exactly the invariant (`--render`'s output is never committed); outside a git
     # work tree (exit 128) it simply does not fire.
     if args.render is not None:
-        target = (ROOT / args.render).resolve()
-        if target == DOC_SRC.resolve():
+        # ⛔ AND A DESTINATION THAT CANNOT BE RESOLVED IS "COULD NOT RUN" (2) TOO.
+        # `Path.resolve()` raises `RuntimeError("Symlink loop …")` on ELOOP — NOT an
+        # OSError — and it runs before every guard, so the traceback escaped and the
+        # interpreter exited 1, the DRIFT code, from a verb that has no drift verdict
+        # (measured with a two-symlink loop: --render /tmp/loop/a/deep.md → rc 1).
+        try:
+            target = (ROOT / args.render).resolve()
+            src_resolved = DOC_SRC.resolve()
+        except (OSError, RuntimeError) as err:
+            print(f"render: could not resolve {args.render}: {err}", file=sys.stderr)
+            return 2
+        if target == src_resolved:
             print(
                 f"refusing to render over the SOURCE ({args.render}): the document is\n"
                 "`--render`'s output and the source is hand-authored. Pick another\n"
