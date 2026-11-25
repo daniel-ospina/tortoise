@@ -925,7 +925,7 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
 
 
-def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path):
+def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path, monkeypatch):
     """#14593 review P1: a null ``lastBeliefWrite`` must not speak for the store.
 
     MEASURED: the GRAPH event store only receives the types in
@@ -970,6 +970,18 @@ def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path):
         # it points at where the change really is instead of asserting absence.
         assert "ConfidenceChanged" not in reason["recordedEventTypes"], body
         assert reason["recordedEventTypes"], body
+        # ⛔ The enumeration must MIRROR the emitter's gate, not one arm of it:
+        # `sdk._emit_event` also stores `PointRevised` when the #2353 change feed
+        # is on, and a client rules types OUT from this list. Both directions are
+        # graded, because `sorted(_GRAPH_EVENT_TYPES)` satisfies the two
+        # assertions above (measured: the pre-fix return passes them) — which is
+        # exactly how the under-publishing answer shipped.
+        from tortoise.hosted_api import _graph_event_types
+
+        monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+        assert "PointRevised" in _graph_event_types()
+        monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
+        assert "PointRevised" not in _graph_event_types()
         assert "journal" in reason["message"], body
 
 
