@@ -5569,9 +5569,6 @@ def _beat_tween_var_objects(html: str) -> list[list[str]]:
             for match in re.finditer(r"gsap\.(?:to|fromTo)\(\s*el\s*,", html)]
 
 
-#: A `.beat` section, by the markup that declares it — the beat list is DERIVED
-#: from the page so a new beat cannot silently escape the hatch's group.
-BEAT_SECTION_RE = re.compile(r'<section id="(beat-[a-z-]+)" class="beat')
 
 
 #: The two ends of a beat's ground, and the pair of spellings each is written
@@ -5584,8 +5581,34 @@ GROUND_ENDS = (
 
 
 def _beat_section_ids(html: str) -> list[str]:
-    """The ids of the page's `.beat` sections, in document order."""
-    return BEAT_SECTION_RE.findall(html)
+    """The ids of the page's `.beat` sections, in document order.
+
+    ⛔ READ FROM THE ATTRIBUTES, not from one fixed spelling (#14683 review F1,
+    measured). This used to be `BEAT_SECTION_RE.findall(html)` over the RAW
+    page, which got the beat list wrong in BOTH directions — and the beat list
+    is the thing the row's own docstring says is "DERIVED from the page so a
+    new beat cannot silently escape the hatch's group":
+
+      FAIL-OPEN — the regex required the literal characters
+      `<section id="beat-x" class="beat`, so `<section class="workflow beat"
+      id="beat-new">` and `<section id='beat-new2' class='beat'>` (single
+      quotes) did not match. A new beat written either way was INVISIBLE to
+      the list and escaped the hatch's group silently: measured `beats=7`,
+      row GREEN, with the new section live on the page.
+
+      FALSE RED — it read the raw page, so a `<section …>` parked in an HTML
+      comment (dead to the browser, and commenting a tag out is the natural way
+      to disable it) was counted as a beat and the row demanded a hatch arm for
+      something that does not exist: measured `beats=8`, RED naming the
+      commented-out id. That is verbatim the #14020 failure `_css_blanked`
+      fixed for CSS — reintroduced for markup, two functions above
+      `_beat_ground_elements`, which does strip comments.
+
+    `_beat_section_spans` is the shared reader, so the beat LIST and the beat
+    GROUNDS cannot disagree about what the page contains.
+    """
+    return [beat for beat, _start, _end in
+            _beat_section_spans(_without_html_comments(html))]
 
 
 def _max_height_media_spans(css: str) -> list[tuple[int, int, int]]:
@@ -5709,6 +5732,35 @@ def _direct_child_elements(body: str) -> list[GroundElement]:
     return out
 
 
+def _beat_section_spans(markup: str) -> list[tuple[str, int, int]]:
+    """`[(beat_id, body_start, body_end)]` for each `.beat` section.
+
+    `markup` must already be comment-blanked (`_without_html_comments`); the
+    returned indices are into THAT string, so a caller that needs the body must
+    pass, and slice, the same one. Comment-blanking is not length-preserving,
+    which is why the blanked string is threaded through instead of re-derived.
+
+    "`.beat`" means the word `beat` among the element's CLASS tokens and an `id`
+    that starts with `beat-` — the attribute reader `_element_facts` already
+    provides — rather than a fixed `<section id="…" class="…` spelling.
+    """
+    out: list[tuple[str, int, int]] = []
+    for match in _HTML_TAG_RE.finditer(markup):
+        if match.group(1) or match.group(2).lower() != "section":
+            continue
+        _tag, classes, ids = _element_facts(match.group(2), match.group(3))
+        if "beat" not in classes:
+            continue
+        beat_id = next((element_id for element_id in sorted(ids)
+                        if element_id.startswith("beat-")), "")
+        if not beat_id:
+            continue
+        start = match.end()
+        out.append((beat_id, start, start + len(
+            _element_body(markup, start, "section"))))
+    return out
+
+
 def _beat_ground_elements(
         html: str) -> dict[str, dict[str, GroundElement | None]]:
     """Each beat's FIRST and LAST direct child, read from the MARKUP.
@@ -5727,13 +5779,8 @@ def _beat_ground_elements(
     """
     markup = _without_html_comments(html)
     out: dict[str, dict[str, GroundElement | None]] = {}
-    for match in BEAT_SECTION_RE.finditer(markup):
-        beat = match.group(1)
-        tag_end = markup.find(">", match.end())
-        if tag_end == -1:
-            continue
-        children = _direct_child_elements(
-            _element_body(markup, tag_end + 1, "section"))
+    for beat, body_start, body_end in _beat_section_spans(markup):
+        children = _direct_child_elements(markup[body_start:body_end])
         out[beat] = {
             "first-child": children[0] if children else None,
             "last-child": children[-1] if children else None,
@@ -6425,8 +6472,12 @@ class TestShortViewportCentringIsGradedPerBlock:
         "      #beat-hero > :last-child { margin-bottom: auto; }")
     CENTRED_HATCH = ALIGNED_HATCH + "\n" + AUTO_MARGINS_HATCH
 
+    HERO_SECTION = ('<section id="beat-hero" class="beat">'
+                    '<div class="doc-grid">copy</div></section>')
+
     @staticmethod
-    def _page(*, hatch: str, base: str = "", extra: str = "") -> str:
+    def _page(*, hatch: str, base: str = "", extra: str = "",
+              markup: str = HERO_SECTION) -> str:
         return (
             "<!doctype html>\n<html><head><style>\n"
             "    .beat { justify-content: safe center; }\n"
@@ -6439,8 +6490,7 @@ class TestShortViewportCentringIsGradedPerBlock:
             # The ground carries `.doc-grid` so a class-qualified selector
             # addresses it; the guard reads the ELEMENT, not the selector text
             # (#14697 residual 2).
-            '<section id="beat-hero" class="beat">'
-            '<div class="doc-grid">copy</div></section>\n'
+            f"{markup}\n"
             "</body></html>\n"
         )
 
@@ -6474,6 +6524,50 @@ class TestShortViewportCentringIsGradedPerBlock:
                 "    .beat > :first-child { margin-top: auto; }\n"
                 "    .beat > :last-child { margin-bottom: auto; }"))
         assert _short_viewport_centring_problems(page) == []
+
+    def test_a_commented_out_beat_section_is_not_a_beat(self):
+        """A comment is dead to the browser, so it is not a beat (#14683 F1).
+
+        The beat list used to be read off the RAW page, so a `<section …>`
+        parked in an HTML comment was counted and the row demanded a hatch arm
+        for an element that does not exist — measured `beats=8`, RED naming the
+        commented-out id, with no edit able to clear it but deleting the
+        comment. That is verbatim the #14020 failure `_css_blanked` fixed for
+        CSS, and this page is comment-dense (its hero comment quotes
+        `<video>`/`<div>`).
+        """
+        markup = (self.HERO_SECTION
+                  + '\n<!-- <section id="beat-oldbit" class="beat">'
+                    "<p>retired</p></section> -->")
+        page = self._page(hatch=self.CENTRED_HATCH, markup=markup)
+        assert _beat_section_ids(page) == ["beat-hero"], (
+            "a beat section inside an HTML comment was derived as a live beat")
+        assert _short_viewport_centring_problems(page) == [], (
+            "the row demanded a hatch arm for a commented-out section")
+
+    def test_a_new_beat_is_derived_whatever_the_attributes_spell(self):
+        """The `derived from the page` guarantee, in the spellings that exist.
+
+        The beat list is documented as "DERIVED from the page so a new beat
+        cannot silently escape the hatch's group", but it was regexed from one
+        fixed spelling — `<section id="…" class="beat`. A new beat written
+        CLASS-FIRST or with SINGLE-QUOTED attributes was invisible to the list
+        and escaped the group silently: measured `beats=7`, row GREEN, with the
+        new section live on the page (#14683 review F1).
+        """
+        for spelling in (
+            '<section class="workflow beat" id="beat-new"><p>x</p></section>',
+            "<section id='beat-new' class='beat'><p>x</p></section>",
+        ):
+            page = self._page(hatch=self.CENTRED_HATCH,
+                              markup=self.HERO_SECTION + "\n" + spelling)
+            assert "beat-new" in _beat_section_ids(page), (
+                f"a new beat spelled {spelling!r} was invisible to the "
+                "derived beat list")
+            problems = _short_viewport_centring_problems(page)
+            assert any("beat-new" in problem for problem in problems), (
+                f"the new beat {spelling!r} escaped the hatch's group with the "
+                f"row GREEN: {problems!r}")
 
     def test_a_qualified_subject_is_not_the_bare_beat(self):
         """`.beat.workflow > …` NARROWS the set; it is not a home for every beat.
