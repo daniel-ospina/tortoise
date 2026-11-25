@@ -10,8 +10,10 @@ also found that the flag is GLOBAL while the cutover is PER GRAPH, and that
 nothing created the counter row for a NEW graph
 (`provision_graph_record` had zero hits when this file was written — `#14582`
 has since added it, called from the two doors the record can file — so what
-remains is the graphs that existed BEFORE it landed), and every graph created
-after the cutover was born uncut.
+remains is the graphs that existed BEFORE it landed: the hook runs at the
+creating door, and a credential resolver that finds an existing default row
+returns it without re-running that door), and every graph created after the
+cutover was born uncut.
 
 The fixes asserted here:
 

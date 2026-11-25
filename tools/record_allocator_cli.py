@@ -154,7 +154,9 @@ must be true before the flag is rolled, and none of them is this command's to do
      BEST-EFFORT: a record outage at creation does not fail the create, it
      leaves the graph UNCUT — which `/health` reports as
      `record.armed_but_uncut` and which `%(prog)s backfill` heals. And it does
-     not reach the graphs that already existed when it landed. So find the
+     not reach the graphs that already existed when it landed — the hook runs at
+     the door that CREATES a graph, and a credential resolver that finds an
+     existing default row returns it without re-running that door — so find the
      population with `%(prog)s sweep --org-id <org> --dsn <dsn>`, seed it with
      `%(prog)s backfill --org-id <org> --dry-run` (read it, write nothing) and
      then for real — BEFORE the flag is rolled.
@@ -606,8 +608,11 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     follow-up `sweep` cannot read CLEAN over them; and the payload says in words
     that the run left them not cut over. ⛔ A `halted` graph is seeded (monotone)
     but NOT armed: `arm` moves `seeded` → `active` only, and a halt has its own
-    remedy (`reopen`), so the entry carries `armed: False` with the reason
-    instead of raising halfway through an org.
+    remedy (`reopen`) — so a `--arm` run carries `arm_refused` with the `reopen`
+    command instead of raising halfway through an org, while a run WITHOUT
+    `--arm` shows the same state through each entry's `mode`/`counter_mode` and
+    the summary sentence below, which names BOTH states rather than calling a
+    `halted` graph `seeded`.
     """
     from tortoise import record_allocator as ra
 
@@ -774,13 +779,15 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # over; the graphs stay in `sweep`'s population until they are `active`.
         payload["finish_the_cutover"] = (
             f"{left_seeded} graph(s) "
-            + ("WOULD be `seeded` — which allocates NOTHING — so a real run "
-               "here would not cut them over. " if dry_run else
-               "are `seeded` — which allocates NOTHING — so this run did not "
-               "cut them over. ")
-            + ("Re-run with `--arm --acknowledge-cutover` to arm them, and "
-               "re-run `sweep` to confirm: a `seeded` graph stays in that "
-               "population until it is `active`"))
+            + ("WOULD be left NOT ALLOCATING" if dry_run else "are NOT ALLOCATING")
+            + " — a `seeded` counter allocates NOTHING, and a `halted` one moved "
+            "nowhere. "
+            + ("So a real run here would not cut them over. " if dry_run else
+               "So this run did not cut them over. ")
+            + ("Re-run with `--arm --acknowledge-cutover` to arm the `seeded` "
+               "ones (a `halted` graph needs `reopen` first), and re-run "
+               "`sweep` to confirm: any graph that is not `active` stays in "
+               "that population"))
     return payload
 
 
