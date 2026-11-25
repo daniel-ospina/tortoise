@@ -393,6 +393,22 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
         "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
 
 
+def test_an_unresolvable_render_target_is_could_not_run(tmp_path):
+    """A destination that cannot be RESOLVED answers 2, never 1.
+
+    `Path.resolve()` raises `RuntimeError("Symlink loop …")` on ELOOP — a
+    `RuntimeError`, not an `OSError` — and the resolve happens before every guard, so
+    the traceback escaped and the interpreter exited 1 (this tool's DRIFT code) from
+    a verb with no drift verdict. Measured with two symlinks pointing at each other.
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    rc = census.main(["--render", str(a / "deep.md")])
+    assert rc == 2, (
+        f"an unresolvable render target must answer 2 (could not run), got {rc}")
+
+
 def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
     """`--render` on a source it cannot read answers 2, never 1.
 
