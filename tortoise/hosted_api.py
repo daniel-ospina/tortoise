@@ -15733,7 +15733,7 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
     the claim (the PR's own "a :Source's raw payload never rides the route"), and
     because ``_provenance`` is reachable through the MCP door as well — fixing it
     there is a wider behaviour change than this route needs, and is the better
-    home only if the surface owner takes it (filed as a follow-up).
+    home only if the surface owner takes it (filed as #14630).
 
     Only the properties of a ``:Source`` neighbour are touched; every other
     node's map is returned as stored, so no other arm's payload changes shape.
@@ -54803,7 +54803,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
