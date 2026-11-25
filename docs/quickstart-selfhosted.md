@@ -46,7 +46,7 @@ pip install -e .
 pip install git+https://github.com/daniel-ospina/tortoise.git
 ```
 
-- **Never** run `pip install tortoise` — the name is taken on PyPI by an unrelated turtle-graphics package. This project is published as `tortoise-graph`.
+- **Never** run `pip install tortoise` — the name is taken on PyPI by an unrelated turtle-graphics package. This project's **engine** is published on PyPI as `tortoise-graph`; the **client** (`tortoise-client`) is not published yet and builds from a clone (see § Scripting / agent tooling below).
 - Optional embeddings (vector search): `pip install -e '.[embeddings]'`.
 - **Off-box backup driver** (Option A2's declared target): install the `backups` extra — `pip install -e '.[backups]'`, or `pip install 'tortoise-graph[backups]'` from PyPI. The driver's `R2Storage` needs `boto3`, which ships only in that extra (`Dockerfile.selfhost` and the hosted image both install it). Without it a complete target still validates at boot and then **fails every run** with *"boto3 not installed"* instead of producing an archive.
 - Use a venv: `python3 -m venv .venv && source .venv/bin/activate`. On Homebrew and Ubuntu, PEP 668 blocks bare `pip` installs into the system Python ("externally-managed-environment") — the venv sidesteps that.
@@ -528,19 +528,40 @@ key here: a local daemon needs none):
 ### Scripting / agent tooling — the thin Python driver (`tortoise-client`)
 
 For Python scripts and agent integrations, install the thin driver (#526) —
-it connects to the daemon over MCP and never embeds the engine:
+it connects to the daemon over MCP and never embeds the engine. It is not on
+PyPI yet, and it cannot be pip-installed from the repo subdirectory (its shared
+modules are staged at build time), so build the wheel and install it. Use its
+own virtualenv, **not** the one from §1: `tortoise-client` and `tortoise-graph`
+both ship a top-level `tortoise` package, so co-installing overwrites files and
+breaks the engine (see `client/README.md` §Install).
 
 ```bash
-pip install tortoise-client
+# pypi.org/pypi/tortoise-client → 404, so there is no `pip install tortoise-client` yet
+python3 -m venv ~/.venv-tortoise-client   # its OWN venv — never §1's (that one holds the engine)
+source ~/.venv-tortoise-client/bin/activate
+git clone https://github.com/daniel-ospina/tortoise.git ~/tortoise-client-src   # build tree, outside your engine clone
+cd ~/tortoise-client-src && git checkout v0.2.1   # the released tag — client and engine ship in lockstep
+bash client/build_client.sh          # stages the shared modules, builds dist-client/*.whl
+pip install dist-client/*.whl        # thin driver only — no engine code, no engine deps
 # TORTOISE_MCP_URL defaults to http://localhost:8000/mcp — set TORTOISE_API_KEY if the daemon requires auth
 tortoise-client status          # connectivity + tool-count probe
 ```
+
+Once `tortoise-client` is published to PyPI, this block collapses to
+`pip install tortoise-client`.
 
 ```python
 # client-first import surface (tortoise.mcp_client also works)
 from tortoise_client import status, call_tool
 print(status())
 ```
+
+> ℹ️ That leaves `~/.venv-tortoise-client` active for the rest of this shell (the example
+> above needs it), and it holds only the driver — not the engine's `tortoise` CLI. The
+> engine commands below (`tortoise key create`, `tortoise serve`, §6's `tortoise doctor` /
+> `tortoise backup`, §7's `tortoise export`) run from the environment you installed the
+> engine into (§1's `.venv`): run `deactivate`, `cd` to that directory, and
+> `source .venv/bin/activate` before running them.
 
 ### No-Docker path (single-agent eval) — stdio
 

@@ -159,19 +159,30 @@ Tortoise ships as **two distributions** — the MongoDB-driver model: the engine
 | Distribution | What it is | License | Install where |
 |---|---|---|---|
 | `tortoise-graph` | The **server**: engine (SDK, projection, EP), daemon, MCP server, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) | BSL-1.1 | Docker image / server host |
-| `tortoise-client` | The **thin driver**: MCP client + config + types + a `tortoise-client` CLI — connects, never embeds the engine | Apache-2.0 | anywhere you script / integrate |
+| `tortoise-client` | The **thin driver**: MCP client + config + types + a `tortoise-client` CLI — connects, never embeds the engine | Apache-2.0 | anywhere you script / integrate — from a clone, below |
 
 **Scripting / integration / agent tooling — install the client:**
 
 ```bash
-pip install tortoise-client
+# `tortoise-client` is not on PyPI yet (pypi.org/pypi/tortoise-client → 404), and it
+# cannot be pip-installed straight from the repo: the driver's shared modules are
+# staged at build time, so `pip install ...#subdirectory=client` yields a package
+# that is missing its own `tortoise.mcp_client` module. Build the wheel, then install it —
+# in its OWN venv, never the one holding `tortoise-graph` (they share a `tortoise` package):
+python3 -m venv ~/.venv-tortoise-client && source ~/.venv-tortoise-client/bin/activate
+git clone https://github.com/daniel-ospina/tortoise.git ~/tortoise-client-src   # build tree, outside any repo
+cd ~/tortoise-client-src && git checkout v0.2.1   # the released tag — client and engine ship in lockstep
+bash client/build_client.sh          # stages the shared modules, builds dist-client/*.whl
+pip install dist-client/*.whl        # thin driver only — no engine code, no engine deps
 ```
 
-Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000/mcp`; `TORTOISE_API_KEY` when auth is on) and run `tortoise-client status`. A clean client install contains no engine code and pulls no engine dependencies (no FalkorDB / numpy / scipy / fastapi).
+Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000/mcp`; `TORTOISE_API_KEY` when auth is on) and run `tortoise-client status`. A clean client install contains no engine code and pulls no engine dependencies (no FalkorDB / numpy / scipy / fastapi). Install it in its own venv, never the one holding `tortoise-graph`: both dists ship a top-level `tortoise` package, so co-installing overwrites files and breaks the engine.
 
-**Running the server** (self-hosted): Docker compose (`docker compose up -d`) or `pip install tortoise-graph` + `tortoise-serve` — see [docs/quickstart-selfhosted.md](docs/quickstart-selfhosted.md). The `tortoise-graph` package still ships the full SDK surface for server-side power use and local eval. (The bare `tortoise` PyPI name is squatted by an unrelated library — engine = `tortoise-graph`, client = `tortoise-client`, #258/#526.)
+**Running the server** (self-hosted): Docker compose (`docker compose up -d`) or `pip install tortoise-graph` + `tortoise-serve` — see [docs/quickstart-selfhosted.md](docs/quickstart-selfhosted.md). The `tortoise-graph` package still ships the full SDK surface for server-side power use and local eval. (The bare `tortoise` PyPI name is squatted by an unrelated library — the engine is published on PyPI as `tortoise-graph`; the client's PyPI name will be `tortoise-client`, but only the engine is published today: the client builds from a clone, as above, #258/#526.)
 
 ```bash
+# the engine goes in its OWN env, never the client venv above
+python3 -m venv ~/.venv-tortoise-graph && source ~/.venv-tortoise-graph/bin/activate
 pip install 'tortoise-graph[backups]'   # server package: engine + daemon + MCP server
 #   [backups] is the off-box backup driver's dependency (boto3 for its R2
 #   store, #8544). Leave it off only if you never declare a target: a complete
