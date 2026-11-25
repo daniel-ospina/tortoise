@@ -759,6 +759,58 @@ def test_the_belief_routes_provenance_chain_also_honours_the_source_rule(
         assert secret not in repr(body), body
 
 
+def test_the_delegation_filter_grades_the_label_SET_not_just_the_first_label(
+        tmp_path):
+    """#14593 review P1: a hybrid neighbour is judged by ALL its labels.
+
+    ``node_type`` is the neighbour's FIRST label. So ``(:Object:Source)``
+    presented as ``node_type == "Object"`` — an allowed label — and the filter,
+    keying on that single string, published the node's whole ``properties`` map
+    with the ``:Source`` half included. MEASURED on this tree, through public
+    doors only: a hybrid node carrying ``text`` returned it inside
+    ``GET /v1/entities/{id}/belief``.
+
+    ⛔ The hybrid is not a hand-written fixture shape: ``mcp_server.py``'s #4649
+    blast-radius fix exists for ``(:Object:Source)``, #12914 and
+    ``tool_registry.py`` (citing tortoise#13114) name ``(:Object:Source)`` /
+    ``(:Subject:Source)`` / ``(:Object:Event)`` as shapes the supersede path
+    meets, and ``relabel_legacy_documents`` leaves ``:Document:Source`` behind on
+    an interrupted run. This arm creates the exact hybrid and asserts the payload
+    nowhere reaches the response.
+    """
+    secret = "HYBRID OBJECT-SOURCE BODY THAT MUST NOT RIDE THIS ROUTE"
+    hybrid_id = "hybrid-object-source-14593"
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        sdk = _sdk(ha)
+        try:
+            subj = sdk._create_subject("Reviewer", "person")
+            # `:Object` FIRST on purpose: that is what makes `labels(n)[0]` an
+            # allowed label and reproduces the disclosure instead of pretending
+            # the order does not matter.
+            sdk._get_proj().g._query(
+                "CREATE (n:Object:Source {id:$i, name:'HYBRID', url:$u, text:$t})",
+                params={"i": hybrid_id, "u": "https://example.test/hybrid-14593",
+                        "t": secret}, read_only=False)
+            edge = sdk._create_edge("references", subj["id"], hybrid_id)
+            assert edge["created"] is True, f"the fixture could not write the edge: {edge}"
+            point = sdk._create_point(
+                "statement", "a claim with a documented author",
+                authoredBy=subj["id"])
+        finally:
+            sdk.close()
+
+        out = client.get(f"/v1/entities/{point['id']}/belief")
+        assert out.status_code == 200, out.text
+        body = out.json()
+        delegation = body["evidence"]["provenance"]["delegation"]
+        # The fixture reached the arm, so this row grades something.
+        assert [d["node_type"] for d in delegation] == ["Object"], body
+        # …and the `:Source` half is still there to be seen, which is the point.
+        assert set(delegation[0]["labels"]) == {"Object", "Source"}, delegation
+        assert "text" not in delegation[0]["props"], delegation[0]["props"]
+        assert secret not in repr(body), "a hybrid node's payload rode the route"
+
+
 def test_the_delegation_filter_denies_by_default_not_by_one_spelling():
     """#14593 review P1 (the fix's OWN hole): the filter keyed on ONE spelling.
 

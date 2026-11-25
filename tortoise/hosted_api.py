@@ -15769,12 +15769,38 @@ def _filter_delegation_payloads(provenance: dict | None) -> dict | None:
 
     filtered: list = []
     for entry in delegation:
-        if (isinstance(entry, dict)
-                and entry.get("node_type") not in _PUBLISHABLE_DELEGATION_LABELS):
+        if isinstance(entry, dict) and not _delegation_entry_publishable(entry):
             props, _denied = filter_source_props(dict(entry.get("props") or {}))
             entry = {**entry, "props": props}
         filtered.append(entry)
     return {**provenance, "delegation": filtered}
+
+
+def _delegation_entry_publishable(entry: dict) -> bool:
+    """Is EVERY label on this delegation neighbour one the route may publish?
+
+    ⛔ THE WHOLE SET, never ``node_type`` alone, and the difference is a measured
+    disclosure (#14593 review P1). ``node_type`` is the neighbour's FIRST label
+    (``labels(n)[0]`` as the callee returned it), so a node carrying
+    ``[:Object, :Source]`` presented as ``node_type == "Object"`` — an allowed
+    label — and its ``properties(n)`` map was published untouched, ``:Source``
+    half included. That shape is not hypothetical: this repo's own product code
+    names the hybrids as production shapes (``mcp_server.py``'s #4649 blast-radius
+    case is ``(:Object:Source)``; #12914 and ``tool_registry.py`` citing #13114
+    name ``(:Object:Source)`` / ``(:Subject:Source)`` / ``(:Object:Event)`` as
+    shapes the supersede path meets), and ``relabel_legacy_documents``
+    (``migrate_kinds.py``) leaves ``:Document:Source`` behind on an interrupted
+    run — the same legacy provenance class one spelling over.
+
+    Deny by DEFAULT: an entry whose labels cannot be read at all is filtered, not
+    trusted. ``labels`` is additive on the payload; an older callee (or a
+    hand-built chain) that carries only ``node_type`` falls back to that single
+    string, which is exactly the previous behaviour rather than a widening.
+    """
+    labels = entry.get("labels")
+    if not isinstance(labels, (list, tuple)) or not labels:
+        labels = [entry.get("node_type")]
+    return all(lbl in _PUBLISHABLE_DELEGATION_LABELS for lbl in labels if lbl)
 
 
 async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
