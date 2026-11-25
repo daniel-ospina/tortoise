@@ -10334,20 +10334,20 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
         "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
 
 
-#: The ISSUE shorthand an entry of the row enumeration may use — `` `#14560`'s `` — with its path
-#: named beside the word `row` SOMEWHERE ELSE in the block. `[\s#]*` spans the block's comment
-#: wrapping (`\n# `), which `\s*` alone does not: the live paragraph breaks between
-#: `` `#14565`'s `` and its path, and a matcher bound to the unwrapped spelling reads the
-#: enumeration's shorthand as unreachable when it is not (the same one-spelling class this block
-#: keeps re-learning).
+#: The ISSUE shorthand a row item may be spelled with — `` `#14560`'s `` — and the rule the block
+#: states for it: "Every row item above is therefore spelled with its path beside the word", so
+#: inside the row LIST every issue label must carry its own path. `[\s#]*` spans the block's
+#: comment wrapping (`\n# `), which `\s*` alone does not: the live paragraph breaks between a label
+#: and its path, and a matcher bound to the unwrapped spelling reads a reachable item as unreached
+#: (the one-spelling class this block keeps re-learning).
 _ROW_ENUMERATION_ISSUE_RE = re.compile(r"`#(?P<issue>\d+)`'s")
 _ROW_ISSUE_SHORTHAND_RE = r"`#%s`'s[\s#]*`tests/(?P<file>[\w/.-]+\.py)`\s*rows?\b"
 
 
 def _issue_shorthand_row_file(unquoted: str, issue: str) -> str | None:
-    """The file `` `#<issue>`'s `<path>` row `` names, or `None` when the block never spells it.
+    """The file `` `#<issue>`'s `<path>` row `` names, or `None` when the text never spells it.
 
-    One resolver, used for the live block AND for the fixture that proves it refuses a shorthand
+    One resolver, used for the live list AND for the fixture that proves it refuses a shorthand
     with no path beside it, so the fixture cannot drift into grading something the live arm does
     not.
     """
@@ -10355,45 +10355,65 @@ def _issue_shorthand_row_file(unquoted: str, issue: str) -> str | None:
     return match.group("file") if match else None
 
 
-def test_the_row_enumeration_spells_no_row_claim_no_matcher_reaches():
-    """Every entry of the row enumeration must resolve to a file a matcher can reach.
+def _row_list_issue_shorthands(unreached: str) -> list[str]:
+    """The issue labels a row list spells with NO path beside them, IN THE LIST'S OWN TEXT.
 
-    `#14612` review measured the block saying "Every row item above is therefore spelled with its
-    path beside the word" while three enumeration entries were spelled `` `#14560`'s ``,
-    `` `#14565`'s `` and `` `#14552`'s `` — by ISSUE, with the path named only in the paragraph
-    ABOVE. The enumeration now spells every one of them with its path, so that sentence is true;
-    nothing graded the difference either way, which is the half this arm closes.
+    The `reached` half of `test_the_row_list_alone_reaches_every_item_it_names`: a list that leaves
+    an entry as `` `#14560`'s `` resolves to no file inside the list, so the sentence that says every
+    item is spelled with its path beside it is false and no path-based arm can see it.
+    """
+    return sorted({m.group("issue") for m in _ROW_ENUMERATION_ISSUE_RE.finditer(unreached)
+                   if _issue_shorthand_row_file(unreached, m.group("issue")) is None})
 
-    MEASURED on the shorthand form: drop the path beside `` `#14560`'s `` and the enumeration's
-    entry resolves to no file while every existing arm stays GREEN — the same class the block
-    records for `#14415` and `#14597`. Both halves are checked per issue, so a fold that keeps a
-    shorthand and loses its path reds here.
+
+def test_the_row_list_alone_reaches_every_item_it_names():
+    """The row list must be SELF-SUFFICIENT, which is the invariant the block now states.
+
+    `#14612` review (`2ce50a8343`, P3) measured "Every row item above is therefore spelled with its
+    path beside the word" to be FALSE: three of the list's nine items were spelled `` `#14560`'s ``,
+    `` `#14565`'s `` and `` `#14552`'s ``, reachable only through the EARLIER emission paragraph. The
+    list now spells all three by path (`94ecd6b607be`), and that is the stronger repair — but a
+    repair the commit message MEASURES rather than one an arm HOLDS: re-introduce one issue-only
+    entry and every existing arm stays GREEN, because a list that names no path for an item leaves
+    the path-based checks nothing to read. That is the `#14415`/`#14597` defect one fold away.
+
+    Two halves, over the list ALONE (sliced `A ROW is an entry in` … `THE LIST IS POSITIVE ONLY`):
+    every path it names is a row claim `_row_claims` returns FROM THAT SLICE, and no issue label in
+    it sits without its own path beside it. Both are checked against the live block and against the
+    list's own pre-fix spelling, so neither can pass by grading nothing.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     enumeration = _row_enumeration(header)
-    issues = sorted({m.group("issue") for m in _ROW_ENUMERATION_ISSUE_RE.finditer(enumeration)})
-    assert issues, (
-        "the row enumeration names no issue at all, so this arm grades nothing — re-point "
+    rows = set(cs.load_manifest()["durations"])
+    named = {m.group(1) for m in re.finditer(r"`tests/([\w/.-]+\.py)`", enumeration)}
+    assert named, (
+        "the row list names no file by path, so this arm grades nothing — re-point "
         "`_row_enumeration` at the list the block actually writes")
-    unquoted = _unquoted_block(header)
-    claims = set(_row_claims(header))
-    for issue in issues:
-        named_file = _issue_shorthand_row_file(unquoted, issue)
-        assert named_file is not None, (
-            f"the row enumeration says `#{issue}`'s but the block nowhere spells a path beside "
-            f"that issue with the word `row`, so no matcher can reach the file it means — name the "
-            f"path (`#{issue}`'s `tests/….py` row) in the enumeration, or drop the entry")
-        assert named_file in claims, (
-            f"`#{issue}`'s row is spelled `tests/{named_file}` but `_row_claims` does not return "
-            "it, so the enumeration's entry is a row claim graded by nothing")
-    # …and the resolver REFUSES the shape it exists for: the shorthand with its path moved away.
-    # MEASURED on that sentence: `_row_claims` never returns `test_14560_operator_vectors.py`, so
-    # deleting its `durations` row left every arm GREEN — the `#14597` defect, one issue label over.
-    assert _issue_shorthand_row_file(
-        "`#14560`'s row, and `tests/test_14560_operator_vectors.py` named elsewhere", "14560"
-    ) is None, (
-        "the shorthand resolver accepted `` `#14560`'s `` with NO path beside it — it would grade "
-        "a file the block never names in that claim, and the live arm above would stop biting")
+    # 1. REACH: the list reaches every item it names, on its own text.
+    ungraded = sorted(named - set(_row_claims(enumeration)))
+    assert not ungraded, (
+        f"the row list names {ungraded} but `_row_claims` does not return it FROM THE LIST — the "
+        "item is only reachable through prose above, which is the issue-only spelling the block "
+        "says it no longer uses. Put the word `row` beside the path inside the list")
+    rowless = sorted(named - rows)
+    assert not rowless, (
+        f"the row list calls {rowless} a `durations` row, but the map carries none: the weight "
+        "then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
+    # 2. SPELLING: no entry survives as an issue label with its path left elsewhere.
+    shorthands = _row_list_issue_shorthands(enumeration)
+    assert not shorthands, (
+        f"the row list spells {shorthands} by ISSUE with no path beside them, so the block's "
+        "\"every row item above is therefore spelled with its path beside the word\" is false and "
+        "no matcher can reach the files those labels mean — spell the path in the list")
+    # …and the checker REFUSES the pre-fix list, so half 2 is not decoration: this is the block's
+    # own text before `94ecd6b607be` fixed it.
+    pre_fix = (
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s "
+        "`tests/test_expansion_fusion_14344.py` row, `#14560`'s, `#14565`'s, `#14552`'s, "
+        "`#14592`'s `tests/test_14592_read_parity.py` row. ⛔ THE LIST IS POSITIVE ONLY")
+    assert _row_list_issue_shorthands(pre_fix) == ["14552", "14560", "14565"], (
+        "the issue-shorthand checker no longer reads the list it was written for, so half 2 passes "
+        f"over any spelling of it — got {_row_list_issue_shorthands(pre_fix)!r}")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
