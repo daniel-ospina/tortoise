@@ -2960,6 +2960,8 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_mcp_selfcheck.py
+  - test_recall_neighborhood.py
   # #14429 review P2: the spool-drain rehearsal's two load-bearing invariants (the
   # source spool is never written, and a non-loopback / production target is
   # refused) are enforced only inside `tools/spool_drain_rehearsal.py`'s own control
