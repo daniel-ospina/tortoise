@@ -242,6 +242,29 @@ producer. Those are dated measurements of a machine in its BOTH-producers state,
 and they remain accurate about it — but on a box where this seam is installed
 the producer is retired, so read them as the precondition this section removes.
 
+#### Residuals this guard does NOT close (filed as notes, not chased)
+
+- **The legacy DIRECTORY has no convergence arm.** The farm's manifest also
+  carries `extensions/tortoise-capture/`, so a copy-mode or second-clone farm
+  can re-materialize the legacy directory after an install renamed it aside.
+  The install then refuses (both names present) and — because that refusal
+  returns early — the second producer's convergence never runs on that box, so
+  `tortoise install pi` stays red until a human moves one aside, once per farm
+  cycle. The measured reference box's farm denies that stem by name and
+  converges green.
+- **`legacy_extension_obstacle` mirrors two of the installer's four refusal
+  conditions**, so `hooks status`/`doctor` can still name a refusing verb for
+  the newer ones (a symlinked preservation target, a manifest-declared
+  directory). The mirror is the one thing that drifts — that is its documented
+  hazard, not a new one.
+- **A TOCTOU window** remains between the digest comparison and the
+  `unlink()` in the re-assert arm; the farm never writes the retired path, so
+  the window needs a concurrent writer on the same box.
+- **A symlink at a producer path pointing at a DIRECTORY** is loaded by Pi as a
+  file attempt (which fails), yet retiring it renames the LINK to
+  `*.ts.disabled`, which Pi then resolves as a directory and loads. That shape
+  is refused by the post-retirement assertion rather than converged.
+
 #### The backlog is a decision, not a delete
 
 Where the product seam is NOT installed, `session-events/` is the **only**
