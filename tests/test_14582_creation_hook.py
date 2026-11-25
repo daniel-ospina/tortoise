@@ -809,8 +809,11 @@ def test_the_WRITE_PATH_feeds_and_retracts_the_registry(monkeypatch):
         assert rw.armed_but_uncut()["armed_but_uncut"] == 0, (
             "the observation that repairs the gap must RETRACT the entry")
 
-        # 3. `halted`: the write path must move it to the OTHER population — not
-        #    leave the repaired entry standing, and not report it as a gap.
+        # 3. `halted`: the write path must MOVE it — report it on the halt's own
+        #    key, not as a gap. (The `halted` arm's retraction is graded by
+        #    `test_a_graph_TRANSITIONS_between_the_two_populations`: the `active`
+        #    observation in step 2 already emptied the uncut map here, so this row
+        #    cannot also show the entry being retracted.)
         state["row"] = (5, "halted")
         assert rw.record_owns_position(tenant=tenant) is False
         block = rw.armed_but_uncut()
