@@ -20,9 +20,14 @@ consumes. The measurement therefore reports, over seeded randomised pools:
   * ``pass1_rank0_position`` — where pass 1's own rank-0 row lands in the
                               merged leg. This is the displacement made visible:
                               under the concatenation it is pushed to
-                              ``len(expanded)`` (everything the expansion
-                              returned sits above it); under the fusion it is
-                              bounded by how many candidates out-rank it.
+                              ``len(expanded)`` ONLY when the expansion did not
+                              repeat that row; a repeated rank-0 sits wherever
+                              the expansion ranked it (measured mean 6.83 at
+                              ``shared=0.6``, 8.78 at ``shared=0.2``, against
+                              **12.21** averaged over the five shapes) — which is
+                              why the mean must not be read as "every expansion
+                              row sat above it". Under the fusion it is bounded
+                              by how many candidates out-rank it.
 
 **Why this and not the capstone set.** `docs/evidence/12186-capstone/queries.json`
 is a single-hop NAME set: 300 harvested object names, one canonical `:Object`

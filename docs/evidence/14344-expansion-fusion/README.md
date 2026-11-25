@@ -57,9 +57,16 @@ happened to repeat it. Under the fusion it is **1.26 at k=5 and 3.59 at k=10**. 
 this change removes, stated as a count rather than as a ranking theory.
 
 The fifth column is the displacement made visible, and it is measured over the whole merged leg so it
-cannot saturate: under the concatenation pass 1's **own top row** sat at position ~12 — every row the
-expansion returned was above it — and under the fusion it sits at ~2. (An earlier revision of this
-doc reported a "did pass-1's top row fall out of the head" boolean instead; that reads `0.0` for
+cannot saturate: under the concatenation pass 1's **own top row** sat at a mean row index of
+**12.21** (0-based, so row 13 of the merged leg) — and under the fusion it sits at ~2. ⛔ **The mean is
+NOT "the expansion's rows were all above it"**: that holds only where the expansion did not repeat
+that row, where it lands at exactly `len(expanded)` (10 with a 10-row expansion, 20 with a 20-row
+one). Where the expansion DID repeat it, the row sits wherever the expansion ranked it — 6.83 at
+`shared=0.6` and 8.78 at `shared=0.2` in the 10/10 shape, i.e. INSIDE the expansion's own list — and
+those shapes pull the mean down from the 17.86 / 18.18 the two 20-row shapes read. What is
+unconditional is the count next door: no pass-1-only row ever survived the concatenation. (An
+earlier revision of this doc reported a "did pass-1's top row fall out of the head" boolean instead;
+that reads `0.0` for
 BOTH arms by construction, because each rule's merged head is dominated by whatever that rule puts
 first, so it measured nothing and was replaced.)
 

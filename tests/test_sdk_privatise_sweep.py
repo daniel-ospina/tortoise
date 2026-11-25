@@ -384,38 +384,6 @@ def _residue_block() -> str:
     figures the kept blocks above publish (1914 on this branch's pre-merge tree, 1930 on
     `main`'s own) are each side's OWN measurement and neither is the figure above; this fold's
     `#:` lines in `tools/sdk_privatise.py` are what the delta between them accounts for.
-    — and the LATER fold of `origin/main` `2cccf90f4dd4` kept both sides' blocks once more (this
-    lane's copy read 1930, the peer re-cut's copy 1931) and brought that peer's own `#14445`
-    `SWEEP_RESIDUE` re-cut — the `#:` lines that attribute it are prose in the same run. ⛔ THAT
-    FOLD'S FIRST RESOLUTION DID NOT keep either: it replaced BOTH sides' records with one new
-    paragraph. That deleted the `#14480` record the branch's side of that fold carried — pair
-    (11911, "3e92044bab08cc3d") — AND the peer's `(11911, "4ed42694957a174d")` one, and left the
-    surviving sentence pointing at a note
-    no longer in the file — against this block's own rule a few hundred lines above (`BOTH SIDES'
-    RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them). Review rounds
-    caught it; BOTH records are restored verbatim above the later paragraph, each with a marker
-    naming the ONE tree that reproduces its pair — `59a08fdb8b40` for the peer's,
-    `05c46e24a2782` for `#14480`'s (neither is a tree this branch ever built, and an earlier marker
-    naming `a2f165b0ba47` was wrong: that tree derives 11912 and `--check` exits 1 there) — so the
-    claim in this sentence is now true of the resolved file rather than
-    only of the peer's half. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE
-    at 2019 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
-    `--repin` on BOTH trees
-    (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
-    — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
-    with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
-    walked run, so the figure above is RE-MEASURED by this walk on the folded file rather than
-    adjusted by arithmetic from either parent's reading,
-    — and `#4625`'s OWN residue re-pin block above (`SWEEP_RESIDUE` `11910` → `11908`, the two
-    `_JSONB_CACHE.update({...})` rows the 5 s `jsonb` TTL retired) appended `#:` lines to
-    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree rather than carried
-    forward from it — which is the defect THIS arm exists to catch, and it caught it here: the
-    figure and the walk are now graded together
-    (`test_the_extent_figure_is_the_walks_own_count`), so a prose edit that moves the run REDS
-    naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
-    moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
-    gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
-    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
     — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks once more (each side
     had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
     prose), and the resolution keeps both verbatim rather than trimming the run to one side's
@@ -877,6 +845,69 @@ def test_the_extent_figure_is_the_walks_own_count():
     assert published == actual, (
         f"the block publishes its extent as {published} lines; its own walk returns {actual} — a "
         "prose edit changed the run, so re-derive the figure instead of carrying it forward")
+
+
+#: How long a run of identical non-blank lines has to be before it is a SPLICE rather than the
+#: block's own habit of repeating one clause verbatim across folds (it does that constantly, in
+#: single lines and in pairs). Eight is above every honest repeat measured in this docstring and
+#: far below the spliced passage that shipped: **31** lines, twice (#14396 review, P3-1).
+_SPLICE_RUN_LINES = 8
+
+
+def _duplicated_line_runs(text: str, run: int = _SPLICE_RUN_LINES) -> list[tuple[int, ...]]:
+    """Line numbers of every run of `run` identical, non-blank lines that OCCURS TWICE.
+
+    Whitespace-normalised, because a re-indent is not a different passage. Short windows whose
+    words total under 40 characters are skipped: `(`...`)` and a bare `— and this fold ...`
+    preface recur legitimately.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    seen: dict[tuple[str, ...], list[int]] = {}
+    for i in range(len(lines) - run + 1):
+        window = tuple(lines[i:i + run])
+        if not all(window) or sum(len(line) for line in window) < 40:
+            continue
+        seen.setdefault(window, []).append(i + 1)
+    return [tuple(starts) for starts in seen.values() if len(starts) > 1]
+
+
+def test_the_block_narrative_carries_no_spliced_passage():
+    """#14396 review P3-1 — the docstring carried the same 31-line passage TWICE, verbatim.
+
+    A merge resolution appended both sides' narrative instead of collapsing it, and the copy
+    landed INSIDE the docstring whose own graded rule is "BOTH SIDES' RECORDS ARE KEPT
+    VERBATIM ABOVE, and there is ONE assignment after them" — so the file that polices union
+    residue was carrying union residue of its own, ungraded. No arm read it: the extent figure
+    is graded on `tools/sdk_privatise.py`'s run (NOT on this docstring), so deleting prose here
+    moves neither number and nothing reds.
+
+    ⛔ THE ARM GRADES REPETITION, NOT LENGTH, and it names the passage it is required to keep:
+    a "fix" that shortens the narrative to pass this arm would be the class it exists to catch.
+    """
+    doc = _residue_block.__doc__ or ""
+    # Non-vacuity first: the narrative this arm polices must still be here, and still be long
+    # enough for a spliced run to be expressible in it at all.
+    assert "LATER fold of `origin/main` `2cccf90f4dd4`" in doc, (
+        "the docstring must still carry the `2cccf90f4dd4` fold record — deleting the narrative "
+        "is not the fix for a DUPLICATED paragraph in it")
+    assert len(doc.splitlines()) > 4 * _SPLICE_RUN_LINES, (
+        "the docstring is too short to be the narrative this arm grades — the walk may have "
+        "broken (an empty `__doc__` passes `in` on nothing and would read as GREEN)")
+    dup = _duplicated_line_runs(doc)
+    assert not dup, (
+        f"the docstring carries {len(dup)} spliced run(s) of {_SPLICE_RUN_LINES}+ identical "
+        f"lines, starting at lines {[s[0] for s in dup]} (each paired with a second copy) — a "
+        "merge kept both sides' records where the block requires ONE, so delete the duplicate "
+        "and keep the record once")
+    # The arm's own falsifier: the PRE-FIX pair of starts (387 and 452, 31 lines apart) must be
+    # REFUSED, or this arm grades nothing. Built from the shipped shape rather than a literal
+    # sample, so the detector's window arithmetic is what is exercised.
+    spliced = "\n".join(f"    line {i} of a kept passage" for i in range(_SPLICE_RUN_LINES))
+    assert _duplicated_line_runs(f"{spliced}\nspliced tail\n{spliced}"), (
+        "the detector must refuse a passage carried twice — every arm above depends on it")
+    assert not _duplicated_line_runs(f"{spliced}\nspliced tail\n    a DIFFERENT passage"), (
+        "the detector must pass a passage carried ONCE beside a different one, or an honest "
+        "fold record reds it")
 
 
 #: The label `main`'s RESTORED fold records carry, and why it may not say `VERBATIM` (#14583
