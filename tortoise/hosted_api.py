@@ -15717,8 +15717,10 @@ def _layer_payload(entry: dict, layer: str) -> dict:
     ``content``/``text`` verbatim on this route while ``filter_source_props``
     withholds them one door over — measured, and the shape is a production one
     (``mcp_server.py``'s #4649 case). ``labels`` is the column
-    ``FalkorProjection._resolve_entity`` emits for exactly this question; the
-    branch label is the fallback for an older callee, not the rule.
+    ``FalkorProjection._resolve_entity`` emits for exactly this question; a row that
+    carries no ``labels`` falls back to the ROUTE's layer declaration (``layer``),
+    which ``entity_reads.layer_payload`` documents as a legacy/mock arm and NOT as a
+    safety guarantee — ``entry["label"]`` is read nowhere on this path.
 
     ⚠️ NAMED RESIDUAL, not a promise: the layer's own KIND property
     (``LAYER_KIND_PROP``) is re-attached in ``entity_reads.layer_payload`` — the
@@ -54950,7 +54952,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (725 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

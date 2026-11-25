@@ -138,8 +138,10 @@ def layer_payload(
     carried a hand-copied form of this rule — and it is the half that most
     recently shipped wrong (a branch-keyed echo handed ``objectKind`` back through
     ``GET /v1/sources/{id}``). ``label`` is the ROUTE's layer declaration, never a
-    matched branch, and it is required: a caller that forgot it would silently
-    re-open that door.
+    matched branch, and it is a required positional with no branch fallback — a caller
+    that OMITTED it gets a ``TypeError``, while a caller that passed the matched branch
+    instead would silently re-open that door, which is the hazard the required
+    positional is there to make loud.
     """
     # ⛔ A COPY, not an alias: the re-attach below reads the pre-filter bag, and an
     # alias would make "the kind comes from before the filter" true only by

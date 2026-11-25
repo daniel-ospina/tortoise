@@ -3482,10 +3482,16 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: means the relation loosened and the relation, not the ceiling, is what gets fixed.
 #: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, this PR's
 #: relations preview, which walks every relationship type) and ONE door (its own
-#: `REST GET /v1/entities/{entity_id}/relations`), so 44 rows x 16 doors = 704 pairs.
+#: `REST GET /v1/entities/{entity_id}/relations`), so 19 CUSTOMER-CALLABLE rows x 16
+#: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
+#: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
+#: filters `_rows()` to `_reach(row) == "customer-callable"` and counts the doors over
+#: THAT set, so quoting the whole table here (44 x 16) would state a denominator no arm
+#: measures — an earlier cut of this note did, and another read 45 in a third frame.
 #: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
 #: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved
-#: (the 43 older rows still account for 27 of the 28). Worst row is UNCHANGED at 3
+#: (the 18 older customer-callable rows still account for 27 of the 28). Worst row is
+#: UNCHANGED at 3
 #: (rows 1, 2, 17, 22, 24, 45 hold the multi-door cells), so the 4-ceiling is untouched.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 28
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
