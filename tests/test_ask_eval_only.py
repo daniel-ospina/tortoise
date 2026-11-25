@@ -269,10 +269,22 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   re-measured from the registry (39 live entries, 34 advertised) — the same move
     #   `test_10084_graph_argument_omit_first` already records for the advertising view.
     #   The five `http_policy=False` rows are unchanged, so 34 = 39 - 5.
-    # Anything BELOW 34 is unexplained shrinkage and this arm reds on it; lowering the
+    #   ⛔ #11609 lane P11 (the nine envelope doors) retires NINE doors and registers
+    #   NOTHING. EIGHT were `http_policy=True` and every one of the eight delivered into a
+    #   container ALREADY in this view (`search_knowledge`, `list_knowledge`,
+    #   `check_confidence`, `graph_overview`), so no container row arrives and the listing
+    #   moves by exactly -8: 34 - 8 = **26**, re-measured from the registry's own
+    #   `http_policy` population (30 live entries, 26 advertised). The NINTH door,
+    #   `expand_relationships`, was `http_policy=False`, so it was never in this view —
+    #   but it WAS one of the five exclusion rows, so the exclusion term moves 5 -> 4
+    #   (the remaining four are still `http_policy=False`), which is why this view moves
+    #   by the eight departures and not by the nine: 26 = 30 - 4. That ninth door moved
+    #   the UNFILTERED census instead, and `test_10084_graph_argument_omit_first` derives
+    #   that move separately — the two numbers are not interchangeable.
+    # Anything BELOW 26 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
 
-    assert len(names) >= 34, f"default surface shrank to {len(names)}"
+    assert len(names) >= 26, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

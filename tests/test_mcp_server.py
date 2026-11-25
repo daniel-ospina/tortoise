@@ -1286,11 +1286,13 @@ class TestStdioEntrypointToolRegistration:
             #                       `expand_relationships`, `check_structure`,
             #                       `calibrate_summary`. No container row is added: every
             #                       destination was already advertised)
-            # ⛔ Not the HTTP-filtered view: that one is 34 at this head
-            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 34
-            # and 32 respectively), and
-            # the two differ by the five `http_policy=False` rows. Writing one view's
-            # base with the other's head lands on a number no population has.
+            # ⛔ Not the HTTP-filtered view: that one is 26 at this head
+            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 26
+            # and 24 respectively), and
+            # the two differ by the four `http_policy=False` rows still live (five until the
+            # ninth envelope door, `expand_relationships`, retired: it was itself one of
+            # them). Writing one view's base with the other's head lands on a number no
+            # population has.
             assert len(names) >= 30, f"expected >=30 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
