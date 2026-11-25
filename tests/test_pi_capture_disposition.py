@@ -186,8 +186,9 @@ def test_the_disposition_names_both_measured_producers():
     readme = _text(SEAM_README)
     assert capture_install.LEGACY_PI_DIRNAME in readme
     assert "reflect-hook.ts" in readme, (
-        "the record must name the second producer, the one the install guard "
-        "does NOT disable")
+        "the record must name the second producer whose bytes live in "
+        "agent-infra — the install guard retires it in place, and only the "
+        "shim disposition removes it at source")
     assert "shim" in readme, (
         "the record must state the disposition: the agent-infra copy is kept "
         "as a shim, not deleted yet")
