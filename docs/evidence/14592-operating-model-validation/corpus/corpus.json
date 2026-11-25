@@ -1,0 +1,183 @@
+{
+  "_about": "Fresh, synthetic operating-model corpus for #14592 Phase D. Five short MEETING TRANSCRIPTS about one small business (Harbour Lane Provisions, a specialty grocery wholesaler). Written for this test only — never derived from any existing graph. Each document is one meeting, fed to the product as ONE captured session (the extractor v4's only door is session capture: `mine_knowledge_from_session(conversation=...)`).",
+  "_elements": {
+    "decision_with_options": "doc-01 (3 options, stated reason, chosen option)",
+    "constraint": "doc-02 (cold chain <4C, auditor log, licence forbids unvalidated subcontract)",
+    "goal": "doc-03 (40 restaurant accounts by December)",
+    "roles_people": "doc-04 (Marta Reyes / Dev Patel / Priya Nair and what each owns)",
+    "contradiction": "doc-05 (Marta reports ColdPath failed its cold-chain audit -> revert to NordicFreight, contradicting doc-01's decision)"
+  },
+  "documents": [
+    {
+      "doc_id": "doc-01",
+      "date": "2026-02-03",
+      "title": "Choosing a cold-chain delivery partner",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Marta, we have to settle the delivery partner this week. Where are we on the options?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): Three options on the table. Option A is to stay with NordicFreight, our incumbent. Option B is to switch to ColdPath Logistics. Option C is to buy our own refrigerated van."
+        },
+        {
+          "role": "user",
+          "content": "What are the numbers and what argues against each?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): NordicFreight's 6pm order cutoff cannot make our morning restaurant slots, and we have missed four slots in January because of it. ColdPath Logistics offers a 9pm cutoff and a validated cold-chain certificate. The own-van option needs 48,000 pounds of capital spending, which is more than our current cash buffer allows."
+        },
+        {
+          "role": "user",
+          "content": "Dev, can we fund the van?"
+        },
+        {
+          "role": "assistant",
+          "content": "Dev Patel (Finance Director): No. The cash buffer is 31,000 pounds and it is committed to the March supplier payments, so the capital spend for our own refrigerated van is not approvable this quarter."
+        },
+        {
+          "role": "user",
+          "content": "Then we go with ColdPath. Marta, you negotiate the contract."
+        },
+        {
+          "role": "assistant",
+          "content": "Decision: we choose ColdPath Logistics as our delivery partner. The reason is that ColdPath meets the morning restaurant slots with a 9pm cutoff and holds a validated cold-chain certificate, while NordicFreight cannot make our morning slots and our own refrigerated van is not affordable this quarter. Marta Reyes owns negotiating the ColdPath contract, and Dev Patel owns approving the capital spending line."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-02",
+      "date": "2026-02-10",
+      "title": "Cold-chain constraint and audit requirement",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What are the hard rules we must not break on chilled goods?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): The cold chain must stay below 4 degrees Celsius at all times from our loading bay to the customer's door. There is no exception for short routes."
+        },
+        {
+          "role": "user",
+          "content": "And the auditor?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): Our food safety auditor requires a temperature log for every single delivery, and the log must be retained for twelve months. We cannot deliver chilled goods without a log entry for that delivery."
+        },
+        {
+          "role": "user",
+          "content": "Does that restrict who can drive for us?"
+        },
+        {
+          "role": "assistant",
+          "content": "Dev Patel (Finance Director): Yes. Our wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate. That is a licence constraint, not a preference."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-03",
+      "date": "2026-02-17",
+      "title": "Account growth goal for the year",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Priya, what is the number we are chasing this year?"
+        },
+        {
+          "role": "assistant",
+          "content": "Priya Nair (Sales Lead): Our goal is to reach 40 restaurant accounts by December. We currently hold 18 restaurant accounts, so we need 22 more."
+        },
+        {
+          "role": "user",
+          "content": "What limits how fast we can add accounts?"
+        },
+        {
+          "role": "assistant",
+          "content": "Priya Nair (Sales Lead): Delivery capacity limits it. Every new restaurant account needs a morning delivery slot, and our cold-chain rules mean we cannot add an account unless we can hold the cold chain below 4 degrees for that slot. So the growth goal depends on the delivery partner keeping the morning slots."
+        },
+        {
+          "role": "user",
+          "content": "And onboarding?"
+        },
+        {
+          "role": "assistant",
+          "content": "Priya Nair (Sales Lead): Priya Nair owns account onboarding. Each new restaurant account needs a signed supply agreement and a first delivery with a temperature log before it counts as an account."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-04",
+      "date": "2026-02-24",
+      "title": "Who owns what",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Let us write down the ownership so it stops being ambiguous."
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): Marta Reyes owns delivery scheduling and Marta Reyes owns the cold-chain temperature log. If a log entry is missing, Marta Reyes is accountable for it."
+        },
+        {
+          "role": "user",
+          "content": "Finance?"
+        },
+        {
+          "role": "assistant",
+          "content": "Dev Patel (Finance Director): Dev Patel owns supplier payments and Dev Patel owns capital spending approvals. No capital spend is approved unless Dev Patel approves it."
+        },
+        {
+          "role": "user",
+          "content": "Sales?"
+        },
+        {
+          "role": "assistant",
+          "content": "Priya Nair (Sales Lead): Priya Nair owns account onboarding and Priya Nair owns the restaurant account pipeline. Priya Nair reports the account count to the team every month."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-05",
+      "date": "2026-03-05",
+      "title": "ColdPath failed the cold-chain audit",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Marta, the ColdPath trial — what did the audit find?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): ColdPath Logistics failed its cold-chain audit last week. Two of their vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes."
+        },
+        {
+          "role": "user",
+          "content": "What does that mean for us?"
+        },
+        {
+          "role": "assistant",
+          "content": "Marta Reyes (Operations Lead): It means we cannot keep using ColdPath Logistics for chilled deliveries. Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate, so the ColdPath choice is not viable."
+        },
+        {
+          "role": "user",
+          "content": "So we go back?"
+        },
+        {
+          "role": "assistant",
+          "content": "Decision: we revert to NordicFreight as our delivery partner and we stop using ColdPath Logistics. The reason is that ColdPath failed its cold-chain audit and our licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate. Marta Reyes owns renegotiating with NordicFreight."
+        },
+        {
+          "role": "user",
+          "content": "Does that change the growth goal?"
+        },
+        {
+          "role": "assistant",
+          "content": "Priya Nair (Sales Lead): The goal of 40 restaurant accounts by December stands, but NordicFreight's 6pm cutoff still cannot make our morning restaurant slots, so delivery capacity is now the binding limit on the growth goal."
+        }
+      ]
+    }
+  ]
+}
