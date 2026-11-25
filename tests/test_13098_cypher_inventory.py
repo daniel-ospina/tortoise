@@ -294,7 +294,8 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
     """`--render --all-surface` would write a document that contradicts its own pins.
 
     The source's 25 pins are PRODUCT-surface counts, and `--render` appends one row
-    per site under them. The all-surface census is ~8x wider, so the pair produced a
+    per site under them. The all-surface census is many times wider in rows as well as
+    in files, so the pair produced a
     document whose §0 `sites` pin — a product-surface count — sat above an appendix
     several times longer while `--render` printed success — a self-contradictory
     artifact, which is the "false pass in prose" class this file exists to refuse.
@@ -504,7 +505,7 @@ NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 # ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
 # the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
-# per arm — one row for each `_exactly_one` arm — makes that claim executable. A deleted row, a
+# per arm makes that claim executable. A deleted row, a
 # DUPLICATED row and a row whose `what=` matches nothing are all reds
 # (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
 # why that test asserts multiplicity and arm-id uniqueness on top of set equality.
