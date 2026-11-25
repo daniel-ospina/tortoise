@@ -280,12 +280,32 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         module ALIAS, not a definition: discounting it would red a correct fixture
         that spells a clock read `_t.gmtime()`, which is why the test is on the
         resolved BODY rather than on membership in `scope` (#14646 cycle 3).
+
+        ⛔ An INSTANCE of such a body is a body too (#14646 P3-2): the resolution
+        follows a CALL whose callee this module defines, so `_FROZEN = _FrozenClock()`
+        is recognised as the stub it is rather than as a clock. Without the call
+        arm the name resolves to an `ast.Call`, this returns False, and
+        `_FROZEN.now(…)` is counted as a clock READ — which let a frozen stub
+        spelled through a module variable through `assert not undated` and left it
+        to red only in the behavioural window instead of at the EDIT. A callee this
+        module does NOT define stays a clock (`_t = time; _t.gmtime()`), so the
+        alias shape that must keep working still does.
         """
         node = scope.get(name)
-        while (isinstance(node, ast.Name) and node.id in scope
-               and node.id not in seen):
-            seen = seen | {node.id}
-            node = scope[node.id]
+        while True:
+            if (isinstance(node, ast.Name) and node.id in scope
+                    and node.id not in seen):
+                seen = seen | {node.id}
+                node = scope[node.id]
+                continue
+            if isinstance(node, ast.Call):
+                callee = node.func
+                if (isinstance(callee, ast.Name) and callee.id in scope
+                        and callee.id not in seen):
+                    seen = seen | {callee.id}
+                    node = scope[callee.id]
+                    continue
+            break
         return isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
 
@@ -378,41 +398,133 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         node for node in ast.parse(inspect.getsource(_single_sample_meter)).body
         if isinstance(node, ast.FunctionDef))
 
-    # Scope, in Python's own resolution order: module globals first, then the
-    # function's locals overriding them. The LAST binding of a name wins, which
-    # is what a rebind does at runtime — a derived value shadowed by a later
-    # literal below it is still a literal.
-    scope: dict[str, ast.expr] = {}
+    def _scope_of(*bodies) -> dict[str, ast.expr]:
+        """The name -> expression map Python itself would resolve against.
+
+        Scope, in Python's own resolution order: module globals first, then the
+        function's locals overriding them. The LAST binding of a name wins, which
+        is what a rebind does at runtime — a derived value shadowed by a later
+        literal below it is still a literal.
+
+        Hoisted out of the arm body so the SELF-CHECK below can resolve a
+        SYNTHETIC module through exactly this rule instead of through a
+        restatement of it (#14646 P3-2).
+        """
+        built: dict[str, ast.expr] = {}
+        for body in bodies:
+            for stmt in body:
+                if isinstance(stmt, ast.Assign):
+                    targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+                    value = stmt.value
+                elif (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    # A bare `x: str` DECLARES; it does not rebind. Only an
+                    # annotation carrying a value is a binding, and only a binding
+                    # may shadow the one above it.
+                    and stmt.value is not None
+                ):
+                    targets, value = [stmt.target.id], stmt.value
+                else:
+                    continue
+                for name in targets:
+                    built[name] = value
+        # A helper function is a legitimate place for the clock, at module level OR
+        # defined inside the fixture; register its body so `def _now_iso(): return
+        # datetime.now(UTC)…` resolves wherever it is written. A CLASS is registered
+        # for the same reason and one more: it is what `_defines_a_body` walks INTO
+        # to tell a clock wrapper (`return datetime.now(UTC)`) from a frozen stub
+        # (`return datetime(2026, …)`).
+        for body in bodies:
+            for stmt in body:
+                if isinstance(
+                        stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    built.setdefault(stmt.name, stmt)
+        return built
+
     module = ast.parse(inspect.getsource(inspect.getmodule(_single_sample_meter)))
-    for body in (module.body, fn.body):
-        for stmt in body:
-            if isinstance(stmt, ast.Assign):
-                targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
-                value = stmt.value
-            elif (
-                isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
-                # A bare `x: str` DECLARES; it does not rebind. Only an
-                # annotation carrying a value is a binding, and only a binding
-                # may shadow the one above it.
-                and stmt.value is not None
-            ):
-                targets, value = [stmt.target.id], stmt.value
-            else:
-                continue
-            for name in targets:
-                scope[name] = value
-    # A helper function is a legitimate place for the clock, at module level OR
-    # defined inside the fixture; register its body so `def _now_iso(): return
-    # datetime.now(UTC)…` resolves wherever it is written. A CLASS is registered
-    # for the same reason and one more: it is what `_receiver_is_local` walks INTO
-    # to tell a clock wrapper (`return datetime.now(UTC)`) from a frozen stub
-    # (`return datetime(2026, …)`).
-    for body in (module.body, fn.body):
-        for stmt in body:
-            if isinstance(
-                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                scope.setdefault(stmt.name, stmt)
+    scope = _scope_of(module.body, fn.body)
+
+    # ⛔ SELF-CHECK of the receiver rule (#14646 P3-2), run against a SYNTHETIC
+    # module so it measures the RULE and not this fixture's current spelling.
+    # It exists because the rule has a direction that mutating THIS fixture can
+    # only ever show once: `_defines_a_body` must recognise an INSTANCE of a body
+    # this module defines, not only a plain function/class NAME. Before it did,
+    # `_FROZEN = _FrozenClock()` resolved to an `ast.Call`, was not seen as a
+    # body, and `_FROZEN.now(UTC)` was counted as a CLOCK READ — so a frozen stub
+    # spelled through a module variable passed `assert not undated` and reddened
+    # only the behavioural window instead of the edit. Both directions are
+    # asserted below: the frozen instance must NOT read as a clock, and a wrapper
+    # that really reads one must still be walked INTO and accepted (the fix must
+    # not become over-strict and red a correct fixture).
+    import textwrap
+
+    synthetic = ast.parse(textwrap.dedent("""
+        class _FrozenClock:
+            @staticmethod
+            def now(_tz=None):
+                return datetime(2026, 11, 24, 2, 0, tzinfo=UTC)
+
+        class _ClockReadingClock:
+            @staticmethod
+            def now(_tz=None):
+                return datetime.now(_tz)
+
+        _FROZEN = _FrozenClock()
+        _LIVE = _ClockReadingClock()
+
+        def _frozen_fixture():
+            measured_at = _FROZEN.now(UTC).isoformat()
+            return MeterReading(used=1.0, measured_at=measured_at,
+                                estimated=True, note="n")
+
+        def _live_fixture():
+            measured_at = _LIVE.now(UTC).isoformat()
+            return MeterReading(used=1.0, measured_at=measured_at,
+                                estimated=True, note="n")
+    """))
+    def _synthetic_fixture(name):
+        """The value `name` hands the gate, and the scope that resolves it.
+
+        The scope is the module PLUS that fixture's own body, the same two
+        layers the real arm uses — without the local layer the reading resolves
+        to a bare `measured_at` Name and nothing can be said about it.
+        """
+        owner = next(
+            node for node in synthetic.body
+            if isinstance(node, ast.FunctionDef) and node.name == name)
+        construction = next(
+            node for node in ast.walk(owner)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "MeterReading")
+        return (_measured_at_argument(construction),
+                _scope_of(synthetic.body, owner.body))
+
+    frozen_reading, frozen_scope = _synthetic_fixture("_frozen_fixture")
+    live_reading, live_scope = _synthetic_fixture("_live_fixture")
+
+    assert _defines_a_body("_FROZEN", frozen_scope), (
+        "`_FROZEN = _FrozenClock()`, where `_FrozenClock` is defined in this "
+        "module, is not recognised as a body — so `_FROZEN.now(…).isoformat()` "
+        "counts as a CLOCK READ and a frozen stub spelled through a module "
+        "variable passes `assert not undated`, reddening only the behavioural "
+        "window instead of the edit (#14646 P3-2). Resolve a CALL whose callee "
+        "this module defines: an instance of a local class is a local body.")
+    assert _defines_a_body("_LIVE", live_scope), (
+        "the same resolution must hold for a wrapper INSTANCE — otherwise the "
+        "two spellings are judged by different rules and this check proves "
+        "nothing about the one that matters")
+    assert not reaches_a_clock(frozen_reading, frozen_scope), (
+        "the arm counts a clock-NAMED call on a frozen-stub INSTANCE as "
+        "clock-derived, which is the P3-2 bypass restated executably: the value "
+        "handed to `MeterReading` derives from `datetime(2026, 11, 24, …)`, so "
+        "it must be REJECTED at the edit. Walking the class body is what makes "
+        "this work — a stub is refused because nothing in it reads a clock.")
+    assert reaches_a_clock(live_reading, live_scope), (
+        "the rule now discounts an instance receiver, so it MUST still walk INTO "
+        "the class body: a wrapper that really reads the clock "
+        "(`return datetime.now(_tz)`) is CORRECT code and rejecting it would "
+        "red a correct fixture — the failure mode from the other side.")
 
     constructions = [
         node for node in ast.walk(fn)
