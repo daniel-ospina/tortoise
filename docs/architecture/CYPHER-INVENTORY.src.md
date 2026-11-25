@@ -141,7 +141,7 @@ enumerated, and the other **172** are a COMMENT or docstring line that simply EN
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
 “(#13330 post-merge” that `#13399` added, …) with nothing following, which the case-insensitive
 predicate counts and which is why the predicate has to be stated — `tortoise/ended.py` carries none of
-them, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
+the 185, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
 split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
