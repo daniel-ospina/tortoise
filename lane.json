@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-dup-capture-1795645542-p13189-5019feed",
+  "_sha": "be6f5189107ca42c21f27ebcbee0cf8eade481dd",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/dup-capture.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/capture-duplication"
+    },
+    {
+      "kind": "sha",
+      "value": "ee150cd96ec10aa810961ff9e6871cbf9a1bfae5"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/dup-capture"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 2977,
+  "ended_at": 1795648519,
+  "exit_code": 0,
+  "heartbeat_at": 1795648519,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-dup-capture-1795645542-p13189-5019feed",
+  "lease_until": 1795685119,
+  "pid": 13189,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795645542,
+  "state": "DONE",
+  "tag": "dup-capture",
+  "worktree": "/home/cmux/tortoise/.worktrees/dup-capture"
+}
