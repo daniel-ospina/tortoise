@@ -69,9 +69,16 @@ def sdk(tmp_path):
 
 def _gate(monkeypatch, required: bool) -> None:
     """Force the ONE predicate. `_derived_mirror_required` imports it per call, so this
-    reaches every writer — folds, sdk doors and the restore alike."""
+    reaches every writer — folds, sdk doors and the restore alike.
+
+    ⛔ ``**_kw`` for the same reason as :func:`_gate_map` (`#14560`): the DR restore asks
+    with ``require_substantive=True``, and a positional-only stub would raise into the
+    caller's fail-closed `except` — turning every "stop" into "keep" and greening these
+    arms over a fold that never actually stopped. The keyword is ignored deliberately: the
+    triviality rule is pinned separately.
+    """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: required, raising=False)
+                        lambda entity_type, **_kw: required, raising=False)
 
 
 def _gate_map(monkeypatch, keep: set[str]) -> None:
@@ -83,7 +90,14 @@ def _gate_map(monkeypatch, keep: set[str]) -> None:
     labels SHARE — measured, all three were green under `_gate` alone.
     """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: entity_type in keep, raising=False)
+                        lambda entity_type, **_kw: entity_type in keep, raising=False)
+    # ⛔ ``**_kw`` IS NOT TIDINESS (#14560): the DR restore asks with
+    # ``require_substantive=True`` so a TRIVIAL verdict cannot license a drop, and a
+    # one-positional-arg stub would raise into the caller's fail-closed `except` and turn
+    # every "stop" answer into "keep" — the per-label AND below would then be green over
+    # a door that never opened. The keyword is IGNORED here on purpose: what these arms
+    # measure is the per-label conjunction, and the triviality rule has its own pin
+    # (`tests/test_14560_operator_vectors.py::test_a_TRIVIAL_verdict_cannot_license_the_restore_drop`).
 
 
 def _prop(g, match: str, prop: str):
@@ -946,6 +960,14 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     both = _dump({"dump_id": 1, "labels": ["Object", "Point"],
                   "props": {"id": "pt-13826-co", "content": "x",
                             "embedding": list(VEC)}})
+    # ⛔ THE HOLD IS LIFTED *HERE ONLY*, so the two-counter conjunction stays GRADED
+    # (`#14560` review F5). `:Point`'s restore drop is HELD (`hosted_backup._RESTORE_DROP_HELD`,
+    # `#13971`'s per-ID ask is outstanding), so with the real set every arm below would keep
+    # the vector for the WRONG reason and the two `keep=` arms would stop discriminating at
+    # all. The hold itself is asserted on the real set by
+    # `test_the_restore_hold_keeps_the_point_vector_on_the_real_set`.
+    import tortoise.hosted_backup as _hb
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     _gate_map(monkeypatch, keep={"point"})
     result = restore_graph(proj.g, both)
     assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
@@ -970,6 +992,30 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
         "both `:Point` halves said stop and the restore kept the graph vector")
     assert result["retired_vectors"] == 1, result
     assert result["retired_vector_labels"] == ["Object", "Point"], result
+
+
+#: ⛔ THE HOLD ARM IS ITS OWN TEST, ON THE REAL SET (`#14560` review F5). `:Point`'s restore
+#: drop is HELD (`hosted_backup._RESTORE_DROP_HELD`, `#13971`'s per-ID ask is outstanding), so
+#: with the real set every arm above would keep the vector for the WRONG reason — which is why
+#: arm 4 lifts the hold for itself. This arm asks the opposite question on the set AS IT
+#: SHIPS: the SAME dump and the SAME both-stop answer must KEEP the vector. It is the arm
+#: that reds if the hold is lifted without `#13971`'s per-ID ask, and it is the direction
+#: `#5004` (a dropped restored vector cannot be re-encoded) makes mandatory.
+#: ⛔ A SEPARATE TEST rather than the tail of arm 4, because it needs its own UNDO of that
+#: arm's hold patch and a graph with nothing on it: `proj` is a fresh graph per test, so the
+#: arm needs no `DETACH DELETE` wipe to be honest about what the restore put there.
+def test_the_restore_hold_keeps_the_point_vector_on_the_real_set(proj, monkeypatch):
+    """A held label's restored vector survives a both-halves-stop answer."""
+    both = _dump({"dump_id": 1, "labels": ["Object", "Point"],
+                  "props": {"id": "pt-13826-co", "content": "x",
+                            "embedding": list(VEC)}})
+    _gate_map(monkeypatch, keep={""})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+        "the `:Point` restore drop is HELD until `#13971`'s per-ID ask lands — an aggregate "
+        "`record_vectors >= graph_vectors` is not evidence about the row being deleted, and "
+        "`#5004` forbids re-encoding what is dropped")
+    assert "retired_vectors" not in result, result
 
 
 def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):

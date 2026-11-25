@@ -96,7 +96,7 @@ _SDK = "tortoise/sdk.py"
 #: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
 _EV = "tortoise/entity_verdict.py"
 _HB = "tortoise/hosted_backup.py"
-#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2683` for
+#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2732` for
 #: `_index_has_is_operator()`.
 _PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
 
@@ -154,9 +154,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28635`), so any non-NULL', _SDK, 28635, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
     ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:28999`', _SDK, 28999, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the reader table cites
-    # `hosted_backup.py:2683` for `_index_has_is_operator()`, and that document had NO pin at all,
-    # so nothing would have reddened the next rotation of it.
-    (_PLAN_4997, "tortoise/hosted_backup.py:2683", _HB, 2683, "def _index_has_is_operator() -> bool:"),
+    # `hosted_backup.py:2732` for `_index_has_is_operator()`, and that document had NO pin at all,
+    # so nothing would have reddened the next rotation of it. ⛔ RE-DERIVED BY CONTENT at the
+    # `#14560` head (`2683` on `main` → `2732` here, +11 from that PR's `hosted_backup.py` hunk and
+    # +38 from the `#14560` review-F5 hold's docblock and prose): an offset-only edit would have
+    # carried the cite TWO shifts' worth of staleness while reading as a correction.
+    (_PLAN_4997, "tortoise/hosted_backup.py:2732", _HB, 2732, "def _index_has_is_operator() -> bool:"),
     # --- docs/evidence/13083-capability-census/README.md — the PROBE's two `file:line` cites.
     # ⛔ Added 2026-11-23: deleting the census document rewrote `probe_shape_bytes.py`'s docstring,
     # which was one line SHORTER than the rewrite, so both of the README's cites into that file

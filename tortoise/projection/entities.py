@@ -79,7 +79,8 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
-def _derived_mirror_required(entity_type: str) -> bool:
+def _derived_mirror_required(entity_type: str, *,
+                             require_substantive: bool = False) -> bool:
     """Must this fold still write the GRAPH copy of the derived vector? (#13610)
 
     One question, asked through ONE function, and the answer is ``True`` in every
@@ -116,14 +117,21 @@ def _derived_mirror_required(entity_type: str) -> bool:
     That shape is `CREATE (n:{labels}) SET n = $p` into a required-empty graph, so a popped
     vector has no stored value behind it: once BOTH halves (`point`, and the `operator`
     conjunct) answer stop, an id the record has no row for loses its only copy, and `#5004`
-    forbids re-encoding it. Today the aggregate answers KEEP (≈37,099 record point vectors
-    against 37,158 in the graph, measured 2026-11-19), and the `operator` half is held back
-    STRUCTURALLY, not by luck: `record_vectors >= graph_vectors` is unreachable while any
-    plain point carries an embedding (its graph denominator is the whole `:Point` label and
-    its record numerator is the operator subset), pinned by
-    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`.
-    So `:Point`'s cut-over is an OPERATOR act — or a later, kind-aware denominator — not a
-    backfill that will eventually measure true. The correct fix is a PER-ID ask (does the
+    forbids re-encoding it. ⛔ TWO THINGS HOLD THAT DOOR, and the second is the one `#14560`
+    had to install:
+
+      * the `point` conjunct's own answer (≈37,099 record point vectors against 37,158 in
+        the graph, measured 2026-11-19), and
+      * ``require_substantive`` on a TRIVIAL verdict — because `operator` is no longer
+        "held back STRUCTURALLY": `#14560` made the denominator KIND-AWARE, so the empty
+        operator slice now verifies (``0 >= 0``, marked ``trivial``), where before its
+        denominator was the whole `:Point` label and no count could ever satisfy it. A
+        vacuous count may not license an irreversible drop, so the door asks for evidence
+        (`record_vector.mirror_verdict`'s ``require_substantive``, `#13798`'s marker) rather
+        than inheriting a blocked comparison. ⚠️ That inheritance was an ACCIDENT, not a
+        rule: it protected `:Point` only because a different population was mis-counted.
+
+    The correct fix is a PER-ID ask (does the
     record hold THIS row), which is `#13971`'s remaining work,
     recorded there with the measured shape; the gate stays where it is until it lands,
     because the restore is the one writer whose mistake cannot be repaired afterwards.
@@ -143,6 +151,17 @@ def _derived_mirror_required(entity_type: str) -> bool:
     `derived == replay(journal)` hold, and `MIRROR_RETIRED_LABELS` must not contain `point`
     so that fold keeps writing the dense leg a named fallback.
 
+    ⛔ ``require_substantive`` IS THE DESTRUCTIVE CALLER'S FORM (`#14560`), and only the DR
+    restore passes it: a TRIVIAL coverage verdict — the count compared two zeroes (`#13798`)
+    — is not evidence about any row, and the restore's dropped vector cannot be
+    re-encoded (`#5004`). Before this flag, `:Point` was protected on that door by an
+    ACCIDENT rather than by a rule: `operator`'s denominator was its parent `:Point`
+    label, so the `operator` conjunct could never answer stop. `#14560` made the
+    denominator kind-aware (the operator slice is now satisfiable, which is what lets
+    `:Point`'s strip gate open) and that accident went with it — so the door now asks for
+    evidence instead of inheriting a blocked comparison. The per-ID gap this door still has
+    (a restored vector for an id the record holds no row for) is `#13971`'s remaining work.
+
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
     `sdk::_event_raw_write_door`, `sdk::_session_event_write`,
@@ -156,7 +175,8 @@ def _derived_mirror_required(entity_type: str) -> bool:
     try:
         from tortoise.record_vector import mirror_required
 
-        return bool(mirror_required(entity_type))
+        return bool(mirror_required(entity_type,
+                                    require_substantive=require_substantive))
     except Exception:  # noqa: BLE001, RUF100 — unarmed is the safe answer
         logger.debug(
             "#13610: the dense cutover's arming predicate could not be read — "

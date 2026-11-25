@@ -68,6 +68,7 @@ __all__ = [
     "ARMING_ENV",
     "COVERAGE_GATED_LABELS",
     "COVERAGE_TTL_SECONDS",
+    "GRAPH_KIND_FILTER",
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
@@ -85,6 +86,7 @@ __all__ = [
     "coverage",
     "coverage_verified",
     "cutover_armed",
+    "graph_kind_filter",
     "journal_ready",
     "knn_statement",
     "mirror_required",
@@ -240,6 +242,65 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
     "object": ("object", "id", "", ("created_at", None)),
     "subject": ("subject", "id", "", ("created_at", None)),
 }
+
+
+#: The GRAPH-side twin of ``LABEL_SERVED[label][2]``: for the entity types whose
+#: record numerator is KIND-FILTERED, the predicate that narrows the graph's node
+#: population to the same kind — so :func:`coverage` compares like with like.
+#:
+#: ⛔ WHY THIS EXISTS, and it is a MEASUREMENT, not a preference (`#14560`). Two
+#: entity types are not graph labels: `operator` ⊂ `:Point` and `document`/`source`
+#: both ⊂ `:Source`. The RECORD numerator has always applied the kind predicate
+#: (`#13630`: a plain-point surplus must not verify the operator slice). The GRAPH
+#: denominator did not — `projection._label_vector_count` resolved the entity type to
+#: its parent LABEL and counted every vector-bearing node of it — so
+#: ``record_vectors >= graph_vectors`` was not "harder" for `operator`, it was
+#: IMPOSSIBLE: 17,899 operator rows can never be >= the whole `:Point` population,
+#: and no backfill can change that. The gate was unsatisfiable by arithmetic, which
+#: is a false block on the one action it gates (`tools/strip_graph_entity_vectors`).
+#:
+#: The predicate is the repo's ONE operator identity — `is_operator = true OR
+#: op_type IS NOT NULL` (`#943`; `ep.py`, `sdk.py`, `search_engine.py` all read it
+#: this way), i.e. the Cypher twin of ``LABEL_SERVED["operator"][2]``'s SQL. A
+#: HYBRID operator (`create_point(op_type=…)`: `is_operator = false` WITH `op_type`)
+#: is therefore an operator on BOTH sides, which matters because that is the only
+#: operator shape that carries a vector at all — measured on a scratch graph
+#: (`tests/test_14560_operator_vectors.py`, with the docker lane's URI): a
+#: `create_operator` Point lands NO
+#: `embedding` in either store (operators store no content, `#548`), while a hybrid
+#: Point lands one in the graph AND journals it, so its record row is filled by the
+#: same write.
+#:
+#: ⚠️ `document`/`source` SHARE THE SAME SHAPE and are deliberately NOT narrowed
+#: here: their graph discriminator is `documentKind`, and the pair is not measured as
+#: blocking anything today (`#14552` measured `:Source` at 0 vector-bearing nodes, so
+#: that gate is trivially satisfied). Adding them is one line in this dict when a
+#: measurement asks for it — what must NOT happen is the reverse, a reader inverting
+#: the one-sided comparison "because the denominator is unfixable". It was not; it was
+#: unmeasured.
+GRAPH_KIND_FILTER: dict[str, str] = {
+    "operator": "(n.is_operator = true OR n.op_type IS NOT NULL)",
+}
+
+
+def graph_kind_filter(entity_type: str) -> str:
+    """The graph-node predicate narrowing ``entity_type``'s LABEL, or ``""``.
+
+    ``""`` for the entity types that ARE their own label (`point`, `object`, `subject`,
+    `event`) — a whole-label count is the right population there, so the caller splices
+    nothing. ⛔ `source` and `document` also return ``""``, but for the OPPOSITE reason:
+    :data:`tortoise.security.ENTITY_TYPE_LABELS` maps BOTH to the one `Source` label, so their
+    labels are one-sided and there is no declared graph discriminator to narrow them by yet —
+    a stated GAP, not a population claim. Reading ``""`` as "the whole label is this type's
+    population" is exactly the inversion this note exists to prevent (see :data:`Coverage`).
+
+    ⛔ THE RETURNED STRING IS CYPHER SPLICED INTO A STATEMENT, so it must only ever
+    come from :data:`GRAPH_KIND_FILTER` — a closed dict keyed by a validated entity
+    type. Never accept a filter from a caller, a plan file or an environment
+    variable: this is the reason the declaration is a module constant and not a
+    parameter.
+    """
+    return GRAPH_KIND_FILTER.get(entity_type, "")
 
 
 #: The arming surface for the CUTOVER, **default ON since `#13610`** (an explicit
@@ -547,30 +608,36 @@ class Coverage:
     * the two keys are not identical — the graph MERGEs on `id`, the record keys on
       `name` (`chk_object_node_key_is_contract_key`) — so two nodes sharing a name
       can hold the coverage verdict below what the record can ever reach, in which
-      case the deployment double-stores for ever with no defect to point at;
-    * for the three labels whose KIND predicate splits a graph label (`operator` ⊂
-      `point`, and `source`/`document` both ⊂ `:Source`) the numerator applies the
-      label's KIND predicate while the denominator is the whole graph label
-      (`_label_vector_count` counts every vector-bearing node of `:Point` / `:Source`,
-      which holds BOTH kinds). The comparison is therefore one-sided HARDER for those
-      three, and `record_vectors >= graph_vectors` is UNREACHABLE whenever the other
-      kind carries any embedding — so `operator`, `source` AND `document` may never
-      verify from this count alone, and their cut-over is an OPERATOR act (or a
-      later, kind-aware denominator), never something that "happens by itself".
-      ⛔ `operator` is NOT the exemption an earlier cut of this docstring claimed:
-      its denominator is `MATCH (n:Point) WHERE n.embedding IS NOT NULL`
-      (`security.ENTITY_TYPE_LABELS["operator"] == "Point"`, `_label_vector_count`),
-      and non-operator Points are exactly the population that carries embeddings by
-      default (`projection.entities._upsert_point_props` computes OR restores the
-      vector for NON-operator Points, `#7778`) — so one embedded plain point is
-      enough to make that comparison unreachable for ever.
+      case the deployment double-stores for ever with no defect to point at.
 
-    Neither of the first two is introduced by this gate (they are properties of
-    comparing two stores by size) and closing either is a repair sweep or an
-    identity-aware comparison, filed from this change rather than pretended away.
-    The third is the price of a one-sided predicate: the graph has no per-kind
-    vector property to count, so the alternative would be a kind-aware denominator
-    that the graph cannot answer today. What the count DOES prove is
+    Neither of those two is introduced by this gate (they are properties of comparing
+    two stores by size) and closing either is a repair sweep or an identity-aware
+    comparison, filed from this change rather than pretended away.
+
+    ⛔ THE KIND HALF IS NOW TWO-SIDED (`#14560`), which is what makes `operator`
+    reachable at all. Until it landed, the NUMERATOR applied the label's kind predicate
+    (`#13630`) while the DENOMINATOR was the whole parent label, so for the three entity
+    types that are not their own label (`operator` ⊂ `point`, and `source`/`document`
+    both ⊂ `:Source`) ``record_vectors >= graph_vectors`` was not "harder" — it was
+    IMPOSSIBLE, and no backfill could change it. Measured on the production record:
+    17,899 operator rows against a graph denominator of 39,662 (`:Point`'s whole
+    vector-bearing population), so the operator slice could never verify and the
+    `:Point` strip it gates could never run. The denominator now applies the same
+    population the numerator counts (`GRAPH_KIND_FILTER`, one declaration, the Cypher
+    twin of the SQL), so the comparison is like with like and three reachable states
+    remain: a slice that is empty in BOTH stores verifies as ``trivial`` (and its
+    reason NAMES why there is nothing to copy rather than implying a backfill is
+    behind), a slice the graph holds and the record lacks stays UNVERIFIED, and a
+    slice the record covers verifies substantively.
+
+    ⚠️ `source`/`document` are the same shape and are NOT narrowed yet: their graph
+    discriminator is `documentKind` and nothing measures that pair as blocking today
+    (`#14552` measured `:Source` at 0 vector-bearing nodes, which satisfies that gate
+    trivially). The declaration makes it one line when a measurement asks; what must
+    not recur is a reader inverting the one-sided comparison "because the graph cannot
+    answer a kind-aware denominator" — it could, and the count simply did not ask.
+
+    What the count proves, unchanged, is
     the thing the retirement needs: the record holds at least as many vectors as the
     graph can serve, so retiring the graph's copy loses no row that the record has
     not got.
@@ -823,7 +890,12 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
     `kind_filter` is applied
     for `operator`/`source`/`document` and is `""` for the other four, exactly as
     :func:`_record_vector_count` does it and as :func:`vector_search` serves it), so
-    it is comparable with the graph's whole-label count. That is cheaper than :func:`vector_search`'s arm by design —
+    it is comparable with the graph's count for the SAME population — and the graph side
+    is kind-narrowed too since `#14560` (:data:`GRAPH_KIND_FILTER`, applied by
+    `projection._label_vector_count`), because a one-sided predicate is not a harder
+    comparison, it is an unsatisfiable one: `operator`'s numerator is the operator slice
+    while its parent label's whole vector-bearing population was the denominator.
+    That is cheaper than :func:`vector_search`'s arm by design —
     the verification must not cost as much as the read it gates — and it is the
     COUNT the pattern asks for rather than a row-by-row diff, because the question
     is *"does the record hold as many vectors as the graph serves?"* and not
@@ -886,6 +958,34 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
             # (`searcher()`'s `if verdict.trivial` block) already promises.
             reason = (f"the count measured {record_vectors} vector(s) in the "
                       f"record for {label} against {graph_vectors} in the graph")
+            if graph_kind_filter(label):
+                # ⛔ `operator` IS NOT A GAP TO BACKFILL, AND BOTH COUNTS SAY SO
+                # (`#14560`, measured). Operators store no content (`#548`), so a
+                # `create_operator` Point carries NO vector in EITHER store; the only
+                # operator shape that has one is a HYBRID (`create_point(op_type=…)`),
+                # which journals its vector on the same write, so its record row is
+                # filled at write time and no copy is owed.
+                #
+                # ⛔ THE BOTH-ZERO ARM IS THE ONLY ONE THAT MAY SAY "nothing to copy"
+                # (review finding, reproduced): `graph_vectors == 0` alone is ALSO the
+                # post-strip steady state — a record holding this slice's vectors (the
+                # production row cohort is 17,899) against a graph holding none — and a
+                # clause claiming "no vector in either store" over a line that reads
+                # "measured 17899 … against 0" falsifies itself in the one place an
+                # operator reads after a strip.
+                if graph_vectors == 0 and record_vectors == 0:
+                    reason += (
+                        " — NOTHING TO COPY: this slice carries no vector in either "
+                        "store, because an operator stores no content to embed (#548) "
+                        "and the only operator shape that has a vector (a hybrid "
+                        "`create_point(op_type=…)`) journals it on the same write, so "
+                        "its record row is filled at write time")
+                elif record_vectors < graph_vectors:
+                    reason += (
+                        " — the graph holds this slice's vectors and the record does "
+                        "not: copy them with `tools/entity_vector_backfill.py "
+                        "--label Point`, whose population is the whole `:Point` label "
+                        "and therefore already addresses this slice")
             if trivial:
                 reason += (
                     " — BOTH SIDES ARE EMPTY, so this verification is TRIVIAL: the "
@@ -930,17 +1030,21 @@ def _record_vector_count(label: str, scope: _Scope, *,
     points verify `operator` on a SURPLUS of plain points, and the record's
     kind-filtered answer would hold zero rows of that kind while the COUNT called the
     label covered (the graph answers the read, `search_engine.py:4179`, so nothing on
-    the record leg reports its shortfall). One-sided on purpose: the graph
-    DENOMINATOR is the whole label (the graph has no per-kind vector property to
-    count), so the comparison for those two labels is not merely HARDER to pass —
-    for `document`/`source` it is UNREACHABLE whenever the other kind carries an
+    the record leg reports its shortfall). For `document`/`source` the graph
+    DENOMINATOR is still the whole `:Source` label — the graph's kind discriminator is
+    `documentKind` and no declaration narrows it yet — so the comparison there is not
+    merely HARDER to pass: it is UNREACHABLE whenever the other kind carries an
     embedding, because one `public.source` table splits into two labels while the
     graph's `:Source` label holds BOTH kinds and the denominator counts all of it.
+    ⛔ `operator` IS NO LONGER IN THAT POSITION: it was, until `#14560` gave it a
+    kind-aware denominator too (`GRAPH_KIND_FILTER`), and that correction is what lets
+    `:Point`'s strip gate open at all.
 
     ⛔ SO THE TRANSITION IS NOT AUTOMATIC FOR THOSE TWO, and that is stated rather
     than implied: a deployment whose only shortfall is the other kind's rows stays
-    UNVERIFIED and keeps double-storing that label until an operator acts (or a
-    kind-aware denominator exists — the graph cannot answer one today). The cost is
+    UNVERIFIED and keeps double-storing that label until an operator acts (or
+    `document`/`source` get the same one-line declaration — the graph CAN answer a
+    kind-aware count; it is simply not asked to yet). The cost is
     a longer double-storage and never a short answer, which is the direction this
     gate is allowed to fail in (`#13610` review; `Coverage`'s docstring carries the
     same residual).
@@ -1076,12 +1180,15 @@ def label_frozen(entity_type: str, scope: _Scope | tuple[str, str] | None = None
     never take.
 
     The consequence is deliberately not a hard-coded exclusion. While the graph
-    denominator is label-wide, `record_vectors >= graph_vectors` cannot be satisfied
+    denominator is label-wide for `:Source`, `record_vectors >= graph_vectors` cannot be
+    satisfied
     by both halves at once (:func:`_record_vector_count`: one `public.source` table
     splits into two kind-filtered numerators against the whole-label denominator), so
     this answers ``False`` for `:Source` — which is CORRECT, because that is exactly
-    the state where a writer is still storing. A kind-aware denominator, should one
-    ever exist, widens the answer without touching this rule.
+    the state where a writer is still storing. A kind-aware denominator for that label,
+    when one is declared, widens the answer without touching this rule — that is exactly
+    what `#14560` did for `operator`, and it confirms the rule rather than perturbing
+    it.
 
     Conservative in every unknown: an unmeasurable sibling answers unverified, which
     keeps the named fallback (the graph is complete while a writer still writes).
@@ -1127,7 +1234,8 @@ def mirror_verdict(entity_type: str, *,
                    scope: _Scope | tuple[str, str] | None = None,
                    record_dsn: str | None = None,
                    graph_population: Callable[[str], int | None] | None = None,
-                   graph_vectors: int | None = None) -> tuple[bool, str]:
+                   graph_vectors: int | None = None,
+                   require_substantive: bool = False) -> tuple[bool, str]:
     """``(mirror_required, reason)`` — the predicate AND the account behind it.
 
     :func:`mirror_required` is this function's first element; this is the one place
@@ -1161,6 +1269,14 @@ def mirror_verdict(entity_type: str, *,
       same ``record_vectors >= graph_vectors`` the read path uses. A hard-coded override
       or an operator's "yes I backfilled" boolean would be the asserted gate this whole
       design exists to avoid.
+    * ``require_substantive`` — the DESTRUCTIVE caller's form (`#14560`): a TRIVIAL
+      verdict (``0 >= 0``, whose count compared two zeroes and proved nothing about any
+      row) keeps the copy instead of licensing its deletion. One caller uses it — the DR
+      restore (`hosted_backup._restore_retires_vector`), whose dropped vector `#5004`
+      forbids re-encoding — and the flag is a keyword rather than a second predicate so
+      there stays exactly ONE place that turns a count into a decision
+      (:func:`_mirror_answer`). ⛔ It cannot be used to make a write STOP: it only ever
+      adds a `True` (keep) arm.
 
     ``record_dsn`` is the record leg the caller means, when it did not come from the
     ambient ``TORTOISE_RECORD_DSN`` (the stripper's ``--record-dsn``); it is resolved by
@@ -1212,23 +1328,48 @@ def mirror_verdict(entity_type: str, *,
         # The WRITE path's door: cache only. See `coverage_verified` on why an operator
         # that holds a handle should supply a population instead.
         cached = _cached_coverage(entity_type, resolved, record_dsn)
-        if cached is not None and cached.verified:
-            return False, cached.reason
         if cached is not None:
-            return True, cached.reason
+            return _mirror_answer(cached, require_substantive)
         return True, (
             f"the record has not proved it holds this label's vectors in this process "
             f"(no coverage verdict was taken for {entity_type!r} since boot)")
     verdict = coverage(entity_type, resolved, graph_population=graph_population,
                        graph_vectors=graph_vectors, record_dsn=record_dsn)
-    return (not verdict.verified), verdict.reason
+    return _mirror_answer(verdict, require_substantive)
+
+
+def _mirror_answer(verdict: Coverage, require_substantive: bool) -> tuple[bool, str]:
+    """``(mirror_required, reason)`` for one verdict — the ONE mapping from a count to
+    a decision, so the cache-only arm and the measured arm cannot disagree.
+
+    ⛔ ``require_substantive`` IS FOR A DESTRUCTIVE CALLER, AND ITS ONE CASE IS THE
+    TRIVIAL VERDICT (`#14560`). ``0 >= 0`` is VERIFIED and proves nothing about any ROW
+    (`#13798`'s marker), so a caller that would DELETE a copy — the DR restore, whose
+    dropped vector `#5004` forbids re-encoding — may not act on it. `#13798` names this
+    consumer: *"a consumer that may not read a vacuous pass as evidence asks
+    ``verdict.verified and not verdict.trivial``"*. A write fold asks without the flag
+    (writing a redundant vector costs bytes, and the marker is for the delete side); the
+    strip asks without it too, because its plan is measured per key and refuses a stale
+    one. Keeping the copy here is the same fail-closed direction the rest of this
+    function takes in every unknown.
+    """
+    if not verdict.verified:
+        return True, verdict.reason
+    if require_substantive and verdict.trivial:
+        return True, (
+            verdict.reason +
+            " — ⛔ the copy is KEPT anyway: this caller would DELETE it, and a TRIVIAL "
+            "verdict (the count compared two zeroes) is not evidence about the row it "
+            "would delete (#13798)")
+    return False, verdict.reason
 
 
 def mirror_required(entity_type: str, *,
                     scope: _Scope | tuple[str, str] | None = None,
                     record_dsn: str | None = None,
                     graph_population: Callable[[str], int | None] | None = None,
-                    graph_vectors: int | None = None) -> bool:
+                    graph_vectors: int | None = None,
+                    require_substantive: bool = False) -> bool:
     """Must the GRAPH still store this label's derived vector? (#13610, option 2)
 
     ``True`` — write it, because the graph is (or may be) this label's answering
@@ -1279,7 +1420,8 @@ def mirror_required(entity_type: str, *,
     """
     return mirror_verdict(
         entity_type, scope=scope, record_dsn=record_dsn,
-        graph_population=graph_population, graph_vectors=graph_vectors)[0]
+        graph_population=graph_population, graph_vectors=graph_vectors,
+        require_substantive=require_substantive)[0]
 
 
 @dataclass(frozen=True)

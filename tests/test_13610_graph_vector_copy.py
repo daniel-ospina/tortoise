@@ -1926,75 +1926,134 @@ def test_the_numerator_applies_the_labels_kind_predicate():
         rp.scope_connection = real_scope
 
 
-def test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify(
+def test_the_operator_denominator_applies_the_operator_predicate_so_the_gate_is_satisfiable(
         monkeypatch):
-    """F1 (round 13): `operator` is UNREACHABLE, not "merely harder".
+    """F1 (round 13) INVERTED: `operator` is REACHABLE, and by MEASUREMENT (`#14560`).
 
-    ⛔ THE CLAIM THIS PINS, AND THE ONE IT RETIRES. `Coverage`'s docstring used to
-    exempt `operator` from the UNREACHABLE set with *"`point`'s other members are
-    not vector-bearing by default"* — which is inverted. `security.ENTITY_TYPE_LABELS["operator"]
-    == "Point"`, so the DENOMINATOR is every vector-bearing `:Point`, while the
-    numerator applies `(is_operator IS TRUE OR op_type IS NOT NULL)`; and
-    non-operator Points are exactly the population that carries embeddings by
-    default (`projection.entities._upsert_point_props` computes OR restores the
-    vector for NON-operator Points, `#7778`). One embedded plain point therefore
-    keeps `record >= graph` false for ever — the same shape as `document`/`source`.
+    ⛔ WHAT THIS FILE USED TO PIN, AND WHY THAT WAS THE DEFECT. It asserted the two
+    facts that made the operator slice verify-proof: `ENTITY_TYPE_LABELS["operator"]
+    == "Point"`, so the DENOMINATOR was every vector-bearing `:Point`, while the
+    NUMERATOR applies `(is_operator IS TRUE OR op_type IS NOT NULL)` — and non-operator
+    Points are exactly the population that carries embeddings by default, so one
+    embedded plain point kept `record >= graph` false for ever. The direction was called
+    "safe", but it is a gate whose PASS CONDITION CANNOT BE MET: `operator` gates
+    `:Point`'s strip (`label_write_gate` ANDs every entity type addressing the label),
+    so 39,662 vectors (~71 MB) stayed resident with no repair available. The measured
+    production state on `#14560`: 17,899 operator rows, 0 with a vector, denominator
+    39,662 — impossible by arithmetic, not by backfill.
 
-    The direction is safe (a longer double-storage, never a short answer), which is
-    why this is a claim fix and not a runtime fix — but `operator` stays on the
-    graph branch that `record_vector`'s own header records as defective (no
-    operator predicate at all), so the prose an operator reads must say so.
+    What is pinned now, each part executed rather than described:
+
+    1. **ONE declaration**, and it is the repo's canonical operator identity (`#943`),
+       i.e. the Cypher twin of `LABEL_SERVED["operator"][2]`'s SQL. `point` — the label
+       whose denominator IS the whole label — is untouched, so `:Point`'s own count is
+       not lowered by this and the strip keeps its counterweight.
+    2. **The count splices it**, on a graph door that RECORDS: the `operator` statement
+       carries the predicate, the `point` statement does not.
+    3. **The arithmetic is satisfiable in both directions** — 0 vs 0 verifies (and says
+       NOTHING TO COPY, naming why rather than implying a backfill is behind), 0 vs 1
+       does not, and 1 vs 1 verifies substantively.
+    4. **The prose says the true thing**, so a reader cannot re-derive the old
+       "unreachable" premise from this module's own docstring.
     """
-    from tortoise.security import ENTITY_TYPE_LABELS, entity_label
+    from tortoise.projection import FalkorProjection
 
-    # (1) THE CODE FACT: the denominator resolves `operator` to the PARENT label,
-    # and the label's own predicate never reaches it.
-    assert ENTITY_TYPE_LABELS["operator"] == "Point", ENTITY_TYPE_LABELS["operator"]
-    assert entity_label("operator") == "Point"
-    tree = ast.parse((_REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text(
-        encoding="utf-8"))
-    counter = next(node for node in ast.walk(tree)
-                   if isinstance(node, ast.FunctionDef)
-                   and node.name == "_label_vector_count")
-    body = ast.unparse(counter)
-    assert "n.embedding IS NOT NULL" in body, body
-    assert "is_operator" not in body, (
-        "the denominator now applies an operator predicate — if that is deliberate, "
-        "`operator` may be reachable again and F1's prose must be re-derived: " + body)
+    # (1) THE DECLARATION — one, closed, and the twin of the SQL predicate.
+    assert record_vector.GRAPH_KIND_FILTER == {
+        "operator": "(n.is_operator = true OR n.op_type IS NOT NULL)"}, \
+        record_vector.GRAPH_KIND_FILTER
+    sql_kind = record_vector.LABEL_SERVED["operator"][2]
+    for term in ("is_operator", "op_type"):
+        assert term in record_vector.GRAPH_KIND_FILTER["operator"], term
+        assert term in sql_kind, (term, sql_kind)
+    # ...and NOTHING else is narrowed: a whole-label count is right for the rest, and
+    # narrowing `point` would lower the denominator of the label the strip is about.
+    assert record_vector.graph_kind_filter("point") == ""
+    assert record_vector.graph_kind_filter("event") == ""
+    assert "point" not in record_vector.GRAPH_KIND_FILTER
 
-    # (2) THE CONSEQUENCE, EXECUTED: 2 operator rows in the record against the
-    # whole `:Point` population (3, one of them plain) is UNVERIFIED. The record
-    # side is stubbed — this asserts the COMPARISON, not the door.
-    monkeypatch.setattr(record_vector, "_record_vector_count", lambda *a, **k: 2)
-    record_vector.reset_coverage_cache()
-    verdict = record_vector.coverage(
-        "operator", record_vector._Scope(*_SCOPE), graph_vectors=3,
-        record_dsn=None, now=0.0)
-    assert verdict.verified is False, verdict.as_dict()
-    assert (verdict.record_vectors, verdict.graph_vectors) == (2, 3), verdict.as_dict()
-    # ...and the other side of the same comparison, so this is a size test and not
-    # an always-False stub: 3 operator rows DO verify against the same denominator.
-    monkeypatch.setattr(record_vector, "_record_vector_count", lambda *a, **k: 3)
-    record_vector.reset_coverage_cache()
-    assert record_vector.coverage(
-        "operator", record_vector._Scope(*_SCOPE), graph_vectors=3,
-        record_dsn=None, now=0.0).verified is True
+    # (2) THE COUNT SPLICES IT — executed through the projection's own method, on a
+    # door that records the statement it was handed.
+    class _RecordingGraph:
+        def __init__(self, count):
+            self.statements: list[str] = []
+            self._count = count
+
+        def query(self, sql, params=None, timeout=None):
+            self.statements.append(sql)
+            return _Result([[self._count]])
+
+    class _Proj:
+        def __init__(self, count):
+            self.g = _RecordingGraph(count)
+
+    op_proj, pt_proj = _Proj(0), _Proj(3)
+    assert FalkorProjection._label_vector_count(op_proj, "operator") == 0
+    assert FalkorProjection._label_vector_count(pt_proj, "point") == 3
+    op_sql, pt_sql = op_proj.g.statements[0], pt_proj.g.statements[0]
+    assert "MATCH (n:Point)" in op_sql and "MATCH (n:Point)" in pt_sql, (op_sql, pt_sql)
+    assert "n.embedding IS NOT NULL" in op_sql, op_sql
+    assert "n.is_operator = true OR n.op_type IS NOT NULL" in op_sql, op_sql
+    assert "is_operator" not in pt_sql and "op_type" not in pt_sql, (
+        "a whole-label population was narrowed — `point`'s denominator must stay the "
+        "label's whole vector-bearing count: " + pt_sql)
+
+    # (3) THE ARITHMETIC, in all three reachable directions (the record side is stubbed;
+    # this asserts the COMPARISON, not the door).
+    scope = record_vector._Scope(*_SCOPE)
+
+    def _verdict(record: int, graph: int):
+        monkeypatch.setattr(record_vector, "_record_vector_count",
+                            lambda *a, **k: record, raising=True)
+        record_vector.reset_coverage_cache()
+        return record_vector.coverage("operator", scope, graph_vectors=graph,
+                                      record_dsn=None, now=0.0)
+
+    empty = _verdict(0, 0)
+    assert empty.verified is True and empty.trivial is True, empty.as_dict()
+    assert (empty.record_vectors, empty.graph_vectors) == (0, 0), empty.as_dict()
+    assert "NOTHING TO COPY" in empty.reason, empty.reason
+    assert "#548" in empty.reason, empty.reason
+
+    short = _verdict(0, 1)
+    assert short.verified is False and short.trivial is False, short.as_dict()
+    assert "--label Point" in short.reason, (
+        "the shortfall must name the repair that EXISTS (the `:Point` population "
+        "already addresses this slice); it must not send an operator to a per-kind "
+        "slice the tool cannot select: " + short.reason)
+
+    covered = _verdict(1, 1)
+    assert covered.verified is True and covered.trivial is False, covered.as_dict()
+
+    # ⛔ THE TWO STATES A FIRST CUT GOT WRONG (verification-gate findings, reproduced),
+    # and both are reachable in production rather than theoretical:
+    #
+    #   (a) the POST-STRIP steady state — the record holds this slice's vectors and the
+    #       graph holds none — must NOT claim "no vector in either store"; a clause that
+    #       contradicted its own counts would be what an operator reads after the strip,
+    #       because a VERIFIED reason is cached and re-rendered.
+    stripper = _verdict(17_999, 0)
+    assert stripper.verified is True and stripper.trivial is False, stripper.as_dict()
+    assert "NOTHING TO COPY" not in stripper.reason, stripper.reason
+    assert "--label Point" not in stripper.reason, stripper.reason
+
+    #   (b) a COVERED slice must NOT be sent to the backfill — the repair clause belongs
+    #       to a shortfall, not to every non-empty graph.
+    assert "--label Point" not in covered.reason, covered.reason
+    short_by_two = _verdict(3, 5)
+    assert short_by_two.verified is False, short_by_two.as_dict()
+    assert "--label Point" in short_by_two.reason, short_by_two.reason
     record_vector.reset_coverage_cache()
 
-    # (3) THE PROSE: the exemption and its inverted reason are gone, and `operator`
-    # is named in the same UNREACHABLE set as the other two.
+    # (4) THE PROSE — no stale "unreachable" claim survives, and the two-sided kind
+    # half is named where a reader looks for the comparison's terms.
     doc = record_vector.Coverage.__doc__ or ""
     assert "not vector-bearing by default" not in doc, doc
-    idx = doc.find("is UNREACHABLE")
-    assert idx != -1, doc
-    # The whole bullet, not one wrapped line: the claim and the labels that carry it
-    # are spread across the wrap, so a line-scoped read would be a pin on the
-    # formatter rather than on the contract.
-    clause = " ".join(doc[max(0, idx - 900): idx + 1200].split())
-    assert "operator" in clause, (
-        "`Coverage`'s docstring no longer names `operator` as unreachable: " + clause)
-    for label in ("document", "source"):
-        assert label in clause, clause
+    collapsed = " ".join(doc.split())
+    assert "THE KIND HALF IS NOW TWO-SIDED" in collapsed, collapsed[:600]
+    assert "GRAPH_KIND_FILTER" in collapsed, collapsed[:600]
+    # `source`/`document` are stated as still one-sided rather than silently dropped.
+    assert "NOT narrowed yet" in collapsed, collapsed[:600]
 
 
 def test_the_coverage_contract_says_the_numerator_applies_the_kind_predicate():
