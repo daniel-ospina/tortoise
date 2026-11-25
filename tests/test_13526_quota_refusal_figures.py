@@ -181,12 +181,18 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
     from tortoise.allowance_gate import STALE_AFTER_SECONDS
 
     #: Attribute calls that READ a clock, whichever module carries them. Kept
-    #: narrow deliberately: `isoformat`/`fromisoformat` are FORMATTERS, and a
-    #: literal formatted at import time must not read as derived. Any call whose
-    #: receiver is the `datetime`/`time` module is also accepted, which covers
-    #: `time.strftime`, `datetime.fromtimestamp` and friends without listing them.
+    #: narrow deliberately: `isoformat`/`fromisoformat`/`strptime`/`strftime` are
+    #: FORMATTERS, and a literal formatted at import time must not read as derived.
+    #: ⛔ An earlier revision also accepted ANY call whose receiver was the
+    #: `datetime`/`time` module, to cover `time.strftime` and
+    #: `datetime.fromtimestamp` "without listing them". Measured, that re-opened the
+    #: hole from the other side: `datetime.fromisoformat("2026-11-25T12:00:00+00:00")`
+    #: — a formatter over a hardcoded instant — satisfied it. Both shapes it was
+    #: meant to cover are already reached by the RECURSION below whenever their
+    #: argument is a clock (`time.strftime(fmt, time.gmtime())`,
+    #: `datetime.fromtimestamp(time.time())`), and when their argument is a literal
+    #: they SHOULD be rejected. So the blanket rule is strictly worse than recursion.
     clock_attrs = {"now", "utcnow", "today", "gmtime", "localtime", "time"}
-    clock_modules = {"datetime", "time"}
 
     def reaches_a_clock(node, scope, seen=frozenset()):
         """True when `node` reaches a clock call, resolving `scope` Names anywhere in it.
@@ -203,11 +209,7 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and (
-                node.func.attr in clock_attrs
-                or (isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in clock_modules)
-            )
+            and node.func.attr in clock_attrs
         ):
             return True
         return any(
@@ -273,11 +275,17 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
 
     reading = _single_sample_meter(MEASURED_USED_MB)(ORG)
     age = (datetime.now(UTC) - datetime.fromisoformat(reading.measured_at)).total_seconds()
-    assert 0 <= age < STALE_AFTER_SECONDS, (
-        f"the fixture's reading is {age:.0f}s old — outside the gate's "
-        f"{STALE_AFTER_SECONDS}s freshness window, so the dimension goes UNARMED "
-        "(reason=stale, write served) and every case below asserts a refusal the "
-        "gate never composes")
+    assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
+        f"the fixture's RETURNED reading is {age:.0f}s old — outside this "
+        f"fixture's own {_FRESH_FIXTURE_MAX_AGE_S}s window. A literal written "
+        "TODAY passes the gate's "
+        f"{STALE_AFTER_SECONDS}s bound and takes its `stale` arm a bound later "
+        "(cap UNARMED, write served), so every case below would assert a refusal "
+        "the gate never composes. This arm is the behavioural half and it is "
+        "deliberately EXACTLY as tight as the fixture's own assert: the "
+        "structural arm above has now been beaten twice, and this one is what "
+        "still catches a same-day literal if it is beaten a third time "
+        "(#14646)")
 
 
 def _armed_gate(monkeypatch, used: float) -> None:
