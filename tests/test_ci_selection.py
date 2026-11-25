@@ -9281,8 +9281,9 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on the ~1,950-word block this head carries (measured: 1,948 words; the spliced
-#: fold's block was 3,043, measured at `45dd35ba9a` and `14b8322eb2`). jscpd's clone taxonomy draws
+#: bounds the read on a block of this shape — thousands of words, the spliced fold's was 3,043
+#: (measured at `45dd35ba9a` and `14b8322eb2`, the two trees that carried that splice) — rather
+#: than a remembered head count, which rots with every fold. jscpd's clone taxonomy draws
 #: the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
@@ -9614,9 +9615,11 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
-    # below would be decoration on the one file it exists to grade. This block is ~1,950 words at
-    # this head (measured: 1,948; the spliced fold's was 3,043), so the floor is roughly 19x below
-    # it — not a tuned value.
+    # below would be decoration on the one file it exists to grade. The real block is more than an
+    # order of magnitude longer than this floor (100 words) — not a
+    # tuned value. ⛔ The relation is asserted, not a remembered head count: a count in this comment
+    # rots with every fold, and stale counts beside real artefacts are what this PR's review rounds
+    # have repeatedly filed (rounds 16 and 18, P3-1).
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
         f"{_SPLICE_SHINGLE_WORDS}-word repeated-span window to grade anything, so the arm below "
@@ -11528,6 +11531,11 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row
     # and nothing reds.
     "test_relation_guards_14263.py",
+    # #14344 (PR #14396): same shape again — a `core` row with NO `durations:` row.
+    # Caught in review round 4 by reading the sibling row above rather than the
+    # tuple: `--integrity` was green and the ENTRY-RULE pin was VACUOUS for this
+    # file, because it iterates THIS tuple and nobody had listed it.
+    "test_expansion_fusion_14344.py",
     # #14343 increment 2 (this PR) — the embed list's SHAPE pinned on the REAL emissions
     # (character tripwire + round-trip + the keys-declared-once traps). Same defect its
     # three sibling rows above record, on its third occurrence in this fold: the file first

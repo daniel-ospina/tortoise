@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **313** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **314** files scanned |
 | files carrying at least one statement site | **102** |
 | **statement sites (this census)** | **1327** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **875** (589 read, 286 write) |
@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 313 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 314 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (313 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (314 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 313 files>` → **1,650** across **112** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 314 files>` → **1,650** across **112** files: exactly the
 tool's number. A bare `rg … tortoise/` gives **1,656 / 113**, the 6 extra occurrences living in
 the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,650 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 313 files>` → **2,388** across **149** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 314 files>` → **2,388** across **149** files, while the tool
 reports 2,401 / 150. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 313 files finds exactly 13 — the verb-at-end-of-line scan alone finds **185**,
+predicate over the same 314 files finds exactly 13 — the verb-at-end-of-line scan alone finds **185**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **172** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -144,7 +144,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,117, and `-i` without the exclusion 2,478 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 313
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 314
 `.py` files the same two predicates read **2,114** and **2,388**; with `-t py` and the test-module
 exclusion dropped they read **2,116** and **2,391**. The 87-occurrence 2,391→2,478 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
@@ -545,7 +545,16 @@ prose was carried rather than re-taken (#14587 review P3-2): `non_cypher_door_ca
 because no graph statement was added, removed, re-classified or re-shaped**: `sites` **1327**, `plain`
 **875** (read **589**, write **286**), `candidates` **589**, `partial` **321**, `unresolved` **105**,
 `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2**, `files` **102**,
-`files_scanned` **313**.
+`files_scanned` **314**.
+
+⛔ **RE-CUT AT THE MERGE, and the ONLY pin that moved is `files_scanned` (`313` → `314`), which is**
+`main`'s own change and not this branch's: `#14597` added `tortoise/expansion_merge.py`, a scanned
+product module carrying NO door call and NO `MATCH`/`MERGE` (measured: `rg -c` on both predicates
+returns nothing), so it moves the scanned-file count and nothing else — `--check` reported exactly one
+drift (`files_scanned: doc=313 tool=314`) and the re-measured tree reads `sites` **1327**, `files`
+**102**, `non_cypher_door_calls` **269**, `ast_door_calls` **1596**, `partial` **321**. The two
+`tortoise/record_allocator.py` rows in Appendix A are re-derived at this merged tree (`:716` / `:842`),
+not carried.
 
 ⚠️ **Appendix A gains and loses NO row — nothing here is a census-visible statement SITE — but 135 of
 its `file:line` ADDRESSES moved, and that is the half a carried table gets wrong.** Measured at this
@@ -1101,7 +1110,7 @@ one.
 
 <!-- cypher-inventory:sites = 1327 -->
 <!-- cypher-inventory:files = 102 -->
-<!-- cypher-inventory:files_scanned = 313 -->
+<!-- cypher-inventory:files_scanned = 314 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 589 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
