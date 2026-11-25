@@ -655,8 +655,11 @@ def test_a_name_that_contains_the_title_suffix_still_round_trips():
     `'BEFORE\n'`-style truncation while the sibling whitespace row STAYS GREEN, which is
     the point. `read_fly_secret_names` accepts any non-empty name and a shortest-match
     group is free to stop early, so the class is reachable in production. The comment
-    above `_TITLE_RE` states the same causal fact this docstring does, so the two
-    cannot drift apart.
+    above `_TITLE_RE` currently states the same causal fact this docstring does — noted
+    as CURRENTLY AGREEING rather than as an enforced invariant, because both are prose
+    and nothing reads that comment: the only grammar test,
+    `test_the_workflow_owns_the_grammar_in_exactly_one_place`, asserts on the workflow's
+    shell, not on the comment. They can drift, and no row here would notice.
     """
     suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
     for name in (
