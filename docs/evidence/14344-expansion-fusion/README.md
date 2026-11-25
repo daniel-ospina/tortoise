@@ -77,18 +77,20 @@ leave it:** the union of two passes is larger than the leg's page, so a rule tha
 side must show less of the other. Which point is right is a decision the adoption A/B should make,
 not something this lane can settle by choosing a formula.
 
-**The design that would leave the frontier — named, not built here (see §4).** Fuse the expansion as
+**The design that would leave the frontier — named, not built here (described in this section).** Fuse the expansion as
 its OWN leg (`raw_results["entity_key_expansion"]`) at the strategy-level `rrf_fusion` instead of
 merging it into the `fts` leg. Then the pass-1 leg is byte-identical to the unarmed read (retention =
 100 %, by construction rather than by measurement) and the expansion contributes its own independent
 terms (admission = full). Its blocker is a real one and is why it is not in this change: with two legs
 present, `_tortoise_fts_query` stops taking the single-strategy path, and that path is where the
 caller's `threshold` filter is applied to **raw** leg scores — the RRF path applies the same number
-to RRF scores instead (`if threshold > 0`, values of order ~1/61), so an armed FTS-only read (dense
-leg down, a common shape on a loaded box) would not be left unfiltered: its page would come back
-**EMPTY**, which is what the two sibling carriers out of the same measurement say, and it would
-contaminate exactly the A/B the lever exists to win. Any lane taking this over must handle the
-threshold explicitly.
+to RRF scores instead, and only when it is positive (`if threshold > 0`, values of order ~1/61). So
+for a caller that SETS a threshold above that range, an armed FTS-only read (dense leg down, a common
+shape on a loaded box) comes back **EMPTY** rather than filtered-and-useful, which is what the two
+sibling carriers out of the same measurement say; for the default `threshold = 0.0` door read the
+RRF arm filters nothing at all, so that caller is unaffected in the other direction. Either way the
+caller's floor stops meaning what it meant, and it would contaminate exactly the A/B the lever exists
+to win. Any lane taking this over must handle the threshold explicitly.
 
 ## 3. Why the capstone fixed set cannot answer the graded question
 
