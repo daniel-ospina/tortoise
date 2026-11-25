@@ -16184,10 +16184,23 @@ def _graph_event_types() -> list[str]:
 
     One home for the question `_belief_changes_reach_the_graph_store` answers,
     so the route's published reason and its own branch cannot disagree.
-    """
-    from tortoise.sdk import _GRAPH_EVENT_TYPES  # the emitter's own gate
 
-    return sorted(_GRAPH_EVENT_TYPES)
+    ⛔ MIRRORS the emitter's gate, it does not restate one arm of it. `sdk._emit_event`
+    admits a type on TWO paths — membership in `_GRAPH_EVENT_TYPES`, OR
+    `"PointRevised"` when the #2353 change feed is on — and both end in
+    `append_event`, so a set built from the frozenset alone under-publishes what the
+    store RECORDS (measured: with `TORTOISE_CHANGE_FEED=1`, `PointRevised` rows exist
+    and `poll_events(types=["PointRevised"])` returns them, while
+    `"PointRevised" in _GRAPH_EVENT_TYPES` is `False`). A client enumerating this
+    field rules types OUT, so the second arm has to be in it.
+    """
+    from tortoise.sdk import _GRAPH_EVENT_TYPES, _change_feed_enabled
+
+    types = set(_GRAPH_EVENT_TYPES)
+    # Read the SAME switch the emitter reads, so the two cannot diverge.
+    if _change_feed_enabled():
+        types.add("PointRevised")
+    return sorted(types)
 
 
 def _belief_changes_reach_the_graph_store() -> bool:
@@ -16220,9 +16233,9 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     ⛔ ``lastBeliefWrite`` is answered from what the GRAPH event store HOLDS — it
     is not inferred — and a ``null`` there is NOT "this belief never moved"
     unless the store can hold such a row at all. Measured: this build's emitter
-    writes only the types in ``sdk._GRAPH_EVENT_TYPES``, which excludes
-    ``ConfidenceChanged``, so on a real graph the field is null while the change
-    is durable in the event JOURNAL. The route therefore publishes
+    admits the types in ``sdk._GRAPH_EVENT_TYPES`` (plus ``PointRevised`` when the
+    change feed is on), and ``ConfidenceChanged`` is in neither arm, so on a real
+    graph the field is null while the change is durable in the event JOURNAL. The route therefore publishes
     ``lastBeliefWriteUnavailable`` with a named reason beside the null, rather
     than letting an absence read as a measurement.
 
@@ -16466,10 +16479,10 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         # ⛔ A NULL `lastBeliefWrite` IS NOT "THIS BELIEF NEVER MOVED", and this
         # field is how the route says so instead of leaving a client to infer it
         # from an absent value. MEASURED (#14593 review P1): the GRAPH event
-        # store only ever receives the types in `sdk._GRAPH_EVENT_TYPES` — the
-        # ONE product `append_event` call site is `sdk.py::_emit_event`'s
-        # graph-store arm, gated on that membership — and `ConfidenceChanged` is
-        # NOT in it. So on a real graph `latest_for_node(..., "ConfidenceChanged",
+        # store receives the types in `sdk._GRAPH_EVENT_TYPES`, plus
+        # `PointRevised` when the #2353 change feed is on — every product
+        # `append_event` call site is `sdk.py::_emit_event`'s graph-store arm —
+        # and `ConfidenceChanged` is in NEITHER admission path. So on a real graph `latest_for_node(..., "ConfidenceChanged",
         # …)` cannot return a row: the scan above runs and finds nothing, and the
         # route used to say only "null", which reads as "never moved" while the
         # change is in fact durable in the event JOURNAL. Naming the reason is
@@ -16484,10 +16497,11 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                 "error_code": "BELIEF_CHANGES_NOT_IN_GRAPH_EVENT_STORE",
                 "message": (
                     "a null lastBeliefWrite does not mean this belief never "
-                    "moved. This build's GRAPH event store records only the "
-                    "types in `sdk._GRAPH_EVENT_TYPES`, and `ConfidenceChanged` "
-                    "is not one of them, so no row of that type exists to "
-                    "read — the belief change itself IS durable, in the event "
+                    "moved. This build's GRAPH event store records the types "
+                    "its emitter admits (`sdk._GRAPH_EVENT_TYPES`, plus "
+                    "`PointRevised` under the change feed), and "
+                    "`ConfidenceChanged` is in neither, so no row of that type "
+                    "exists to read — the belief change itself IS durable, in the event "
                     "journal. Read it there (`tortoise_belief_timeline`) "
                     "rather than concluding the belief is static."),
                 "recordedEventTypes": _graph_event_types(),
@@ -54737,7 +54751,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (724 distinct
+# ABSOLUTE line number from 208 tracked files (725 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
