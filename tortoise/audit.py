@@ -690,7 +690,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # operator input has the SAME shape — the Subject lane moves no edges either
     # (#1423), and EP's participation predicate is label-agnostic
     # (``epistemic_disjunction`` admits ``:Subject``; the strip is
-    # ``status in TERMINAL_EXCLUDED_STATUSES``), so the input is stripped and the
+    # ``live.ending_axes``, the ONE declaration of the rule), so the input is stripped and the
     # belief is lost exactly as measured in #11826. Measured: a ``:Subject``
     # superseded with ``apply_supersessions`` carries ``status='superseded'``,
     # holds no relationship of any type to its successor, and NO check in this
@@ -1231,9 +1231,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "CLEAN over it. Target a CLAIM successor")
         if (s["carrier_status"] or "") == DRAFT_STATUS and not s["carrier_terminal"]:
             # ⛔ …and NOT when the legacy ``outdated`` flag already makes it TERMINAL:
-            # ``ep.py`` computes ``is_terminal = status in TERMINAL_EXCLUDED_STATUSES
-            # or bool(outdated)``, so a ``draft(outdated)`` successor is not repaired by
-            # a promotion at all (measured: ``status='live', outdated=true`` →
+            # ``ep.py`` computes ``is_terminal`` from ``live.ending_axes`` — the ONE
+            # declaration, which reads ``isClosed``/``pipelineSlot`` too — so a
+            # ``draft(outdated)`` successor is not repaired by a promotion at all (measured: ``status='live', outdated=true`` →
             # ``iterations 0``, ``confidences {}``; clearing ``outdated`` alone →
             # ``effective_n 2.5255``). The terminal arm below states it instead
             # (#12210 review, P2).

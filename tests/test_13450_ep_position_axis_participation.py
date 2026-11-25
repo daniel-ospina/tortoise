@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -726,18 +727,51 @@ class TestThePresencePinCannotBeSatisfiedByAComment:
 #: before it read ``live.ending_axes``.
 _RETIRED_PREDICATE_SPELLING = "TERMINAL_EXCLUDED_STATUSES or bool(outdated)"
 
+#: The same spelling with LAYOUT removed — what the scan compares against, so a
+#: citation that wraps across comment lines is still seen (Finding 1, P2).
+_RETIRED_PREDICATE_LAYOUT_FREE = "".join(_RETIRED_PREDICATE_SPELLING.split())
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+_COMMENT_MARKER = re.compile(r"^\s*#+\s?")
 
-def _retired_spelling_sites() -> list[str]:
-    """Every shipped module that still re-quotes the retired predicate."""
-    return sorted(
-        f"{path.relative_to(_REPO_ROOT)}:{lineno}"
-        for path in sorted((_REPO_ROOT / "tortoise").rglob("*.py"))
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1)
-        if _RETIRED_PREDICATE_SPELLING in line
-    )
+
+def _layout_free(text: str) -> tuple[str, list[int]]:
+    """`text` with whitespace and comment markers removed, plus each char's line.
+
+    A prose citation of the retired predicate may wrap across two comment
+    lines — `tortoise/audit.py:1234-1235` did exactly that at PR #14600's head,
+    so the contiguous spelling appeared on NO single line and a line-by-line
+    scan reported the file clean. Comparing layout-free text closes that hole;
+    the returned `line_of` map keeps the report a `file:line` a reader can open.
+    """
+    chars: list[str] = []
+    line_of: list[int] = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        for char in _COMMENT_MARKER.sub("", raw):
+            if not char.isspace():
+                chars.append(char)
+                line_of.append(lineno)
+    return "".join(chars), line_of
+
+
+def _retired_spelling_sites(root: Path | None = None) -> list[str]:
+    """Every shipped module that still re-quotes the retired predicate.
+
+    WRAP-AWARE, deliberately: `_layout_free` squashes whitespace and comment
+    markers first, so `… TERMINAL_EXCLUDED_STATUSES` on one comment line and
+    `or bool(outdated) …` on the next is ONE citation, not two clean lines.
+    """
+    base = root if root is not None else _REPO_ROOT
+    sites: list[str] = []
+    for path in sorted((base / "tortoise").rglob("*.py")):
+        squashed, line_of = _layout_free(path.read_text(encoding="utf-8"))
+        start = squashed.find(_RETIRED_PREDICATE_LAYOUT_FREE)
+        while start != -1:
+            sites.append(f"{path.relative_to(base)}:{line_of[start]}")
+            start = squashed.find(
+                _RETIRED_PREDICATE_LAYOUT_FREE, start + 1)
+    return sorted(sites)
 
 
 def test_no_production_module_quotes_the_retired_predicate():
@@ -761,9 +795,47 @@ def test_no_production_module_quotes_the_retired_predicate():
     Non-vacuity: measured on the pre-fix head, where this scanned exactly one
     site, `tortoise/sdk.py:28299`; the only edit that greens it is the edit that
     replaces that citation with the declaration's own name.
+
+    ⛔ WRAP-AWARE since review finding 1 (P2): the line-contiguous cut was GREEN
+    over `tortoise/audit.py:1234-1235`, whose citation wraps after
+    `TERMINAL_EXCLUDED_STATUSES`, so no single line carried the spelling. A
+    wrapped citation is now a `file:line` this scan reports, and
+    `test_a_citation_wrapped_across_comment_lines_is_still_caught` is that exact
+    shape (non-vacuity for the widening: it reds the line-contiguous scan).
     """
     offenders = _retired_spelling_sites()
     assert offenders == [], (
         "a shipped module re-quotes the predicate #13450 retired — cite "
         "`live.ending_axes` (the ONE declaration) instead of a spelling that "
         f"drifts with the code: {offenders}")
+
+
+def test_a_citation_wrapped_across_comment_lines_is_still_caught(tmp_path):
+    """Finding 1 (P2): the guard must see a citation that WRAPS.
+
+    `tortoise/audit.py:1234-1235` carried this exact shape at PR #14600's head —
+    `TERMINAL_EXCLUDED_STATUSES` at the end of one comment line, `or
+    bool(outdated)` at the start of the next — and the line-contiguous scan
+    reported the file clean. Reverting `_layout_free` to a per-line `in` test
+    reds this row.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "wrapped.py").write_text(
+        "            # ``ep.py`` computes ``is_terminal = status in "
+        "TERMINAL_EXCLUDED_STATUSES\n"
+        "            # or bool(outdated)``, so a successor is not repaired\n",
+        encoding="utf-8")
+    assert _retired_spelling_sites(tmp_path) == ["tortoise/wrapped.py:1"], (
+        "a citation wrapped across two comment lines must still be reported — "
+        "this is the shape `tortoise/audit.py` carried at this head")
+
+
+def test_citing_the_one_declaration_is_not_flagged(tmp_path):
+    """The widening is not a word-ban: the declaration's own name passes."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "fine.py").write_text(
+        "    # ``ep.py`` computes ``is_terminal`` from ``live.ending_axes`` — the\n"
+        "    # ONE declaration, which reads ``isClosed``/``pipelineSlot`` too.\n"
+        "    # The OLD arm was ``status in TERMINAL_EXCLUDED_STATUSES`` alone.\n",
+        encoding="utf-8")
+    assert _retired_spelling_sites(tmp_path) == []
