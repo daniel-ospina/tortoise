@@ -55,11 +55,6 @@ version: 1
 # 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it, and never spliced from BOTH
-# parents: a fold that keeps two re-derivations leaves the guard reading the clause twice, which is
-# the red #5373 and #14481 both record. On THIS tree — `origin/main` `51f444fd088` folded in
-# (carrying `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14596`'s ratchet fix and
-# `#14595`'s follow-up) plus THIS PR's OWN row in `fast_pool()`
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
 # `51f444fd088f` folded in, after the `#14419` B7 cut took the durations-map arithmetic bulk out of
 # `tests/test_ci_selection.py` and re-packed the pool, plus this PR's OWN row in `fast_pool()`
@@ -68,17 +63,6 @@ version: 1
 # `ceil(826.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
 # (1680 / 826.2 = 2.0334), so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta is
-# measurable and small: `fast_pool()` holds **1333** files at this head — `main`'s **1332**, which
-# already carries `#14560`'s row, `#14565`'s `tests/test_14559_reaper_schedule.py` and `#14574`'s
-# `tests/test_fly_secret_declaration_report.py` — plus exactly ONE row of THIS branch's,
-# `tests/test_expansion_fusion_14344.py`, re-counted on the resolved tree rather than carried from
-# either parent's paragraph. ⛔ `#14415`'s rows (`tests/test_14219_batch_ingest.py`,
-# `tests/test_14219_batches_api.py`) are `main`'s at this head, NOT this PR's: they were that PR's
-# own additions and they landed before this fold. The name lists are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
-# graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: measured with the verb on `main`'s own map at
 # its own sha, `main` packs its own split — quoted WITHOUT name lists on purpose, because a name
 # list would parse as a second clause and red the guard — so no parent's figure may be carried
