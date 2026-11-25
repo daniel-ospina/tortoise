@@ -80,10 +80,11 @@ version: 1
 # merging INTO rather than carrying this sentence's zero. This PR adds no test file, and `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head and NOT this PR's.
 # ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
-# EARLIER spelling, quoted only so the rot it suffered is legible — `1333` here against `1332` on
-# `main`, nothing graded it, and it outlived the landing that made it false. A count in this block is
-# re-measured where it LANDED or not written at all, and this sentence's job is the reason the delta is
-# zero, not a figure that owes a re-measurement to whoever next moves a row. ⛔ The
+# EARLIER spelling, BOUND TO THE TREE THAT HELD IT (`git show 939e37f664:config/ci-surfaces.yml`,
+# an ancestor of `main`) and quoted only so the rot it suffered is legible — `1333` here against
+# `1332` on `main`, nothing graded it, and it outlived the landing that made it false. A count in this
+# block is re-measured where it LANDED or not written at all, and this sentence's job is the reason the
+# delta is zero, not a figure that owes a re-measurement to whoever next moves a row. ⛔ The
 # other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
 # this branch's: each landed before this fold. The name lists are what the guard COMPARES against
 # the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
