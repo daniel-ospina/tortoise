@@ -1030,6 +1030,15 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
         by_id = client.get(f"/v1/sources/{hyb}")
         assert by_id.status_code == 200, by_id.text
         assert raw not in by_id.text, by_id.text
+        # ⛔ AND THE KIND IS THE ROUTE'S LAYER, NOT THE MATCHED BRANCH: read as a
+        # Source, the node answers the Source bag, which does not declare
+        # `objectKind` (D10 B6 retires it). Keying the by-id echo on the matched
+        # branch handed it back here (measured) — a denied property riding a door
+        # that withholds the rest.
+        assert "objectKind" not in by_id.json(), by_id.json()
+        # …while reading it as the Object it also is keeps its own layer's kind.
+        as_object = client.get(f"/v1/objects/{hyb}").json()
+        assert as_object["objectKind"] == "goal", as_object
         body = client.get("/v1/objects", params={"limit": 100}).json()
         assert raw not in repr(body), body
         listed = [o for o in body["objects"] if o["id"] == hyb]

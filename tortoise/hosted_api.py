@@ -15700,7 +15700,7 @@ async def _resolve_entity_off_loop(org: dict, entity_id: str, *, surface: str
     return sdk, resolved
 
 
-def _layer_payload(entry: dict) -> dict:
+def _layer_payload(entry: dict, layer: str | None = None) -> dict:
     """One resolved node's properties, under its layer's own disclosure rule.
 
     A ``:Source`` goes through ``projection.entities.filter_source_props`` — the
@@ -15735,8 +15735,15 @@ def _layer_payload(entry: dict) -> dict:
         # echoing the field the row is keyed by (the list read re-attaches it for
         # the same reason). The KIND is the layer's declaration, never a `:Source`
         # payload — everything the filter denied stays denied.
-        _kind_prop = {"Object": "objectKind", "Subject": "subjectKind"}.get(
-            entry.get("label") or "")
+        # ⛔ KEYED ON THE ROUTE'S LAYER, NOT THE MATCHED BRANCH. `entry["label"]`
+        # is whichever branch resolved the node, so keying the echo on it handed
+        # `objectKind` back through `GET /v1/sources/{id}` — a property the
+        # `:Source` bag DENIES (`_SOURCE_NODE_PROPS` does not declare it, and
+        # `_DOC_RETIRED_KEYS` retires it, D10 B6). `layer` is the declaration the
+        # route asked for, and `entity_reads.LAYER_KIND_PROP` is its one home.
+        from tortoise.entity_reads import LAYER_KIND_PROP
+
+        _kind_prop = LAYER_KIND_PROP.get(layer or entry.get("label") or "")
         if _kind_prop and _kind_prop in raw and _kind_prop not in props:
             props[_kind_prop] = raw[_kind_prop]
     return props
@@ -15881,7 +15888,7 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     for entry in resolved:
         if label not in (entry.get("labels") or (entry.get("label"),)):
             continue
-        return _layer_payload(entry)
+        return _layer_payload(entry, layer=label)
     raise HTTPException(status_code=404, detail=f"{label} not found")
 
 
