@@ -120,6 +120,26 @@ version: 1
 # this PR's: each landed before this fold. The name lists are what the guard COMPARES against the
 # live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a
 # graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
+# reader of the prose can see. On THIS tree — `origin/main` `837bba743d3` folded in, which carried
+# `#14612`'s and `#14614`'s own re-writes of this very block — it already held BOTH rows an earlier
+# cut of this work had proposed: `#14596`'s `tests/test_14560_operator_vectors.py` (`core`, flat
+# 2.0 s `DEFAULT_FAST_WEIGHT`) and `#14552`'s `tests/test_record_read_point_vector_keys.py`
+# (`core`, that same flat weight), and each landed before this fold, so neither is THIS PR's. THIS
+# PR adds exactly ONE file, `tests/test_14592_read_parity.py`, and with it the weight packs into
+# two bins: three shards at 826.4 s (a, j, k) and eight at 826.3 s (b, c, d, e, f, g, h, i), so
+# `ceil(826.4/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03` on every one of
+# the eleven shards, so the two agree by construction rather than by a hand re-read.
+# ⛔ THE POOL DELTA IS ONE, and it is measured BOTH ways because a delta asserted from one side is
+# how the older "1333 here against 1332 on `main`" spelling outlived the landing that made it
+# false: `fast_pool()` holds 1334 files at this head and 1333 on `origin/main`. ⛔ No parent's
+# FIGURE is carried here: the fold re-packed every bin (the packer is greedy), so the per-fold
+# readings that stood in this block before the union splice — `#14565`'s, `#14574`'s, `#14559`'s,
+# and the `826.0`/`825.9` pair a rebase of this branch once spliced in beside this sentence —
+# describe trees that no longer exist, and they are deleted rather than re-pointed. The name lists
+# are what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
+# about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
