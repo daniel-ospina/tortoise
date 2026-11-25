@@ -97,11 +97,11 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,650 occurrences of the door predicate across 112 files
+1,651 occurrences of the door predicate across 112 files
 2,401 occurrences of the verb predicate across 150 files   (upper-bound shape, see below)
 
-1,650  regex door-pattern occurrences
-  −54  occurrences on a line carrying NO door call (comments and docstrings)
+1,651  regex door-pattern occurrences
+  −55  occurrences on a line carrying NO door call (comments and docstrings)
 = 1,596  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,596  AST door calls
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 314 files>` → **1,650** across **112** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,656 / 113**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,650 / 112 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 314 files>` → **1,651** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,657 / 113**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,651 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
@@ -152,7 +152,7 @@ exclusion dropped they read **2,116** and **2,391**. The 87-occurrence 2,391→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−55** and
 the **= 1,596 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
@@ -528,8 +528,9 @@ and `--check` on the merge will report the difference. That is the documented pr
 defect in this cut — but it is stated here rather than left for the merge to discover, because a pin
 that reads green at a branch head and red at the merge is the failure this section exists to name.
 
-**The cut this PR (#14582, `feat/14582-provision-graph-record`) makes — TWO non-Cypher door calls and
-NOT a single Cypher statement: one from its feature, one from its review round.**
+**The cut this PR (#14582, `feat/14582-provision-graph-record`) makes — TWO non-Cypher door calls,
+ONE further prose mention of the door pattern, and NOT a single Cypher statement: one call from its
+feature, one from its review round, and the mention from the review round's own fix.**
 `tortoise/record_allocator.py::provision_graph_record` derives the seed's enumerated floor with
 `cur.execute(JOURNAL_COUNT_SQL, (org_id, graph_id))` — a Postgres statement through a door, and the
 reason a door need not know how many positions a pre-existing graph already holds — and
@@ -541,7 +542,16 @@ statements through a door, so they take the same `SQL_VETO` arm `#14002`'s prese
 `point_vector_keys` did. ⛔ This paragraph said **ONE** call and quoted `268→269` / `1595→1596`
 against a base that reads `267` / `1594`, because the review round added the second call and the
 prose was carried rather than re-taken (#14587 review P3-2): `non_cypher_door_calls` 267→**269**,
-`ast_door_calls` 1594→**1596** (= `1327` classified + `269`). ⛔ **Every other pin is unchanged,
+`ast_door_calls` 1594→**1596** (= `1327` classified + `269`). ⛔ **AND THAT CORRECTION WAS ITSELF ONE
+SHORT**, which is why the two figures below are no longer `1,650` / `−54`: the same review round's P2
+fix added a THIRD regex match that is NOT a call — `tortoise/supabase_control.py`'s
+`_provision_default_graph_record` docstring names the inline `cp.query("graphs", method="POST", …)`
+the name-search census could not see — so `rg` counts one more occurrence and the no-call
+subtraction grows by one with it, while `non_cypher_door_calls` and `ast_door_calls` do NOT move (a
+docstring is not an AST door node). This is the third revision of this one paragraph and the second
+time its before-operands were carried instead of re-derived; §1's block and its `rg` bullet are now
+graded against `rg_totals` by `tests/test_13098_cypher_inventory.py`, so the next re-cutter is told
+rather than trusted. ⛔ **Every other pin is unchanged,
 because no graph statement was added, removed, re-classified or re-shaped**: `sites` **1327**, `plain`
 **875** (read **589**, write **286**), `candidates` **589**, `partial` **321**, `unresolved` **105**,
 `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2**, `files` **102**,
@@ -579,8 +589,10 @@ re-cutting — the identical carried-table defect, from a peer lane on this same
 the pin below is byte-comparison rather than sampling.
 The table is REGENERATED with `--markdown` at this tree and is byte-identical to the tool's output,
 which `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` pins. §1's
-`rg` reconciliation moves by exactly those two calls: door **1,648**→**1,650** across the same **112**
-files (the `−54` in-section subtraction does not move; `door_occurrences_on_call_lines` 1594→**1596**),
+`rg` reconciliation moves by those two calls AND the one prose mention above: door **1,648**→**1,651**
+across the same **112** files (the in-section subtraction moves with the mention, `−54`→**`−55`**,
+because a docstring occurrence lands on the no-call side; `door_occurrences_on_call_lines`
+1594→**1596**),
 while the verb figures (**2,401 / 150**) do not move at all — both are Postgres calls, and a
 non-Cypher door call carries no `MATCH`/`MERGE`.
 

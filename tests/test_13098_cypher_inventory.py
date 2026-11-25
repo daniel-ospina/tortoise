@@ -198,7 +198,7 @@ NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 # ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
 # the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
-# per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
+# per arm — 10 rows for 10 `_exactly_one` arms — makes that claim executable. A deleted row, a
 # DUPLICATED row and a row whose `what=` matches nothing are all reds
 # (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
 # why that test asserts multiplicity and arm-id uniqueness on top of set equality.
@@ -218,6 +218,17 @@ TABLE_CANDIDATES_PATTERN = (
     r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$")
 PRODUCT_SURFACE_PATTERN = (
     r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|")
+# §1's THREE-ROW door reconciliation block — the `rg`-equivalent arithmetic in the ```text fence.
+# It was ungraded prose until this arm existed, and it rotted TWICE on #14587 alone (`1,650` / `−54`
+# stated against a tool that measured `1,651` / `−55`, with `--check` printing `25 pinned counts
+# match` over it) — the same false PASS the arms above exist to refuse, one block lower in the same
+# section. Each row is graded separately, not as one blob, because `_exactly_one`'s duplicate proof
+# works per LINE (a duplicated block would still match once).
+DOOR_REGEX_TOTAL_PATTERN = r"^([\d,]+) +regex door-pattern occurrences$"
+DOOR_NON_CALL_PATTERN = (
+    r"^\s*\u2212([\d,]+) +occurrences on a line carrying NO door call \(comments and docstrings\)$")
+DOOR_ON_CALL_PATTERN = (
+    r"^= ([\d,]+) +occurrences on a line carrying a door CALL +\[measured\]$")
 
 _GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
     ("a", "§1's decomposition line (publishes §0's operands)", SECTION1_BOUNDS,
@@ -232,6 +243,12 @@ _GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
      NARRATIVE_PATTERN),
     ("c-product-surface", "§1's product-surface table row", SECTION1_BOUNDS,
      PRODUCT_SURFACE_PATTERN),
+    ("d-door-regex-total", "§1's door block: `regex door-pattern occurrences`", SECTION1_BOUNDS,
+     DOOR_REGEX_TOTAL_PATTERN),
+    ("d-door-non-call", "§1's door block: `occurrences on a line carrying NO door call`",
+     SECTION1_BOUNDS, DOOR_NON_CALL_PATTERN),
+    ("d-door-on-call", "§1's door block: `occurrences on a line carrying a door CALL`",
+     SECTION1_BOUNDS, DOOR_ON_CALL_PATTERN),
 )
 
 # The ONLY bare `re.search` lookups `_grade_doc_text` is allowed to make: the §0 and §1 region
@@ -280,7 +297,8 @@ def _exactly_one(pattern: str, text: str, *, what: str, flags: int = re.MULTILIN
 
 
 def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: int,
-                    files_with_sites: int) -> None:
+                    files_with_sites: int, door_occurrences: int, door_non_call: int,
+                    door_on_call: int) -> None:
     """Grade EVERY publication of §0's operand pair in `doc_text`, or red.
 
     ⛔ EXTRACTED FROM THE TEST ON PURPOSE (`#13424` review P2-1): a guard nothing can be
@@ -416,6 +434,41 @@ def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: i
         f"doc={row_sites} sites / {row_files} files, "
         f"measured={sites} / {files_with_sites}")
 
+    # (d) §1's door reconciliation BLOCK — the three rows of the ```text fence that reconcile the
+    # `rg`-equivalent predicate against the AST. ⛔ THIS IS A THIRD PUBLICATION OF THE SAME ARITHMETIC
+    # and it was the one nothing read: on #14587 the block stated `1,650` / `−54` while `rg_totals`
+    # measured `1,651` / `−55`, because two commits added a third regex occurrence that is a
+    # DOCSTRING mention (no AST node) and the subtraction was carried. Both terms were off by one in
+    # the SAME direction, so the block's own `−` still closed at the graded 1,596 — the identical
+    # shape `test_the_published_decomposition_names_the_measured_operands` was written against, one
+    # block lower, and `--check` printed `25 pinned counts match` over it.
+    #
+    # All three rows are graded against the tool's OWN `rg_totals`, so the block cannot disagree with
+    # the instrument it claims to quote. The subtraction is asserted as an equality (row 1 − row 2 ==
+    # row 3) as well, because that is the arithmetic the block publishes and a re-cutter editing one
+    # term is exactly how the carried `−54` shipped.
+    (doc_door_total,) = _exactly_one(
+        DOOR_REGEX_TOTAL_PATTERN, section1.group(0),
+        what="§1's door block: `regex door-pattern occurrences`")
+    (doc_door_non_call,) = _exactly_one(
+        DOOR_NON_CALL_PATTERN, section1.group(0),
+        what="§1's door block: `occurrences on a line carrying NO door call`")
+    (doc_door_on_call,) = _exactly_one(
+        DOOR_ON_CALL_PATTERN, section1.group(0),
+        what="§1's door block: `occurrences on a line carrying a door CALL`")
+    assert int(doc_door_total.replace(",", "")) == door_occurrences, (
+        "§1's door block states a regex-occurrence total the tool does not measure: "
+        f"doc={doc_door_total} measured={door_occurrences}")
+    assert int(doc_door_non_call.replace(",", "")) == door_non_call, (
+        "§1's door block states a COMMENT/docstring subtraction the tool does not measure: "
+        f"doc={doc_door_non_call} measured={door_non_call}")
+    assert int(doc_door_on_call.replace(",", "")) == door_on_call, (
+        "§1's door block states a door-call-line count the tool does not measure: "
+        f"doc={doc_door_on_call} measured={door_on_call}")
+    assert door_on_call == sites + non_cypher, (
+        "the tool's own door-call-line reconciliation does not close: "
+        f"{door_on_call} != {sites} + {non_cypher}")
+
 
 @requires_doc_pin
 def test_the_published_decomposition_names_the_measured_operands():
@@ -449,7 +502,12 @@ def test_the_published_decomposition_names_the_measured_operands():
     handover item 2): it pins §1's decomposition line (§0's operand pair, published
     in §1's block), §0's narrative
     pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
-    `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
+    `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls` —
+    AND, since `#14587`, the three rows of §1's door-reconciliation block against
+    `rg_totals` (arms `d-door-regex-total` / `d-door-non-call` / `d-door-on-call`):
+    that block was ungraded prose until this PR, and it rotted twice in one review
+    trail (`1,650` / `−54` stated over a tool that measured `1,651` / `−55`, with
+    `--check` green).
     It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
     `adjacency` / `ep` / `traversal` / `fulltext` / `ddl` / `unresolved`) nor §0's
     scanned-file count: those are INDEPENDENT census quantities, NOT derived from the
@@ -473,6 +531,7 @@ def test_the_published_decomposition_names_the_measured_operands():
     """
     doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
     result = census.census(("tortoise",))
+    totals = census.rg_totals(("tortoise",))
     sites = len(result["sites"])
     non_cypher = result["non_cypher_door_calls"]
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
@@ -481,7 +540,10 @@ def test_the_published_decomposition_names_the_measured_operands():
     # the in-section decoy mutant (`test_the_narrative_pin_refuses_an_in_section_decoy`);
     # that function's comments carry the region-bounds and per-arm reasoning.
     _grade_doc_text(doc_text, sites=sites, non_cypher=non_cypher,
-                    candidates=candidates, files_with_sites=result["files_with_sites"])
+                    candidates=candidates, files_with_sites=result["files_with_sites"],
+                    door_occurrences=totals["lines_door_calls"],
+                    door_non_call=totals["door_occurrences_without_a_call"],
+                    door_on_call=totals["door_occurrences_on_call_lines"])
 
 @requires_doc_pin
 def test_the_narrative_pin_refuses_an_in_section_decoy():
@@ -507,6 +569,7 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
     """
     doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
     result = census.census(("tortoise",))
+    totals = census.rg_totals(("tortoise",))
     sites = len(result["sites"])
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
     percent = round(candidates / sites * 100, 1)
@@ -546,7 +609,10 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
     #    ⛔ Do not read "the arms share one helper" as "this test covers them": that is
     #    precisely the overclaim `#13458` review P2-3 returned.
     kwargs = dict(sites=sites, non_cypher=result["non_cypher_door_calls"],
-                  candidates=candidates, files_with_sites=result["files_with_sites"])
+                  candidates=candidates, files_with_sites=result["files_with_sites"],
+                  door_occurrences=totals["lines_door_calls"],
+                  door_non_call=totals["door_occurrences_without_a_call"],
+                  door_on_call=totals["door_occurrences_on_call_lines"])
     _grade_doc_text(doc_text, **kwargs)  # baseline GREEN, so step 3's red is the mutant's
     with pytest.raises(AssertionError) as refused:
         _grade_doc_text(mutant, **kwargs)
@@ -557,17 +623,23 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
 
 @pytest.fixture(scope="module")
 def measured_census() -> dict[str, int]:
-    """The census, measured ONCE — the arm-coverage test grades seven mutants of ONE doc.
+    """The census, measured ONCE — the arm-coverage test grades ten mutants of ONE doc.
 
     `census()` is a full tree walk (measured ~6 s at `#13458`), so measuring it per case
-    would add ~40 s to prove what one measurement already settles.
+    would add ~40 s to prove what one measurement already settles. `rg_totals` is walked
+    ONCE here too, not per arm: the three `d-door-*` arms grade §1's reconciliation block
+    against it, and re-running the walk for each would triple that cost for no new signal.
     """
     result = census.census(("tortoise",))
+    totals = census.rg_totals(("tortoise",))
     return {
         "sites": len(result["sites"]),
         "non_cypher": result["non_cypher_door_calls"],
         "candidates": sum(1 for s in result["sites"] if s.verdict.startswith("candidate")),
         "files_with_sites": result["files_with_sites"],
+        "door_occurrences": totals["lines_door_calls"],
+        "door_non_call": totals["door_occurrences_without_a_call"],
+        "door_on_call": totals["door_occurrences_on_call_lines"],
     }
 
 
