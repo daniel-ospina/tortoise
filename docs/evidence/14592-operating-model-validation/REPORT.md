@@ -51,10 +51,14 @@ export DEEPSEEK_API_KEY='…'                  # the extraction LLM credential (
     docs/evidence/14592-operating-model-validation/run_census3.py           # 5. expansions / sources
 ```
 
-`run.sh` takes both of the 2026-11-25 run's measured deviations from the **caller**
-(`TORTOISE_VENV`, `DEEPSEEK_API_KEY`) and fails loudly when either is absent — it carries no absolute
-path and reads no credential store (§9). Every artifact writer names itself and its sha256 in a
-`provenance` block, so a reader can tell which code produced the numbers.
+`run.sh` requires `TORTOISE_DB_URI` (`${TORTOISE_DB_URI:?…}`, which aborts when absent) and refuses
+when the interpreter it resolves is not executable; `TORTOISE_VENV` DEFAULTS to `<worktree>/.venv`
+rather than being required, and `DEEPSEEK_API_KEY` is demanded only for `run_ingest.py` (or on
+`TORTOISE_REQUIRE_LLM_KEY=1`), so the four read-only steps run with no model credential. It carries no
+absolute path and reads no credential store (§9). Of the five `run_*.py` writers, FOUR define a
+`provenance` block — `run_census.py`, `run_readback.py`, `run_census2.py`, `run_census3.py` — and
+`run_ingest.py` does not; four of the six committed receipts therefore carry a block and
+`out/ingest-receipt.json` / `out/tool-surface.json` do not. §10 names each one.
 
 ---
 
@@ -601,8 +605,13 @@ mechanism works — it is the silent subset without a span that matters, and the
   in the first revision of `run_census.py`; the driver now searches with `limit=8`, picks by content
   and records the finding instead of a null.
 
-⚠️ **Provenance, stated rather than implied — and MEASURED.** Every receipt in `out/` carries a
-`provenance` block, and **all four say `produced_by_committed_producer: false`**. They were produced
+⚠️ **Provenance, stated rather than implied — and MEASURED.** FOUR of the six receipts in `out/`
+carry a `provenance` block (`census.json`, `census2.json`, `census3.json`, `readback.json`), and
+**all four say `produced_by_committed_producer: false`**. The other two carry none, for two different
+reasons: `run_ingest.py` defines no `_provenance()` at all, so `out/ingest-receipt.json` cannot carry
+one even on a re-run; and `run_readback.py` writes `out/tool-surface.json` as a bare surface dump,
+with no block, which is why `stamp_provenance.py`'s subject set (`ARTIFACTS`) names the four it can
+grade rather than "every file in `out/`". They were produced
 by the 2026-11-25 run **before** their producers were committed, so they are not that code's output,
 and they cannot be regenerated: the lane container is gone. `stamp_provenance.py` writes the block by
 measuring, not asserting — it reads each producer's own `WRITTEN_KEYS` and records the keys a re-run

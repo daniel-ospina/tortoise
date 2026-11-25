@@ -29,9 +29,11 @@ than silently pinning nothing.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -176,20 +178,124 @@ def test_section_5_counts_every_impl_row_and_does_not_call_rows_nodes():
 # ── finding 4 (P1): every receipt has a producer in the tree ──────────────────
 
 
+def _receipt_names_written(driver: Path) -> set[str]:
+    """The receipt names a driver actually WRITES — from its AST, not its prose.
+
+    A filename MENTION is not a producer: with `run_census2.py`'s write deleted
+    but its filename left behind in a comment, a substring check stays green
+    (#14606 review F2), so a receipt could lose its producer while the pin that
+    claims to guard it kept passing. Walk for a `write_text` call whose receiver
+    is an `OUT / "<name>"` path instead.
+    """
+    written: set[str] = set()
+    for node in ast.walk(ast.parse(driver.read_text())):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write_text"):
+            continue
+        receiver = node.func.value
+        if not (isinstance(receiver, ast.BinOp)
+                and isinstance(receiver.op, ast.Div)
+                and isinstance(receiver.left, ast.Name)
+                and receiver.left.id == "OUT"):
+            continue
+        name = receiver.right
+        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+            written.add(name.value)
+    return written
+
+
 def test_every_committed_receipt_has_a_committed_producer():
-    """REDS IF an artifact is added or produced without its script.
+    """REDS IF an artifact is added, or its producer's WRITE is removed.
 
     Measured pre-fix: `census2.json` and `census3.json` had NO producer —
     `run_census.py` has exactly one write, to `census.json` — so the report's
-    "reproducible" path could not regenerate its own decisive evidence.
+    "reproducible" path could not regenerate its own decisive evidence. And
+    measured in review: deleting the write while leaving the filename in a
+    comment kept the earlier substring pin GREEN, which is why this walks the
+    AST for `(OUT / "<name>").write_text(` rather than grepping for the name.
     """
-    drivers = {path: path.read_text() for path in BUNDLE.glob("run_*.py")}
-    unproduced = []
-    for receipt in sorted((BUNDLE / "out").glob("*.json")):
-        needle = f'"{receipt.name}"'
-        if not any(needle in body for body in drivers.values()):
-            unproduced.append(receipt.name)
-    assert not unproduced, f"no committed script writes: {unproduced}"
+    written: set[str] = set()
+    for driver in sorted(BUNDLE.glob("run_*.py")):
+        written |= _receipt_names_written(driver)
+    receipts = sorted(receipt.name for receipt in (BUNDLE / "out").glob("*.json"))
+    assert receipts, "the evidence bundle must commit its receipts"
+    unproduced = [name for name in receipts if name not in written]
+    assert not unproduced, f"no committed script WRITES: {unproduced}"
+
+
+def test_the_ingest_driver_refuses_a_graph_that_is_not_empty():
+    """REDS IF the isolation guard is removed, or stops being CALLED.
+
+    Measured in review (finding F2): step 1 READ `graph_overview()` and stored it
+    as `empty_before`, but nothing refused a non-empty graph — a second
+    invocation appends five captures onto the 120 Points already there, every
+    document still reports `ok: true, errors: []`, and `ingest-receipt.json` is
+    OVERWRITTEN, so §2's isolation claim would silently stop describing the
+    artifacts with no red anywhere.
+    """
+    ingest = _driver("run_ingest.py")
+    assert ingest.assert_graph_is_empty(
+        {"taxonomy": {"Point": 0, "Event": 0, "Subject": 0,
+                      "Object": 0, "Source": 0}}) is None
+    try:
+        ingest.assert_graph_is_empty({"taxonomy": {"Point": 120}})
+    except SystemExit as exc:
+        assert "already holds 120" in str(exc), exc
+    else:
+        raise AssertionError(
+            "a second run would APPEND onto 120 Points and overwrite the receipt")
+    # ...and the guard must be WIRED to the reading, not merely defined. A COMMENT
+    # carrying the call text would satisfy a substring check (the same
+    # prose-satisfiable shape the producer pin above was upgraded away from), so
+    # look for the Call node.
+    tree = ast.parse((BUNDLE / "run_ingest.py").read_text())
+    call_sites = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)
+                  and node.func.id == "assert_graph_is_empty"]
+    assert call_sites, "`main()` must CALL the guard, not merely define it"
+    assert any(isinstance(arg, ast.Name) and arg.id == "before"
+               for call in call_sites for arg in call.args), (
+        "the guard must be called on the overview `main()` read (`before`)")
+
+
+def test_section_0_and_10_state_the_provenance_facts_the_tree_holds():
+    """REDS IF §0 restates a guarantee the writers do not implement.
+
+    Measured in review (findings F1/A-F4): §0 claimed *"Every artifact writer
+    names itself and its sha256 in a `provenance` block"* (one of five writers
+    then defined none) and that `run.sh` *"fails loudly when either is absent"*
+    — `TORTOISE_VENV` is a DEFAULT, `DEEPSEEK_API_KEY` is demanded only for
+    `run_ingest.py`, and `TORTOISE_DB_URI` was not named at all. §10 made the
+    mirror-image overclaim: "Every receipt in `out/` carries a `provenance`
+    block" over a directory whose stamp tool grades FOUR of six files.
+    """
+    report = _report()
+    assert "Every artifact writer names itself and its sha256" not in report
+    assert "fails loudly when either is absent" not in report
+    assert "Every receipt in `out/` carries a" not in report
+    flat = " ".join(report.split())
+    assert "FOUR define a `provenance` block" in flat, (
+        "§0 must state that four of the five run_*.py writers define one")
+    assert "four of the six committed receipts" in flat, (
+        "§0 must state the receipt count the tree holds")
+
+    # ...and the counts are MEASURED here, not asserted in prose.
+    writers = {path.name: path.read_text() for path in BUNDLE.glob("run_*.py")}
+    with_provenance = sorted(name for name, body in writers.items()
+                             if "_provenance(" in body)
+    assert with_provenance == ["run_census.py", "run_census2.py",
+                               "run_census3.py", "run_readback.py"], with_provenance
+    stamped = sorted(name for name in
+                     (path.name for path in (BUNDLE / "out").glob("*.json"))
+                     if "provenance" in json.loads((BUNDLE / "out" / name).read_text()))
+    assert stamped == ["census.json", "census2.json", "census3.json",
+                       "readback.json"], stamped
+    # The stamp tool's subject set is the same four, and it says so.
+    stamp = (BUNDLE / "stamp_provenance.py").read_text()
+    named = set(re.findall(r'\("([^"]+\.json)", "run_[^"]+"\)', stamp))
+    assert named == set(stamped), (sorted(named), stamped)
 
 
 def test_the_evidence_drivers_carry_no_box_bound_path_or_credential_scrape():
