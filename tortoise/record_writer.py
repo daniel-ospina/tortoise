@@ -3002,8 +3002,12 @@ _UNCUT_OBSERVATIONS = 0
 #: ⛔ "IT KEEPS ITS APPEND" IS NOT THE ARGUMENT, AND AN EARLIER CUT OF THIS BLOCK
 #: MADE IT ONE — "in it `record_owns_position` returns False, so `live_write.write`
 #: KEEPS the JSONL append — the graph loses nothing" (#14610 review F2). **A
-#: HALTED GRAPH'S RECORD ACCUMULATES NOTHING.** `record_owns_position` returning
-#: False proves the JOURNAL LINE is durable, not that the record keeps up: with the
+#: HALTED GRAPH'S RECORD ACCUMULATES NOTHING.** What `record_owns_position`
+#: returning False establishes is the append's own behaviour — NOT that the record
+#: keeps up. ⛔ THIS COMMENT DOES NOT RESTATE THE DURABILITY POSTURE: read
+#: `docs/durability-posture.md`, which is its only authority and which
+#: `tests/test_durability_posture.py` enforces (#2881) — an earlier cut of this
+#: sentence attributed durability to the append and reded that gate. With the
 #: writer flag ON, `allocate=True` reaches `ALLOCATION_SQL`'s `AND mode = 'active'`
 #: and matches no row (`cursor_not_active`); with the flag OFF, the enumerated arm
 #: is refused because the row exists (`_refuse_an_enumerated_replay`). Neither arm
