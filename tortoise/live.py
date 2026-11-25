@@ -305,8 +305,10 @@ def _terminal_excluded(clause: str, excluded=None, *,
 
     The position arms are ``TRUE`` (keep) for a node carrying neither property:
     ``coalesce(NULL, false) = false`` and ``coalesce(NULL, '') <> 'terminal'``.
-    So ``:Point``, ``:Subject`` and ``:Event`` (no pipeline) are unaffected by
-    construction, and a status-less Object or a legacy node still reads live.
+    So a node carrying NEITHER property is unaffected by construction — whatever
+    its label, because ``isClosed`` is not pipeline-shaped and rides the props
+    passthrough onto a ``:Point`` too (:func:`is_terminal_status` states the
+    measured reach) — and a status-less Object or a legacy node still reads live.
     Skipping the slot conjunct would make the predicate depend on a property
     only one label has; reading it on all of them costs nothing and cannot
     silently exempt a label whose pack later declares a pipeline.
@@ -511,9 +513,24 @@ def is_terminal_status(status, outdated: bool = False, *,
     ``(status, outdated)`` pair keeps its exact meaning, and a caller that has
     the position in hand passes it rather than re-deciding currency itself.
     ⚠️ A caller that does NOT pass them is answering from the lifecycle word
-    alone — correct for a ``:Point``/``:Subject``/``:Event`` row (no pipeline),
-    and the residual for an ``:Object`` row whose query did not fetch the two
-    props. Fetch them and pass them; do not re-spell the test.
+    alone. ⛔ That is NOT "correct for a ``:Point``/``:Subject``/``:Event`` row
+    (no pipeline)" — the sentence that stood here until #14671's review measured
+    it false: the PIPELINE is not the only carrier of the position axis. The
+    doors store ``isClosed`` VERBATIM on any label through the props
+    passthrough, so ``sdk.update_knowledge(point_id, isClosed=True)`` stores it
+    on a ``:Point`` — and this repo's own participation suite writes the marker
+    on ``:Point`` rows throughout
+    (``tests/test_13450_ep_position_axis_participation.py``:
+    ``TestAnEndedInputStopsVoting::test_a_closed_source_stops_voting`` and
+    ``::test_the_axis_is_read_under_the_include_draft_hatch_too``,
+    ``TestTheDiagnosticNamesTheAxis``'s two rows, and
+    ``TestTheWriteDoorsStateTheirPosture``, which parameterises
+    ``SET n.isClosed = true`` over ``:Point`` sources; the ``:Object`` arm is
+    ``::test_a_closed_object_input_stops_voting``). So omitting the two kwargs
+    is a RESIDUAL for EVERY label, not a correctness claim about three of them.
+    Fetch them and pass them; do not re-spell the test. The residual is only
+    closed when the query provably returns neither prop — which a reader asserts
+    from its own ``RETURN``, never from the label.
 
     The composition itself is :func:`ending_axes` — the ONE declaration — so
     this boolean and the marker list a diagnostic prints (#13450) are the same
