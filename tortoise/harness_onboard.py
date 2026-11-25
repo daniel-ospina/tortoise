@@ -163,30 +163,6 @@ def bridge_entry(*, url: str | None = None,
 
 # ── Config merge (idempotent, diffs shown, foreign entries preserved) ─────
 
-def _in_scope_write_target(project_dir: Path, rel: str) -> Path:
-    """The file to WRITE for project scope — never an ancestor outside it.
-
-    ⛔ The READ side walks up to the filesystem root when there is no git
-    top-level (`_project_layer`, faithfully mirroring the `mcp-client`
-    extension), and that is correct for READING. It is NOT correct for WRITING:
-    outside a work tree the walk has no bound, so `cd ~/scratch && tortoise onboard`
-    planned edits to `~/scratch/../.mcp.json` and `~/.mcp.json` (`~/AGENTS.md` with
-    the instruction file) while `--scope project` — the DEFAULT — reported project
-    scope. A write that carries a false provenance label is what this module
-    exists to prevent, so the write side refuses to adopt an ancestor and stays
-    inside `project_dir`.
-    """
-    found = mcp_selfcheck._project_layer(project_dir, rel)
-    if found is not None and found.exists():
-        root = mcp_selfcheck._repo_root(project_dir)
-        # With a git top-level the walk is bounded by it, so anything it found is
-        # inside the work tree the user scoped. Without one it is unbounded: accept
-        # the file only when it really sits under `project_dir`.
-        if root is not None or project_dir in found.parents:
-            return found
-    return (mcp_selfcheck._repo_root(project_dir) or project_dir) / rel
-
-
 def _config_path(harness: str, project_dir: Path, *,
                  scope: str = "project") -> Path | None:
     """The config file to WRITE, for the requested scope.
@@ -195,11 +171,15 @@ def _config_path(harness: str, project_dir: Path, *,
     because "write the one that is there" is how an installer silently edits a
     user's GLOBAL config while the command was run inside a project — a change
     that is neither reviewable in a diff nor scoped to the repository the user
-    asked about. `project` (the default) always resolves inside `project_dir`;
-    `user` always resolves under `~`. Outside a git work tree, which is where the
-    read-side walk has no bound, `project` falls back to
-    `<project_dir>/<rel>` rather than adopting an ancestor (see
-    `_in_scope_write_target`).
+    asked about.
+
+    ⛔ THE PROMISE IS "WITHIN THE PROJECT", NOT "INSIDE `project_dir`". Inside a git
+    work tree `project` resolves to the layer the HARNESS loads, which is the
+    repo-root file — so an install run from `<repo>/tortoise` edits `<repo>/.mcp.json`
+    and `<repo>/AGENTS.md` on purpose (a nested file would shadow it). Outside a
+    work tree it never escapes `project_dir` (see `mcp_selfcheck.write_layer`):
+    `cd ~/scratch && tortoise onboard --harness pi` used to write `~/AGENTS.md`
+    while reporting project scope.
     """
     # ⛔ RESOLVE FIRST: the CLI's default is the RELATIVE `Path(".")`, and
     # `Path(".").parents == []`, so every walk below stayed in the cwd and the
@@ -219,16 +199,14 @@ def _config_path(harness: str, project_dir: Path, *,
                 return path
         return (Path(user_rels[0].replace("~", str(Path.home())))
                 if user_rels else None)
-    # ⛔ A TOML harness has NO project layer (codex reads `$CODEX_HOME/config.toml`
-    # only), so there is nothing to write in project scope. Returning
-    # `<repo>/.mcp.json` here made the refusal call a JSON file "TOML" and told the
-    # user to paste a TOML table into it — three false statements on the DEFAULT
-    # scope of a plain `tortoise onboard --harness codex`. Name the file the
-    # harness ACTUALLY reads instead (the format is refused before anything is
-    # written — see `write_config`).
-    if harness in mcp_selfcheck._TOML_HARNESSES or not project_rels:
-        return (Path(user_rels[0].replace("~", str(Path.home())))
-                if user_rels else None)
+    if not project_rels:
+        # ⛔ A HARNESS WITH NO PROJECT LAYER HAS NO `project` SCOPE. There is no file
+        # to name, and inventing `<repo>/.mcp.json` made the TOML refusal tell a
+        # Codex user to paste a `[mcp_servers.tortoise]` table into a file Codex
+        # never reads, while claiming it was "TOML" (`--scope` defaults to project).
+        # `write_config` refuses TOML harnesses by their REAL path before this; `None`
+        # is the honest answer for any other caller.
+        return None
     for rel in project_rels:
         # ⛔ Resolve the project layer the SAME way `read_entry` does. Writing
         # `<project_dir>/<rel>` while the verifier walks UP to the git top-level
@@ -237,10 +215,11 @@ def _config_path(harness: str, project_dir: Path, *,
         # and the verification agreed because it read back the file the installer
         # had just made. Measured from `<repo>/tortoise`: wrote
         # `<repo>/tortoise/.mcp.json` while the root one already existed.
-        target = _in_scope_write_target(project_dir, rel)
-        if target.exists():
-            return target
-    return _in_scope_write_target(project_dir, project_rels[0])
+        found = mcp_selfcheck.write_layer(project_dir, rel)
+        if found is not None and found.exists():
+            return found
+    root = mcp_selfcheck._repo_root(project_dir) or project_dir
+    return root / (project_rels[0] if project_rels else ".mcp.json")
 
 
 _JSON_WS = " \t\n\r"
@@ -366,11 +345,33 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     """
     out = InstallResult(harness=harness)
     entry = bridge_entry(url=url, python=python)
+    if harness in mcp_selfcheck._TOML_HARNESSES:
+        # ⛔ FORMAT IS CHECKED BEFORE ANY PATH IS RESOLVED, AND THE PATH NAMED IS THE
+        # ONE THE HARNESS READS. This used to run after `_config_path`, so a Codex
+        # install at the DEFAULT scope reported `<repo>/.mcp.json` — three false
+        # statements in one refusal (that file is not TOML, it is not Codex's
+        # config, and Codex never reads it) and the reader was told to paste a TOML
+        # table into it. `--scope project` is not a Codex concept: `config.toml` is
+        # the harness's single global file.
+        rels = mcp_selfcheck.HARNESS_CONFIG_PATHS.get(harness, ())
+        real = next((Path(r.replace("~", str(Path.home())))
+                     for r in rels if r.startswith("~")), None)
+        out.refusals.append(
+            f"{harness}: this installer writes JSON configs only — {harness} reads "
+            f"TOML ({real if real else 'its own TOML config'}), and a JSON document "
+            f"there would leave {harness} unable to parse the file while the "
+            f"install reported success. NOTHING was written"
+            + (" — and `--scope project` is not a " + harness
+               + " concept; it has one global config, not one per project"
+               if real is not None else "")
+            + f". Add this table to {real if real else 'that file'} by hand:\n"
+            + _toml_table(entry))
+        return out
     path = _config_path(harness, project_dir, scope=scope)
     if path is None:
         out.refusals.append(f"{harness}: no known config path — nothing written")
         return out
-    if path.suffix.lower() == ".toml" or harness in mcp_selfcheck._TOML_HARNESSES:
+    if path.suffix.lower() == ".toml":
         # ⛔ FORMAT IS CHECKED BEFORE CONTENT. This path used to write a JSON
         # document into `~/.codex/config.toml`, which Codex cannot parse — so the
         # install did nothing while `wrote:` reported the file updated — and, in
@@ -378,20 +379,11 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
         # "not valid JSON". Writing the wrong format and calling it written is
         # the silent-fallback class this module exists to remove, so the answer
         # is a NAMED refusal plus the table to paste, never a write.
-        scope_note = ""
-        if scope == "project":
-            # ⛔ `--scope project` is not a {harness} concept: it reads ONE file.
-            # Saying "project scope" while naming a user-scope path, or naming the
-            # repo's `.mcp.json` as the "TOML" file to edit, is the wrong-layer
-            # defect this PR removes.
-            scope_note = (
-                f" ⛔ `--scope project` is not a {harness} concept — {harness} "
-                f"reads no repo-level config, so this is the only file to edit.")
         out.refusals.append(
             f"{harness}: this installer writes JSON configs only — {path} is "
             f"TOML, and a JSON document there would leave {harness} unable to "
-            f"parse the file while the install reported success.{scope_note} "
-            f"NOTHING was written. Add this table to {path} by hand:\n"
+            f"parse the file while the install reported success. NOTHING was "
+            f"written. Add this table to {path} by hand:\n"
             + _toml_table(entry))
         return out
     before = ""
@@ -640,12 +632,14 @@ def _instruction_path(project_dir: Path, name: str) -> Path:
     "nothing to remove". The agent in that subdirectory reads the new file; the one
     at the root never sees the sentences.
 
-    ⛔ And the same bound as the config write: outside a git work tree the walk has
-    no stop, so an ANCESTOR `AGENTS.md` (`~/AGENTS.md` from `~/scratch`) was a
-    reachable write target while `--scope project` reported project scope.
+    ⛔ But never an ANCESTOR outside the project: `_instruction_path` delegates to
+    `write_layer`, not `_project_layer`, so outside a git work tree the file stays
+    in `project_dir` (a write following the READ walk put the block in
+    `/tmp/ancestor/AGENTS.md`, i.e. a reachable `~/AGENTS.md`).
     """
     project_dir = Path(project_dir).resolve()   # see `_config_path`
-    return _in_scope_write_target(project_dir, name)
+    return (mcp_selfcheck.write_layer(project_dir, name)
+            or (mcp_selfcheck._repo_root(project_dir) or project_dir) / name)
 
 
 def write_instructions(harness: str, project_dir: Path, *,
