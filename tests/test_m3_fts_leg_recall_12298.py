@@ -1425,13 +1425,15 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # live file with `sed -n "<n>p"`, never nudged by a constant — the three rows did
     # move by the same delta this time, which is a measurement, not an assumption.
     # The SYMBOLS are unchanged; only the numbers moved.
-    # ⛔ RE-DERIVED AGAIN (main-red, un-red lane, #12604): TWO commits moved all three
-    # rows and re-pointed neither — #14596 (`3bbe5567df24`) inserted 25 net lines above
-    # them and #14567 (`939e37f664e5`) inserted 124, so the pin and §1 of the brief were
-    # +149 behind the tree and `test (c)`/`test (h)` reddened on every PR. Re-derived
-    # against the live file by SYMBOL SEARCH at `a29b5f24ce95`, never by arithmetic: the
-    # symbols moved by the same delta this time (a measurement, not an assumption), and
-    # the SYMBOLS are unchanged — only the numbers moved.
+    #
+    # ⛔ AND AGAIN, the SAME way (#14639): two merges grew the same module above all
+    # three rows and neither re-derived them — `3bbe5567df24` (#14596) +25, then
+    # `939e37f664e5` (#14567) +124, so the pin sat 149 lines behind `main` and shard
+    # `test (c)` reddened on every head. Measured per hop, not by adding a delta to
+    # the previous number: the same three symbols were located at 21042/21485/21927
+    # (`e0accb8fe63`), 21067/21510/21952 (`3bbe5567df24`) and 21191/21634/22076
+    # (`939e37f664e5`). Uniform shift per hop is a MEASUREMENT here, not an
+    # assumption — the symbol text is what moved the number, and neither changed.
     ("tortoise/projection/__init__.py", 21191, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21191`"),
     ("tortoise/projection/__init__.py", 21634, "def _create_fulltext_index(",
