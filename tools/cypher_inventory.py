@@ -862,6 +862,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="census every tracked surface, not only the product")
     args = parser.parse_args(argv)
 
+    # ⛔ `--render` AND `--all-surface` CONTRADICT EACH OTHER — refuse the pair.
+    # The source's 25 pins are PRODUCT-surface counts (`census(("tortoise",))`),
+    # and `--render` appends the run's rows under those pins. Rendering the
+    # all-surface census would write a document whose §0 pin reads `sites = 1327`
+    # above an appendix of ~9,230 rows (measured on the combination: `render: wrote
+    # 10327 lines`), print success, and be self-contradictory — a false pass in
+    # prose, which is the class this file exists to refuse. The refusal is loud
+    # rather than a silent scope-narrowing: a lane that asked for the wide census
+    # and got the product one would believe it had rendered the wide table.
+    if args.render is not None and args.all_surface:
+        print(
+            "--render writes the PRODUCT-surface document: the source's 25 pins are\n"
+            "product counts, so an all-surface appendix under them contradicts the\n"
+            "pins. Render without --all-surface, or take the wide census from\n"
+            "`--markdown --all-surface` instead.",
+            file=sys.stderr,
+        )
+        return 2
+
     prefixes: tuple[str, ...] = ("tortoise",)
     if args.all_surface:
         prefixes = (".",)

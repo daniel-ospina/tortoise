@@ -276,6 +276,36 @@ def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsy
         "grade its pins over a committed copy of the rows")
 
 
+def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
+    """`--render --all-surface` would write a document that contradicts its own pins.
+
+    The source's 25 pins are PRODUCT-surface counts, and `--render` appends one row
+    per site under them. The all-surface census is ~8x wider, so the pair produced a
+    document whose §0 pin read `sites = 1327` above an appendix of ~9,230 rows while
+    `--render` printed success — a self-contradictory artifact, which is the "false
+    pass in prose" class this file exists to refuse. Measured on the combination
+    before the refusal: `render: wrote 10327 lines`.
+
+    ⛔ A LOUD REFUSAL, NOT A SILENT SCOPE-NARROWING: a lane that asked for the wide
+    census and quietly got the product one would believe it had rendered the wide
+    table.
+    """
+    out = tmp_path / "wide.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--render", str(out), "--all-surface"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 2, (
+        f"`--render --all-surface` must exit 2 (could not run), got {proc.returncode}")
+    assert "--all-surface" in proc.stderr, (
+        "the refusal must name the flag that contradicts `--render`; stderr was:\n"
+        + proc.stderr)
+    assert not out.exists(), (
+        "the refusal must write NOTHING — a half-written wide document is the "
+        "artifact the refusal exists to prevent")
+
+
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 
 # ⛔ EVERY `_exactly_one` ARM `_grade_doc_text` MAKES, one row each, as
@@ -1890,20 +1920,21 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
         "pytest errors in session setup and no census arm runs at all")
     # …and the arms it produces for are still here. A structural count, not a
-    # reading of the file's content: the decorator is applied at 7 arms + 1
-    # parametrized one (7 cases), and an arm leaving this module is a diff a
-    # reviewer sees — what is invisible is the ENV disappearing, which is above.
+    # reading of the file's content: the decorator is applied at 8 arms + 1
+    # parametrized one (7 cases) — 8 since #13098 split the table-shape arm, whose
+    # rendered half now renders a document — and an arm leaving this module is a
+    # diff a reviewer sees; what is invisible is the ENV disappearing, which is above.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
-    # is 15 at this head — the 8 decorator lines PLUS 7 prose/format mentions (the
-    # module docstring, the block comment above the imports, two arm docstrings, one
-    # f-string and the two literals of this very assertion). Measured, not assumed:
-    # under the previous `>= 8` form, deleting SEVEN of the eight gated arms left the
-    # count at `1 decorator + 7 prose = 8` and this row stayed GREEN, so the arm it
-    # claims to protect ("the arms this pin exists for are gone") did not fire until
-    # seven eighths of them were gone. The AST cannot see prose; `== 8` rather than
-    # `>= 8` means a NINTH gated arm is a red a reviewer reads instead of slack that
-    # a silently-deleted arm can absorb.
+    # is 18 at this head — the 9 decorator lines PLUS 9 prose/format mentions (the
+    # module docstring, the block comment above the imports, three arm/helper
+    # docstrings, one f-string and the two literals of this very assertion, plus this
+    # comment). Measured, not assumed: under the previous `>= 8` form, deleting SEVEN
+    # of the eight gated arms left the count at `1 decorator + 7 prose = 8` and this
+    # row stayed GREEN, so the arm it claims to protect ("the arms this pin exists for
+    # are gone") did not fire until seven eighths of them were gone. The AST cannot
+    # see prose; `== 9` rather than `>= 9` means a TENTH gated arm is a red a reviewer
+    # reads instead of slack that a silently-deleted arm can absorb.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     decorated = [
         node.name
@@ -1915,8 +1946,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
             for dec in node.decorator_list
         )
     ]
-    assert len(decorated) == 8, (
-        "expected EXACTLY 8 `@requires_doc_pin` arms (7 single + 1 parametrized); got "
+    assert len(decorated) == 9, (
+        "expected EXACTLY 9 `@requires_doc_pin` arms (8 single + 1 parametrized); got "
         f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
         "delete this pin with them, or restore them")
 
@@ -2176,7 +2207,7 @@ def test_no_error_line_command_substitutes_a_backticked_word():
     )
 
 
-def test_the_docs_tables_are_not_broken_across_physical_lines():
+def _table_shape_offenders(text: str) -> list[str]:
     """A table row is ONE physical line — a hard wrap inside one reds the `docs` gate.
 
     ⛔ THIS IS NOT HYPOTHETICAL (`#14038`). A lane re-cut one prose cell of §1's
@@ -2205,14 +2236,22 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
 
     Measured non-vacuous: on the pre-fix blob (`a642d54b8678`) this fails at line
     69 with `no-trailing` AND `colcount` (4 pipes where the separator declares 5).
-    """
-    doc = _document_text()
-    lines = doc.split("\n")
 
-    def pipes(text: str) -> int:
+    ⛔ WHY ONE CHECKER AND TWO ARMS (#13098 review). After the split, the PROSE
+    tables live in the TRACKED source (what `docs` lints) and the appendix lives in
+    a gitignored render that `docs` never sees. One arm reading `_document_text()`
+    therefore paid a FULL TREE WALK (`_document_text()` calls `census()`) inside the
+    REQUIRED `python-ci-gate` to grade rows no required check can red, and it added
+    ~22 s to every PR — the cost this file's own `@requires_doc_pin` block exists to
+    keep out of the merge gate. So: the source half is UNGATED (cheap, and it is the
+    half `docs` reads) and the rendered half is `@requires_doc_pin`.
+    """
+    lines = text.split("\n")
+
+    def pipes(line: str) -> int:
         # `\|` renders a literal pipe and does not delimit a cell — the doc uses
         # that spelling inside an inline `git ls-tree … | grep` command.
-        return re.sub(r"\\\|", "", text).count("|")
+        return re.sub(r"\\\|", "", line).count("|")
 
     offenders: list[str] = []
     i = 0
@@ -2241,14 +2280,68 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
                     )
         i = j
 
+    return offenders
+
+
+def test_the_source_tables_are_not_broken_across_physical_lines():
+    """The PROSE tables — the half a REQUIRED check actually reads.
+
+    Ungated on purpose: this is the text `docs` lints (`CYPHER-INVENTORY.src.md` is
+    the tracked file), it costs one `read_text`, and a wrapped cell here is exactly
+    the `#14038` break that redded a required context.
+    """
+    offenders = _table_shape_offenders(_source_text())
     assert not offenders, (
-        "a markdown table row is broken across physical lines, which reds the "
-        "REQUIRED `docs` check as MD055/MD056. \u26d4 The graded text mixes BOTH "
-        "halves of the split: the PROSE tables come from the tracked "
-        "`docs/architecture/CYPHER-INVENTORY.src.md` (which is what `docs` lints — "
-        "the rendered `CYPHER-INVENTORY.md` is gitignored and never in the changed "
-        "set), while an offender inside Appendix A would be a `markdown_table`/"
-        "`_digest` bug rather than a row to re-join, because every generated row "
-        "is one line by construction. A row is one line — re-join it rather than "
-        "re-wrapping it:\n" + "\n".join(offenders)
+        "a markdown table row in the tracked SOURCE is broken across physical "
+        "lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is one "
+        "line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
+    )
+
+
+@requires_doc_pin
+def test_the_rendered_tables_are_not_broken_across_physical_lines():
+    """The whole RENDERED document — prose plus Appendix A's generated rows.
+
+    ⛔ PINNED, not ungated: `_document_text()` runs a full census, and the appendix
+    it grades lives in a gitignored file that no required check ever sees — so it
+    belongs where the census already runs (`cypher-diff`, which sets
+    `TORTOISE_CYPHER_DOC_PIN=1`), not in the merge gate. An offender inside Appendix
+    A is a `markdown_table`/`_digest` bug rather than a row to re-join, because
+    every generated row is one line by construction.
+    """
+    offenders = _table_shape_offenders(_document_text())
+    assert not offenders, (
+        "a markdown table row in the RENDERED document is broken across physical "
+        "lines (MD055/MD056). ⛔ Inside Appendix A this is a `markdown_table` bug, "
+        "never a row to re-join — fix the generator:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_rendered_document_is_not_tracked():
+    """The split's OTHER half: `CYPHER-INVENTORY.md` must stay OUT of the index.
+
+    ⛔ WITHOUT THIS THE CONFLICT RETURNS BY THE RESOLUTION PATH, NOT THE EDIT PATH.
+    Every open PR that still holds a copy meets this change as a `CONFLICT
+    (modify/delete)`, and the standard "keep our version" resolution RE-STAGES the
+    file — `.gitignore` governs UNTRACKED paths, so it does not refuse a path that
+    already has an index stage. Nothing else would notice: `--check` reads the
+    source, the appendix arms render into `tmp_path`, and `docs` lints a re-added
+    copy and finds nothing wrong with it. The path is derived from `census.DOC_OUT`
+    so the assertion cannot drift from the constant `--render` writes.
+    """
+    rel = census.DOC_OUT.relative_to(ROOT).as_posix()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", rel],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert tracked.returncode != 0, (
+        f"{rel} is TRACKED again — it is `--render`'s output, not a source (#13098).\n"
+        f"    git rm --cached {rel}\n"
+        "A modify/delete conflict resolved by keeping the incoming copy re-stages "
+        "it, and no other arm in this suite reads the tracked path."
+    )
+    ignored = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT)
+    assert ignored.returncode == 0, (
+        f"{rel} is not gitignored — `--render`'s output must never be stageable; "
+        "re-add the path to `.gitignore`'s #13098 block"
     )
