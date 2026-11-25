@@ -854,6 +854,46 @@ def test_belief_distinguishes_a_declared_prior_from_a_measurement(tmp_path):
         assert d["ep_state"] != m["ep_state"], (d, m)
 
 
+def test_belief_does_not_report_a_terminal_claims_decayed_posterior_as_measured(tmp_path):
+    """⛔ P2 (review cycle 5): a terminalising write's decayed Beta(1,1) is a
+    STORED VALUE, not a measurement — #2490's rule, applied through the one fold.
+
+    `_retract_point` runs `live.decay_clause`, which stamps the claim with
+    `VACUITY_BELIEF` (`confidence=0.5, posterior_alpha=1.0, posterior_beta=1.0`).
+    Those columns satisfy `ep_measured_cypher`, so a route that published
+    `ep_state` WITHOUT the terminal fold answered `measured` — with
+    `{mean: 0.5, alpha: 1.0, beta: 1.0, effective_n: 2.0}`, byte-identical to the
+    fabricated payload the absent arm removes, under the one word that claims an
+    EP pass produced it. Measured before the fold: the stored row read
+    `('retracted', 0.5, 1.0, 1.0, True)` and the route said `measured`.
+
+    The fold is `search_engine.ep_state_resolve` — the ONE place #2490's gate is
+    applied (`why.py`, the rankers and `annotate_ep_batch` all call it), fed by
+    `live.is_terminal_status`, which is also what those callers use.
+    """
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a claim that will be retracted",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._set_point_baseline(p["id"], 8.0, 2.0)
+            before = client.get(f"/v1/entities/{p['id']}/belief").json()
+            assert before["ep_state"] == "baseline", before
+            sdk._retract_point(p["id"])
+        finally:
+            sdk.close()
+
+        body = client.get(f"/v1/entities/{p['id']}/belief").json()
+        # The POSTERIOR case: the claim is ended, its stored belief is the
+        # decayed vacuity — `measured` would name an EP pass that never made it.
+        assert body["ep_state"] == "baseline", body
+        # The numbers themselves are still the stored ones (not invented, not
+        # nulled): the state is what stops them reading as a measurement.
+        assert body["current"]["alpha"] == 1.0, body
+        assert body["current"]["beta"] == 1.0, body
+
+
 def test_relations_keeps_an_inbound_neighbour_that_carries_no_identity(tmp_path):
     """⛔ P3 (review cycle 4): the self-loop guard must not drop identity-less
     neighbours.

@@ -15755,7 +15755,7 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
 
 
 def _paged(body_key: str, rows: list[dict], *, candidates: int,
-           offset: int) -> dict:
+           offset: int, exact: bool) -> dict:
     """The capped-page envelope `/v1/points` publishes, one layer over.
 
     ``candidates`` is the candidate set the PRODUCER could see, before the
@@ -15764,8 +15764,13 @@ def _paged(body_key: str, rows: list[dict], *, candidates: int,
     same WHERE (so ``exact=True`` is honest and a truncated page carries
     ``total_available``), while ``list_sources`` passes the length of the
     whole-population list it paged in Python (also exact, for the same reason —
-    it is the complete set). A caller that ever fills it with a probe row must
-    pass ``exact=False`` instead; that is why the flag is not defaulted here.
+    it is the complete set). ⛔ ``exact`` is therefore REQUIRED and has no
+    default: a caller that ever fills ``candidates`` from a ``limit + 1`` probe
+    row must pass ``exact=False`` (the probe is a lower bound, never a total —
+    ``truncation.py``'s own rule), and a default would silently hand such a
+    caller the wrong claim. Both current callers pass ``exact=True`` because
+    their totals ARE exact; the parameter exists so the next one cannot inherit
+    that answer by omission.
 
     ⛔ ``offset`` is load-bearing, not bookkeeping. These routes are
     ``SKIP``/``LIMIT`` paged, so the honest question is *"do matches exist beyond
@@ -15783,7 +15788,7 @@ def _paged(body_key: str, rows: list[dict], *, candidates: int,
 
     delivered = len(rows)
     sink: dict = {}
-    mark_truncation(sink, returned=delivered, candidates=candidates, exact=True,
+    mark_truncation(sink, returned=delivered, candidates=candidates, exact=exact,
                     offset=offset)
     body: dict = {body_key: rows, "count": delivered}
     body |= truncation_field(sink)
@@ -15878,7 +15883,7 @@ async def _list_layer_route(org: dict, label: str, surface: str, body_key: str,
         lambda: entity_reads.list_layer(
             sdk._get_proj(), label, limit=limit, offset=offset, kind=kind),
         op=surface)
-    return _paged(body_key, rows, candidates=total, offset=offset)
+    return _paged(body_key, rows, candidates=total, offset=offset, exact=True)
 
 
 @app.get("/v1/objects")
@@ -15896,8 +15901,14 @@ async def list_objects(
     (``name``, then the node's internal id), so walking ``offset`` visits every
     row exactly once. ENDED rows (``deprecated`` and the rest of the terminal
     vocabulary) are excluded from the listing and stay retrievable by id — the
-    same tombstone contract, read through the same shared predicate, as
-    ``GET /v1/points``.
+    LISTING half of ``GET /v1/points``' tombstone contract, read through the same
+    shared predicate. ⛔ The BY-ID half is deliberately NOT identical, and the
+    difference is stated rather than implied: ``GET /v1/points/{id}`` refuses a
+    ``retracted`` record by name (``#432``/``#689``), while this route answers it
+    with the stored properties — it delegates to ``sdk.get_entity``, which is
+    the documented behaviour of the MCP door it reuses, and a caller reading
+    `status` in the payload can see the row is ended. Measured both ways:
+    a retracted Object answers 200 here and 404 on ``/v1/points/{id}``.
 
     Delegates to :func:`tortoise.entity_reads.list_layer`. See
     ``/v1/objects/{id}`` for the single-node read.
@@ -15979,7 +15990,7 @@ async def list_sources(
         lambda: sdk.list_knowledge(kind="source"), op="list_sources")
     rows = list(rows or [])
     page = rows[offset:offset + limit]
-    return _paged("sources", page, candidates=len(rows), offset=offset)
+    return _paged("sources", page, candidates=len(rows), offset=offset, exact=True)
 
 
 @app.get("/v1/sources/{entity_id:path}")
@@ -16117,12 +16128,16 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     says which reading ``current`` carries. ``/v1/search`` publishes the same
     word for the same reason (``ranking.py``).
 
-    ⛔ An UNCALIBRATED graph REFUSES the confidence read (``CalibrationError``,
-    fail-closed since #344) — answered here as **409** with the SDK's own
-    sentence, because the precondition that failed is the graph's state, not the
-    request, and the remedy is to calibrate. It is deliberately not a 200 with
-    a substituted number: a topology-only figure reported as EP would be the
-    silent-uncalibrated-EP class #7478 targets.
+    ⛔ An UNCALIBRATED **CLAIM OR GRAPH** REFUSES the confidence read
+    (``CalibrationError``, fail-closed since #344) — answered here as **409**
+    with the SDK's own sentence, because a precondition that is not the request
+    failed, and the remedy is to calibrate *that scope*: ``get_confidence``
+    narrows its calibration scope to ``claim_id`` (measured: a CALIBRATED graph
+    holding one mirror-only Point raises `1 uncalibrated evidence points` for
+    that id), so the failure is not always the graph's. The remedy below names
+    both scopes rather than promising the graph-level one. It is deliberately
+    not a 200 with a substituted number: a topology-only figure reported as EP
+    would be the silent-uncalibrated-EP class #7478 targets.
 
     ⛔ ``lastBeliefWrite`` is what a ``ConfidenceChanged`` event COMMITS (the
     values EP wrote), not a before→after delta — one event does not carry the
@@ -16169,15 +16184,33 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
     # totality rules (a non-numeric operand is `absent`, a half pair is
     # `absent`, the `confidence` mirror leads) rather than a second vocabulary
     # that could drift from `ranking.py`/`why.py`.
-    from .search_engine import EP_STATE_ABSENT, ep_state
+    #
+    # ⛔ AND THE #2490 TERMINAL FOLD, through `ep_state_resolve` — the ONE place
+    # that fold happens, which every other state-reporting surface applies
+    # (`why.py`, `search_engine.annotate_ep_batch`, the rankers). Without it a
+    # claim a terminalising write stamped with the DECAYED `confidence=0.5,
+    # posterior_alpha=1.0, posterior_beta=1.0` (`live.VACUITY_BELIEF`) answered
+    # `ep_state: "measured"` — publishing `{mean: 0.5, alpha: 1.0, beta: 1.0,
+    # effective_n: 2.0}`, byte-identical to the fabricated payload the absent arm
+    # of this handler removes, under the one word that says an EP pass measured
+    # it. Measured on a retracted Point before this fold: the stored row read
+    # `('retracted', 0.5, 1.0, 1.0, True)` and the route said `measured`. The
+    # terminal predicate is `live.is_terminal_status` — the same call
+    # `ep_state_resolve`'s other callers make — so the vocabulary cannot diverge.
+    from .live import is_terminal_status
+    from .search_engine import EP_STATE_ABSENT, ep_state, ep_state_resolve
 
-    belief_state = ep_state(
-        confidence=entity.get("confidence"),
-        posterior_alpha=entity.get("posterior_alpha"),
-        ep_alpha=entity.get("ep_alpha"),
-        posterior_beta=entity.get("posterior_beta"),
-        ep_beta=entity.get("ep_beta"),
-        baseline_set=entity.get("baseline_set") is True,
+    belief_state = ep_state_resolve(
+        ep_state(
+            confidence=entity.get("confidence"),
+            posterior_alpha=entity.get("posterior_alpha"),
+            ep_alpha=entity.get("ep_alpha"),
+            posterior_beta=entity.get("posterior_beta"),
+            ep_beta=entity.get("ep_beta"),
+            baseline_set=entity.get("baseline_set") is True,
+        ),
+        measured=not is_terminal_status(
+            entity.get("status"), bool(entity.get("outdated"))),
     )
     has_belief = belief_state != EP_STATE_ABSENT
     view = None
@@ -16192,9 +16225,11 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                 detail={
                     "error_code": "EP_UNCALIBRATED",
                     "message": str(e),
-                    "remedy": ("calibrate the graph before reading EP "
-                               "confidence — `dream`/`compute_confidence` on a "
-                               "calibrated graph"),
+                    "remedy": ("calibrate the scope the error names — the CLAIM "
+                               "(a claim with no prior is uncalibrated even on a "
+                               "calibrated graph) or the GRAPH; "
+                               "`dream`/`compute_confidence` on a calibrated "
+                               "graph"),
                 }) from e
     proj = sdk._get_proj()
     last = await _read_offload(
