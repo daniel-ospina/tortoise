@@ -8938,7 +8938,10 @@ def _record_health() -> dict:
     # So the overflow counters are published BESIDE this fold, never in it, for
     # the one thing they can honestly say: that `armed_but_uncut` is a LOWER
     # BOUND. `armed_but_uncut_observations` is the lifetime total on the same
-    # footing. The authoritative population is a QUERY (`sweep` / `backfill`).
+    # footing. ⛔ `sweep` / `backfill` is NOT a census of it (#14587 review P1-2):
+    # both read `journal_event`, and a graph whose record writes are refused has
+    # no row there. The per-graph remedy is `seed --graph-id …
+    # --enumerated-floor 0` + `arm`.
     uncut_count = block.get("armed_but_uncut")
     if block["armed"] and isinstance(uncut_count, int) and uncut_count > 0:
         block["ok"] = False

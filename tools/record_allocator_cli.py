@@ -145,9 +145,16 @@ must be true before the flag is rolled, and none of them is this command's to do
      graphs created from that point on are born cut over. ⛔ IT IS
      BEST-EFFORT: a record outage at creation does not fail the create, it
      leaves the graph UNCUT — which `/health` reports as
-     `record.armed_but_uncut` and which `%(prog)s backfill` heals. And it does
-     not reach the graphs that already existed when it landed. So find the
-     population with `%(prog)s sweep --org-id <org> --dsn <dsn>`, seed it with
+     `record.armed_but_uncut`. ⛔ `%(prog)s backfill` does NOT heal that graph
+     (#14587 review P1-2): it seeds `sweep`'s population, and `sweep` reads
+     `public.journal_event`, so a graph whose record writes are being REFUSED has
+     no row there to find — however many times it writes. Seed it PER GRAPH with
+     `%(prog)s seed --org-id <org> --graph-id <id> --enumerated-floor 0` (correct
+     for a graph that has never written to the record; a graph with existing
+     record rows is REFUSED `divergence`, never silently seeded) and then
+     `%(prog)s arm --org-id <org> --graph-id <id> --acknowledge-cutover`. The
+     hook also does not reach the graphs that already existed when it landed, and
+     `backfill` IS the verb for those. So find THAT population with `%(prog)s sweep --org-id <org> --dsn <dsn>`, seed it with
      `%(prog)s backfill --org-id <org> --dry-run` (read it, write nothing) and
      then for real — BEFORE the flag is rolled.
 

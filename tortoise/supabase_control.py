@@ -4357,7 +4357,9 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     failing the caller — the provisioning RPC's own data-plane graph is already
     committed, and an agent-signup's plaintext key exists only in the response a
     raise would replace with a 500. So a record fault here is LOGGED and made
-    VISIBLE (`/health` `record.armed_but_uncut`, and `backfill`), never raised.
+    VISIBLE (`/health` `record.armed_but_uncut`), never raised — and the remedy
+    it prints is the PER-GRAPH `seed` + `arm`, not `backfill`, which cannot
+    reach a graph the record has never seen write (#14587 review P1-2).
     """
     try:
         from tortoise.record_writer import provision_graph_record

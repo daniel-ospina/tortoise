@@ -2970,7 +2970,11 @@ _UNCUT_GRAPHS: dict[str, str] = {}
 #: the observation that repairs it (:func:`clear_uncut_graph`), and this counter
 #: is published beside it for the one thing it can honestly say: that the tracked
 #: count is a LOWER BOUND, because at least this many observations could not be
-#: distinguished. The authoritative population is a QUERY — `sweep` / `backfill`.
+#: distinguished. ⛔ `sweep` / `backfill` is NOT that population either (#14587
+#: review P1-2): both enumerate `journal_event`, and a graph whose record writes
+#: are REFUSED never gets one, so a census of this registry has to come from the
+#: process; the per-graph remedy is `seed --graph-id … --enumerated-floor 0` +
+#: `arm`.
 _UNCUT_UNTRACKED = 0
 #: The same count for the halted population, which has its own bounded map. Past
 #: the cap a halted graph would otherwise stop being PUBLISHED with nothing
