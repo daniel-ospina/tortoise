@@ -3062,12 +3062,27 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     ⛔ `mode_halted` DOES NOT LAND HERE. See :data:`_UNCUT_HALTED`: a halted graph
     keeps its JSONL append and is an operator's decision, so it is published on
     its own key instead of being reported as an uncut graph.
+
+    ⛔ AND IT RETRACTS AN EARLIER UNCUT OBSERVATION FOR THAT GRAPH (#14587
+    review P3). A graph is published here when it was OBSERVED unusable
+    (`provision_failed`, `no_cursor_row`, a divergence), and an operator can HALT
+    it afterwards — on the write path that is the very next observation. Leaving
+    the stale entry in place counts the graph in BOTH populations, keeps a reason
+    the halt falsified (`provision_failed`) in `armed_but_uncut_reasons()`, and —
+    because `ok` folds `armed_but_uncut` and nothing else clears it for a halted
+    row — pins `record.ok: false` for as long as the halt stands. A sanctioned
+    halt is not a degraded deployment: the health contract says it is published
+    on its own key, and a permanent false red is exactly what that split exists
+    to prevent.
     """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
         if reason == f"mode_{record_projection.MODE_HALTED}":
             with _UNCUT_GUARD:
+                # The halt SUPERSEDES the uncut observation: same graph, newer and
+                # more specific fact, and the two keys fold differently.
+                _UNCUT_GRAPHS.pop(key, None)
                 _UNCUT_HALTED[key] = reason
                 if len(_UNCUT_HALTED) > UNCUT_GRAPH_CAP:
                     _UNCUT_HALTED.pop(next(iter(_UNCUT_HALTED)))

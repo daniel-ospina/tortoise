@@ -1409,6 +1409,39 @@ def test_a_re_provisioned_halted_graph_keeps_its_published_entry(monkeypatch):
         rw._uncut_warned_at.clear()
 
 
+def test_a_halt_retracts_an_earlier_uncut_observation():
+    """⛔ A SANCTIONED HALT MUST NOT PIN `ok: false` (#14587 review P3).
+
+    A graph is published on the UNCUT key when it was observed unusable
+    (`provision_failed`, `no_cursor_row`, a refused cutover), and an operator can
+    HALT it afterwards — on the write path that is the very next observation, and
+    the hook's halted arm reaches the same function. `mode_halted` is published on
+    its OWN key and used to leave the earlier entry untouched, so the graph was
+    counted in both populations, `armed_but_uncut_reasons()` kept the falsified
+    `provision_failed`, and — `ok` folding only `armed_but_uncut` — the
+    deployment read degraded for as long as the halt stood. The health contract
+    splits the key precisely so an operator's decision is not a degradation.
+
+    Mutant: drop the `_UNCUT_GRAPHS.pop(key, None)` in the halted arm → the uncut
+    count stays 1 and both assertions red.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        rw.note_uncut_graph("org-14582", "graph-1", reason="provision_failed")
+        assert rw.armed_but_uncut()["armed_but_uncut"] == 1
+        rw.note_uncut_graph("org-14582", "graph-1", reason="mode_halted")
+        block = rw.armed_but_uncut()
+        assert block["armed_but_halted"] == 1, block
+        assert block["armed_but_uncut"] == 0, (
+            "the halt left the graph in the UNCUT population, which `ok` folds: "
+            f"a sanctioned halt pinned the deployment red — {block}")
+        assert rw.armed_but_uncut_reasons() == {}, (
+            "the halt kept a reason it had itself falsified, and that reason is "
+            f"what `/health` publishes: {rw.armed_but_uncut_reasons()}")
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
     """⛔ #14587 review P1-2 — the printed remedy could not reach the population.
 
