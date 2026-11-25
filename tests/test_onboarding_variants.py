@@ -795,13 +795,14 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     # prefix is optional in the EXTRACTION only — the pin immediately below
     # still grades which form Cursor's snippet must carry.
     # What EMPTIED `referenced` here was #14607 REMOVING the separate plain-form
-    # `.mcp.json` snippet (`4b2fba3e^:SKILL.md:415`, `"Bearer
+    # `.mcp.json` snippet (`4b2fba3e^:tortoise/onboarding/SKILL.md:415`, `"Bearer
     # ${TORTOISE_API_KEY}"`); the Cursor `env:` row predates that change — it
     # arrived with `24e8388c5f316`, and `01b78913cde4` only dropped
     # its `"type": "http",`. Do not "restore" the plain snippet to
     # satisfy a tighter locator: in a JSON header that form resolves once at
-    # process start to an EMPTY `Authorization: Bearer` (SKILL.md:411-414) — the
-    # empty-bearer class this guard exists to prevent.
+    # process start to an EMPTY `Authorization: Bearer`
+    # (tortoise/onboarding/SKILL.md:411-414) — the empty-bearer class this
+    # guard exists to prevent.
     referenced = set(
         re.findall(
             r'"Authorization":\s*"Bearer \$\{(?:env:)?([A-Z0-9_]+)\}',
@@ -1722,27 +1723,35 @@ def test_3232_generic_restart_lines_are_exact():
     # MCP config at START, so a user told to confirm the tools FIRST looks for
     # tools the running session cannot have loaded yet. No wording is pinned
     # here: a forward phrasing ("…, then confirm the tools …") still passes, so
-    # #3429's lesson (pin the ORDER, not one reword) survives. Only the cue's
-    # OWN clause is graded — splitting at the first `,`/`.`/`;` keeps "Restart
-    # your client after changing the config, then confirm the tools …" GREEN,
-    # because the inversion does not bind there.
+    # #3429's lesson (pin the ORDER, not one reword) survives.
     #
-    # Two things a first cut got wrong, both measured on this pin:
-    # 1. The clamp strips leading punctuation BEFORE splitting, because a comma
-    #    right after the cue (`Restart your client, after confirming the tools
-    #    …` — a one-token edit of the sentence this pin grades) left an EMPTY
-    #    first clause, so the inversion was never graded and it stayed GREEN.
-    # 2. The pattern anchors on a CONFIRMATION verb. "restart after <verb> the
-    #    tools" inverts the order only when the user is told to confirm/check/
-    #    verify them FIRST; a purpose clause — "Restart your client after the
-    #    config change so it loads the tools", restart still first — must stay
-    #    GREEN, because a new false red is exactly how a pin gets deleted.
-    cue_clause = re.split(
-        r"[,.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
-    assert not re.search(
-        r"\b(?:after|once|when|if)\b[^.;]*?"
-        r"\b(?:confirm|check|verify|see|look|ensure|list)\w*\b[^.;]*?\btools\b",
-        cue_clause), (
-        "docs/quickstart-cloud.md inverts its own restart cue: 'restart AFTER "
-        "confirming the tools' asks the user to look for tools this session "
-        "cannot have loaded yet — the restart comes FIRST (#3232, #14676)")
+    # ⛔ GRADE THE CLAUSE THE TRIGGER GOVERNS, NOT A VERB ALLOWLIST. Two earlier
+    # cuts of this guard were measured wrong; they are recorded so they are not
+    # re-invented:
+    #   * matching only the un-punctuated form missed
+    #     "Restart your client, after confirming the tools …" — a ONE-TOKEN edit
+    #     of the sentence above — and an interior comma hid it again
+    #     ("… fully (on macOS, quit the menu-bar app) after confirming the tools
+    #     …"), so truncating at a comma is not a bound either;
+    #   * an allowlist of confirmation verbs (confirm|check|verify|…) is an
+    #     unwinnable enumeration: `verify\w*` does not match "verified", and
+    #     "after making sure the tools …" / "after the tools show up …" invert
+    #     the order using no listed verb at all.
+    # What inverts is the CLAUSE the trigger governs: after `after`/`once`, the
+    # text up to the next connective is the condition the restart is deferred to,
+    # so naming the tools there puts the tools-event first. The complement stops
+    # at `so`/`then`/clause break, which keeps a PURPOSE clause GREEN ("Restart
+    # your client after the config change so it loads the tools", restart still
+    # first) — a new false red is exactly how a pin gets deleted (#3429).
+    # `when`/`if` are deliberately NOT triggers: they introduce a remedy, not an
+    # order, and "Restart your client if the tools are missing" is correct
+    # advice that this pin must leave alone.
+    trigger = re.search(r"\b(?:after|once)\b", after_cue)
+    complement = (re.split(r"\b(?:so|then)\b|[,;.(\u2014]",
+                           after_cue[trigger.end():], maxsplit=1)[0]
+                  if trigger else "")
+    assert not re.search(r"\btools?\b", complement), (
+        "docs/quickstart-cloud.md defers its restart to the tools instead of "
+        "the other way round: '… after confirming the tools are there' asks "
+        "the user to look for tools this session cannot have loaded yet — the "
+        "restart comes FIRST (#3232, #14676)")
