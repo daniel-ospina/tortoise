@@ -171,8 +171,14 @@ and it **verifies with a live call** instead of leaving the agent to discover a
 broken config by failing to use it:
 
 ```bash
-tortoise onboard --harness pi        # claude | codex | cursor | pi
+tortoise onboard --harness pi        # claude | cursor | pi  (codex: see below)
 ```
+
+⚠️ `--harness codex` is **refused by name**, not silently botched: Codex reads
+TOML (`~/.codex/config.toml`), and this installer writes JSON configs only — a
+JSON document there would leave Codex unable to parse the file while the install
+reported success. The refusal prints the `[mcp_servers.tortoise]` table to paste,
+and the Codex sections below are the hand path.
 
 It registers the MCP as the **credential-free bridge**
 (`python3 -m tortoise.mcp_bridge`), so the config carries no `${VAR}` to expand

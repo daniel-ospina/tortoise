@@ -83,6 +83,20 @@ INSTRUCTION_FILES: dict[str, str] = {
 BEGIN_MARK = "<!-- tortoise:mcp-first:begin v1 -->"
 END_MARK = "<!-- tortoise:mcp-first:end -->"
 
+#: `--harness` values that are ALIASES of a canonical harness. `claude-code` is
+#: advertised by the CLI and resolves the same config/instruction files as
+#: `claude`, but `CAPTURE_SEAM` has no `claude-code` key — so looking the seam up
+#: with the raw value refused a seam that is exactly the right artifact
+#: ("no capture/recall seam for 'claude-code'"), installed no hooks, and still
+#: exited 0. Normalising ONCE here keeps the alias from being a special case at
+#: every lookup.
+HARNESS_ALIASES: dict[str, str] = {"claude-code": "claude"}
+
+
+def canonical_harness(harness: str) -> str:
+    """The harness key the seam/version tables are keyed by."""
+    return HARNESS_ALIASES.get(harness, harness)
+
 #: THE TWO SENTENCES (#14607 part B), plus the one command that makes them
 #: actionable. Wording is the issue's own; the fix line is the AX admission test
 #: ("if the third part cannot be written, the surface must not refuse").
@@ -172,10 +186,18 @@ def _config_path(harness: str, project_dir: Path, *,
         return (Path(user_rels[0].replace("~", str(Path.home())))
                 if user_rels else None)
     for rel in project_rels:
-        path = project_dir / rel
-        if path.exists():
-            return path
-    return project_dir / (project_rels[0] if project_rels else ".mcp.json")
+        # ⛔ Resolve the project layer the SAME way `read_entry` does. Writing
+        # `<project_dir>/<rel>` while the verifier walks UP to the git top-level
+        # created a NEW nested `.mcp.json` that then SHADOWED the repo-root config
+        # for every session started below it (hiding that file's other servers),
+        # and the verification agreed because it read back the file the installer
+        # had just made. Measured from `<repo>/tortoise`: wrote
+        # `<repo>/tortoise/.mcp.json` while the root one already existed.
+        found = mcp_selfcheck._project_layer(project_dir, rel)
+        if found is not None and found.exists():
+            return found
+    root = mcp_selfcheck._repo_root(project_dir) or project_dir
+    return root / (project_rels[0] if project_rels else ".mcp.json")
 
 
 _JSON_WS = " \t\n\r"
@@ -415,8 +437,40 @@ def _git_tracks(path: Path) -> bool:
 
 # ── Instruction file (the two sentences), delimiter-marked + reversible ───
 
+def _marker_pair(text: str) -> tuple[int, int]:
+    """How many BEGIN and END markers a file carries.
+
+    ⛔ THE PAIRING IS THE SAFETY PROPERTY. `_strip_block` removes from a BEGIN to
+    the next END, so a file carrying a BEGIN with NO END makes that removal swallow
+    everything the user wrote after it — measured: an instruction file whose block
+    had been hand-trimmed took the append branch on install (BEGIN count 2), and
+    `--uninstall` then left `'# House rules\n'`, deleting `My own later notes: never
+    delete this.` Reversibility is advertised as "removes exactly the marked
+    block"; a malformed pair must therefore be REFUSED, never guessed at.
+    """
+    return text.count(BEGIN_MARK), text.count(END_MARK)
+
+
+def _markers_well_formed(text: str) -> tuple[bool, str]:
+    """True when the file carries exactly ONE BEGIN before exactly ONE END."""
+    begins, ends = _marker_pair(text)
+    if begins == 0 and ends == 0:
+        return True, ""
+    if begins != 1 or ends != 1:
+        return False, (f"start markers: {begins} / end markers: {ends} — the "
+                       f"marked block is malformed")
+    if text.index(BEGIN_MARK) > text.index(END_MARK):
+        return False, "the END marker appears BEFORE the BEGIN marker"
+    return True, ""
+
+
 def _strip_block(text: str) -> str:
-    """Remove every marked block, leaving the rest of the file untouched."""
+    """Remove the marked block, leaving the rest of the file untouched.
+
+    Assumes the pair has been validated by `_markers_well_formed`; callers must
+    refuse a malformed file rather than silently deleting the text between a
+    dangling BEGIN and some later END.
+    """
     out: list[str] = []
     inside = False
     for line in text.splitlines(keepends=True):
@@ -444,9 +498,17 @@ def write_instructions(harness: str, project_dir: Path, *,
         return out
     path = project_dir / name
     before = path.read_text(encoding="utf-8") if path.exists() else ""
+    ok, why = _markers_well_formed(before)
+    if not ok:
+        out.refusals.append(
+            f"{path}: {why}. The two sentences were NOT written — finish or remove "
+            f"the partial `{BEGIN_MARK}` / `{END_MARK}` pair by hand first, so the "
+            f"block stays reversible")
+        return out
     if BEGIN_MARK in before and END_MARK in before:
-        # Idempotent: replace the block in place, preserving everything around it
-        # (including edits the user made inside it — those are theirs).
+        # Idempotent: replace the block in place, preserving everything around it.
+        # ⛔ Edits the user made INSIDE the block are NOT preserved — the block is
+        # ours and is rewritten whole. (The previous comment claimed otherwise.)
         after_body = _strip_block(before)
         after = (after_body.rstrip("\n") + "\n\n" + INSTRUCTIONS
                  if after_body.strip() else INSTRUCTIONS)
@@ -483,6 +545,12 @@ def remove_instructions(harness: str, project_dir: Path, *,
         out.planned.append(str(path))
         return out
     before = path.read_text(encoding="utf-8")
+    ok, why = _markers_well_formed(before)
+    if not ok:
+        out.refusals.append(
+            f"uninstall: {path}: {why} — REFUSING to remove, because a malformed "
+            f"pair would take your own text with it. Remove the block by hand")
+        return out
     if BEGIN_MARK not in before:
         out.planned.append(str(path))    # nothing of ours is there
         return out
@@ -548,13 +616,13 @@ def onboard(harness: str = "pi", *, project_dir: Path | None = None,
                 f"hooks: capture installer unavailable ({type(exc).__name__}); "
                 f"recall/retain are NOT automatic — re-run after fixing that")
         else:
-            if harness not in CAPTURE_SEAM:
+            if canonical_harness(harness) not in CAPTURE_SEAM:
                 out.refusals.append(
                     f"hooks: no capture/recall seam for {harness!r} (known: "
                     f"{', '.join(sorted(CAPTURE_SEAM))}) — recall will not be "
                     f"automatic, and this installer does not invent one")
             else:
-                res = install_capture(harness, root=project_dir,
+                res = install_capture(canonical_harness(harness), root=project_dir,
                                       dry_run=dry_run)
                 # `error` and `actions` are BOTH rendered (#10241): a write that
                 # landed before a failure has already changed what the harness
