@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 317 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 318 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -144,7 +144,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,127, and `-i` without the exclusion 2,491 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 317
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 318
 `.py` files the same two predicates read **2,124** and **2,401**; with `-t py` and the test-module
 exclusion dropped they read **2,126** and **2,404**. The 87-occurrence 2,404→2,491 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
@@ -217,13 +217,25 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **875** | read=589, write=286 |
+| `plain` | **880** | read=594, write=286 |
 | `adjacency` | **293** | read=192, write=101 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
 | `fulltext` | **2** | read=2 |
 | `unresolved` | **105** | unresolved=105 |
+
+⛔ **RE-CUT AT THIS HEAD: §3's `plain` row read `875` / `read=589` here, which is the PREVIOUS
+base's reading and it made the table sum to 1,327 against the `sites` pin `1,332`.** Every row above
+is now the tool's own `shape_matrix` at this tree (`--json`), and the same reading the 25 pins carry:
+`plain` **880** (`read` **594** + `write` **286**), `adjacency` **293** (192/101), `ep` **32**
+(21/11), `ddl` **17**, `traversal` **3**, `fulltext` **2**, `unresolved` **105** — which sums to
+**1,332** = `sites`, as a shape table must. The same re-cut moved the `partial` count in the prose
+below (`321` → **324**), §1's population line (`317` → **318**, the tool's own `py_files`) and §4's
+two `589` references (→ **594**, the `candidate:SQL-shaped` verdict). Every one of them is a
+PREVIOUS-base figure that no pin covers, because the pins are scalars in §0 rather than the prose
+that explains them: `--check` was GREEN at this head while all five were stale, so a reader who
+trusts the green alone is reading the older tree (#14625 review).
 
 **What the unresolved bucket is.** 105 sites hand a door a statement built where no static reader
 can follow: a **parameter** (`def _count(proj, query: str)` in `tortoise/audit.py:247`), a
@@ -236,7 +248,7 @@ migration candidates: `tortoise/projection/__init__.py` loops over `("db.idx.ful
 as a `plain` READ — the one direction a verdict flips. Both of its un-folded spellings classify
 `ddl`, which is what showed the loss was in the folding and not in the DDL arm. They are not
 "probably fine" — they are exactly the sites a flip would have to re-derive by
-hand, so they are counted and named rather than classified by guesswork. 321 further sites
+hand, so they are counted and named rather than classified by guesswork. 324 further sites
 are **partial**: the literal half carries the shape (e.g.
 `"MATCH (op:Point)-[:" + safe_rel + "]->(t)"` is an adjacency read) and the digest shows `{}`/`???`
 where the folded part was.
@@ -267,8 +279,8 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 589 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 589 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 594 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 594 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 286 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 330 |
 
