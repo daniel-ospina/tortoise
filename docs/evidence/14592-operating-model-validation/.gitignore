@@ -1,0 +1,4 @@
+# The SDK event log for this run is 391 KB of raw JSONL — scratch, not evidence.
+# It is reproducible with run.sh; the receipts in this directory are the evidence.
+out/events.jsonl
+out/events.jsonl.position
