@@ -675,7 +675,7 @@ def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
         unreadable.chmod(0o600)
 
 
-def test_the_renderer_refuses_to_write_over_the_source(capsys):
+def test_the_renderer_refuses_to_write_over_the_source(tmp_path, monkeypatch, capsys):
     """`--render <the source>` would corrupt the tracked file AND lock the tool.
 
     `render()`'s own refusal guards the SOURCE'S CONTENT, never the DESTINATION, so
@@ -686,14 +686,31 @@ def test_the_renderer_refuses_to_write_over_the_source(capsys):
     just wrote. §7 tells every lane to run this verb, so a mistyped path is the
     plausible route to the conflict this split exists to remove.
 
+    ⛔ AND THE SOURCE IS BUILT IN A THROWAWAY GIT TREE, NOT IN THIS CHECKOUT: this arm
+    is graded by MUTATION, and with the source branch deleted the real arm overwrote
+    the REAL tracked `docs/architecture/CYPHER-INVENTORY.src.md` (measured: 127,003 ->
+    371,800 bytes, rows and all) before the byte-for-byte assertion reported the loss —
+    taking any uncommitted edit to the source with it. The scratch source is `git add`ed
+    so the TRACKED-PATH branch is still reachable when the source branch is deleted,
+    which is what keeps the stderr assertion below discriminating.
+
     In-process and cheap: the guard sits BEFORE the census, so this never walks the
     tree; the source is compared byte-for-byte to prove nothing was written.
     """
-    before = DOC_SRC.read_bytes()
-    rc = census.main(["--render", DOC_SRC.relative_to(ROOT).as_posix()])
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", src.name], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    before = src.read_bytes()
+    rc = census.main(["--render", src.relative_to(repo).as_posix()])
     assert rc == 2, f"`--render <source>` must exit 2, got {rc}"
-    assert DOC_SRC.read_bytes() == before, (
-        "the tracked SOURCE was rewritten — the guard must refuse before writing")
+    assert src.read_bytes() == before, (
+        "the SOURCE was rewritten — the guard must refuse before writing")
     # ⛔ ASSERT THE BRANCH, NOT JUST THE EXIT CODE (#13098 round 3): the source is
     # ALSO tracked, so `git ls-files` refuses it too — an exit-2-only assertion
     # therefore stays green if the `target == DOC_SRC` branch is DELETED, and that
