@@ -281,11 +281,11 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **74** lines across **23**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 74 lines,
+and the reason is measured: `:Document` occurs on **77** lines across **23**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 77 lines,
 `git grep -l ':Document' -- tortoise/` → 23 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-nine moves have since been made, one per workstream: the #10976
+ten moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
@@ -331,7 +331,15 @@ module's opening paragraph names `:Object`/`:Subject`/`:Event`/`:Document`/`:Sou
 to say which labels the one derive-and-encode rule spans, i.e. prose that names
 the retired label to state a rule about it, in a file this population had not
 previously reached, so it lifts the FILE count as well as the line count
-(like #10976 and #11729 before it). All nine are the point
+(like #10976 and #11729 before it). The tenth is #14593's read-parity work — three
+lines in `tortoise/hosted_api.py`, in the new deny-by-default delegation prose:
+the `_PUBLISHABLE_DELEGATION_LABELS` comment (`:15775`) names a legacy
+``(:Document:Source)`` hybrid as one of the shapes `/belief` may not publish,
+and `_filter_delegation_payloads`' docstring records the measured label-order
+case (`:15813`) and the `relabel_legacy_documents` interrupted-run shape
+(`:15847`) for the same reason. It is a WIDENING like #11928's, and it is the
+first move whose point is a disclosure filter rather than a label retirement. All
+ten are the point
 rather than an accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
@@ -341,10 +349,12 @@ of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
-and one narrow enough to skip them (`\(\w*:Document`) still matches **nine**
+and one narrow enough to skip them (`\(\w*:Document`) still matches **eleven**
 lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
 `relabel_legacy_documents`'s docstring), that same
-`cache_eviction.py:956` comment, and the `hosted_backup.py` ones (the
+`cache_eviction.py:956` comment, the two `hosted_api.py` lines #14593 added that
+spell the hybrid as ``(:Document:Source)`` inside a `(` (`:15775`, `:15813`),
+and the `hosted_backup.py` ones (the
 served-label declaration, the validator's docstring and `restore_backup`'s),
 which arrived with #11729, plus three more in that file from #12015's own
 docstring constants and comments — the unlabelled dump entry, and the composed
