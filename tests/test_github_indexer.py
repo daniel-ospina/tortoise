@@ -3226,12 +3226,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
     # that was about to be committed. `entities.py` used to keep this branch's values
-    # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
-    # status latch, so the whole block moved together and is re-derived here again
-    # (`+59` against `origin/main`'s numbers — `git diff --numstat origin/main...HEAD --
-    # tortoise/projection/entities.py` -> `61  2` — resolved line by line, never applied as an
-    # offset; the pin TABLE's own keys were only `+30` off, because the last re-derivation of
-    # this block was two commits stale when this PR re-measured it); `sdk.py` moves for both sides each
+    # across both of those merges; it no longer does — `main` grew the module ABOVE every
+    # row of this block, so the whole block moved together and is re-derived here again. It is
+    # MEASURED, never carried: `git diff origin/main...HEAD -- tortoise/projection/entities.py`
+    # is EMPTY (this branch does not touch the file), so the eleven distinct start keys (13
+    # rows) moved by exactly `main`'s own growth above the block since the table's last cut —
+    # `+43` on EVERY one (`5261→5304`, `6124→6167`, `6206→6249`, `6364→6407`, `6388→6431`,
+    # `6389→6432`, `6396→6439`, `6417→6460`, `6449→6492`, `6458→6501`, `6469→6512`), each
+    # address resolved line by line against the tree that carries it, never applied as an
+    # offset; `sdk.py` moves for both sides each
     # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a
@@ -3258,21 +3261,30 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # its own LAST-line text `continue`) at `2c1065a52e`, and the numbers are
     # `55206-55208` (the non-scalar refusal), `55358-55367` (the un-supersede arm),
     # `22518-22693` (`update_knowledge`, its end again located as the function's own
-    # last line `return self._update_entity_any(id, **props)`) and `55912` (the
+    # last line `return self._update_entity_any(id, **props)`) and `55807` (the
     # per-label `SET n += $props`). The two deltas — **+186** for the three later rows
     # and **+15** for `update_knowledge` — are the consistency check, not the input.
     # ⛔ Where a pinned first-line text is NOT itself a unique locator, the search used
     # the longer form of the same line and that is what locates the row: `SET n +=
-    # $props` occurs **40×** in `sdk.py`, so `55912` was found by its per-label write
-    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
+    # $props` occurred **40×** in `sdk.py` at this re-derivation, so `55807` was found
+    # by its per-label write
+    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurred **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
+    # ⛔ These occurrence counts are HISTORICAL MEASUREMENTS at the tree each sentence
+    # names, never present-tense claims about HEAD: the count in prose drifts with every
+    # `sdk.py` commit and then reads as authoritative (#12731, P3 on this repair's
+    # review — `40×` had become stale on `main`). Do not "correct" them to HEAD.
     # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
     # which carried a locator that could not FAIL on the defect it exists to catch:
-    # `55912`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
-    # 25 of them in comments), so a uniform drift landed it on a comment; the
-    # per-label write it was actually found by occurs **once** and is what it now
-    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # the row at `55918` stored the bare `SET n += $props` (occurred **40×** in
+    # `sdk.py` at `c50a03a`, 25 of them in comments), so a uniform drift landed it on
+    # a comment; the per-label write it was actually found by occurred **once** and is
+    # what it now stores. `55918` is that address at BOTH `ef0abcb` (re-derived) and
+    # `c50a03a` (narrowed) — this note previously read `55912`→`55918`, and `55912`
+    # holds `keys = list(props)` at both trees, so no tree named the per-label write
+    # at `55912` (#12731 review). And `22593-22768` recorded `None` for its end — its
+    # START text
     # `def update_knowledge(` is unique and did red, but an end that is never read
     # let an insert INSIDE the function leave the cited end naming nothing while
     # both guards stayed green.
@@ -3309,9 +3321,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # would have re-pinned the wrong function. Each address was found by searching its own
     # pinned FIRST-line text (and, for the arm, its own LAST-line text `continue`) at the
     # tree that carries that row: `55742-55744` (the non-scalar refusal), `55894-55903`
-    # (the un-supersede arm), `56343` (the per-label `SET n += $props`, which occurs once
-    # while bare `SET n += $props` occurs 40×) and `22779-22954` (`update_knowledge`, its
-    # end again located as the function's own last line `return
+    # (the un-supersede arm), `56343` (the per-label `SET n += $props`, which occurred
+    # once while bare `SET n += $props` occurred 41× at that tree) and `22779-22954`
+    # (`update_knowledge`, its end again located as the function's own last line `return
     # self._update_entity_any(id, **props)`, whose other occurrence is a different door's).
     # `if (_np_dead == [_SUPERSEDED_STATUS]` occurs TWICE, so that row is located by its
     # `continue` terminator and not by its start text. The `+150` / `+195` pair is the
@@ -3338,16 +3350,29 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `b2d1e9086a92` and at `bbe54363ad65` is what attributes the move, and the `+53` / `+117`
     # pair is the CONSISTENCY CHECK on that measurement, never its input.
     # ⛔ THIS IS A MAIN-RED INHERITED, NOT ONE THIS CHANGE CAUSED — stated so that nobody hunts
-    # for a branch commit to blame: `git diff HEAD -- tortoise/sdk.py` is EMPTY, and all four
-    # addresses are identical at this head, at `origin/main` `af40c97ca312` and at the pre-fold
-    # branch head `7ce74ac20fc0`. The branch's own `sdk.py` never moved this region; `main` did,
+    # for a branch commit to blame: `git diff origin/main...HEAD -- tortoise/sdk.py` is EMPTY
+    # (the 3-dot form is the one that proves it — a bare `git diff HEAD` compares the WORKING
+    # TREE to HEAD and reads empty on any clean checkout, whatever the branch committed), and all
+    # four addresses were identical at `origin/main` `af40c97ca312`, whose `sdk.py` blob
+    # (`fdedef380b6d`) is also `7ce74ac20fc0`'s — and `7ce74ac20fc0` is a `#14219` lane commit,
+    # NOT this branch's head and an ancestor of neither branch nor `main`, so its identity is a
+    # statement about `main`'s own history and nothing here is a branch commit's doing. No commit
+    # on this branch carries that blob at all: **every** commit this branch AUTHORED, `840b74316332`
+    # and back, carries `c05b92bdc6ac`, i.e. already post-`#14567` (the `remerge-14640` merge head and
+    # every commit authored on top of it carry `main`'s own blob instead, which is the point of the
+    # merge). `main` then grew this module
+    # above all four twice — `#14596` (+29 above all
+    # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
+    # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
+    # `56446` / `56598` / `57113`, and the table below is re-cut to those. The branch's own
+    # `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
     # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
     # ⛔ THAT READING IS SUPERSEDED AT THIS HEAD, and it is marked rather than deleted because it
     # is the record of what was true at `main` `af40c97ca312`. After the `origin/main` merge the
     # three premises above are all FALSE here, measured: `git diff origin/main...HEAD --
     # tortoise/sdk.py` is `25  0` (NOT empty — three hunks at `10783` +6, `29186` +11, `37063`
-    # +8), the four addresses are IDENTICAL to `origin/main` `4b2fba3e8aa0`'s (`23110`, `56446`,
+    # +8), the four addresses are IDENTICAL to `origin/main` `071710aea1b8`'s (`23110`, `56446`,
     # `56448`, `56598`, `57113` — i.e. the block quoted exactly `main`'s CORRECT table, which the
     # merge resolved this file to) and therefore NOT identical at this head. So the reds this
     # table's own guard raised were this BRANCH's shift (`+6` above `update_knowledge`, `+25`
@@ -3359,6 +3384,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `56529`/`56568`/`56538` triple this sentence used to carry was the `bbe54363ad65`-era address
     # of the same two occurrences and the same terminator, and it names unrelated lines both here
     # and on `origin/main` (`56598`/`56637` there), so it is superseded rather than deleted.
+    # ⛔ `origin/main`'s own three figures for this sentence (`56598`/`56637`/`56607`, on its
+    # side of the merge) describe ITS tree, which does not carry this branch's +25 below
+    # `update_knowledge`; they are not a competing measurement of this one.
     # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
     # re-derive every address at the current tree), so the note that "no landing re-derived
     # these four rows" no longer holds. Its figures are above and were re-measured here, not
