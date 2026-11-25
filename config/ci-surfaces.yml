@@ -155,8 +155,14 @@ version: 1
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
-# says) and the bin is held by the `tests/test_dod_5090_probe.py` row in `durations` — neither of
-# which `#14544` touched.
+# says), and `#14544` left that `eval` registration alone. The REGISTRATION is the ONLY half
+# exempt: the bin is held by the `tests/test_dod_5090_probe.py` row in `durations`, and that row IS
+# `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
+# cutting its cases (its note on the row records exactly that) — so a packing change attributed to
+# that row is a cause this paragraph does NOT exclude, and the row's provenance is that cut rather
+# than the default. The weight is not restated here: the no-per-file-weight rule above binds the
+# figure, and a weight re-read is a packing input rather than the membership change this paragraph is
+# about.
 #
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
 # form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /

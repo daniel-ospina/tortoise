@@ -10134,6 +10134,90 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
             "GREEN")
 
 
+#: The `#14544` exemption paragraph, bounded from its own opening sentence to the next `⛔`.
+#: It claims that ONE cause — `#14544`'s removal of `tests/test_dod_5090_probe.py` from the `core`
+#: surface — cannot move a bin, and it used to close with "… — neither of which `#14544` touched",
+#: where the anaphor bound BOTH nouns it followed: the `eval` registration AND the `durations` ROW.
+#: The registration half is TRUE; the ROW half is FALSE — `e66997b81e76` (`#14544`, on `main`) rewrote
+#: that row's weight in the same commit whose subject is the cut — and the weight is the SHARD-LAYOUT
+#: input, so the sentence told the reader the opposite of what it exists to establish. It also
+#: contradicted the row's own note, three thousand lines below it.
+#: ⛔ THE ANAPHOR IS THE DEFECT, not the nouns: `neither of which` re-binds whatever nouns PRECEDE it,
+#: so one sentence can be true of one noun and false of the other with nothing in the text marking
+#: which — and a fold that re-wraps or re-orders the nouns silently repoints it. This paragraph may
+#: call the row untouched only by naming the row AGAIN explicitly; the pronoun form is refused here
+#: for the same reason `_unquoted_block` refuses an odd quote count, because it cannot be read
+#: reliably.
+_H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT claim")
+_H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
+    r"neither\s+of\s+which[\s\S]{0,80}?#14544", re.IGNORECASE)
+#: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit. Without
+#: this direction a fold could satisfy the anaphor ban by simply DELETING the row clause, which loses
+#: the correction rather than making it — the absence claim this PR exists to stop re-introducing.
+_H_14544_ROW_PROVENANCE_RE = re.compile(
+    r"row\s+in\s+`durations`[\s\S]{0,240}?#14544[`]?['\u2019]?s\s+own\s+edit", re.IGNORECASE)
+
+
+def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
+    """The `#14544` exemption must be scoped to the noun it is TRUE of (`#14612` review, P3).
+
+    The paragraph establishes one thing: dropping the `core` REGISTRATION cannot push
+    `tests/test_dod_5090_probe.py` out of `fast_pool()`, because membership comes from the `eval`
+    registration alone. It closed with "— neither of which `#14544` touched", binding the
+    `durations` ROW as well — and that half is false. `git show e66997b81e76 -- config/ci-surfaces.yml`
+    rewrites that very row, in the commit whose subject is the cut, so the row at this head IS
+    `#14544`'s own edit; the weight it carries is what `fast_pool()`'s shard layout measures, so the
+    clause invited the exact reading the paragraph exists to forbid (that `#14544` is not implicated
+    in a packing change).
+
+    Both directions are graded, because either alone is satisfiable the wrong way: banning the
+    anaphor while saying nothing about the row lets a fold DELETE the correction, and requiring the
+    provenance while permitting the anaphor lets the old sentence return verbatim.
+    """
+    header = _unquoted_block(_emission_block_header(cs.MANIFEST.read_text(encoding="utf-8")))
+    opening = _H_14544_EXEMPTION_OPEN_RE.search(header)
+    assert opening is not None, (
+        "the block no longer opens the `#14544` exemption paragraph with `The one cause this "
+        "paragraph does NOT claim` — re-point this arm at the sentence the block uses rather than "
+        "letting it grade nothing")
+    end = header.find("⛔", opening.end())
+    assert end != -1, (
+        "the `#14544` exemption paragraph has no `⛔` marker after its opening, so it runs to the "
+        "end of the block and this arm would grade every sentence after it — restore the bound")
+    paragraph = header[opening.start():end]
+    assert "tests/test_dod_5090_probe.py" in paragraph, (
+        "the bounded `#14544` paragraph no longer names `tests/test_dod_5090_probe.py`, so this "
+        "arm grades a paragraph that is no longer about the row it exists to correct — re-point "
+        "the bound")
+    anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(paragraph)
+    assert anaphor is None, (
+        "the `#14544` exemption paragraph binds its two nouns with `neither of which `#14544` "
+        f"touched` ({anaphor.group(0)!r}). The registration half is TRUE, the `durations` ROW half "
+        "is FALSE: `e66997b81e76` (`#14544`) rewrote that row's weight in the commit whose subject "
+        "is the cut, and that weight is the shard-layout input. State the REGISTRATION as the "
+        "exempt half and the row as `#14544`'s OWN edit, and do not restate the weight (the "
+        "no-per-file-weight rule above binds the figure).")
+    assert _H_14544_ROW_PROVENANCE_RE.search(paragraph), (
+        "the `#14544` exemption paragraph no longer records that the `durations` row is `#14544`'s "
+        "OWN edit — deleting the row clause instead of correcting it loses the fact that the "
+        "weight is that cut's input, which is why the old sentence was false")
+    # NON-VACUITY: the retired sentence trips the anaphor arm, and the same paragraph with the
+    # provenance removed trips the positive one — so neither assertion is decoration.
+    retired = (
+        "The one cause this paragraph does NOT claim is `#14544`'s removal of "
+        "`tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot "
+        "move a bin, because the file's pool entry comes from the `eval` registration ALONE and the "
+        "bin is held by the `tests/test_dod_5090_probe.py` row in `durations` — neither of which "
+        "`#14544` touched.")
+    assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(retired), (
+        "the anaphor pattern no longer reads the sentence it was cut for, so this arm passes over "
+        f"any spelling of it — re-point it at: {retired!r}")
+    assert not _H_14544_ROW_PROVENANCE_RE.search(retired), (
+        "the provenance pattern reads the RETIRED sentence as stating the row's provenance, so the "
+        "positive direction proves nothing: the old clause says `neither of which `#14544` "
+        "touched`, which is the opposite claim")
+
+
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     """The `carry an explicit `N` `durations` row` / `carry NO row` spelling is GRADED both ways.
 
