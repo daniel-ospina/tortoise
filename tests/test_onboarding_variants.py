@@ -1655,6 +1655,98 @@ def test_key_never_interpolated_into_env_blocks():
 # edit cannot make them contradict the per-harness credential mechanisms.
 QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 
+_RESTART_CUE = "Restart your client"
+
+# ── The restart-order pin's GRADED inversion forms — a CLOSED, MEASURED set ───
+# The pin exists for one defect (#3232, #14676): the client reads its MCP config
+# at START, so copy that tells the user to confirm the tools BEFORE the restart
+# sends them looking for tools the running session cannot have loaded.
+#
+# A prose denylist is open-ended by nature, so this set is deliberately finite
+# and every member was MEASURED: forms (a)–(e) were each observed GREEN on the
+# pre-fix pin (a claim wider than its measurement is what #14676's review found),
+# and the config-scope exclusion in `_confirmation_scopes_the_config` was
+# observed as a FALSE RED on it. Phrasings outside this set are OUT OF SCOPE BY
+# DESIGN — an unbounded pattern is what produced both defects this pin was re-cut
+# to fix, and a rule that reds legitimate copy is how a pin gets deleted (#3429).
+_CONFIRM_VERB = r"\b(?:confirm|check|verify|see|look|ensure|list)\w*\b"
+_INVERSION_FORMS = (
+    # (a) connective + confirmation verb whose OBJECT is the session's tool list:
+    #     "Restart your client after confirming the tools are actually there".
+    re.compile(r"\b(?:after|once|when|if)\b[^.;]*?" + _CONFIRM_VERB + r"[^.;]*?\btools\b"),
+    # (b) a participle that places the confirmation before the restart:
+    #     "Restart your client, having first confirmed the tools are there".
+    re.compile(r"\bhaving\b[^.;]*?" + _CONFIRM_VERB + r"[^.;]*?\btools\b"),
+    # (c) an ADVERSATIVE clause leading with the pre-restart marker:
+    #     "Restart your client, but first confirm the tools are actually there".
+    #     A BARE leading "first" is deliberately not graded — "Restart your
+    #     client first and confirm the tools …" is the forward reading of the
+    #     same words.
+    re.compile(
+        r"^(?:but|however|though|yet)\b[^.;]*?\b(?:first|beforehand)\b[^.;]*?"
+        + _CONFIRM_VERB
+        + r"[^.;]*?\btools\b"
+    ),
+    # (d) a marker trailing the object, unambiguous about the order:
+    #     "… confirm the tools are actually there beforehand".
+    re.compile(
+        _CONFIRM_VERB + r"[^.;]*?\btools\b[^.;]*?"
+        r"\b(?:beforehand|before restarting|before you restart)\b"
+    ),
+    # (e) the restart conditioned on the tools ALREADY being present:
+    #     "Restart your client only once the tools are actually there".
+    re.compile(r"\b(?:only\s+)?once\s+(?:the\s+)?tools\b"),
+)
+# A config-side noun: the config is a FILE, readable without a restart.
+_CONFIG_NOUN_RE = re.compile(r"\b(?:configs?|settings|installer|\.mcp\.json)\b")
+# …including one naming the scope AFTER the object ("… the tools are enabled in
+# your client settings"), which is how the third measured false red phrased it.
+_CONFIG_PREP_RE = re.compile(r"\b(?:in|from|inside|per|under)\b[^.;]{0,40}?\b(?:config|settings)\b")
+
+
+def _confirmation_scopes_the_config(clause: str) -> bool:
+    """Is this clause's confirmation about the CONFIG (a file) rather than the
+    running session's tool list?
+
+    A pre-restart check of the CONFIG is LEGITIMATE — the file is readable
+    without a restart — so "Restart your client after verifying the config lists
+    the tools" keeps the restart FIRST and must stay GREEN (measured as a FALSE
+    RED on the previous cut of this pin). Two placements are graded: the config
+    noun before the object ("… verifying the config lists the tools"), and a
+    prepositional phrase after it ("… checked the tools are enabled in your
+    client settings"). A bare mention of "config" elsewhere in the clause is
+    NOT enough — "… confirming the tools are there — the config is read at
+    start" stays an inversion.
+    """
+    tools_at = clause.find("tools")
+    if tools_at < 0:
+        return False
+    if _CONFIG_NOUN_RE.search(clause[:tools_at]):
+        return True
+    return bool(_CONFIG_PREP_RE.search(clause[tools_at:]))
+
+
+def _restart_cue_order_violation(quick: str) -> str | None:
+    """The first clause in `quick`'s restart-cue paragraph that INVERTS the
+    cue's order, or None when the paragraph is clean.
+
+    Graded forms are exactly the five enumerated in `_INVERSION_FORMS`, minus
+    any whose confirmation scopes the config (see above). Rephrasings outside
+    that set are out of scope BY DESIGN; this function grades what it claims and
+    claims only what it grades.
+    """
+    para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
+    flat = " ".join(para.split())
+    after = flat[flat.index(_RESTART_CUE) + len(_RESTART_CUE):]
+    clauses = re.split(r"[,.;]", after.lstrip(" \t,.;:—–-"))
+    for clause in clauses:
+        if _confirmation_scopes_the_config(clause):
+            continue
+        for pattern in _INVERSION_FORMS:
+            if pattern.search(clause):
+                return clause
+    return None
+
 
 def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
     """The AGENTS.md heredoc must carry the corrected ORDER, not merely lack
@@ -1691,10 +1783,10 @@ def test_3232_generic_restart_lines_are_exact():
     exact string — that is where a harness's own mechanism lives (a new shell
     for Pi/Codex CLI, a registry + relaunch for Codex Desktop), so an edit that
     contradicts one is visible. The QUICKSTART half is pinned as an ORDER (the
-    cue, then a tools-appear clause that must not be inverted); its equality
-    pin was retired in #14607's aftermath because it redded a legitimate
-    reword — #3429's lesson, applied here. The `_are_exact` name is historical
-    and now covers only the installer half."""
+    cue, then a tools-appear clause, with the inversion forms enumerated in
+    `_INVERSION_FORMS`); its equality pin was retired in #14607's aftermath
+    because it redded a legitimate reword — #3429's lesson, applied here. The
+    `_are_exact` name is historical and now covers only the installer half."""
     src = _installer_text()
     assert ('echo "Next: restart your agent, then confirm the skills are '
             'listed:"') in src, (
@@ -1740,27 +1832,69 @@ def test_3232_generic_restart_lines_are_exact():
     # MCP config at START, so a user told to confirm the tools FIRST looks for
     # tools the running session cannot have loaded yet. No wording is pinned
     # here: a forward phrasing ("…, then confirm the tools …") still passes, so
-    # #3429's lesson (pin the ORDER, not one reword) survives. Only the cue's
-    # OWN clause is graded — splitting at the first `,`/`.`/`;` keeps "Restart
-    # your client after changing the config, then confirm the tools …" GREEN,
-    # because the inversion does not bind there.
+    # #3429's lesson (pin the ORDER, not one reword) survives. Clauses are split
+    # at `,`/`.`/`;`, which keeps "Restart your client after changing the
+    # config, then confirm the tools …" GREEN — the inversion does not bind.
     #
-    # Two things a first cut got wrong, both measured on this pin:
-    # 1. The clamp strips leading punctuation BEFORE splitting, because a comma
-    #    right after the cue (`Restart your client, after confirming the tools
-    #    …` — a one-token edit of the sentence this pin grades) left an EMPTY
-    #    first clause, so the inversion was never graded and it stayed GREEN.
-    # 2. The pattern anchors on a CONFIRMATION verb. "restart after <verb> the
-    #    tools" inverts the order only when the user is told to confirm/check/
-    #    verify them FIRST; a purpose clause — "Restart your client after the
-    #    config change so it loads the tools", restart still first — must stay
-    #    GREEN, because a new false red is exactly how a pin gets deleted.
-    cue_clause = re.split(
-        r"[,.;]", after_cue.lstrip(" \t,.;:—–-"), maxsplit=1)[0]
-    assert not re.search(
-        r"\b(?:after|once|when|if)\b[^.;]*?"
-        r"\b(?:confirm|check|verify|see|look|ensure|list)\w*\b[^.;]*?\btools\b",
-        cue_clause), (
-        "docs/quickstart-cloud.md inverts its own restart cue: 'restart AFTER "
-        "confirming the tools' asks the user to look for tools this session "
-        "cannot have loaded yet — the restart comes FIRST (#3232, #14676)")
+    # What the graded set IS and IS NOT (#14679's review measured both):
+    # - It is the FIVE forms in `_INVERSION_FORMS`, each observed GREEN before
+    #   this cut: the "after/once/when/if + confirm-the-tools" clause, "having
+    #   [first] confirmed the tools", "but first … confirm the tools", "confirm
+    #   the tools … beforehand", and "[only] once the tools are there".
+    # - It is NOT an open-ended inversion detector. "…, though you should confirm
+    #   the tools are there first"; "… when the tools appear"; and any other
+    #   rephrasing outside those five are deliberately NOT graded — widening a
+    #   prose denylist is how both defects this pin fixes got in. The comment
+    #   and the assert message claim only the five, so neither outruns the
+    #   measurement.
+    # - A confirmation scoped to the CONFIG stays GREEN: the file is readable
+    #   without a restart, so "Restart your client after verifying the config
+    #   lists the tools" is forward copy, not an inversion.
+    violation = _restart_cue_order_violation(quick)
+    assert violation is None, (
+        f"docs/quickstart-cloud.md inverts its own restart cue: {violation!r} "
+        "asks the user to confirm the tools this session cannot have loaded "
+        "yet — the restart comes FIRST (#3232, #14676). Graded forms are the "
+        "five enumerated in _INVERSION_FORMS; a pre-restart check of the CONFIG "
+        "is not an inversion, and rephrasings outside that closed set are out "
+        "of scope by design.")
+
+
+# Every row below is a MEASURED case: the GREEN rows are forward copy (a false
+# red here is how a pin gets deleted), and each RED row was GREEN on the pre-fix
+# pattern — so this table is the executable form of the review's mutation matrix,
+# not a restatement of it.
+@pytest.mark.parametrize("line, inverted", [
+    # ── forward: restart first, the confirmation follows ────────────────────
+    ("Restart your client, then confirm the tools are actually there — "
+     "`tortoise_*` in the client's tool list.", False),
+    ("Restart your client after changing the config, then confirm the tools "
+     "are actually there.", False),
+    ("Restart your client. The tools then appear in the list.", False),
+    ("Restart your client after the config change so it loads the tools.", False),
+    ("Restart your client first, then confirm the tools are actually there.", False),
+    ("Restart your client first and confirm the tools are actually there.", False),
+    # ── forward, config-side: the file is readable without a restart ────────
+    ("Restart your client after verifying the config lists the tools.", False),
+    ("Restart your client after confirming the config file lists the tools.", False),
+    ("Restart your client once you have checked the tools are enabled in your "
+     "client settings.", False),
+    # ── inversions: confirm FIRST, restart second ───────────────────────────
+    ("Restart your client after confirming the tools are actually there.", True),
+    ("Restart your client, but first confirm the tools are actually there.", True),
+    ("Restart your client, having first confirmed the tools are actually "
+     "there.", True),
+    ("Restart your client, though you should confirm the tools are actually "
+     "there beforehand.", True),
+    ("Restart your client only once the tools are actually there.", True),
+    ("Restart your client, after confirming the tools are actually there.", True),
+])
+def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
+    doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
+    violation = _restart_cue_order_violation(doc)
+    if inverted:
+        assert violation is not None, (
+            f"this inversion must be graded and was not: {line!r}")
+    else:
+        assert violation is None, (
+            f"false red on forward copy ({violation!r}): {line!r}")
