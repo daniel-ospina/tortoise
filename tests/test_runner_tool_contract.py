@@ -1133,6 +1133,16 @@ _GH_SUBCOMMANDS = (
     "config",
     "copilot",
     "discussion",
+    # ⛔ LISTED THOUGH `gh 2.102.0` (this box) DOES NOT PUBLISH IT, AND IT MUST STAY.
+    # The CI runner's `gh` DOES publish `event`, and this file's own re-derivation pin
+    # caught the gap the only way it can be caught: `test_every_gh_subcommand_is_
+    # recognised` failed on shard `test-carve-out (b)` of run 45702028189 at head
+    # `071864b2` with "`gh` publishes ['event'] and `_GH_SUBCOMMANDS` does not list
+    # it" — a required check red on a diff that touches no workflow. The assertion is
+    # one-directional (`published - listed`), so a SUPERSET is the correct shape: an
+    # entry the local `gh` does not publish costs nothing, while a MISSING one is an
+    # invocation that scans CLEAN. Do not prune this to "only what this box prints".
+    "event",
     "extension",
     "gist",
     "gpg-key",
