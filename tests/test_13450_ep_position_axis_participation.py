@@ -664,7 +664,11 @@ def test_ep_imports_the_shared_answer_and_spells_no_filter():
         f"{_terminal_vocabulary_refs(source)} — the participation test answers "
         "from `live.ending_axes`, which reads BOTH axes; a word-only arm here is "
         "exactly the defect #13450 removed")
-    assert "is_terminal_status" in dir(live) and "ending_axes" in dir(live)
+    # ⛔ Nothing further is asserted on `live`'s namespace, on purpose: a
+    # `"ending_axes" in dir(live)` clause cannot be falsified — this module
+    # imports both names at load, so the missing name breaks COLLECTION before
+    # any body runs. Deleted when PR #14600's review measured it (F1): a clause
+    # that cannot fire reads as coverage while proving nothing.
 
 
 class TestThePresencePinCannotBeSatisfiedByAComment:
