@@ -3480,8 +3480,8 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: ⛔ 27 -> 28 at `#14592`'s head (`cy-14593`), and this RISE is TABLE GROWTH, not a
 #: loosened relation — verified rather than assumed, because the arm's rule says a rise
 #: means the relation loosened and the relation, not the ceiling, is what gets fixed.
-#: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, this PR's
-#: relations preview, which walks every relationship type) and ONE door (its own
+#: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, `#14592`'s
+#: relations preview, which walks every relationship type) and ONE door (its own)
 #: `REST GET /v1/entities/{entity_id}/relations`), so 19 CUSTOMER-CALLABLE rows x 16
 #: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
 #: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
