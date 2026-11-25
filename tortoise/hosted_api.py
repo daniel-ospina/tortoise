@@ -16301,8 +16301,10 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                 }) from e
     # ⛔ `sdk._get_proj()` IS A GRAPH SEAM and must be evaluated INSIDE the
     # offloaded callable, never on the loop (#10602/#3718). It is the COLD
-    # projection open — connect + version probe (`hosted_api.py`'s
-    # `_GRAPH_SEAM_CALLEES` names it) — so calling it before the `await` put
+    # projection open — connect + version probe
+    # (`tests/test_read_routes_loop_responsiveness.py`'s `_GRAPH_SEAM_CALLEES`
+    # names it; the set lives in that suite, NOT in this module) — so calling it
+    # before the `await` put
     # synchronous FalkorDB I/O back on the single event loop this route family
     # exists to keep free. Measured: it reds the REQUIRED
     # `tests/test_read_routes_loop_responsiveness.py::test_graph_io_is_offloaded`

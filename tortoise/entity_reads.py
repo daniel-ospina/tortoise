@@ -173,16 +173,20 @@ def list_layer(
         # DROPPED by `kind_fallbacks.named_kind` (which also TRIMS surrounding
         # whitespace, so the stored value is the caller's spelling apart from
         # that trim), an uninstalled NAMESPACE is refused by
-        # `hosted_api._require_approved_kind` — a check on the namespace, never
-        # on the spelling — and nothing else rewrites the value. Measured: one
+        # `hosted_api._require_approved_kind` WHEN THE GRAPH HAS AN APPROVAL SET
+        # (a graph with no `:PackInstall` records admits every namespace — the
+        # #2714 back-compat rule stated in `pack_state.kind_namespace_is_approved`)
+        # — a check on the namespace, never on the spelling — and nothing else
+        # rewrites the value. Measured: one
         # graph holds `team` and `core:team` side by side. So an EQUALITY filter
         # answered `200 count: 0, truncated: false` for the spelling that
         # happened not to be the stored one — the "byte-identical to *this graph
         # names no such thing*" page this read exists not to produce, and it was
         # a spelling the route's own refusal list recommends. The set is exactly
         # {bare, core:bare} for a `core:`-namespaced kind and its bare form; an
-        # ARBITRARY namespace stays exact, because `zzz:goal` is a vocabulary
-        # item of its own and must not pull in the bare `goal` rows.
+        # ARBITRARY namespace stays exact, because `kind_equivalents` folds ONLY
+        # the repo's `core:` namespace — `zzz:goal` names one value and must not
+        # pull in the bare `goal` rows.
         # ⛔ `kind_is_known` appears nowhere in this rule: it is a boolean
         # VALIDATOR (reached on a create through the warn-not-block
         # `kind_other_layer` advisory, and none of those calls raises or
