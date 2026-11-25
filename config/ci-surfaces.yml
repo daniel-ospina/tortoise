@@ -57,56 +57,36 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `c3dca6998156` folded in, carrying
-# `#14548`'s residue RATCHET, `#14565`'s reaper-schedule row, `#14574`'s drift-reporter registration
-# (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14560`'s
-# `tests/test_14560_operator_vectors.py` and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (both `core`, both flat 2.0 s, both `main`'s) —
-# plus `#14592`'s row (`tests/test_14592_operating_model_evidence.py`, `core`, at the same flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`, and `main`'s too), the verb packs the pool into two bins: three shards
-# at 826.4 s (a, j, k) and eight at 826.3 s (b, c, d, e, f, g, h, i), so `ceil(826.4/60 x 2)` = 28 m
+# reader of the prose can see. On THIS tree — `origin/main` `29bb16b5b6` folded in, carrying
+# `#14548`'s residue RATCHET, `#14415`'s two batch rows, `#14560`'s
+# `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule row, `#14574`'s
+# drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
+# `tests/test_record_read_point_vector_keys.py`, `#14592`'s
+# `tests/test_14592_operating_model_evidence.py` and `#14597`'s
+# `tests/test_expansion_fusion_14344.py` (that last trio `core`, all at the same flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`, all `main`'s) — the verb packs the pool into two bins: ten shards at
+# 826.5 s (a, b, c, d, e, f, g, h, i, k) and one at 826.6 s (j), so `ceil(826.6/60 x 2)` = 28 m
 # governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03`, so the two agree by construction rather
-# than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence. The delta
-# is ZERO at this head, and it was MEASURED, not reasoned: `fast_pool()` was computed from both
-# sides' manifests and the two sets are equal — and the parsed manifests are identical too, so the
-# `durations` comment rewrite below changes no value. ⛔ That zero is a READING of this head, never a
-# promise about the next fold: `fast_pool()` takes its inputs from the tree being measured (the
-# manifest, the selector's own constants, and the filesystem under an `on_demand: <dir>/**` subtree,
-# which `on_demand_subtree_files` expands with `rglob("test_*.py")` on purpose — a file added to a
-# non-gating subtree must not silently re-enter the gate), so re-measure the delta on the tree you are
-# merging INTO rather than carrying this sentence's zero. This PR adds no test file, and `#14592`'s
-# `tests/test_14592_operating_model_evidence.py` row is `main`'s at this head and NOT this PR's.
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 826.6 = 2.0324), so the two agree by
+# construction rather than by a hand re-read. ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's
+# figure may be carried here, and none is — `main`'s own partition must be re-derived on `main`,
+# never read out of this sentence. ⛔ EVERY row named above is `main`'s at this head and none is this
+# branch's: this PR adds no test file, so the delta is ZERO, and it was MEASURED, not reasoned —
+# `fast_pool()` was computed from both sides' manifests and the two sets are equal, and the parsed
+# manifests are identical too, so the `durations` comment rewrites on either side change no value.
+# ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes
+# its inputs from the tree being measured (the manifest, the selector's own constants, and the
+# filesystem under an `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with
+# `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
+# the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
+# sentence's zero.
 # ⛔ NO FILE COUNT ABOUT THIS HEAD IS STATED HERE, on purpose: the pair below is an
 # EARLIER spelling, BOUND TO THE TREE THAT HELD IT (`git show 939e37f664:config/ci-surfaces.yml`,
 # an ancestor of `main`) and quoted only so the rot it suffered is legible — `1333` here against
 # `1332` on `main`, nothing graded it, and it outlived the landing that made it false. A count in this
 # block is re-measured where it LANDED or not written at all, and this sentence's job is the reason the
-# delta is zero, not a figure that owes a re-measurement to whoever next moves a row. ⛔ The
-# other rows named above (`#14559`'s, `#14574`'s, `#14415`'s two) are `main`'s at this head, NOT
-# this branch's: each landed before this fold. The name lists are what the guard COMPARES against
-# the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are
-# a graded claim about THIS head — a fold re-derives them with the verb, it never carries them.
-# reader of the prose can see. On THIS tree — `origin/main` `a29b5f24ce95` folded in, carrying
-# `#14548`'s residue RATCHET, `#14415`'s two batch rows, `#14560`'s
-# `tests/test_14560_operator_vectors.py` row, `#14565`'s reaper-schedule row, `#14574`'s
-# drift-reporter row (`tests/test_fly_secret_declaration_report.py`, `core`, flat 2.0 s), `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` and `#14592`'s
-# `tests/test_14592_operating_model_evidence.py` (both `core`, both flat 2.0 s) — plus
-# THIS PR's own row (`tests/test_expansion_fusion_14344.py`, `core`, at the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), the verb packs the pool into two bins: ten shards at 826.5 s
-# (a, b, c, d, e, f, g, h, i, k) and one at 826.6 s (j), so `ceil(826.6/60 x 2)` = 28 m governs
-# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 826.6 = 2.0324), so the two agree by
-# construction rather than by a hand re-read. ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's
-# figure may be carried here, and none is — `main`'s own partition must be re-derived on `main`,
-# never read out of this sentence. The delta is measurable and small: `fast_pool()` holds **1335**
-# files at this head, re-counted on the RESOLVED tree rather than carried from either parent's
-# paragraph, and exactly ONE of those entries is THIS branch's own
-# (`tests/test_expansion_fusion_14344.py`) — every other row named above landed on `main` before this
-# fold. The name lists are what the guard COMPARES against the live emission
+# delta is zero, not a figure that owes a re-measurement to whoever next moves a row. The name lists
+# are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
