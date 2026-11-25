@@ -226,6 +226,36 @@ def _config_path(harness: str, project_dir: Path, *,
 _JSON_WS = " \t\n\r"
 
 
+def _read_text(path: Path) -> str:
+    """Read `path` WITHOUT newline translation, so `\\r\\n` survives the round trip.
+
+    ⛔ `Path.read_text` opens in universal-newline mode, so every `\\r\\n` became
+    `\\n` BEFORE the merge and the diff were computed: a CRLF config then landed
+    all-LF while the diff shown for approval was a one-member change with no `\\r`
+    in it (measured: 6 `\\r` in, 0 out, one `-` line). That is the
+    reformat-the-user-did-not-ask-for class this module exists to prevent, hidden by
+    the very diff the installer shows to justify it.
+    """
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Write `text` with `newline=""`, so an existing `\\r\\n` is not translated out."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
+def _newline_of(text: str) -> str:
+    """The file's OWN line terminator: `\\r\\n` when it uses one, else `\\n`.
+
+    Used for the lines this installer INSERTS, so a CRLF config does not end up
+    with LF members (the same reformat, one line at a time).
+    """
+    return "\r\n" if "\r\n" in text else "\n"
+
+
 def _skip_ws(text: str, i: int) -> int:
     while i < len(text) and text[i] in _JSON_WS:
         i += 1
@@ -301,8 +331,14 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     which is exactly the reformat this function exists to prevent. An EMPTY
     `mcpServers` object is spliced too, without a leading comma.
 
-    Returns the edited text, or "" when `mcpServers` is not a JSON OBJECT in this
-    text (the caller then falls back to a full dump, and SAYS so).
+    LINE ENDINGS ARE THE FILE'S OWN: `\\r\\n` is never translated (the text comes
+    from `_read_text`) and every line this function INSERTS uses the terminator the
+    document already uses, so a CRLF config stays CRLF.
+
+    Returns the edited text, or "" when the text cannot be spliced: `mcpServers` is
+    absent or not a JSON OBJECT, or the object is a member/brace LAYOUT
+    `_insert_member` does not splice (the closing brace sharing the last member's
+    line). The caller then falls back to a full dump, and SAYS so.
     """
     servers = _member_span(text, "mcpServers")
     if servers is None:
@@ -313,13 +349,14 @@ def _splice_entry(text: str, name: str, entry: dict) -> str:
     if span is None:
         return _insert_member(text, name, entry, servers[0], servers[1])
     start, end = span
+    nl = _newline_of(text)
     # Match the indentation of the value being replaced: everything after the
     # first line of the dumped entry shifts right by the original indent.
     line_start = text.rfind("\n", 0, start) + 1
     indent = text[line_start:start]
     indent = indent[:len(indent) - len(indent.lstrip())]
     dumped = json.dumps(entry, indent=2, ensure_ascii=False)
-    body = dumped.replace("\n", "\n" + indent)
+    body = dumped.replace("\n", nl + indent)
     return text[:start] + body + text[end:]
 
 
@@ -332,8 +369,13 @@ def _insert_member(text: str, name: str, entry: dict,
     spaces) rather than hard-coded, so a 4-space or tab-preferring config keeps
     its own style. An object written INLINE (`{"other": …}`) gets an inline
     member, because inserting a multi-line value there would reformat the line it
-    shares.
+    shares. Inserted lines use the document's OWN terminator (`_newline_of`).
+
+    Returns "" for a shape this does not splice: a MULTI-LINE object whose closing
+    brace shares the last member's line (`{\n  "other": {"a": 1}}\n}`) — the caller
+    then re-dumps the document and says so, which is why that return is not silent.
     """
+    nl = _newline_of(text)
     close = obj_end - 1                       # the object's own `}`
     inner = text[obj_start + 1:close]
     one_line = "\n" not in inner
@@ -356,11 +398,11 @@ def _insert_member(text: str, name: str, entry: dict,
     # indent + two spaces is the fallback for an object that is empty.
     own = re.search(r'\n([ \t]*)"', text[obj_start:close])
     member_indent = own.group(1) if own else base + "  "
-    body = dumped.replace("\n", "\n" + member_indent)
+    body = dumped.replace("\n", nl + member_indent)
     line = f'{member_indent}"{name}": {body}'
     if not inner.strip():
-        return text[:line_start] + line + "\n" + text[line_start:]
-    return (text[:line_start].rstrip("\n").rstrip() + ",\n" + line + "\n"
+        return text[:line_start] + line + nl + text[line_start:]
+    return (text[:line_start].rstrip("\n").rstrip() + "," + nl + line + nl
             + text[line_start:])
 
 
@@ -442,7 +484,7 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     data: dict = {}
     if path.exists():
         try:
-            before = path.read_text(encoding="utf-8")
+            before = _read_text(path)
             data = json.loads(before)
         except (OSError, ValueError) as exc:
             # A config we cannot parse is REFUSED, not clobbered — rewriting it
@@ -468,15 +510,22 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
     if spliced:
         after = spliced
     else:
-        # No `mcpServers` OBJECT to splice into (the file has none, or it is not an
-        # object): dump, and SAY that the whole file was written rather than
-        # implying a one-entry merge. ⛔ A file that merely LACKS the entry is NOT
-        # this branch — `_splice_entry` inserts into an existing object.
-        after = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        # No `mcpServers` OBJECT THIS INSTALLER CAN SPLICE: the file has none, the
+        # key is not an object, or the object is a member/brace layout
+        # `_insert_member` does not handle. Dump, and SAY that the whole file was
+        # written rather than implying a one-entry merge. ⛔ A file that merely LACKS
+        # the entry is NOT this branch — `_splice_entry` inserts into an existing
+        # object. ⛔ THE REASON IS NOT "no object": saying that over a file whose
+        # `json.loads` proves an object IS there is a false statement (measured on
+        # `{\n  "mcpServers": {\n    "other": {"a": 1}}\n}\n`), so the sentence
+        # names the shapes it actually covers.
+        nl = _newline_of(before)
+        after = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", nl) + nl
         if before:
             out.actions.append(
-                f"{path}: the file has no `mcpServers` object to merge into — the "
-                f"whole document was re-written")
+                f"{path}: no `mcpServers` object this installer can splice "
+                f"(absent, not an object, or a member/brace layout it does not "
+                f"splice) — the whole document was re-written")
     # ⛔ RE-PARSE WHAT WILL BE WRITTEN and refuse unless it is the document this
     # function intended. Splicing is byte surgery, so a duplicate key, a
     # structural surprise or a stale offset could otherwise land a file whose
@@ -534,8 +583,7 @@ def write_config(harness: str, project_dir: Path, *, url: str | None = None,
                 f"{path}: could not create a protected backup ({exc}) — the config "
                 f"was NOT rewritten; back it up yourself and re-run")
             return out
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(after, encoding="utf-8")
+    _write_text(path, after)
     out.wrote.append(str(path))
     return out
 
@@ -870,8 +918,10 @@ def _strip_block(text: str) -> str:
         elif not inside:
             out.append(line)
         offset += len(line)
-    # Collapse the blank run the removal may leave at the tail.
-    return "".join(out).rstrip("\n") + "\n" if out else ""
+    # Collapse the blank run the removal may leave at the tail, with the document's
+    # OWN terminator (a CRLF file must not come back with an LF tail).
+    stripped = "".join(out)
+    return stripped.rstrip("\r\n") + _newline_of(text) if stripped else ""
 
 
 def _instruction_path(project_dir: Path, name: str) -> Path:
@@ -905,7 +955,14 @@ def write_instructions(harness: str, project_dir: Path, *,
             f"written; add them to this harness's instruction file by hand")
         return out
     path = _instruction_path(project_dir, name)
-    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    # ⛔ THE SAME READ, THE SAME HAZARD: universal newlines flattened a CRLF
+    # instruction file to LF BEFORE the diff was computed, so installing two
+    # sentences rewrote every line ending of the user's own AGENTS.md and the diff
+    # showed only the appended block. `_read_text` keeps the file's bytes, and the
+    # block this function appends uses the file's own terminator.
+    before = _read_text(path) if path.exists() else ""
+    nl = _newline_of(before)
+    block = INSTRUCTIONS if nl == "\n" else INSTRUCTIONS.replace("\n", nl)
     ok, why = _markers_well_formed(before)
     if not ok:
         out.refusals.append(
@@ -937,11 +994,11 @@ def write_instructions(harness: str, project_dir: Path, *,
         # the old block is no longer matched, so both blocks show up in the diff
         # instead of one silently rewriting the other.)
         after_body = _strip_block(before)
-        after = (after_body.rstrip("\n") + "\n\n" + INSTRUCTIONS
-                 if after_body.strip() else INSTRUCTIONS)
+        after = (after_body.rstrip("\r\n") + nl + nl + block
+                 if after_body.strip() else block)
     else:
-        after = (before.rstrip("\n") + "\n\n" + INSTRUCTIONS
-                 if before.strip() else INSTRUCTIONS)
+        after = (before.rstrip("\r\n") + nl + nl + block
+                 if before.strip() else block)
     if after == before:
         out.planned.append(str(path))
         return out
@@ -952,8 +1009,7 @@ def write_instructions(harness: str, project_dir: Path, *,
     out.planned.append(str(path))
     if dry_run:
         return out
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(after, encoding="utf-8")
+    _write_text(path, after)
     out.wrote.append(str(path))
     return out
 
@@ -971,7 +1027,7 @@ def remove_instructions(harness: str, project_dir: Path, *,
     if not path.exists():
         out.planned.append(str(path))
         return out
-    before = path.read_text(encoding="utf-8")
+    before = _read_text(path)
     ok, why = _markers_well_formed(before)
     if not ok:
         out.refusals.append(
@@ -995,7 +1051,7 @@ def remove_instructions(harness: str, project_dir: Path, *,
     out.diffs.append(diff)
     out.planned.append(str(path))
     if not dry_run:
-        path.write_text(after, encoding="utf-8")
+        _write_text(path, after)
         out.wrote.append(str(path))
     return out
 

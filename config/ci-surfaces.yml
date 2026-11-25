@@ -61,8 +61,11 @@ version: 1
 # `#14597`'s `tests/test_expansion_fusion_14344.py`, `#14415`'s two batch rows, `#14548`'s residue
 # RATCHET, `#14560`'s `tests/test_14560_operator_vectors.py`, `#14565`'s reaper-schedule row,
 # `#14574`'s drift-reporter row (`tests/test_fly_secret_declaration_report.py`) and `#14552`'s
-# `tests/test_record_read_point_vector_keys.py` (all `core`, all flat 2.0 s) — plus `#14607`'s two
-# new `core` rows (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), the verb
+# `tests/test_record_read_point_vector_keys.py` (all `core`; every one of them at the flat 2.0 s
+# weight EXCEPT `#14548`'s residue RATCHET, which is `tests/test_sdk_privatise_sweep.py` at
+# **28.0 s** — a `core` file whose weight is not flat, so do not read this list as "all 2.0 s")
+# — plus `#14607`'s two new `core` rows (`tests/test_mcp_selfcheck.py`,
+# `tests/test_recall_neighborhood.py`), the verb
 # packs the pool into two bins: eight at 826.9 s (a, b, e, f, g, i, j, k) and three at 826.8 s
 # (c, d, h), so `ceil(826.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
 # SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with

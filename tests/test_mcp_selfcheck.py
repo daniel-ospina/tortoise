@@ -372,6 +372,100 @@ def test_the_spliced_entry_keeps_the_FILES_own_indentation(project):
     assert '\n          "type": "stdio"' in inserted, inserted
 
 
+def test_a_CRLF_config_keeps_its_line_endings_through_the_install(project):
+    """A CRLF config must not come back all-LF while the diff shows a one-member change.
+
+    `Path.read_text` applies universal-newline translation, so `before` was already LF
+    before the splice AND the diff were computed: measured pre-fix on this fixture, 6
+    `\r` in / 0 out, and a diff with no `\r` in it — the whole file's line endings
+    changed under a diff that appeared to approve one member. That is the reformat the
+    installer promises never to make, hidden by the very diff shown to justify it.
+    """
+    original = ('{\r\n'
+                '  "mcpServers": {\r\n'
+                '    "other": {"a": 1}\r\n'
+                '  },\r\n'
+                '  "keep": "x"\r\n'
+                '}\r\n')
+    path = project / ".mcp.json"
+    path.write_bytes(original.encode("utf-8"))
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    after = path.read_bytes().decode("utf-8")
+    assert "\n" not in after.replace("\r\n", ""), (
+        f"the install flattened the file's line endings:\n{after!r}")
+    assert '    "other": {"a": 1}' in after, "an unrelated member's bytes changed"
+    assert '  "keep": "x"\r\n' in after, "an unrelated top-level member's bytes changed"
+    assert "tortoise.mcp_bridge" in after
+    assert json.loads(after)["mcpServers"]["other"] == {"a": 1}
+    assert "\r" in "".join(result.diffs), (
+        "the diff is not computed from the file's real bytes, so a reader approving it "
+        "cannot see what happened to the line endings")
+
+
+def test_a_CRLF_config_with_an_existing_entry_is_spliced_not_flattened(project):
+    """The UPGRADE path has the same read, so it needs the same pin."""
+    original = ('{\r\n  "mcpServers": {\r\n    "tortoise": {"type": "http"}\r\n  }\r\n}\r\n')
+    path = project / ".mcp.json"
+    path.write_bytes(original.encode("utf-8"))
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    after = path.read_bytes().decode("utf-8")
+    assert "\n" not in after.replace("\r\n", ""), f"flattened to LF:\n{after!r}"
+    assert '"type": "http"' not in after, "the stale entry was not replaced"
+    assert "tortoise.mcp_bridge" in after
+
+
+def test_the_fallback_says_WHY_the_document_could_not_be_spliced(project):
+    """`""` is also returned for a shape `_insert_member` does not splice — say that.
+
+    Measured pre-fix on this fixture: `json.loads` proves an `mcpServers` OBJECT is
+    there, and the action said *"the file has no `mcpServers` object to merge into"* —
+    false over a file whose closing brace shares the last member's line. The fallback
+    itself is sound (the round-trip guard still proves the write); only the reason was
+    wrong, and it sent the reader looking for a missing object that is present.
+    """
+    original = '{\n  "mcpServers": {\n    "other": {"a": 1}}\n}\n'
+    path = project / ".mcp.json"
+    path.write_text(original, encoding="utf-8")
+    assert json.loads(original)["mcpServers"] == {"other": {"a": 1}}, (
+        "the fixture must really hold an `mcpServers` object for this test to mean anything")
+
+    result = harness_onboard.write_config("pi", project)
+
+    assert result.wrote, result.refusals
+    assert "tortoise.mcp_bridge" in path.read_text(encoding="utf-8")
+    said = " ".join(result.actions)
+    assert "no `mcpServers` object this installer can splice" in said, (
+        f"the fallback's stated reason does not cover this file: {result.actions}")
+    assert "no `mcpServers` object to merge into" not in said, (
+        f"the stated reason denies an object `json.loads` proves is there: {result.actions}")
+
+
+def test_a_CRLF_instruction_file_keeps_its_line_endings(project):
+    """Installing the two sentences must not rewrite the user's own AGENTS.md endings."""
+    target = project / "AGENTS.md"
+    target.write_bytes(b"# House rules\r\n\r\nKeep this line.\r\n")
+
+    harness_onboard.write_instructions("pi", project)
+
+    after = target.read_bytes().decode("utf-8")
+    assert "\n" not in after.replace("\r\n", ""), f"flattened to LF:\n{after!r}"
+    assert "Keep this line.\r\n" in after
+    assert "Reads go through the Tortoise MCP" in after
+
+    harness_onboard.remove_instructions("pi", project)
+
+    back = target.read_bytes().decode("utf-8")
+    assert "\n" not in back.replace("\r\n", ""), f"uninstall flattened to LF:\n{back!r}"
+    assert "Keep this line.\r\n" in back, "the user's own line was lost"
+    assert harness_onboard.BEGIN_MARK not in back
+
+
 def test_installer_refuses_an_unparseable_config(project):
     path = project / ".mcp.json"
     path.write_text("{ not json", encoding="utf-8")
