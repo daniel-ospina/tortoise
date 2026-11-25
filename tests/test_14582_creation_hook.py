@@ -271,6 +271,45 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "graph-row mint has to land first")
 
 
+def test_the_hooks_own_door_list_matches_the_doors_that_call_it():
+    """⛔ THE DOCSTRING NAMED A CALLER THAT DOES NOT EXIST (#14624 review 2).
+
+    `provision_graph_record`'s docstring said it was *"Called from every
+    graph-creation door the census found (`hosted_api._provision_graph`,
+    `supabase_control.ensure_default_graph_row`, `sdk._graph_create`'s registry
+    arm)"* — while the same PR deliberately does NOT hook `sdk._graph_create`
+    (`_UNHOOKED`, above), because hooking it publishes a permanent
+    `armed_but_uncut`.
+
+    The door list is the first thing a reader consults when deciding whether a
+    create path is covered, so an ASSERTED PRESENCE is worse than a gap: it is the
+    inverse of the unpinned-absence hazard `test_the_doors_that_cannot_be_hooked_
+    stay_unhooked` exists for, and neither test could see it — that one reads the
+    AST, this one reads the prose the reader trusts. Both arms are graded here, so
+    the sentence cannot drift from the call sites in either direction.
+    """
+    import inspect
+
+    doc = inspect.getdoc(rw.provision_graph_record) or ""
+    # The module path a door is named by in the prose, minus the package.
+    named = [rel.removeprefix("tortoise/").removesuffix(".py")
+             + "." + function for rel, function, _callee in _DOORS]
+    missing = [door for door in named if door not in doc]
+    assert not missing, (
+        f"the hook's docstring no longer names the doors that DO call it: {missing} "
+        "— a reader checking coverage would conclude they are not wired")
+    claimed_but_unhooked = [rel.removeprefix("tortoise/").removesuffix(".py")
+                            + "." + function for rel, function in _UNHOOKED]
+    for door in claimed_but_unhooked:
+        assert f"{door}`'s" not in doc and f"`{door}`," not in doc, (
+            f"the hook's docstring claims a caller that does not exist: {door} is "
+            "NOT hooked on purpose (F1/F3, pinned above); an asserted presence is "
+            "how the next reader concludes a door is covered when it is not")
+    assert "NOT hooked" in doc, (
+        "the docstring omits the deliberate NON-call, so the absence reads as an "
+        "omission rather than a decision")
+
+
 def test_the_unhooked_door_pin_sees_a_wrapper_spelling():
     """⛔ F5 (#14610 review): the second term of the unhooked-door guard is LIVE.
 
@@ -413,26 +452,46 @@ def test_the_registry_publishes_no_tenant_identifiers():
     assert all(isinstance(v, (int, str)) for v in published)
 
 
-def test_the_declared_export_surface_is_not_silently_shrunk():
-    """⛔ ADDING TO `__all__` MUST NOT DROP FROM IT (#14582 review P2-8).
+#: The names THIS change declares in `record_writer.__all__`: the creation hook,
+#: the registry it feeds, and the reader/clearer of that registry. The surface
+#: pytest grades below is THESE, because they are the names this diff can make a
+#: declared-but-absent export by editing one list.
+_DECLARED_BY_THIS_CHANGE = (
+    "armed_but_uncut",
+    "armed_but_uncut_reasons",
+    "clear_uncut_graph",
+    "note_uncut_graph",
+    "provision_graph_record",
+)
 
-    This change added `provision_graph_record` / `note_uncut_graph` /
-    `armed_but_uncut` to `__all__` and, in the same edit, dropped
-    `current_record_tenant` — the SCOPE reader three suites and every
-    scope-aware caller import by name (``tortoise/record_writer.py`` still
-    defines it; only its declaration was cut).
 
-    ⛔ NOTHING REDDED, and that is why this pin exists: a by-name import
-    (``from tortoise.record_writer import current_record_tenant``) bypasses
-    `__all__` entirely, so the loss is visible only to `import *` and to the
-    operator tooling that reads the module's declared surface BY NAME — in
-    production, after the release. Re-adding a name here is free; shrinking the
-    surface is a red that has to be argued for.
+def test_the_declared_export_surface_keeps_what_this_change_added():
+    """⛔ A WIDENED SURFACE MUST STAY WIDE, AND STAY RESOLVABLE (#14582 P2-8).
+
+    This change adds the creation hook and the `armed_but_uncut` registry to
+    `record_writer.__all__`. A by-name import
+    (``from tortoise.record_writer import provision_graph_record``) bypasses
+    `__all__` entirely, so a name dropped from the list is invisible to the
+    suites that use it and visible only to `import *` and to tooling that reads
+    the declared surface — in production, after the release. Re-adding a name
+    here is free; shrinking the surface is a red that has to be argued for.
+
+    ⛔ WHAT THIS ROW NO LONGER CLAIMS (#14624 review 2, P3). An earlier cut also
+    asserted `"current_record_tenant" in rw.__all__` while its rationale said
+    this change had DROPPED that name "in the same edit" — false of the final
+    diff, where it is unchanged context that `origin/main` already declares. An
+    assertion on unchanged context cannot vary under ANY mutation of this diff,
+    so it was dead weight under a rationale that asserted the opposite. What
+    replaces it is the direction this diff CAN break: the five names above.
+
+    MUTANT: delete any of `_DECLARED_BY_THIS_CHANGE` from `__all__` (→ the first
+    arm), or declare a name the module does not define (→ the second).
     """
-    assert "current_record_tenant" in rw.__all__, (
-        "`current_record_tenant` is no longer in `record_writer.__all__` — it is "
-        "defined in the module and imported by name by the record suites, so this "
-        "is a silent SHRINK of the declared public surface, not a rename")
+    missing = [name for name in _DECLARED_BY_THIS_CHANGE if name not in rw.__all__]
+    assert not missing, (
+        f"{missing} are declared public by this change but no longer in "
+        "`record_writer.__all__` — that is a silent SHRINK of the surface a by-name "
+        "import does not notice, so nothing else would red")
     unresolved = [name for name in rw.__all__ if not hasattr(rw, name)]
     assert not unresolved, (
         f"`__all__` declares names the module does not define: {unresolved} — an "

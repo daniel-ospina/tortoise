@@ -3243,9 +3243,17 @@ def provision_graph_record(*, org_id: str, graph_id: str,
                            ) -> dict[str, Any]:
     """The CREATION HOOK the doors call (#14582): give a new graph its counter row.
 
-    Called from every graph-creation door the census found
-    (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`,
-    `sdk._graph_create`'s registry arm).
+    Called from every graph-creation door the census found — `hosted_api._provision_graph`
+    and `supabase_control.ensure_default_graph_row` (three id-yielding arms) —
+    and from ONE door on purpose: `sdk._graph_create` is NOT hooked, and that is
+    a decision rather than an omission (`#14582` F1/F3, pinned by
+    `tests/test_14582_creation_hook.py::test_the_doors_that_cannot_be_hooked_stay_unhooked`:
+    its Supabase arm persists no row, so the FK refuses a cursor row, and its
+    registry arm creates a graph `public.graphs` never holds — hooking it would
+    publish a permanent `armed_but_uncut` on `/health`). ⛔ THE DOOR LIST HERE IS
+    THE FIRST THING THE NEXT READER CHECKS when deciding whether a create path is
+    covered, so a name on it that does not call this function is worse than a gap:
+    it is an asserted presence (`#14624` review 2).
 
     THREE PROPERTIES, each of which a tidy-looking variant would lose:
 
