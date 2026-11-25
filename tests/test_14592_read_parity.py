@@ -1022,6 +1022,14 @@ def test_a_hybrid_object_source_root_cannot_republish_its_denied_payload(tmp_pat
 
         # … and the layer by-id route.
         assert raw not in client.get(f"/v1/objects/{hyb}").text
+        # ⛔ BY **ID** TOO, which is the arm the url read cannot reach: the hybrid
+        # carries an id, `_RESOLVE_BRANCHES` offers the `Object` branch first, and
+        # a branch test in `_read_labelled_entity` therefore answered 404 for a
+        # node that IS a Source (over-block, measured). Membership answers it —
+        # filtered, like every other read of the same node.
+        by_id = client.get(f"/v1/sources/{hyb}")
+        assert by_id.status_code == 200, by_id.text
+        assert raw not in by_id.text, by_id.text
         body = client.get("/v1/objects", params={"limit": 100}).text
         assert raw not in body, body
         assert hyb in body, body  # …and it IS listed, filtered

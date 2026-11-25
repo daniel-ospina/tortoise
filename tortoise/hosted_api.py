@@ -15859,8 +15859,17 @@ async def _read_labelled_entity(org: dict, entity_id: str, *, label: str,
     """
     _require_scope(org, "graphs:read", surface)
     _sdk, resolved = await _resolve_entity_off_loop(org, entity_id, surface=surface)
+    # ⛔ MEMBERSHIP, NOT THE MATCHED BRANCH — the same rule as `_layer_payload`
+    # one function away, and the reason is the same: `_resolve_entity` answers a
+    # node by the branch that matched it, and `_RESOLVE_BRANCHES` puts
+    # Object/Subject BEFORE Source, so a `(:Object:Source)` carrying both an id and
+    # a url resolves as `Object`. Testing the branch made `GET /v1/sources/{id}`
+    # answer 404 "Source not found" for a node that IS a Source — listed at
+    # `/v1/sources`, readable by its url, unreachable by its id (measured). That is
+    # an over-block rather than a disclosure, and it is still the same defect: the
+    # node's OWN labels decide what it is, never the branch that found it.
     for entry in resolved:
-        if entry.get("label") != label:
+        if label not in (entry.get("labels") or (entry.get("label"),)):
             continue
         return _layer_payload(entry)
     raise HTTPException(status_code=404, detail=f"{label} not found")
@@ -16196,15 +16205,16 @@ async def get_source(entity_id: str, org: dict = Depends(get_current_org_gated))
     a client can walk straight from a ``/v1/sources`` row (which carries the
     url) to the document.
 
-    ⛔ THE ``id`` ARM IS FOR A PURE ``:Source``; a HYBRID ``(:Object:Source)`` is
-    answered by its ``url`` only. ``_resolve_entity`` dedupes a node onto the
-    FIRST branch that resolves it and this route scopes on the matched branch, so
-    a hybrid resolves as ``Object`` and is refused here by ``id`` with
-    ``404 Source not found`` — while ``GET /v1/sources`` still LISTS that node
-    (label matching is subset-based). Measured, and it is the honest shape rather
-    than a leak: the payload is withheld on every door. Do not read this 404 as
-    "that Source does not exist" — read it as "that node is not a pure Source";
-    the url form answers it, which is what a ``/v1/sources`` row gives a caller.
+    ⛔ THE ``id`` ARM COVERS A HYBRID ``(:Object:Source)`` TOO, and that is a
+    deliberate correction rather than a widening: ``_resolve_entity`` answers a
+    node by the FIRST branch that resolves it, so a hybrid carrying both an id and
+    a url came back as ``Object`` — and scoping this route on the matched branch
+    answered ``404 Source not found`` for a node ``GET /v1/sources`` LISTS and
+    whose ``url`` form serves. An earlier revision documented that 404 as "the
+    honest shape"; a route whose own first sentence promises **id or url** cannot
+    answer one of the two because of how the resolver reached the node. The node's
+    OWN labels decide, so a hybrid reads here by either key and the payload is the
+    same filtered bag every other door serves.
 
     ⛔ THE PATH CONVERTER IS ``:path``, and it is load-bearing rather than
     cosmetic: a URL contains ``/``, so a bare ``{entity_id}`` segment cannot
