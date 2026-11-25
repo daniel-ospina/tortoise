@@ -1689,6 +1689,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/claim_dense_leg_13732.py": 4,
     "tools/vector_parity_13906.py": 4,
     "tools/graphevent_home.py": 2,
+    "tools/fly_secret_declaration_report.py": 2,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1807,6 +1808,17 @@ REFUSAL_WHY: dict[str, str] = {
         "exactly `could not run`: with the historical `SystemExit(<message>)` "
         "shape the status would be 1, which a caller gating on the exit would "
         "read as a produced verdict about a record nothing read"
+    ),
+    "tools/fly_secret_declaration_report.py": (
+        "`main()` returns 0 CLEAN / 1 DRIFT / 2 UNREADABLE, so 1 is a VERDICT a "
+        "caller branches on (the drift workflow files one issue per undeclared "
+        "name off 1, and closes its ledger off 0) and an "
+        "environment refusal must not wear it; the file's own UNREADABLE arm "
+        "already maps every not-a-reading to 2, and an unsupported interpreter "
+        "IS not-a-reading, so the guard reuses 2 rather than inventing a code. "
+        "#14396's branch carries this guard with the `SystemExit(<message>)` "
+        "shape (status 1, i.e. DRIFT; that PR is still open, so nothing is on "
+        "`main` yet) — corrected here rather than re-added"
     ),
 }
 
