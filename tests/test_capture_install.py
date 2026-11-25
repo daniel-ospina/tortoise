@@ -845,6 +845,55 @@ def test_pi_install_disables_a_legacy_directory_non_destructively(home):
     assert (ext_dir / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
 
 
+def test_pi_install_retires_a_legacy_directory_an_older_install_renamed(home):
+    """THE UPGRADE PATH (#14342 review round 2, finding 1).
+
+    A box that already ran the PRE-fix installer has ``tortoise-capture/``
+    GONE and ``.tortoise-capture.disabled/`` present — the rename already
+    happened, and nothing renamed it again. The entry-point retirement used to
+    live INSIDE the rename branch, so on that shape it never ran: the install
+    retired the second producer, exited 0 and reported the duplication
+    removed, while the loader kept registering
+    ``.tortoise-capture.disabled/index.ts`` (``discoverExtensionsInDir`` has
+    no dot-prefix filter). Two producers, a receipt saying one.
+
+    Mutation: drop the ``legacy_retirable`` block in ``_install_pi`` — the dot
+    directory stays LOADED and two producers come back."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    already = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    already.mkdir(parents=True)
+    body = "// legacy producer an older install renamed aside\n"
+    (already / "index.ts").write_text(body)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text(
+        "// the other producer\n")
+    assert not (ext_dir / capture_install.LEGACY_PI_DIRNAME).exists(), (
+        "fixture defect: this must be the UPGRADE shape, where the original "
+        "name is already gone")
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_SECOND_PRODUCER_NAME,
+        f"{capture_install.PI_DISABLED_DIRNAME}/index.ts",
+    ], (
+        "fixture defect: this is the two-producer state the guard exists to "
+        f"remove — got {_registered_producers(ext_dir)}")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (already / "index.ts.disabled").read_text() == body, (
+        "the entry point was not retired, or its bytes were lost")
+    assert not (already / "index.ts").exists()
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], (
+        f"a session would be captured by more than one producer: {producers}")
+
+    # Healing is a ONE-OFF: a re-run finds nothing to retire and reports no
+    # change (a guard that re-renames forever is the legacy guard's own bug).
+    second = install_capture("pi", home=home)
+    assert second.ok, second.error
+    assert second.changed is False, f"re-run reported changes: {second.actions}"
+    assert second.actions == (), second.actions
+
+
 def test_pi_install_is_a_clean_no_op_on_rerun(home):
     """Mutation: drop the `_is_regular_unchanged` guard (the mtime moves) — or
     re-run the legacy guard unconditionally (a second rename would raise)."""
@@ -1201,6 +1250,83 @@ def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
     assert "reflect-hook.ts/index.ts" in _registered_producers(ext_dir), (
         f"the producer is no longer loaded, so the box may have stopped "
         f"capturing: {_registered_producers(ext_dir)}")
+
+
+def test_pi_install_retires_a_directory_second_producer_in_place(home):
+    """A directory at ``reflect-hook.ts`` with no ``pi.extensions`` (only
+    ``index.ts``) cannot be retired by renaming the DIRECTORY — a suffixed
+    directory is still resolved through its index file — so its entry point is
+    retired INSIDE it and the directory keeps its own name.
+
+    The fail-closed assertion that follows the retirement has to read the path
+    the loader consults. ``_assert_pi_entry_not_loadable(retired)`` is INERT
+    here: ``retired`` (``reflect-hook.ts.disabled``) is never created on this
+    shape, so ``lexists`` is False and the guard can never fire (#14342 review
+    round 2, finding 3). This pins the outcome AND the receipt: the action must
+    name the entry point it retired, not a rename to a path this shape never
+    creates.
+
+    Mutation: word the action as a rename to ``retired`` — the receipt
+    assertion below REDs over a path that does not exist."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    body = "// the other producer, shipped as a directory\n"
+    (producer / "index.ts").write_text(body)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == body, (
+        "the entry point's bytes were not preserved")
+    assert not (producer / "index.ts").exists()
+    assert producer.is_dir(), (
+        "the directory was renamed: a dot/suffixed directory is STILL loaded")
+    assert not (ext_dir
+                / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "a directory was renamed to a name Pi still loads as a subdirectory")
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], producers
+    retirement = next(a for a in res.actions
+                      if "second capture producer" in a)
+    assert "index.ts" in retirement, retirement
+    assert str(ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME) not in (
+        retirement), (
+        f"the receipt names a path this shape never creates: {retirement}")
+
+
+def test_pi_install_refuses_when_the_retired_second_producer_still_loads(home):
+    """A SYMLINK to a directory at ``reflect-hook.ts`` retires NOTHING by
+    being renamed: ``discoverExtensionsInDir`` resolves symlinks through
+    ``resolveExtensionEntries`` too, so ``reflect-hook.ts.disabled`` (a link to
+    a directory holding ``index.ts``) is STILL a loaded extension. The install
+    must fail closed and say the producer is still live.
+
+    This is also the NON-VACUITY proof for the post-retirement assertion: it is
+    the shape where ``retired`` exists AND is loadable, so a guard reading the
+    wrong path (or none) would report success over two live producers.
+
+    Mutation: assert only on ``active`` (absent after the rename, so the
+    fail-closed guard cannot fire) — the install reports ok here."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    real = home / "checkout" / "reflect-hook"
+    real.mkdir(parents=True)
+    body = "// the other producer, checked out elsewhere\n"
+    (real / "index.ts").write_text(body)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        real, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    assert "STILL an extension Pi loads" in (res.error or ""), res.error
+    # Non-destructive: the link was moved aside, never deleted, and the
+    # checkout it points at is untouched.
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+            ).is_symlink()
+    assert (real / "index.ts").read_text() == body
 
 
 def test_pi_legacy_obstacle_names_the_second_producers_collision(home):

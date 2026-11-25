@@ -2007,6 +2007,12 @@ def _disable_pi_second_producer(
             f"{retired})"], None
     if dry_run:
         return True, [f"[dry-run] would retire {active} → {retired}"], None
+    # ⛔ WHICH PATH THE RETIREMENT ACTUALLY PRODUCES DEPENDS ON THE SHAPE, so
+    # read it BEFORE the mutation: a FILE is renamed to ``retired``, while a
+    # DIRECTORY keeps its own name and has its entry point retired INSIDE it
+    # (renaming the directory to ``reflect-hook.ts.disabled`` retires nothing —
+    # a suffixed directory is still resolved through its index file).
+    was_directory = active.is_dir() and not active.is_symlink()
     error = _retire_pi_entry(active)
     if error:
         return False, [], (
@@ -2014,11 +2020,30 @@ def _disable_pi_second_producer(
             f"could not be disabled ({active}): {error}. TWO producers are "
             "registered, so every session is captured twice until one of them "
             "is removed.")
-    still = _assert_pi_entry_not_loadable(retired)
+    # ⛔ ASSERT ON THE PATH THE LOADER CONSULTS, NOT ON THE PATH THE FILE SHAPE
+    # HAPPENS TO PRODUCE. ``retired`` is NEVER CREATED for the directory shape
+    # (the directory keeps its name), so asserting on it alone was INERT on
+    # precisely the shape that needed checking — a fail-closed guard that could
+    # not fire (#14342 review round 2, finding 3). ``active`` is
+    # loadable-iff-broken for BOTH shapes: a file was renamed away, a directory
+    # lost its entry point. ``retired`` is checked too WHEN THE RENAME CREATED
+    # IT, because a retired name can still be a loaded shape (a link to a
+    # directory resolves through `resolveExtensionEntries` like any other), and
+    # reporting success over that is the duplication this guard exists to
+    # remove.
+    still = _assert_pi_entry_not_loadable(active)
+    if still is None and os.path.lexists(retired):
+        still = _assert_pi_entry_not_loadable(retired)
     if still:
         return False, [], still
+    if was_directory:
+        detail = (f"retired the entry point inside {active} (index.ts/index.js "
+                  f"→ *.disabled; the directory stays in place — a suffixed "
+                  f"directory is still LOADED)")
+    else:
+        detail = f"retired {active} → {retired}"
     return True, [
-        f"disabled the second capture producer: retired {active} → {retired} "
+        f"disabled the second capture producer: {detail} "
         "(files preserved; it wrote ~/.tortoise/session-events/)"], None
 
 
