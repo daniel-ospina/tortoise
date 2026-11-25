@@ -1616,7 +1616,7 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
     # on purpose: it stays silent about WHICH non-zero code a file chooses
     # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins it for the
-    # three files below, because which code each can spare is a per-tool contract
+    # files listed below, because which code each can spare is a per-tool contract
     # decision). Other corpus guards still refuse with a bare
     # `SystemExit(<message>)` — exit 1 — where 1 is also the tool's own
     # DRIFT/failure code, `tools/bridge_table.py`, `tools/mcp_rename_table.py`
@@ -1662,8 +1662,10 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each of the three files below CHOOSES (`#4053`, `#11342`) —
-#: their guards landed in earlier PRs, and this file only PINS them — and the
+#: The refusal code each file listed below CHOOSES (`#4053`, `#11342`) —
+#: their guards landed elsewhere and this file only PINS them, with one exception
+#: (`tools/fly_secret_declaration_report.py`, whose guard the very change that
+#: added its row LANDS, so that row lands and pins in one act — `#5128`) — and the
 #: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
 #: CPython, so for two of these files an old interpreter was reported as the
 #: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
