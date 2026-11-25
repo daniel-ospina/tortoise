@@ -72,7 +72,7 @@ walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup,
 an aggregate, a predicate delete, or the schema those depend on; those are SQL shapes paying RAM prices.
 The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
 and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
-own whole-graph scan (`hosted_api.py:36016`) is a serving reader under this census's own class rule and
+own whole-graph scan (`hosted_api.py:36062`) is a serving reader under this census's own class rule and
 is deliberately **not censused** (`#14204`; the exclusion is stated in §7 step 4 and in the restore row's
 own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
 home. A re-home must re-point it too.
@@ -91,8 +91,8 @@ home. A re-home must re-point it too.
   say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
   those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
   statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
-  whole-graph scan is `hosted_api.py:36016` (`_export_graph_snapshot`; the `:GraphEvent` branch is
-  `:36046` and the append `:36054`), and no row carries either (`#14204`).
+  whole-graph scan is `hosted_api.py:36062` (`_export_graph_snapshot`; the `:GraphEvent` branch is
+  `:36092` and the append `:36100`), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -376,7 +376,7 @@ this record — and the graded figures below are re-derived by `--refresh` rathe
 sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
 why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
-(`157` distinct cite targets above the pivot from `726` in all, over `208` citing files —
+(`157` distinct cite targets above the pivot from `727` in all, over `208` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
@@ -406,7 +406,7 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
    (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
    export scan — both are in `restore_graph`, and the export side is NOT censused at all
-   (`hosted_backup.py:454` and `hosted_api.py:36016`, #14204), so a re-point driven by this census
+   (`hosted_backup.py:454` and `hosted_api.py:36062`, #14204), so a re-point driven by this census
    alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and
