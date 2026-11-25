@@ -28,31 +28,30 @@
 // would hide a live incident from every colleague because one person glanced at
 // it — the opposite of what a security surface is for.
 //
-// DISMISS has two layers, and the second one is the durable one:
+// DISMISS is offered at TWO layers, and they answer different questions:
 //
-//   1. the SERVER acknowledgement (`POST /v1/team/alerts/ack`, #10156) — a
-//      durable `alert_ack` row, so the dismissal is org-wide, survives reload,
-//      survives a deploy, and follows the user to another device. This is the
-//      layer that fixes "I can't clear them" for the owner, and it is REUSED
-//      unchanged: this change adds no server-side state.
-//   2. a LOCAL dismissal in the same per-user store, which is written
-//      IMMEDIATELY and unconditionally, because layer 1 is not always available:
-//      the ack route is owner/admin-only (a member gets a permanent 403) and a
-//      row without an `episode` cannot be acknowledged at all. Without layer 2
-//      those readers are back to "I can't clear them".
+//   1. "close it" — a LOCAL dismissal in the per-user store, written
+//      immediately and unconditionally. It is what the owner asked for, it works
+//      for every reader, and it is reversible (the ledger keeps a Dismissed group
+//      with Restore). Its honest limit is stated rather than hidden: it is per
+//      BROWSER, so it does not follow the user to a second device, and the
+//      ledger labels it "dismissed for you" when that is what happened.
+//   2. "close it for everyone" — the SERVER acknowledgement
+//      (`POST /v1/team/alerts/ack`, #10156), a durable `alert_ack` row: org-wide,
+//      survives reload and deploy, follows the user to another device. It is
+//      REUSED unchanged (this change adds no server-side state) and it lives in
+//      the detail view, where its pending and refusal states are visible. It is
+//      owner/admin-only and needs an `episode`, which is exactly why it cannot be
+//      the only "close it": a member, or a row from an API deploy older than
+//      #10156, has no way to clear anything.
 //
-// The store is therefore the always-works layer; the server ack is the upgrade
-// that makes it org-wide. Both survive a reload. Stated plainly because the
-// honest limit of layer 2 is that it is per BROWSER — a dismissal recorded only
-// locally does not follow the user to a second device, and the ledger says
-// "dismissed for you" when that is what happened.
-//
-// ⚠️ The bug this replaces: `Acknowledge` re-fired. An acknowledgement is
-// matched server-side by episode identity plus window OVERLAP
-// (`_episode_acknowledged`), and an episode whose scan window slides past its
-// start is re-derived with a new `first_at`; the local layer is keyed by the
-// same opaque `episode` string, so the two layers fail in different ways and the
-// row is only re-shown when BOTH say it is unresolved.
+// ⚠️ The bug this replaces: `Acknowledge` re-fired. Server-side, an
+// acknowledgement is matched by episode identity plus window OVERLAP
+// (`_episode_acknowledged`) because `_episode_key` embeds `first_at`, which MOVES
+// as the bounded scan window slides past an episode's start. The local layer must
+// not repeat that mistake, so its key is the episode's client-visible IDENTITY
+// and not the moving server key — see `entryKeyOf`. A notification is hidden when
+// EITHER layer says it was dealt with.
 import {
   OLD_AFTER_DAYS,
   REGISTER_ALERT,
@@ -220,7 +219,7 @@ export function unsnooze(state, episode) {
   return { ...base, snoozed }
 }
 
-/** Dismiss one episode locally. */
+/** Dismiss one notification locally. */
 export function dismiss(state, episode, now = new Date()) {
   const base = state || emptyState()
   if (!episode) return base
@@ -255,19 +254,43 @@ export function isDismissed(state, episode) {
   return Boolean(state && state.dismissed && episode in state.dismissed)
 }
 
+/** The server's opaque episode key — the key the ack route takes. */
+export function episodeOf(alert) {
+  return (alert && alert.episode) ? String(alert.episode) : ''
+}
+
 /**
- * The KEY an episode is stored under.
+ * The KEY a notification is stored under in the LOCAL ledger.
  *
- * The server's opaque `episode` string when present — it is the same key the ack
- * route takes, so the local and server layers name the same thing. Rows without
- * one (an API deploy older than #10156, or a synthetic row) fall back to a
- * composite of the facts that identify the row, which is stable for as long as
- * the row is, and never collapses two rows into one key.
+ * ⚠️ Deliberately NOT the server's `episode` string, and this is the whole
+ * point — see the module header. `_episode_key` embeds `first_at`, which is the
+ * oldest row the bounded newest-first scan can see, so it MOVES as the window
+ * slides past an episode's start (at the live org's ~440 flag rows/day, within
+ * about a day). A local dismissal keyed on it would evaporate the moment the
+ * bout re-keyed — i.e. the exact "I dismissed it and it came back" failure the
+ * owner reported, reintroduced in the client layer while the server layer had
+ * already solved it with window overlap.
+ *
+ * So the local key is the episode's IDENTITY as far as the client can see it:
+ * the type plus the server-authored message. The message is the one field that
+ * carries the subject for every type — `auth_ip` embeds the country, the rate
+ * detectors embed the scope/id (`_read_velocity_message`), and the flag types
+ * embed nothing because their subject is the rule, which the customer-facing
+ * feed deliberately does not ship. Consequence, stated rather than hidden: two
+ * SEPARATE flag bouts of the same type are one local identity, so dismissing one
+ * hides the next until it is restored. That is the same "one episode, one
+ * decision" trade-off `_episode_key` documents server-side, it errs toward
+ * quiet, and it is reversible — the ledger keeps a Dismissed group (with
+ * Restore) so nothing is destroyed by it.
  */
 export function entryKeyOf(alert) {
   if (!alert) return ''
-  if (alert.episode) return String(alert.episode)
-  return [alert.type || '', alert.at || '', alert.first_at || '', alert.label || ''].join('|')
+  const type = String(alert.type || '')
+  const message = String(alert.message || '')
+  if (type || message) return `${type}|${message}`
+  // A row with neither: identify it by whatever else it carries rather than
+  // returning one shared key that would let one dismissal hide every such row.
+  return ['row', alert.at || '', alert.first_at || '', alert.label || ''].join('|')
 }
 
 /** Remote age in words, for a snooze deadline: "in 42 min", "in 6 h", "in 6 days". */
@@ -327,10 +350,11 @@ function newestFirst(a, b) {
  *               presented as current, not so it becomes unreachable.
  *    snoozed  — hidden for now, listed (with a deadline) so they can be un-snoozed.
  *               A snooze with no way back is a delete.
- *    acked    — acknowledged SERVER-side; not listed at all. This is the dismissal
- *               the owner asked for ("close it"), and re-listing it would be the
- *               bug he reported.
- *    dismissed— locally dismissed; counted, not listed.
+ *    acked    — acknowledged SERVER-side (org-wide); not listed at all. This is
+ *               the durable dismissal, and re-listing it would be the bug the
+ *               owner reported.
+ *    dismissed— locally dismissed ("for you"); listed behind its own toggle so
+ *               the action is reversible.
  *    unresolved — the badge: `current.length + older.length`.
  */
 export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_DAYS } = {}) {
@@ -361,6 +385,7 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   current.sort(newestFirst)
   older.sort(newestFirst)
   snoozed.sort(newestFirst)
+  dismissed.sort(newestFirst)
   return {
     current,
     older,
@@ -451,8 +476,15 @@ export const SNOOZE_SELECT_LABEL = 'Snooze for'
 export const SNOOZE_PLACEHOLDER = 'Snooze…'
 export const UNSNOOZE = 'Unsnooze'
 export const DISMISS = 'Dismiss'
-export const DISMISS_PENDING = 'Dismissing…'
+export const RESTORE = 'Restore'
+export const DISMISSED_TOGGLE = (n) => `Dismissed (${n})`
+export const DISMISSED_HIDE = 'Hide dismissed'
 export const DISMISSED_LOCAL_NOTE = 'dismissed for you'
+export const ACK_FOR_EVERYONE = 'Acknowledge for everyone'
+export const ACKED_NOTE = 'acknowledged for the Organization'
+export const SAVE_FAILED =
+  'Your browser did not save that — it will be forgotten when this page '
+  + 'reloads.'
 export const DETAIL_ACTION = 'Details'
 export const DETAIL_BACK = 'Back to notifications'
 export const DETAIL_TITLE = 'Notification detail'

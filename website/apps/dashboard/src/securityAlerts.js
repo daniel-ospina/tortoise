@@ -37,9 +37,10 @@
 // happened, and an unrecognised row cannot support that claim.
 //
 // Kept as pure derivations so `node --test` can execute the decisions without a
-// React renderer; the panel that renders them is `securityAlertsPanel.jsx`
-// (vitest + jsdom) and the copy lives here, once, so the render and the tests
-// cannot disagree about it.
+// React renderer; the surface that renders them is `notificationPanel.jsx`
+// (#14686 — the notifications menu; before it, `securityAlertsPanel.jsx`), and
+// the copy lives here, once, so the render and the tests cannot disagree about
+// it.
 
 export const REGISTER_ALERT = 'alert'
 export const REGISTER_ACTIVITY = 'activity'

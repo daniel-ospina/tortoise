@@ -8,9 +8,10 @@
 // a month old, with a destructive remedy for an event the system never acted on.
 //
 // These import and RUN the derivations in `./securityAlerts.js`. The rendered
-// half is `securityAlertsPanel.dom.test.jsx` (vitest + jsdom), because a source
-// pin cannot see a render — that is #4915's settled lesson, and the reason the
-// panel is a component instead of inline JSX.
+// half is `notificationPanel.dom.test.jsx` (vitest + jsdom), because a source pin
+// cannot see a render — that is #4915's settled lesson. Before #14686 the rendered
+// half was `securityAlertsPanel.dom.test.jsx`, whose surface (alert blocks in the
+// page flow) no longer exists.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -290,13 +291,40 @@ test('#10156: the feed is empty only when BOTH registers are empty', () => {
 
 test('#10156: the panel source never reintroduces the blanket imperative', () => {
   // Belt-and-braces over the module: the copy a customer sees can also arrive
-  // as a literal in the panel. `_read_velocity_message` (server) owns the
+  // as a literal in the render. `_read_velocity_message` (server) owns the
   // per-row sentence, so a hard-coded remedy here is a second author.
-  const panel = readFileSync(join(here, 'securityAlertsPanel.jsx'), 'utf8')
-  assert.doesNotMatch(panel, /Revoke any key/i)
-  assert.doesNotMatch(panel, /Suspicious activity detected/i)
-  // …and it renders the SERVER's message, not a copy of its own.
-  assert.match(panel, /alert\.message/)
+  //
+  // #14686 moved the render from `securityAlertsPanel.jsx` (deleted) to the
+  // notifications menu, so the pin follows the copy to BOTH of its new homes: the
+  // render, and the ledger module that owns the detail view's sentences.
+  // main.jsx is NOT in this set: its `flagged` badge title predates this issue
+  // and is not the alert copy (it is pinned separately, below).
+  const surfaces = ['notificationPanel.jsx', 'notificationLedger.js']
+    .map((f) => readFileSync(join(here, f), 'utf8'))
+    .join('\n')
+  assert.doesNotMatch(surfaces, /Revoke any key/i)
+  assert.doesNotMatch(surfaces, /Suspicious activity detected/i)
+  // …and the render shows the SERVER's message, not a copy of its own.
+  assert.match(readFileSync(join(here, 'notificationLedger.js'), 'utf8'), /alert\.message/)
+})
+
+test('#14686: the alerts no longer render as blocks inside the dashboard content', () => {
+  // The defect the owner reported is a PLACEMENT, so the pin is about placement:
+  // nothing may mount an alert panel inside <main> again, and the feed may only
+  // reach the page through the header's notifications control.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  assert.doesNotMatch(main, /<SecurityAlertsPanel/,
+    'the alert panel must not be mounted in the page flow — that is the bug')
+  assert.match(main, /<NotificationBell/, 'the header must carry the notifications control')
+  // The bell is mounted in the header cluster, not inside <main>.
+  const headerAt = main.indexOf('<header className="dash-header">')
+  // The FIRST <main> AFTER the dashboard header, not the first in the file: the
+  // auth/claim branches render their own <main> above the shell.
+  const mainAt = main.indexOf('<main>', headerAt)
+  const bellAt = main.indexOf('<NotificationBell')
+  assert.ok(headerAt !== -1 && mainAt !== -1 && bellAt !== -1, 'the three anchors must exist')
+  assert.ok(bellAt > headerAt, 'the bell must be inside the header block')
+  assert.ok(bellAt < mainAt, 'the bell must be BEFORE <main> — never in the page content')
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────

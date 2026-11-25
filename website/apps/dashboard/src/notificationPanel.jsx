@@ -1,0 +1,521 @@
+// notificationPanel.jsx — #14686: the notifications icon, and the ledger that
+// unfolds from it.
+//
+// WHY THIS FILE EXISTS. `main.jsx` used to mount `SecurityAlertsPanel` INSIDE
+// `<main>`, above the overview grid, so every alert pushed the real dashboard
+// content down. The owner's report, verbatim:
+//
+//   "the UX is terrible as they appear above other things in the dashboard and I
+//    can't clear them. We should have a notifications icon at the top menu, and
+//    have then a menu that unfolds with the ledger of notifications and for each
+//    I should be able to snooze it, or close it, or click on it and see more
+//    details. In this case because I have no details it's just noise."
+//
+// So the alerts are chrome now, not page content: a bell in the header with an
+// unresolved count, and a panel that carries the ledger, a per-notification
+// snooze / dismiss / detail, and nothing else. The decisions and the persistence
+// live in `notificationLedger.js` (pure, `node --test`); this file is the render.
+//
+// WHAT IT MUST NOT DO, because the previous surface did:
+//   * render anything into the page flow — the panel is positioned under the bell
+//     and closes; the dashboard content never moves (pinned by a DOM assertion
+//     that the panel is not a sibling of `<main>`'s content);
+//   * offer a clearing control that only an owner can use — every reader gets
+//     Snooze and Dismiss, and the owner-only org-wide Acknowledge lives in the
+//     DETAIL view where its refusal can be shown;
+//   * show an empty detail pane — an alert with no recorded detail SAYS so, in
+//     words, because that absence is the second half of the owner's complaint.
+//
+// A11Y: the disclosure pattern the account menu settled on (#1148-ux, P2-1) —
+// `aria-expanded` on the trigger, a labelled `role="group"` panel, plain buttons,
+// Escape closes and returns focus to the bell, and a pointerdown outside closes.
+// No `role="menu"`: the APG menu contract needs roving arrow-key focus, and a
+// declared menu without it is worse than none.
+import React from 'react'
+
+import {
+  ACKED_NOTE,
+  ACK_FOR_EVERYONE,
+  BELL_LABEL,
+  DETAIL_ACTION,
+  DETAIL_BACK,
+  DETAIL_NO_DETAIL,
+  DETAIL_NO_DETAIL_LEAD,
+  DETAIL_TITLE,
+  DETAIL_UNDISPLAYABLE,
+  DISMISS,
+  DISMISSED_HIDE,
+  DISMISSED_TOGGLE,
+  LEDGER_ALL_CLEAR,
+  LEDGER_EMPTY,
+  OLDER_HIDE,
+  OLDER_TOGGLE,
+  PANEL_TITLE,
+  RESTORE,
+  SAVE_FAILED,
+  SNOOZED_HIDE,
+  SNOOZED_TOGGLE,
+  SNOOZE_PERIODS,
+  SNOOZE_PLACEHOLDER,
+  SNOOZE_SELECT_LABEL,
+  STORAGE_UNAVAILABLE,
+  UNSNOOZE,
+  buildLedger,
+  detailOf,
+  dismiss,
+  periodMs,
+  readState,
+  snooze,
+  storageKey,
+  undismiss,
+  unsnooze,
+  snoozedUntil,
+  entryKeyOf,
+  writeState,
+} from './notificationLedger.js'
+// The two "we could not look" sentences are the SAME facts the previous surface
+// carried (`scan_saturated` and a failed read), so they are imported rather than
+// paraphrased: a second spelling is a second claim, and the tested one is the one
+// this file must make.
+import { ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
+
+/** The real browser store, or null where there is none (SSR, a hardened privacy
+ *  mode). Resolved ONCE: a fresh accessor per render would make the read effect
+ *  below re-run on every render and clobber a dismissal the reader just made. */
+const BROWSER_STORAGE = (() => {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null
+    // A privacy mode can expose the object and throw on first USE, so probe it.
+    const probe = '__tortoise_notif_probe__'
+    window.localStorage.setItem(probe, '1')
+    window.localStorage.removeItem(probe)
+    return window.localStorage
+  } catch {
+    return null
+  }
+})()
+
+function Badge({ count }) {
+  if (!count) return null
+  return (
+    <span className="notif-badge" aria-hidden="true">
+      {count > 99 ? '99+' : count}
+    </span>
+  )
+}
+
+function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
+  return (
+    <li className={`notif-row${entry.isIncident ? ' notif-row-incident' : ''}`}>
+      {/* The TEXT is the "click for details" target — a row that opens on a
+          button wrapping the whole line cannot also hold the action buttons
+          (nested buttons are invalid HTML), so the open target is the sentence
+          and the actions are siblings. */}
+      <button
+        type="button"
+        className="notif-open"
+        onClick={() => onOpen(entry.key)}
+        aria-label={`${DETAIL_ACTION}: ${entry.label}`}
+      >
+        <span className="notif-line">
+          <strong>{entry.label}</strong>
+          {entry.countLabel ? <span className="alert-count"> {entry.countLabel}</span> : null}
+          {/* The register, in the reader's words: whether anything happened. */}
+          <span className="notif-chip">{entry.isIncident ? 'alert' : 'activity'}</span>
+        </span>
+        <span className="notif-message">{entry.message}</span>
+        <span className="dim small">
+          {entry.rangeLabel ? <>{entry.rangeLabel} · </> : null}
+          {entry.stamp ? <>{entry.stamp} · </> : null}
+          {entry.ageLabel}
+        </span>
+      </button>
+      <div className="notif-actions">
+        <select
+          aria-label={`${SNOOZE_SELECT_LABEL} ${entry.label}`}
+          className="notif-snooze"
+          value=""
+          onChange={(e) => {
+            const ms = periodMs(e.target.value)
+            // An empty sentinel ("Snooze…") or an unknown id is NOT a licence to
+            // pick a duration the reader did not choose.
+            if (ms) onSnooze(entry, ms)
+            e.target.value = ''
+          }}
+        >
+          <option value="">{SNOOZE_PLACEHOLDER}</option>
+          {SNOOZE_PERIODS.map((p) => (
+            <option key={p.id} value={p.id}>{p.label}</option>
+          ))}
+        </select>
+        <button type="button" className="ghost small" onClick={() => onDismiss(entry)}>
+          {DISMISS}
+        </button>
+      </div>
+    </li>
+  )
+}
+
+function DetailView({ alert, now, state, canAcknowledge, onAcknowledge, ackPending,
+                      ackError, onBack, onDismiss, onUnsnooze }) {
+  const detail = detailOf(alert, now)
+  const key = detail.entry.key
+  const snoozedUntilMs = snoozedUntil(state, key, now)
+  const pending = Boolean(ackPending) && ackPending === (alert && alert.episode)
+  const error = ackError && alert && ackError.episode === (alert && alert.episode)
+    ? ackError.message
+    : ''
+  return (
+    <div className="notif-detail" aria-label={DETAIL_TITLE}>
+      <button type="button" className="ghost small notif-back" onClick={onBack}>
+        ← {DETAIL_BACK}
+      </button>
+      <h3>{detail.entry.label}</h3>
+      <dl className="notif-detail-fields">
+        {detail.fields.map((f) => (
+          <React.Fragment key={f.label}>
+            <dt>{f.label}</dt>
+            <dd>{f.value}</dd>
+          </React.Fragment>
+        ))}
+        {detail.extra.map((f) => (
+          <React.Fragment key={f.label}>
+            <dt>{f.label}</dt>
+            <dd>{f.value}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      {/* THE HONEST EMPTY CASE. `GET /v1/team/alerts` carries no per-event context
+          — no key id, no IP, no rule (see `detailOf`'s finding note), so this is
+          the ordinary state of every alert today, not an edge case. Saying it in
+          words is the difference between "noise" and "a notification I know the
+          limits of". */}
+      {detail.detailState === 'none' ? (
+        <div className="notif-nodetail">
+          <p>{DETAIL_NO_DETAIL}</p>
+          <p className="dim small">{DETAIL_NO_DETAIL_LEAD}</p>
+        </div>
+      ) : null}
+      {/* A payload that exists but has nothing customer-safe in it is a DIFFERENT
+          fact from "nothing was recorded", and must not borrow that sentence. */}
+      {detail.detailState === 'undisplayable' ? (
+        <div className="notif-nodetail">
+          <p>{DETAIL_UNDISPLAYABLE}</p>
+          <p className="dim small">{DETAIL_NO_DETAIL_LEAD}</p>
+        </div>
+      ) : null}
+      <div className="row notif-detail-actions">
+        {snoozedUntilMs ? (
+          <button type="button" className="ghost small" onClick={() => onUnsnooze(key)}>
+            {UNSNOOZE}
+          </button>
+        ) : (
+          <button type="button" className="ghost small" onClick={() => onDismiss(detail.entry)}>
+            {DISMISS}
+          </button>
+        )}
+        {/* Org-wide dismissal — owner/admin only, because the route 403s everyone
+            else. Offered here rather than in the list so its refusal (403/404/
+            409/503) renders where the reader is looking. */}
+        {canAcknowledge && alert && alert.episode && !alert.acked ? (
+          <button
+            type="button"
+            className="ghost small"
+            onClick={() => onAcknowledge && onAcknowledge(alert)}
+            disabled={pending}
+            title="Stop showing this episode to everyone in the Organization"
+          >
+            {pending ? 'Saving…' : ACK_FOR_EVERYONE}
+          </button>
+        ) : null}
+        {alert && alert.acked ? <span className="dim small">{ACKED_NOTE}</span> : null}
+      </div>
+      {error ? <p className="error small" role="alert">{error}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * The header's notifications control.
+ *
+ * Props:
+ *  * `alerts` — the `/v1/team/alerts` episode feed, newest first (unchanged shape);
+ *  * `scanSaturated` / `unavailable` — the feed's two "we may not have seen
+ *    everything" facts, carried through rather than dropped by the move;
+ *  * `userId` / `orgId` — the identity the local ledger is keyed by;
+ *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
+ *  * `ackPending` (episode) / `ackError` ({episode, message}) — its write state;
+ *  * `now` — injectable clock (tests); defaults to the moment the panel opened;
+ *  * `storage` — injectable store (tests); defaults to `localStorage`.
+ */
+export function NotificationBell({
+  alerts = [],
+  scanSaturated = false,
+  unavailable = false,
+  userId = '',
+  orgId = '',
+  canAcknowledge = false,
+  onAcknowledge = null,
+  ackPending = null,
+  ackError = null,
+  now: nowProp = null,
+  storage = BROWSER_STORAGE,
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [detailKey, setDetailKey] = React.useState(null)
+  const [showOlder, setShowOlder] = React.useState(false)
+  const [showSnoozed, setShowSnoozed] = React.useState(false)
+  const [showDismissed, setShowDismissed] = React.useState(false)
+  // The clock is a VALUE, refreshed when the panel opens and after every action,
+  // so a snooze that ran out while the panel was closed is over the moment it is
+  // reopened — without a timer, and without the render being non-deterministic.
+  const [openedAt, setOpenedAt] = React.useState(() => new Date())
+  const clock = nowProp || openedAt
+  const key = storageKey({ userId, orgId })
+  const [ledger, setLedger] = React.useState(() => readState(storage, key, clock))
+  const [saveFailed, setSaveFailed] = React.useState(false)
+  const [lastKey, setLastKey] = React.useState(key)
+  const rootRef = React.useRef(null)
+  const bellRef = React.useRef(null)
+
+  // Switching Organization (or account) must switch the ledger. Adjusting state
+  // DURING render is React's documented alternative to an effect for "a prop
+  // changed and the state is derived from it": an effect would render once with
+  // the previous Organization's dismissals, and would re-run whenever the parent
+  // handed down a new `now`/`storage` identity.
+  if (lastKey !== key) {
+    setLastKey(key)
+    setLedger(readState(storage, key, clock))
+    setDetailKey(null)
+    setShowOlder(false)
+    setShowSnoozed(false)
+    setShowDismissed(false)
+    setSaveFailed(false)
+  }
+
+  const persist = (next) => {
+    const ok = writeState(storage, key, next)
+    setSaveFailed(!ok)
+    setLedger({ state: next, persisted: ok })
+    setOpenedAt(new Date())
+  }
+
+  const handleSnooze = (entry, ms) => {
+    persist(snooze(ledger.state, entry.key, ms, clock))
+  }
+  const handleDismiss = (entry) => {
+    persist(dismiss(ledger.state, entry.key, clock))
+    // The detail view of a notification that is no longer in the ledger has
+    // nothing left to show; go back to the list.
+    if (detailKey === entry.key) setDetailKey(null)
+  }
+  const handleUnsnooze = (episodeKey) => persist(unsnooze(ledger.state, episodeKey))
+  const handleRestore = (entry) => persist(undismiss(ledger.state, entry.key))
+
+  const toggleOpen = () => {
+    const opening = !open
+    setOpen(opening)
+    if (opening) {
+      // Re-read on open: another tab may have snoozed or dismissed something, and
+      // a reloaded page is not the only way this store changes.
+      setLedger(readState(storage, key, new Date()))
+      setOpenedAt(new Date())
+      setDetailKey(null)
+    }
+  }
+
+  // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
+  // the underlying control activates, and the press that dismisses is not also
+  // the press that presses something behind it.
+  React.useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
+  const entries = [...ledgerView.current]
+  if (showOlder) entries.push(...ledgerView.older)
+  // Resolved by the ledger's OWN key function, so a row without a server
+  // `episode` (an older API deploy, a synthetic row) still opens.
+  const detailAlert = detailKey
+    ? (alerts || []).find((a) => entryKeyOf(a) === detailKey) || null
+    : null
+
+  const count = ledgerView.unresolved
+  const bellLabel = count ? `${BELL_LABEL} — ${count} unresolved` : BELL_LABEL
+
+  return (
+    <div className="notif-root" ref={rootRef}>
+      <button
+        type="button"
+        className="notif-bell"
+        ref={bellRef}
+        onClick={toggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && open) {
+            setOpen(false)
+            // Escape from inside the panel must not strand focus on an unmounted
+            // control.
+            if (bellRef.current) bellRef.current.focus()
+          }
+        }}
+        aria-expanded={open}
+        aria-label={bellLabel}
+      >
+        <span className="notif-glyph" aria-hidden="true">🔔</span>
+        <Badge count={count} />
+      </button>
+
+      {open ? (
+        <div
+          className="notif-panel"
+          role="group"
+          aria-label={PANEL_TITLE}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              if (detailKey) setDetailKey(null)
+              else setOpen(false)
+            }
+          }}
+        >
+          <div className="notif-panel-head">
+            <strong>{PANEL_TITLE}</strong>
+            {count ? <span className="dim small">{count} unresolved</span> : null}
+          </div>
+
+          {detailAlert ? (
+            <DetailView
+              alert={detailAlert}
+              now={clock}
+              state={ledger.state}
+              canAcknowledge={canAcknowledge}
+              onAcknowledge={onAcknowledge}
+              ackPending={ackPending}
+              ackError={ackError}
+              onBack={() => setDetailKey(null)}
+              onDismiss={handleDismiss}
+              onUnsnooze={handleUnsnooze}
+            />
+          ) : (
+            <>
+              {/* The three "we cannot see everything" facts, stated where the
+                  reader is, never as "no notifications" (which is a claim about
+                  the Organization's state that a failed read cannot support). */}
+              {unavailable && alerts.length === 0 ? (
+                <p className="dim small notif-note">{ALERTS_UNAVAILABLE}</p>
+              ) : null}
+              {scanSaturated && alerts.length === 0 ? (
+                <p className="dim small notif-note">{SCAN_SATURATED_EMPTY}</p>
+              ) : null}
+              {!unavailable && !scanSaturated && count === 0 ? (
+                <p className="dim small notif-note">
+                  {alerts.length ? LEDGER_ALL_CLEAR : LEDGER_EMPTY}
+                </p>
+              ) : null}
+              {saveFailed || !ledger.persisted ? (
+                <p className="dim small notif-note" role="status">{STORAGE_UNAVAILABLE}</p>
+              ) : null}
+              {saveFailed ? (
+                <p className="error small notif-note" role="alert">{SAVE_FAILED}</p>
+              ) : null}
+
+              {entries.length ? (
+                <ul className="notif-list">
+                  {entries.map((entry) => (
+                    <LedgerRow
+                      key={entry.key}
+                      entry={entry}
+                      onOpen={setDetailKey}
+                      onSnooze={handleSnooze}
+                      onDismiss={handleDismiss}
+                    />
+                  ))}
+                </ul>
+              ) : null}
+
+              {ledgerView.older.length ? (
+                <button
+                  type="button"
+                  className="ghost small notif-more"
+                  onClick={() => setShowOlder(!showOlder)}
+                >
+                  {showOlder ? OLDER_HIDE : OLDER_TOGGLE(ledgerView.older.length)}
+                </button>
+              ) : null}
+
+              {/* Snoozed and dismissed rows stay REACHABLE: a snooze with no way
+                  back is a delete, and a dismissal that cannot be undone turns one
+                  misfire into a silent gap in a security surface. */}
+              {ledgerView.snoozed.length ? (
+                <div className="notif-group">
+                  <button
+                    type="button"
+                    className="ghost small notif-more"
+                    onClick={() => setShowSnoozed(!showSnoozed)}
+                  >
+                    {showSnoozed ? SNOOZED_HIDE : SNOOZED_TOGGLE(ledgerView.snoozed.length)}
+                  </button>
+                  {showSnoozed ? (
+                    <ul className="notif-list notif-list-muted">
+                      {ledgerView.snoozed.map((entry) => (
+                        <li key={entry.key} className="notif-row">
+                          <span className="notif-snoozed-text">
+                            <strong>{entry.label}</strong>
+                            <span className="dim small"> · snoozed {entry.untilLabel}</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => handleUnsnooze(entry.key)}
+                          >
+                            {UNSNOOZE}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+              {ledgerView.dismissed.length ? (
+                <div className="notif-group">
+                  <button
+                    type="button"
+                    className="ghost small notif-more"
+                    onClick={() => setShowDismissed(!showDismissed)}
+                  >
+                    {showDismissed ? DISMISSED_HIDE : DISMISSED_TOGGLE(ledgerView.dismissed.length)}
+                  </button>
+                  {showDismissed ? (
+                    <ul className="notif-list notif-list-muted">
+                      {ledgerView.dismissed.map((entry) => (
+                        <li key={entry.key} className="notif-row">
+                          <span className="notif-snoozed-text">
+                            <strong>{entry.label}</strong>
+                            <span className="dim small"> · dismissed for you</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => handleRestore(entry)}
+                          >
+                            {RESTORE}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+export default NotificationBell

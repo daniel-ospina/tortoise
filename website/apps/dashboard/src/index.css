@@ -1244,38 +1244,114 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
   vertical-align: 1px;
 }
 
-/* #10156: the two alert REGISTERS. A notify-only detector's observation must
-   not look like an incident, so the activity register is muted while the
-   incident register keeps the alarm weight. NEITHER is hidden —
-   `securityAlertsPanel.dom.test.jsx` renders both with this stylesheet loaded
-   and reds if a rule here ever sets display:none / visibility:hidden on a row or
-   a register, which is the evasion no source scan can see (#4915). */
-.overview.alert-register {
-  border-left: 3px solid var(--danger, #ef4444);
-  padding-left: 14px;
-}
-.overview.activity-register {
-  border-left: 3px solid var(--border, #1e293b);
-  padding-left: 14px;
-  opacity: 0.92;
-}
-.alert-row {
-  line-height: 1.6;
-}
-.alert-row-acked {
-  opacity: 0.7;
-}
+/* #10156/#14686: the episode count is the ONE reading carried over from the
+   two-register panel to the notifications ledger (one row per sustained bout,
+   not one per detector window). The register is now a per-row CHIP rather than
+   two alarmed/muted sections, because the ledger is chrome: an incident row
+   keeps the alarm weight via its left border, and nothing is ever hidden —
+   `notificationPanel.dom.test.jsx` renders this stylesheet and reds if a rule
+   here ever sets display:none / visibility:hidden on a row, which is the
+   evasion no source scan can see (#4915). */
 .alert-count {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   color: var(--text-dim, #94a3b8);
 }
-.alert-acked {
-  font-style: italic;
+
+/* #14686: the notifications menu — the bell in the dashboard header, and the
+   ledger that unfolds from it. The alerts are CHROME now: nothing here may
+   occupy the page flow, which is the whole defect this replaces ("they appear
+   above other things in the dashboard"). */
+.notif-root { position: relative; display: inline-flex; }
+.notif-bell {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 30px; padding: 0;
+  border-radius: 8px; border: 1px solid var(--border, #d0d7de);
+  background: var(--bg-soft, #f6f8fa); color: var(--text, #fff);
+  font-size: 14px; font-weight: 400; line-height: 1; cursor: pointer;
 }
-.overview.alert-register li button,
-.overview.activity-register li button {
-  margin-left: 8px;
-  font-size: 11px;
-  padding: 2px 8px;
+.notif-bell:hover { border-color: var(--accent, #06b6d4); }
+.notif-bell[aria-expanded='true'] { border-color: var(--accent, #06b6d4); background: rgba(6,182,212,0.14); }
+.notif-glyph { font-size: 14px; }
+/* The unresolved count. `min-width` + tabular numerals so 9 → 10 does not shift
+   the glyph, and a red badge only ever means "something is unresolved". */
+.notif-badge {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 17px; height: 17px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--red, #f87171); color: #1a0505;
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
+.notif-panel {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 60;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(70vh, 560px); overflow-y: auto;
+  padding: 10px;
+  background: var(--surface, #0f172a); border: 1px solid var(--border, #334155);
+  border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+/* ≤520px: a bottom sheet. Anchored to the bell (which sits left of the account
+   blob near the right edge) a 380px panel would spill off the left of a 390px
+   viewport, and anchoring it to a guessed header height breaks the moment the
+   header wraps to two rows. The sheet needs neither. */
+@media (max-width: 520px) {
+  .notif-panel {
+    position: fixed; left: 8px; right: 8px; bottom: 8px; top: auto;
+    width: auto; max-height: 70vh;
+  }
+}
+.notif-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 2px 4px 8px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--border, #334155);
+}
+.notif-note { padding: 6px 4px; }
+.notif-list { list-style: none; margin: 0; padding: 0; }
+.notif-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 4px; border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.notif-row:last-child { border-bottom: none; }
+.notif-row-incident { border-left: 3px solid var(--red, #f87171); padding-left: 8px; }
+.notif-list-muted .notif-row { border-bottom: none; padding: 4px; }
+/* The row's TEXT is the "click for details" target: an open control wrapping the
+   whole line cannot also hold the action buttons (nested buttons are invalid), so
+   the sentence opens and the actions sit beside it. */
+.notif-open {
+  flex: 1; min-width: 0; display: block;
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--text, #fff); font: inherit; font-weight: 400; text-align: left;
+  cursor: pointer;
+}
+.notif-open:hover .notif-line strong { color: var(--accent, #06b6d4); }
+.notif-line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.notif-chip {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--border, #334155); color: var(--text-dim, #94a3b8);
+}
+.notif-message { display: block; font-size: 12px; color: var(--text-dim, #94a3b8); line-height: 1.5; }
+.notif-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.notif-snooze {
+  background: var(--surface, #0f172a); color: var(--text, #e2e8f0);
+  border: 1px solid var(--border, #334155); border-radius: 6px;
+  font-size: 11px; font-weight: 400; padding: 3px 6px; max-width: 96px; cursor: pointer;
+}
+.notif-more { margin: 6px 4px 0; }
+.notif-group { margin-top: 2px; }
+.notif-snoozed-text { flex: 1; min-width: 0; font-size: 12px; }
+.notif-detail h3 { font-size: 14px; margin: 6px 0 2px; }
+.notif-back { margin-bottom: 4px; }
+.notif-detail-fields {
+  display: grid; grid-template-columns: 84px 1fr; gap: 4px 10px;
+  font-size: 12px; margin: 8px 0; line-height: 1.5;
+}
+.notif-detail-fields dt { color: var(--text-dim, #94a3b8); }
+.notif-detail-fields dd { margin: 0; }
+/* The honest "nothing else was recorded" panel. Deliberately styled as a NOTICE,
+   not an error: it reports a limit of the record, not a failure of the read. */
+.notif-nodetail {
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border, #334155);
+  border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 12px;
+}
+.notif-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-start; margin-top: 8px; }

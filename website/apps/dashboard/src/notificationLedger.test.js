@@ -94,7 +94,7 @@ test('a dismissal survives a reload: the SAME storage hides the row afterwards',
   assert.equal(before.persisted, true)
   assert.deepEqual(before.state, emptyState())
 
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   const next = dismiss(before.state, episode, NOW)
   assert.equal(writeState(storage, key, next), true)
 
@@ -110,7 +110,7 @@ test('a dismissal survives a reload: the SAME storage hides the row afterwards',
 test('a dismissal is scoped: another Organization and another user still see the row', () => {
   const storage = fakeStorage()
   const mine = storageKey({ userId: 'u1', orgId: 'org-a' })
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   writeState(storage, mine, dismiss(emptyState(), episode, NOW))
 
   for (const key of [
@@ -124,7 +124,7 @@ test('a dismissal is scoped: another Organization and another user still see the
 })
 
 test('a dismissal can be undone', () => {
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   const state = undismiss(dismiss(emptyState(), episode, NOW), episode)
   assert.equal(isDismissed(state, episode), false)
   assert.equal(buildLedger({ alerts: [alert()], state, now: NOW }).unresolved, 1)
@@ -133,7 +133,7 @@ test('a dismissal can be undone', () => {
 // ── Snooze ─────────────────────────────────────────────────────────────────
 
 test('snooze hides a row until its own window passes, then it returns', () => {
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   const base = emptyState()
 
   const oneHour = snooze(base, episode, periodMs('1h'), NOW)
@@ -163,7 +163,7 @@ test('the three offered periods are the three the owner asked for', () => {
 })
 
 test('a snoozed row is LISTED (with its deadline) so it can be un-snoozed', () => {
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   const state = snooze(emptyState(), episode, periodMs('1w'), NOW)
   const ledger = buildLedger({ alerts: [alert()], state, now: NOW })
   assert.equal(ledger.snoozed.length, 1)
@@ -205,7 +205,7 @@ test('a store that throws reports persisted:false — the panel must not promise
 })
 
 test('expired snoozes are pruned on READ (a tab closed for a week reopens clear)', () => {
-  const episode = alert().episode
+  const episode = entryKeyOf(alert())
   const storage = fakeStorage()
   writeState(storage, 'k', snooze(emptyState(), episode, periodMs('1h'), NOW))
   const later = new Date(NOW.getTime() + 2 * HOUR)
@@ -228,10 +228,16 @@ test('the dismissal list is capped at the newest few hundred, so the blob cannot
 // ── The ledger is a total, disjoint partition ──────────────────────────────
 
 test('every row lands in exactly one bucket, and the badge counts only actionable rows', () => {
+  // Distinct messages, because the local key is the episode's client-visible
+  // IDENTITY (type + message), not the server's moving `first_at`-bearing key.
   const rows = [
-    alert({ episode: 'e-current' }),
-    alert({ episode: 'e-acked', acked: true }),
-    alert({ episode: 'e-old', at: new Date(NOW.getTime() - 40 * DAY).toISOString() }),
+    alert({ episode: 'e-current', message: 'current row' }),
+    alert({ episode: 'e-acked', message: 'acked row', acked: true }),
+    alert({
+      episode: 'e-old',
+      message: 'old row',
+      at: new Date(NOW.getTime() - 40 * DAY).toISOString(),
+    }),
     alert({
       type: 'read_velocity',
       label: 'Unusual read volume',
@@ -239,11 +245,12 @@ test('every row lands in exactly one bucket, and the badge counts only actionabl
       episode: 'e-activity',
       message: 'Unusual read volume on one key. This is informational.',
     }),
-    alert({ episode: 'e-snoozed' }),
-    alert({ episode: 'e-dismissed' }),
+    alert({ episode: 'e-snoozed', message: 'snoozed row' }),
+    alert({ episode: 'e-dismissed', message: 'dismissed row' }),
   ]
-  let state = snooze(emptyState(), 'e-snoozed', periodMs('1d'), NOW)
-  state = dismiss(state, 'e-dismissed', NOW)
+  const keyOfMessage = (m) => rows.find((r) => r.message === m).type + '|' + m
+  let state = snooze(emptyState(), keyOfMessage('snoozed row'), periodMs('1d'), NOW)
+  state = dismiss(state, keyOfMessage('dismissed row'), NOW)
 
   const ledger = buildLedger({ alerts: rows, state, now: NOW })
   const listed = [
@@ -258,27 +265,29 @@ test('every row lands in exactly one bucket, and the badge counts only actionabl
 
   // Acknowledged rows are NOT in the actionable buckets — that is the dismissal
   // the owner asked for ("close it").
-  assert.ok(!ledger.current.some((e) => e.key === 'e-acked'))
-  assert.ok(!ledger.older.some((e) => e.key === 'e-acked'))
+  assert.deepEqual(ledger.acked.map((e) => e.message), ['acked row'])
+  assert.ok(!ledger.current.some((e) => e.message === 'acked row'))
   // Aged rows are reachable, behind one toggle.
-  assert.deepEqual(ledger.older.map((e) => e.key), ['e-old'])
+  assert.deepEqual(ledger.older.map((e) => e.message), ['old row'])
   // The badge counts actionable notifications only: current + older.
-  assert.equal(ledger.unresolved, 3) // e-current, e-old, e-activity
+  assert.equal(ledger.unresolved, 3) // current, old, activity
+  // Dismissed rows are recoverable, not destroyed.
+  assert.deepEqual(ledger.dismissed.map((e) => e.message), ['dismissed row'])
 })
 
 test('the ledger is newest-first across BOTH registers, with a deterministic tie-break', () => {
   const t = (min) => new Date(NOW.getTime() - min * MIN).toISOString()
   const rows = [
-    alert({ episode: 'a', at: t(30) }),
-    alert({ episode: 'b', at: t(1) }),
-    alert({ episode: 'c', at: t(10), register: 'activity', type: 'read_velocity' }),
-    alert({ episode: 'd', at: t(1) }), // same instant as `b`
+    alert({ episode: 'a', at: t(30), message: 'a' }),
+    alert({ episode: 'b', at: t(1), message: 'b' }),
+    alert({ episode: 'c', at: t(10), message: 'c', register: 'activity', type: 'read_velocity' }),
+    alert({ episode: 'd', at: t(1), message: 'd' }), // same instant as `b`
   ]
   const on = buildLedger({ alerts: rows, state: emptyState(), now: NOW })
-  assert.deepEqual(on.current.map((e) => e.key), ['b', 'd', 'c', 'a'])
+  assert.deepEqual(on.current.map((e) => e.message), ['b', 'd', 'c', 'a'])
   // Rebuilding from a shuffled input yields the identical order.
   const again = buildLedger({ alerts: [...rows].reverse(), state: emptyState(), now: NOW })
-  assert.deepEqual(again.current.map((e) => e.key), ['b', 'd', 'c', 'a'])
+  assert.deepEqual(again.current.map((e) => e.message), ['b', 'd', 'c', 'a'])
 })
 
 test('an episode renders as ONE row carrying its ×N count and window', () => {
@@ -309,12 +318,34 @@ test('an activity row is flagged as a measurement, an incident row is not', () =
   )
 })
 
-test('a row without a server episode key still gets a stable key of its own', () => {
-  const row = { type: 'flag', at: '2026-11-25T11:00:00Z', label: 'Suspicious activity' }
-  const key = entryKeyOf(row)
+test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect a dismissal', () => {
+  const first = alert({ episode: 'flag||2026-11-25T11:55:00Z' })
+  const key = entryKeyOf(first)
   assert.ok(key.length > 0)
-  assert.equal(key, entryKeyOf({ ...row }), 'the fallback key is stable across reads')
-  assert.notEqual(key, entryKeyOf({ ...row, type: 'auth_ip' }), 'two rows cannot share a key')
+  assert.equal(key, entryKeyOf({ ...first }), 'the key is stable across reads')
+
+  // The server re-derives the episode as the scan window slides: same bout, new
+  // `episode` and a moved `first_at`. The local dismissal must survive that —
+  // otherwise the row reappears and the reader learns the control is broken.
+  const rekeyed = {
+    ...first,
+    episode: 'flag||2026-11-24T09:00:00Z',
+    first_at: '2026-11-24T09:00:00Z',
+    at: new Date(NOW.getTime() - 1 * MIN).toISOString(),
+    count: 12,
+  }
+  assert.equal(entryKeyOf(rekeyed), key, 'a growing bout keeps its identity')
+  const state = dismiss(emptyState(), key, NOW)
+  assert.equal(buildLedger({ alerts: [rekeyed], state, now: NOW }).unresolved, 0)
+
+  // A DIFFERENT subject is a different identity: the `auth_ip` message embeds the
+  // country, so two sign-in locations are never one dismissal.
+  assert.notEqual(
+    entryKeyOf(alert({ type: 'auth_ip', message: 'Access from a new location: ES' })),
+    entryKeyOf(alert({ type: 'auth_ip', message: 'Access from a new location: FR' })),
+  )
+  // …and so is a different type with the same wording.
+  assert.notEqual(key, entryKeyOf({ ...first, type: 'review_needed' }))
   assert.equal(entryKeyOf(null), '')
 })
 

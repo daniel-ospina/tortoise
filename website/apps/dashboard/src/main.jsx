@@ -29,7 +29,10 @@ import { captureClaimForHarness, captureStatusLabelForHarness } from './captureS
 // by a test (it mounts the whole application at module scope).
 import { HarnessStatusCard } from './harnessStatusCard.jsx'
 import { feedStateOf } from './securityAlerts.js'
-import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
+// #14686: the alerts are CHROME, not page content — a bell in the header with a
+// ledger that unfolds from it (the panel this replaces rendered inside <main>,
+// above the overview grid, which is the defect the owner reported).
+import { NotificationBell } from './notificationPanel.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -5150,6 +5153,7 @@ function claimIntentInFlight() {
         // reads — map the BFF profile onto its existing shape here so no
         // downstream `session.user.*` access survives.
         sessionMetaRef.current = {
+          id: profile.id || '',
           display_name: profile.displayName || '',
           email: profile.email || '',
         }
@@ -10711,6 +10715,23 @@ function claimIntentInFlight() {
             #2005 (W9): the reopen DERIVES its entry step (openResumeWizard) —
             it used to hardcode step 0, which is #2327's restart. */}
         <button className="ghost small setup-header" onClick={openResumeWizard}>Setup</button>
+        {/* #14686: the notifications bell. It carries the alert feed that used to
+            render as banner blocks above the overview grid, and it is ALWAYS
+            mounted — a control that appears only when there is something to say
+            is a control the reader cannot learn. The panel owns the ledger,
+            snooze, dismiss and the detail view; the state it persists is keyed by
+            the pair below (per user, per Organization). */}
+        <NotificationBell
+          alerts={alerts}
+          scanSaturated={alertsSaturated}
+          unavailable={alertsUnavailable}
+          userId={sessionMetaRef.current?.id || sessionMetaRef.current?.email || ''}
+          orgId={currentOrgId || ''}
+          canAcknowledge={isOwnerAdmin}
+          onAcknowledge={acknowledgeAlert}
+          ackPending={ackPending}
+          ackError={ackError}
+        />
         {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
             the avatar menu is the personal-account surface (identity block
             + Profile entry + workspace switch + Log out); the trigger shows
@@ -11110,8 +11131,21 @@ function claimIntentInFlight() {
             {(TIER_LABELS[team.tier] || team.tier || 'free')} tier
           </span>
         ) : null}
+        {/* #14686: the badge's title names the surface that actually exists — the
+            alerts live in the header's notifications menu now, and "security
+            alerts" was the heading of the block this issue removed. */}
         {team && team.status === 'flagged' && (
-          <span className="tier-badge" title="Unusual activity measured — see recent activity">⚠ flagged</span>
+          {/* TWO decisions meet on this line and BOTH survive:
+              * #14687/#14702 (calibration) retired "Suspicious activity detected"
+                — a `flag` row is a rate MEASUREMENT, and accusing a customer of
+                suspicious activity for one is the false-incident framing that
+                lane removed. Its verb is "measured", not "detected".
+              * #14686 retires "see security alerts", the heading of the block
+                this PR deletes. A pointer to a surface that no longer exists is
+                how a reader learns the dashboard is stale.
+              So: main's verb, this PR's destination. Neither half is optional —
+              reverting either one re-introduces a defect the other fixed. */}
+          <span className="tier-badge" title="Unusual activity measured — see notifications">⚠ flagged</span>
         )}
       </header>
 
@@ -11173,24 +11207,10 @@ function claimIntentInFlight() {
           </div>
         )}
 
-        {tab === 'overview' && (alerts.length > 0 || alertsSaturated || alertsUnavailable) && (
-          // #10156: TWO REGISTERS, never one list. The old block rendered every
-          // entry under "Security alerts / Suspicious activity detected on this
-          // Organization. Revoke any key you don't recognize." — including
-          // notify-only read-velocity observations, which changed nothing, were
-          // a month old, and were one continuous bout counted thirteen times.
-          // The panel owns the split, the ages and the episode counts; the copy
-          // decisions and their tests live in `securityAlerts.js`.
-          <SecurityAlertsPanel
-            alerts={alerts}
-            scanSaturated={alertsSaturated}
-            unavailable={alertsUnavailable}
-            onAcknowledge={acknowledgeAlert}
-            ackPending={ackPending}
-            ackError={ackError}
-            canAcknowledge={isOwnerAdmin}
-          />
-        )}
+        {/* #14686: NOTHING renders here any more. The alert feed is CHROME —
+            `NotificationBell` in the header — because a block inside <main> that
+            pushes the overview content down and cannot be put away is the defect
+            the owner reported, not the layout. */}
         {tab === 'overview' && team === null && (
           // #1841: frames-first — the overview grid renders IMMEDIATELY as
           // skeleton frames (the old code gated the WHOLE section on /v1/team,
