@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +164,53 @@ def _single_sample_meter(used: float):
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    """The dotted spelling of a Name/Attribute expression (``time.gmtime``)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        inner = _dotted_name(node.value)
+        return f"{inner}.{node.attr}" if inner else None
+    return None
+
+
+def _clock_aliases() -> dict[str, str]:
+    """Module-level names in THIS file, and the clock spelling each resolves to.
+
+    The behavioural arm patches the module's ``datetime`` and ``time`` globals. A
+    fixture may instead reach the clock through a name bound at MODULE scope, and
+    the STRUCTURAL arm in this same file accepts those (``:279-282``: *"`_t = time`
+    is a module ALIAS, not a definition: discounting it would red a correct fixture
+    that spells a clock read `_t.gmtime()`"*; ``:299``: *"`_now = datetime.now` — an
+    ordinary spelling — stays accepted"*). Patching only the two globals left the
+    arms DISAGREEING: the shift moved nothing, and the failure blamed a calendar
+    pin the fixture did not have (#14646 P2).
+
+    So the patch surface is DERIVED from the file's own source, the same discipline
+    the structural arm's scope walk already uses. This does NOT reach a name bound
+    inside the fixture's own body (``import time as _t`` written in the fixture),
+    which stays one of the disclosed fail-closed shapes.
+    """
+    aliases: dict[str, str] = {}
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            spelling = _dotted_name(stmt.value)
+            if spelling:
+                aliases.setdefault(stmt.targets[0].id, spelling)
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                aliases.setdefault(alias.asname or alias.name.split(".")[0], alias.name)
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module:
+            for alias in stmt.names:
+                aliases.setdefault(alias.asname or alias.name, f"{stmt.module}.{alias.name}")
+    return aliases
 
 
 def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
@@ -440,6 +488,22 @@ def test_the_fixture_reading_is_fresh_and_derived_from_the_clock():
                 if isinstance(
                         stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     built.setdefault(stmt.name, stmt)
+        # An IMPORT-bound clock is a binding too (#14646 P3). `from time import time`
+        # binds THIS module's name `time` to a reader, so `time()` is exactly as
+        # derived as `time.time()` — but imports are not `Assign`s, so without this
+        # the arm resolved `time` to nothing, called the reading "undated", and red
+        # correct code with a message naming a cause it never measured. Each such
+        # name is registered as the synthetic ATTRIBUTE it spells, so the same
+        # `clock_attrs` / `clock_dual_attrs` rules judge it as the module form.
+        for name, spelling in _clock_aliases().items():
+            if name in built:
+                continue
+            receiver, _, attr = spelling.rpartition(".")
+            if receiver and attr in (
+                    "now", "utcnow", "today", "time", "time_ns", "gmtime", "localtime"):
+                built[name] = ast.Attribute(
+                    value=ast.Name(id=receiver, ctx=ast.Load()),
+                    attr=attr, ctx=ast.Load())
         return built
 
     module = ast.parse(inspect.getsource(inspect.getmodule(_single_sample_meter)))
@@ -685,6 +749,11 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
                 return _real_time.time() + offset.total_seconds()
 
             @staticmethod
+            def time_ns() -> int:
+                """`time_ns` reads the clock too, so it shifts with the others."""
+                return _real_time.time_ns() + int(offset.total_seconds() * 1_000_000_000)
+
+            @staticmethod
             def gmtime(secs=None):
                 return _real_time.gmtime(
                     _real_time.time() + offset.total_seconds() if secs is None else secs)
@@ -694,15 +763,32 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
                 return _real_time.localtime(
                     _real_time.time() + offset.total_seconds() if secs is None else secs)
 
-        previous_time = getattr(module, "time", _real_time)
-        monkeypatch.setattr(module, "datetime", _Shifted)
-        monkeypatch.setattr(module, "time", _Time(), raising=False)
-        try:
-            return real_datetime.fromisoformat(
-                _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at)
-        finally:
-            monkeypatch.setattr(module, "datetime", real_datetime)
-            monkeypatch.setattr(module, "time", previous_time, raising=False)
+        #: The shifted value each clock spelling must be replaced WITH. A READER
+        #: (`now`, `time`, `gmtime`) becomes the bound shifted callable; a MODULE
+        #: (`time`) and the `datetime` class stay a module/class so their other
+        #: attributes keep working.
+        replacements = {
+            "datetime": _Shifted,
+            "datetime.now": _Shifted.now,
+            "datetime.utcnow": _Shifted.utcnow,
+            "datetime.today": _Shifted.today,
+            "time": _Time(),
+            "time.time": _Time().time,
+            "time.gmtime": _Time().gmtime,
+            "time.localtime": _Time().localtime,
+            "time.time_ns": _Time().time_ns,
+        }
+        patches = {"datetime": _Shifted, "time": _Time()}
+        for name, spelling in _clock_aliases().items():
+            replacement = replacements.get(spelling)
+            if replacement is not None and name not in patches:
+                patches[name] = replacement
+        #: `monkeypatch` undoes every one of these at teardown, including the ones
+        #: re-patched by the later `handed()` calls in the assertion loop.
+        for name, value in patches.items():
+            monkeypatch.setattr(module, name, value, raising=False)
+        return real_datetime.fromisoformat(
+            _single_sample_meter(MEASURED_USED_MB)(ORG).measured_at)
 
     base = handed(timedelta())
     #: TWO shifts, and the second crosses a year ON PURPOSE: a pinned calendar
@@ -729,7 +815,11 @@ def test_the_fixture_reading_follows_the_clock(monkeypatch):
             "clock module imported INSIDE the fixture's own body (`import time "
             "as _t`), whose local name this patch cannot reach. That is a false "
             "red with a cheap remedy: read the clock inline — "
-            "`datetime.now(UTC) - timedelta(minutes=5)` (#14646).")
+            "`datetime.now(UTC) - timedelta(minutes=5)` (#14646)."
+            "⛔ MODULE-scope aliases are NOT in that list: `_t = time`, "
+            "`_now = datetime.now`, `_clock = time.gmtime`, `import time as t` and "
+            "`from time import time` are all patched by `_clock_aliases()`, so they "
+            "move with the clock exactly as the structural arm says they should.")
 
 
 def test_the_freshness_pin_reads_a_positional_construction():
