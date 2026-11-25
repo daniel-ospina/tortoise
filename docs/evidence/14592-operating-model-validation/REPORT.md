@@ -31,12 +31,14 @@ touches the record store.
 | Read (structure) | `tortoise_graph_overview`, `tortoise_check_structure`, `tortoise_list_knowledge`, `tortoise_expand_relationships`, `tortoise_explore_connections`, `tortoise_recall`, `tortoise_check_confidence` — all over MCP stdio | Same. |
 | Isolation proof | `tortoise_graph_overview` **before** any write | Returns `Point 0, Event 0, Subject 0, Object 0, Source 0` — recorded below. |
 
-Reproduce with (the extraction credential is needed by step 1 only — the three
-read-only steps call no model, and `run.sh` requires a key only for `run_ingest.py`):
+Reproduce with (steps 3–5 read the graph step 1 wrote, so they must run in the SAME sitting — see
+§10):
 
 ```bash
-export DEEPSEEK_API_KEY=…                                                    # step 1 only
 export TORTOISE_DB_URI='docker://:@127.0.0.1:16467/tortoise_test_matrix'   # this lane's container
+export DEEPSEEK_API_KEY='…'                  # the extraction LLM credential (never read from a file)
+# optional: TORTOISE_VENV=/path/to/a/built/venv   (default: <worktree>/.venv)
+
 ./docs/evidence/14592-operating-model-validation/run.sh \
     docs/evidence/14592-operating-model-validation/run_ingest.py            # 1. write
 ./docs/evidence/14592-operating-model-validation/run.sh \
@@ -44,17 +46,15 @@ export TORTOISE_DB_URI='docker://:@127.0.0.1:16467/tortoise_test_matrix'   # thi
 ./docs/evidence/14592-operating-model-validation/run.sh \
     docs/evidence/14592-operating-model-validation/run_census.py            # 3. structural census
 ./docs/evidence/14592-operating-model-validation/run.sh \
-    docs/evidence/14592-operating-model-validation/run_census2.py           # 4. claim / structure reads
+    docs/evidence/14592-operating-model-validation/run_census2.py           # 4. claims / confidence / structure
 ./docs/evidence/14592-operating-model-validation/run.sh \
-    docs/evidence/14592-operating-model-validation/run_census3.py           # 5. relation expansions
+    docs/evidence/14592-operating-model-validation/run_census3.py           # 5. expansions / sources
 ```
 
-Each phase now carries a verdict: `ok` in its artifact and a non-zero exit when a
-target did not resolve or a relation read returned nothing — so a run whose
-headline evidence is missing cannot be committed as a successful one.
-
-`run.sh` documents the two (measured) reasons it does not use `uv run` on this
-box, and which of them it implements itself — see **§9**.
+`run.sh` takes both of the 2026-11-25 run's measured deviations from the **caller**
+(`TORTOISE_VENV`, `DEEPSEEK_API_KEY`) and fails loudly when either is absent — it carries no absolute
+path and reads no credential store (§9). Every artifact writer names itself and its sha256 in a
+`provenance` block, so a reader can tell which code produced the numbers.
 
 ---
 
@@ -173,7 +173,7 @@ All five layers exist and each carries corpus facts:
 | **Subject** | 10 | "Marta Reyes", "Dev Patel", "ColdPath Logistics", "NordicFreight", "food safety auditor", "delivery partner" |
 | **Event** | 13 | 5 `sessionCaptured` + decision/friction/milestone events |
 | **Source** | 5 | `session:doc-01` … `session:doc-05`, each `sourceKind: agentSession`, with `points` 8–13 |
-| **Point** | 120 | 62 `statement` + 34 `event` (the 34 episodic turns) + 24 operator Points |
+| **Point** | 120 | 96 Points behind the `claim` door (62 `statement` + 34 `event` — the corpus's 34 turns ARE the 34 `event` Points) plus the 24 operator Points (`structure.operators: 24`, `120 - 96`) |
 
 `tortoise_list_knowledge(kind="source")` returns verbatim:
 
@@ -185,7 +185,8 @@ All five layers exist and each carries corpus facts:
  {"url":"session:doc-03","sourceKind":"agentSession","points":8}]
 ```
 
-**But three layer reads have no MCP door at all** — see gaps **G5**, **G6**.
+**The layer reads the brief asked for do not all work** — `list_knowledge` rejects `object`/`subject`/
+`event`, and whether another door enumerates them is **unmeasured** in this run: see gaps **G5**, **G6**.
 
 ---
 
@@ -216,7 +217,7 @@ All five layers exist and each carries corpus facts:
 
 Every search result carries `"scores": {"fts": <n>, "vector": null, "structural": null, "rrf": <n>}`.
 The dense leg contributed nothing, because `sentence_transformers`/`torch` are not installed and
-cannot be installed on this box (see §9). **This is an environment limitation, not a product defect:
+cannot be installed on this box (see §7). **This is an environment limitation, not a product defect:
 the numbers above are a FLOOR, not the ceiling.** They do, however, measure what a self-hosted user
 gets when the `embeddings` extra is absent — which `AGENTS.md` says is a keyword-only product.
 
@@ -230,8 +231,8 @@ small number of structural edges. 24 operators total.
 ### The decision's reasoning is captured correctly
 
 `tortoise_expand_relationships(point_id="pt_f0a2b96…")` — "We choose ColdPath Logistics as our
-delivery partner" — returns **8 incoming `IMPL` endpoints over 6 distinct operators**, each
-traceable to the corpus:
+delivery partner" — returns **8 incoming `IMPL` rows** (6 operators, 7 distinct contents; the
+duplicate is called out below), each traceable to the corpus:
 
 ```json
 {"mechanism":"IMPL","related_content":"ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots","direction":"incoming"}
@@ -244,13 +245,18 @@ traceable to the corpus:
 {"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments","direction":"incoming"}
 ```
 
-⛔ **The reply holds 8 rows, not 8 edges, and not 7.** `out/census3.json` →
-`expand_doc01_decision.reply.result` has **6 distinct `operator_id`s** over **8 rows** — two operators
-return a second endpoint row, so the affordability `[MITIGATION]` appears **twice** (rows 6 and 8
-above), identical in content. The `related_id`s are 8 distinct, which is why the explore reply's "8
-nodes" is defensible while an "8 IMPL edges" reading would not be. An earlier revision of this
-section said "7 incoming `IMPL` edges" and printed seven rows — both wrong. The duplication is a
-within-one-capture minting defect, not a rendering artifact: see **G12**.
+Three options, all three reasons, and the affordability argument carries an extracted **MITIGATION**
+node. This is the part of the answer that is genuinely good.
+
+⚠️ **Rows 6 and 8 carry the same text.** The reply holds **8 relationship rows across 6
+operators**: two of them (`1a21036fe8d…`, `1a21036ff42…`) are MITIGATES-bearing `IMPL` operators
+returned once per endpoint — the claim (`pt_a9d9a2d58…` / `pt_a7c9c3cbc…`) and a **MITIGATION
+operator** (`1a210370019…` / `1a21036ffa1…`), and those two mitigation operators carry identical
+text, so `[MITIGATION] The cash buffer is 31,000 pounds…` appears twice. 8 rows, 6 distinct
+`operator_id`s, 7 distinct `related_content`. The count here is the receipt's
+(`out/census3.json` `.expand_doc01_decision.reply.result`), and the duplicate is itself a product
+observation — the same duplication §4 flags on the goal probe — not a transcription error to tidy
+away.
 
 ### NAND operators exist
 
@@ -261,7 +267,7 @@ Search returned NAND families over the "viable delivery partner" belief
 
 | required class | present? | evidence |
 |---|---|---|
-| decision → option `IMPL` | ✅ | 8 `IMPL` endpoint rows over 6 distinct operators on the doc-01 decision (above); the extra two rows are one operator's duplicate endpoint |
+| decision → option `IMPL` | ✅ | 8 incoming `IMPL` rows — 6 operators, 7 distinct contents (doc-01 decision, above) |
 | option ↔ option `NAND` | ✅ | NAND operator families on the delivery-partner belief (`family_size: 2`) |
 | goal → constraint | ✅ (as text + `IMPL`) | "The growth goal depends on the delivery partner keeping morning slots" → `IMPL` → "Every new restaurant account requires a morning delivery slot"; "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees" |
 | source → claim `extractedFrom` | ✅ (structural) | 5 `agentSession` Sources, each with 8–13 Points; `relation_write.edges` shows `related`/`managedBy` written as `structural` |
@@ -291,7 +297,7 @@ date — dropped` is a *drop*, not a fabrication.
 
 | # | element (corpus fact) | present? | correct? | traceable? | evidence |
 |---|---|---|---|---|---|
-| 1 | **Decision** "we choose ColdPath Logistics" | ✅ | ✅ | ✅ `sessionId: doc-01`, `quote` present | Point exists, 8 `IMPL` endpoint rows (6 operators) attached |
+| 1 | **Decision** "we choose ColdPath Logistics" | ✅ | ✅ | ✅ `sessionId: doc-01`, `quote` present | Point exists, 8 `IMPL` rows (6 operators) attached |
 | 2 | **Option A** stay with NordicFreight | ✅ | ✅ | ✅ | "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots" |
 | 3 | **Option B** switch to ColdPath | ✅ | ✅ | ✅ | "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots" |
 | 4 | **Option C** buy own refrigerated van | ✅ | ✅ | ✅ | Object "our own refrigerated van"; "needs 48,000 pounds of capital spending" |
@@ -328,14 +334,52 @@ The corpus's whole point is that doc-05 refutes doc-01. The graph holds **both a
 ```
 
 `tortoise_expand_relationships` on **both** decision points returns only edges **inside their own
-document**. Doc-01's decision has 8 incoming `IMPL` endpoint rows (6 operators, all from doc-01).
-Doc-05's revert has 4 incoming `IMPL` (all from doc-05). `tortoise_explore_connections(doc-01
-decision, hops=3)` returns **8 nodes, all from doc-01** — it never reaches doc-05.
+document**. Doc-01's decision has 8 incoming `IMPL` rows — 6 operators, 7 distinct contents (§5).
+Doc-05's
+revert has 4 incoming `IMPL` (all from doc-05). `tortoise_explore_connections(doc-01 decision, hops=3)`
+returns **8 relationship rows** (the same 8 `operator_id`s the expand returned, duplicates included —
+not 8 *nodes*), all from doc-01: it never reaches doc-05.
 
-The extractor *did* extract the refuting facts (the failed audit, the licence clause). What it did not
-do is relate them to the claim they refute. `stats.supersessions: 0` on all five documents, and
-`sdk._capture_session`'s own docstring says supersession records form **only** when S3's search
-resolves them — S3 ran (`search_queries: 15`, `search_degraded: false`) and produced none.
+**The mechanism is NOT "the extractor never tried".** It tried, on the exact cross-document pair, and
+the edge was lost at the S3 identity gate. From `out/ingest-receipt.json`, doc-05
+(`documents[4].result`):
+
+* `stats.held: 3`, `held_reasons: {"partial": 6}`, `stats.supersessions: 0` — those two hold counters
+  are the finding, and the previous revision of this report named neither;
+* six `operator endpoint HELD not minted (#10997 S3 HOLD)` warnings, the first naming **doc-01's
+  claim** as the endpoint it could not resolve: *"NAND dst named 'ColdPath Logistics holds a validated
+  cold-chain certificate' but the identity lookup was partial, so whether this endpoint already
+  exists was never established — held with its edge, NOT persisted (no hold store was supplied)"*;
+* the run-level summary: *"S3 HOLD (#10997): 3 candidate(s) held — identity UNRESOLVED (partial=6);
+  run lookup was partial — not minted (I1) and not dropped (I2); NOT carried forward — no hold store
+  was supplied"*;
+* three `operator dropped: src/dst did not resolve to an emitted point/event` warnings, two of them
+  the cross-document pair: `'The cold-chain audit failed ColdPath Logistics last week'` → **doc-01's
+  certificate claim**, and the same source → doc-01's 9pm-cutoff reason;
+* `S3 identity partial: the existing-item lookup did not run for 11 of 25 candidate(s)` (doc-05). Every
+  document reports the same class of partial lookup: 6 of 21 (doc-01), 9 of 24 (doc-02), 2 of 17
+  (doc-03), 13 of 27 (doc-04).
+
+The NAND family that *did* persist is **intra-doc-05**, and it attacks doc-05's own belief point, not
+doc-01's claim: doc-05's `relation_write.edges` holds two `NAND` rows with `stated_predicate:
+"refutes"` and `write_path: "direct"`, both aimed at `We believed ColdPath Logistics was a viable
+delivery partner…` (`pt_dffe3b5e72…`) — the point doc-05 itself asserts. So the graph does represent
+"we believed X, then stopped" *inside* one document, and loses the cross-document edge that would make
+the reversal a conflict between documents.
+
+Two corrections to the previous revision's account of the cause:
+
+* `search_degraded: false` grades the **search** leg, not the identity lookup. The identity counter is
+  the `S3 identity partial` warning, and it says the lookup was partial for 6 of 21 candidates in
+  doc-01 — the very document whose claim the refutation had to join.
+* `supersessions: 0` is a **symptom** of two separate losses, not evidence that S3 produced nothing.
+  The operators were constructed and then (a) HELD because the endpoint lookup was partial — and the
+  hold was not persisted, because `hold_store` is `None` on the path that ships
+  (`tortoise/extractor_v2.py:3614`, *"the path that ships (`hold_store=None`)"*; no caller in
+  `tortoise/sdk.py`, `tortoise/mcp_server.py` or `tortoise/tool_registry.py` passes one), so there is
+  nothing for a later run's `#10997` drain to pick up — and (b) dropped on the arm that requires both
+  endpoints to resolve to an emitted point/event **within the same capture**, which a cross-document
+  edge can never satisfy when the other document's point was never in that capture's payload.
 
 This is the difference between "an operating model" and "a pile of true sentences about the
 business": the model must know that the current partner is NordicFreight *because* ColdPath was
@@ -366,30 +410,38 @@ constraint probe they take 3 of the top 5; on the naming probe they take **all 5
 `point_kind`/`entity_type` distinction in the reply that a caller can filter on without knowing the
 convention in advance.
 
-### G5 — no MCP door to enumerate Object / Subject / Event layers
+### G5 — the layer reads PARTLY work: `list_knowledge` rejects three kinds, and the Object/Subject/Event enumeration is **unmeasured**
 
 The brief's step 4 asks for "entity/object/subject/source reads". Over MCP:
 
-* `tortoise_list_knowledge(kind="object")` → `{"error":"list_knowledge: unknown kind 'object'. Valid
-  kinds: claim, source, source_reliability, batch, namespace, topic, diary"}`
-  (same for `subject`, `event`, `point`)
-* `tortoise_search(entity_type="object")` — the tool's own description says *"Full-scan mode: omit
-  query, set kind → all Points of kind"* — returns **0 rows** for `object`, `subject`, `event`,
-  `source`
-* `tortoise_query(kind="operator")` returns **0 rows**, though the graph has 24 operators
+* **Established, verbatim** (`out/readback.json` `.entities`): `tortoise_list_knowledge(kind="object")`
+  → `{"error":"list_knowledge: unknown kind 'object'. Valid kinds: claim, source,
+  source_reliability, batch, namespace, topic, diary"}` — same for `subject`, `event`, `point`. The
+  door has no `object`/`subject`/`event` kind. It DOES have claims and sources:
+  `list_knowledge(kind="source")` returns the 5 Sources, and `list_knowledge(kind="claim")` returns
+  the whole claim population — `total: 96`, `hasMore: false`, 62 `statement` + 34 `event`
+  (`out/census2.json` `.claims`, args `{"kind": "claim", "limit": 200}`).
+* **Withdrawn — the probe could not have returned rows.** The previous revision reported
+  `tortoise_search(entity_type="object")` → 0 rows as evidence of "no door". That call passed
+  neither `query` nor `kind`; full-scan mode is `is_full_scan = (query is None and kind is not None)`
+  (`tortoise/sdk.py:47018`), so the structural leg is never submitted and the retrieval legs have no
+  query — the arm is empty for **every** `entity_type`, which is why the same call also returned 0
+  rows for `source` (`out/census.json` `.fullscan_source`) while `list_knowledge` reads sources fine.
+  A malformed probe, not a product gap. The tool's own description, quoted two lines away in the
+  bulletin, says *"omit query, **set kind** → all Points of kind"* (`tortoise/tool_registry.py:517`).
+* **Withdrawn — `tortoise_query(kind="operator")`.** `kind` on `tortoise_query` is a **pointKind**
+  (`tortoise/tool_registry.py:303`: *"Query points by pointKind and/or property filters"*); the 24
+  operators are `is_operator` Points, which that argument does not address, so its 0 rows says nothing
+  about the operator population.
+* **Not measured, and therefore not claimed:** whether `tortoise_search(entity_type="object",
+  kind=<objectKind>)` — or `entity_type="operator"` — enumerates the 23 Objects / 24 operators. The
+  code path exists (`kind_field` = `objectKind` / `op_type`), but no call in this run exercised it.
+  **"No MCP door enumerates Object/Subject/Event" is withdrawn**: re-probe with `kind` named before
+  the gap is filed (UNVERIFIED item 2).
 
-The Object / Subject / Event layers genuinely have **no enumerating door**. The claim door does, and
-this report previously said otherwise: an earlier revision claimed
-`tortoise_list_knowledge(kind="claim")` → "0 rows", and **`out/census2.json` → `.claims` is that exact
-call** — `args {"kind": "claim", "limit": 200}`, `ok: true`, reply `{"results": [96 rows], "total":
-96, "hasMore": false}`, binned `pointKind` as **62 `statement` + 34 `event`**. The door returns the
-whole statement population and more; nothing in any committed artifact shows a `claim` call returning
-zero rows. That bullet was the sole justification for proposing a fix to a door that works.
-
-The Object / Subject / Event layers were readable only through `tortoise_graph_overview` (counts) and
-`tortoise_recall` (content). Those two doors work; the direct layer reads do not. **`check_structure`
-returned `{"result": []}`** on a graph that is holding two mutually exclusive live decisions — the
-structural validator sees no problem, which is consistent with G1.
+The layers *were* readable through `tortoise_graph_overview` (counts) and `tortoise_recall` (content).
+`check_structure` returned `{"result": []}` on a graph holding two mutually exclusive live decisions
+— the structural validator sees no problem, which is consistent with G1.
 
 ### G6 — the source layer cannot be listed over stdio MCP
 
@@ -413,12 +465,19 @@ capability the normal MCP way will never find the one tool that returns Objects 
 (`Tool tortoise_recall not listed by server, cannot validate any structured content` — emitted while
 the same call returned a full result set.)
 
-### G9 — `check_confidence(topic=…)` is inert, and disagreeing doors
+### G9 — `check_confidence(topic=…)` returned `[]` for every probe — against a contract that says it is a belief-chain window
 
-`tortoise_check_confidence(topic=<any of the six probes>)` returned `[]` for every probe, while
-`tortoise_check_confidence()` with no filter returns the whole population **and** the same call with
-`claim_id=""` returns rows with EP. Two doors disagree about the same graph, and the topic filter
-answers "nothing" about a topic the graph is full of.
+`tortoise_check_confidence(topic=<any of the six probes>)` returned `[]` for every probe, while the
+same tool with `claim_id=""` returns rows carrying EP (`out/census2.json` `.conf_one`). The
+observation is real.
+
+**What the previous revision got wrong is the expected contract.** At `51f444fd088`,
+`tortoise/sdk.py:31187` documents `topic=` as **"the dated belief chain for a topic, oldest window
+first"** — a belief-chain-window read, not a filter over the population. A graph whose 120 Points
+were all written inside one 11-minute capture (00:56–01:07 UTC) has no earlier window for any topic,
+so `[]` is what that arm should return; it is **not evidence the arm is inert**, and "make it filter"
+would change a documented contract. The work item is to *name* what a caller should get here before
+any change is proposed.
 
 ### G10 — token amplification is 128×
 
@@ -435,44 +494,21 @@ re-read verbatim against the corpus. The `quote` field **is** present on most se
 mechanism works — it is the silent subset without a span that matters, and the product counts it in
 `warnings` rather than exposing it as a per-Point flag.
 
-### G12 — one operator is written twice inside a single capture, and the second row is unmarked
-
-`out/census3.json` → `expand_doc01_decision.reply.result` returns the affordability mitigation
-twice, byte-identical:
-
-```json
-{"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments"}
-{"mechanism":"IMPL","related_content":"[MITIGATION] The cash buffer is 31,000 pounds and is already committed to the March supplier payments"}
-```
-
-Eight rows, eight distinct `related_id`s, but **six distinct `operator_id`s** — so this is not a
-duplicated endpoint on ONE operator, it is the same mitigation re-written through a second operator
-in the same capture. The read side has no signal to tell the caller the two rows are one fact: no
-`operator_id` grouping, no `duplicate_of`, no share count.
-
-This is the same class the report already notices on the goal probe (§4, rank 2–3: *"the same
-mitigation is returned **twice**"*) and it is exactly what the product's own `dedup_hits`/`skipped`
-machinery (§9.3) exists to prevent — which was **not exercised** by this run. It is reported here as
-a gap because §5's edge count depended on it: an earlier revision of this report read the eight rows
-as "7 edges", which is neither the row count nor the operator count.
-
-⚠️ **What the verdict guarantees, and what it does not.** Each phase now returns non-zero and writes
-`ok: false` when its target did not resolve or its relation read came back empty, so the *script*
-cannot report success over a failed read. It cannot stop an operator from committing an artifact a
-failing run wrote — no exit code can. The residual is that a human `git add` of a run whose exit code
-was non-zero is still possible; the `ok` field travels with the artifact so the artifact itself
-carries the contradiction.
-
 ---
 
 ## 8. Improvements — what to change in extraction, each with the evidence
 
-1. **Emit a cross-session conflict relation when S3/S4 finds that a new claim refutes a prior one.**
-   Today `supersessions: 0` and both sides stay `live`. The corpus gives the extractor exactly the
-   evidence it needs (doc-05 says the certificate is invalid, doc-01's decision cites it). A
-   `NAND`/`supersede` between the two decisions — or at minimum a `refutes` edge — is the single
-   change that turns this graph from a pile of sentences into an operating model. *Evidence: G1, G3;
-   §5 relation table; `expand` on both decision points.*
+1. **Carry the cross-document conflict the pipeline already builds — supply a hold store AND drop the
+   same-capture resolution requirement.** The emitter is not the gap: doc-05's capture constructed the
+   counter-claim `NAND` against doc-01's certificate claim and lost it at the S3 identity gate
+   (`held: 3`, `held_reasons: {"partial": 6}`, six `#10997 S3 HOLD` warnings, plus two
+   `operator dropped: src/dst did not resolve to an emitted point/event` warnings naming that pair).
+   The designed path out already exists — `identity_hold.open_store` and the `#10997` drain mint
+   exactly once on a later run whose lookup resolved — but nothing on the shipping path supplies a
+   store (`hold_store=None`, `tortoise/extractor_v2.py:3614`), so the held edge is carried nowhere,
+   and the drop arm requires the far side to be in *this* capture's payload, which a cross-document
+   edge never is. `supersessions: 0` is the symptom; this stage is the cause. *Evidence: G1, G3; §5
+   relation table; `expand` on both decision points.*
 2. **Add an output section for ownership.** `role → object performs/owns` is in the brief's required
    list and in `ONTOLOGY.md`'s predicate set (`ownedBy`, `managedBy`, `performs`), and the extractor
    reads the sentence correctly. It has nowhere to put it. *Evidence: G2; element 14.*
@@ -491,12 +527,17 @@ carries the contradiction.
    fixed. *Evidence: element 18; every `recall` row.*
 6. **Report cost, or report that cost is unavailable, per call.** `cost_usd: 0.0` beside
    `calls_without_cost: 19` reads as "free" rather than "unknown". *Evidence: G10; §2.*
-7. **Close the door/validator gaps before the next validation run.** Enumerate the Object/Subject/
-   Event layers over MCP (G5); list `tortoise_recall` in `tools/list` (G8); make
-   `check_confidence(topic=…)` filter rather than return `[]` (G9). Each is a case where the product
-   holds the data and its own tool cannot return it — which is how this validation had to reach for
-   `graph_overview` + `recall` to answer what the brief asked the layer reads directly. ⛔ The claim
-   door is **not** on this list: `list_knowledge(kind="claim")` returns all 96 rows (G5).
+7. **Close the door gaps that are actually established before the next validation run.** (a) G5's
+   established half: `list_knowledge` has no `object`/`subject`/`event` kind (verbatim in
+   `out/readback.json`). ⚠️ Its "no door enumerates them" half is **withdrawn pending the re-probe in
+   G5** — the first cut's `tortoise_search` probe passed neither `query` nor `kind`, so it never
+   entered full-scan mode and returned `[]` for `source` too, which `list_knowledge` reads fine;
+   re-probe with `kind` named, then restate the gap before filing it. (b) list `tortoise_recall` in
+   `tools/list` (G8) — established, and it hides the one tool that returns Objects with EP and
+   degree. (c) G9 is a **contract question, not a bug**: `check_confidence(topic=…)` is documented as
+   "the dated belief chain for a topic, oldest window first" (`tortoise/sdk.py:31187`), so `[]` on a
+   graph written inside one window is what that arm should return — name the expected behaviour before
+   proposing any change, and do not "make it filter" without an owner decision on the contract.
 8. **Give v4 a document-corpus door.** Otherwise "validate the extractor on a corpus" is only
    expressible as N session captures, and no customer has a corpus in that shape. *Evidence: G7;
    §1 scoping note.*
@@ -510,17 +551,17 @@ carries the contradiction.
    (`failed to lookup address information: Temporary failure in name resolution` for
    `files.pythonhosted.org`, retried over ~1 h across three attempts, while `api.github.com` and
    `api.deepseek.com` both resolve and respond). The worktree's own venv therefore cannot be built;
-   the run used the main checkout's venv by setting `TORTOISE_VENV` to it, with `PYTHONPATH` pinned at
-   this worktree, which resolves `import tortoise` to the worktree's code (verified). `run.sh`
-   defaults to `<worktree>/.venv` and reaches any other interpreter only through that variable — the
-   main-checkout path is **documented here and supplied by the caller**, never baked into the script.
-   **The code under test is this worktree at `origin/main = 51f444fd088`.**
-2. **No LLM key was exported in the operator's shell.** The product's v4 path reads
-   `DEEPSEEK_API_KEY` (`sdk._session_llm_provider` → `_PROVIDERS`), so the operator exported it from
-   pi's auth store **before** running the script. `run.sh` reads no credential file: it requires the
-   variable only for `run_ingest.py`, the one phase that makes a model call, so the three read-only
-   phases stay reproducible with no credential at all. One provider was exercised
+   the run uses the main checkout's venv with `PYTHONPATH` pinned at this worktree, which resolves
+   `import tortoise` to the worktree's code (verified). **The code under test is this worktree at
+   `origin/main = 51f444fd088`.**
+2. **No LLM key is exported in the shell.** The product's v4 path reads `DEEPSEEK_API_KEY`
+   (`sdk._session_llm_provider` → `_PROVIDERS`), so the operator exported the box's existing deepseek
+   credential from pi's auth store before invoking `run.sh`. One provider was exercised
    (`deepseek-direct`, `deepseek-v4-flash`); the openrouter/openai/gemini/venice routes were not.
+   ⚠️ **The consequence, stated: the script does not reproduce on another box unless the caller
+   supplies that key** — `run.sh` now REQUIRES it (`${DEEPSEEK_API_KEY:?…}`) rather than scraping a
+   store, and requires `TORTOISE_VENV` or a built `<worktree>/.venv`. The committed receipts are the
+   durable evidence; re-running needs both inputs.
 3. **One corpus, one run, one model.** Five documents, one capture each, no re-run for
    idempotency (the product reports `dedup_hits`/`skipped` machinery for that; not exercised here).
 4. **`tortoise_graph_overview` reported the container also holds `tortoise_test_matrix`** — a
@@ -531,37 +572,66 @@ carries the contradiction.
 
 ## 10. Artifacts
 
-| path | contents |
-|---|---|
-| `corpus/corpus.json` | the corpus (5 transcripts, ~1,160 tokens) |
-| `run_ingest.py` / `run_readback.py` / `run_census.py` / `run_census2.py` / `run_census3.py` | the five phases, SDK-write + MCP-read only |
-| `run.sh` | the one invocation; the interpreter root is caller-supplied (`TORTOISE_VENV`, default `<worktree>/.venv`) and the LLM credential is required **only** for `run_ingest.py` |
-| `stamp_provenance.py` | grades each artifact against its producer's own `WRITTEN_KEYS` and writes the `provenance` block; `--check` reds a missing or stale one |
-| `out/ingest-receipt.json` | per-document full product result envelope, warnings, `stats.llm` token table |
-| `out/readback.json` | verbatim MCP replies for the 6 search probes, layer reads, entity reads, recall, confidence |
-| `out/census.json`, `out/census2.json`, `out/census3.json` | object/subject/event full-scans, operator census, decision/reversal expansion, source list |
-| `out/tool-surface.json` | the live MCP surface: 39 tools with each tool's own `inputSchema` |
-| ~~`out/events.jsonl`~~ | **not committed** — 391 KB of raw SDK JSONL, scratch and not evidence; this bundle's own `.gitignore` excludes it for that reason. An earlier revision of this table listed it as an artifact. |
+| path | contents | producer |
+|---|---|---|
+| `corpus/corpus.json` | the corpus (5 transcripts, ~1,160 tokens) | authored for this run |
+| `run_ingest.py` | step 1 — the five captures, SDK-write only | — |
+| `run_readback.py` | step 2 — 6 search probes, layer/entity reads, recall, confidence, decision expansion (MCP-read only); carries `decision_probe_findings` | — |
+| `run_census.py` | step 3 — object/subject/event full-scan attempts, operator census, decision/reversal expansion, recall state, confidence-by-topic | writes `out/census.json` |
+| `run_census2.py` | step 4 — `list_knowledge(kind="claim")`, `check_confidence(claim_id="")`, `check_structure()` | writes `out/census2.json` |
+| `run_census3.py` | step 5 — decision/reversal expansions (ids **discovered by content**, never pasted) + source list | writes `out/census3.json` |
+| `run.sh` | the invocation; both inputs caller-supplied, nothing box-bound; the LLM credential is required **only** for `run_ingest.py` — the four read-only phases call no model | — |
+| `stamp_provenance.py` | grades each receipt against its producer's own `WRITTEN_KEYS` and writes the `provenance` block; `--check` reds a missing or stale one | — |
+| `out/ingest-receipt.json` | per-document full product result envelope, `warnings`, `stats.held`/`held_reasons`, `stats.llm` token table | `run_ingest.py` |
+| `out/readback.json` | verbatim MCP replies for the 6 search probes, layer reads, entity reads, recall, confidence, decision expansion | `run_readback.py` |
+| `out/census.json` | full-scan attempts per layer, operator-query census, decision/reversal expansion, recall:state, confidence-by-topic | `run_census.py` |
+| `out/census2.json` | the claim-door population (`total: 96`), the unfiltered confidence read, `check_structure` | `run_census2.py` |
+| `out/census3.json` | doc-01 decision expansion (8 rows / 6 operators / 7 distinct contents), the certificate claim's expansion, `explore_connections(hops=3)`, the source list | `run_census3.py` |
+| `out/tool-surface.json` | the live MCP surface: 39 tools with each tool's own `inputSchema` | `run_readback.py` |
+| `out/events.jsonl` (**not committed**) | the SDK event log — 391 KB of raw JSONL, **scratch**, excluded by this directory's `.gitignore`; reproducible with `run.sh` | `run_ingest.py` |
 
-### Artifact provenance — read this before quoting a number
+⚠️ **Two known defects in the committed receipts themselves, recorded rather than tidied away.**
 
-Every artifact in `out/` carries a `provenance` block, and **all four of them say
-`produced_by_committed_producer: false`**. They were carried from the 2026-11-25 run, which was made
-before `run_census2.py` / `run_census3.py` existed and before any producer wrote a provenance block,
-and they **cannot be regenerated**: `xv14592_operating_model` lived in this lane's private FalkorDB
-container, which was torn down at the end of the run (§9). The block states that, and it is measured
-rather than asserted — `stamp_provenance.py` reads each producer's own `WRITTEN_KEYS` and records
-what the artifact is missing (`census3.json`: `graph`, `provenance`, `ok`, `resolved`) and any point
-id passed as a call ARGUMENT that appears nowhere in the producer's source (`census3.json`: the two
-`pt_…` ids the old ad-hoc run pasted in). Re-running a producer overwrites its artifact with a
-structurally different file, and `stamp_provenance.py --check` then reds until the block is re-cut.
+* `out/readback.json`'s decision arm is a **FAILED read**: `decision_point: "doc-05_t5"` is an
+  episodic turn id, and `expand.reply = {"result": []}` / `explore.reply = []` are recorded beside
+  `ok: true`. The producer now refuses that shape (`pick_decision_point` + `decision_probe_findings`,
+  driven in `tests/test_14592_operating_model_evidence.py`), and §5's relation evidence comes from
+  `out/census3.json`, whose expansion DID run (8 rows).
+* `out/census.json`'s decision arm did not run at all (`decision_point_id: null`) for the same reason
+  in the first revision of `run_census.py`; the driver now searches with `limit=8`, picks by content
+  and records the finding instead of a null.
 
-⛔ `census.json` also carried a key *named* `provenance` that was really a
-`check_confidence(include_provenance=True)` CALL RECEIPT — so the artifact looked self-described while
-holding no provenance block at all. The receipt is kept (under `confidence_provenance_read`, the name
-the fixed producer writes) and the collision is recorded in the block.
+⚠️ **Provenance, stated rather than implied — and MEASURED.** Every receipt in `out/` carries a
+`provenance` block, and **all four say `produced_by_committed_producer: false`**. They were produced
+by the 2026-11-25 run **before** their producers were committed, so they are not that code's output,
+and they cannot be regenerated: the lane container is gone. `stamp_provenance.py` writes the block by
+measuring, not asserting — it reads each producer's own `WRITTEN_KEYS` and records the keys a re-run
+would write and this receipt lacks (`census3.json`: `graph`, `provenance`, `ok`, `resolved`) plus any
+`point_id` passed as a call ARGUMENT that appears nowhere in the producer's source (`census3.json`:
+the two `pt_…` ids the old ad-hoc run pasted in). It refuses to overwrite a producer-written block, and
+`--check` reds a stale one — so a re-run that regenerates a receipt cannot leave a stamp behind
+claiming it did not. The producers were written from the receipts' own recorded `tool`/`args` pairs —
+that is what pins them to the same calls. Any re-run needs steps 1–5 in one sitting and OVERWRITES
+these receipts.
 
----
+⚠️ **`census.json` carried a key *named* `provenance` that was really a call receipt.**
+`tortoise_check_confidence(include_provenance=True)` was stored under `provenance`, so the receipt
+looked self-described while holding no provenance block at all. The receipt is kept under
+`confidence_provenance_read` (the name the fixed producer writes) and the collision is recorded in the
+block rather than deleted.
+
+⚠️ **What the new `ok` verdicts guarantee, and what they do not.** Every phase now returns non-zero
+and writes `ok: false` when its target did not resolve or its relation read came back empty, so the
+*script* can no longer report success over a failed read. No exit code can stop an operator from
+committing a receipt a failing run wrote; the residual is that a human `git add` after a non-zero exit
+is still possible, which is why `ok` travels inside the receipt where the contradiction is visible.
+
+### What this bundle does not establish
+
+* **Object/Subject/Event enumeration.** Withdrawn (G5); the re-probe with `kind` named is owed.
+* **A reproduction of these numbers.** The receipts are the evidence; a re-run needs a built venv, an
+  LLM key and the container, so "reproducible" here means "the call set is committed and complete",
+  never "run it anywhere and get 96".
 
 ---
 

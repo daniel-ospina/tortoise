@@ -78,6 +78,84 @@ def _rows(reply):
     return []
 
 
+def _norm(text: object) -> str:
+    """Whitespace- and case-normalised content, for identity comparison."""
+    return " ".join(str(text or "").lower().split())
+
+
+def pick_point(rows, claim):
+    """The Point whose content IS the claim — by identity, never by search order.
+
+    Returns ``None`` (a refusal) rather than a near-miss. The previous revision
+    ranked a `startswith` preference ahead of `contains`, and measured across
+    every row this corpus produced that term was **False for all of them** (both
+    extracted forms are sentences that *contain* their marker), so the tie fell
+    through to whatever the search listed first. That is how the committed run
+    could record `decision_point_id: null` beside a graph that holds the
+    sentence, and how doc-05's refutation ("Two of ColdPath's vehicles could not
+    show a validated cold-chain certificate…") could be expanded as if it were
+    the claim it refutes.
+
+    Identity is the discriminating signal the corpus provides, so it is the only
+    one used: a row is the claim when its normalised content EQUALS the claim
+    sentence. A driver that cannot find its own target must say so, not pick the
+    most similar sentence it can see.
+    """
+    target = _norm(claim)
+    for row in rows or []:
+        if isinstance(row, dict) and _norm(row.get("content")) == target:
+            return row
+    return None
+
+
+async def _pick(client, out, key, claim):
+    """Search WITH the claim sentence and pick the Point by identity.
+
+    The claim is both the query and the identity the selected row must match, so
+    there is no separate marker that a nearby sentence could also satisfy.
+
+    `limit=8`, not 5: the committed run's decision probe did not surface the
+    decision inside its first five hits, so its expand arm recorded
+    `decision_point_id: null` and never ran — a failed read that the artifact
+    presented as a graph fact.
+    """
+    r = await _call(client, "tortoise_search", {"query": claim, "limit": 8})
+    out[f"{key}_search"] = r
+    point = pick_point(_rows(r.get("reply")), claim)
+    pid = (point or {}).get("id") or (point or {}).get("point_id")
+    out[f"{key}_point_id"] = pid
+    print(f"\n=== {key} point: {pid} — {str((point or {}).get('content'))[:90]}")
+    return pid
+
+
+def verdict(out: dict) -> int:
+    """0 only when every target resolved AND every relation read returned rows.
+
+    `relation_read_findings` used to be PRINTED while `run()` returned 0, so a
+    run whose relation evidence was missing committed cleanly and exited green.
+    """
+    return 1 if out.get("relation_read_findings") else 0
+
+
+def relation_rows(reply, keys=("result", "relationships", "nodes")):
+    """Rows from an expansion reply, in the three shapes the server uses."""
+    if isinstance(reply, str):
+        try:
+            return relation_rows(json.loads(reply), keys)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(reply, dict):
+        for k in keys:
+            if isinstance(reply.get(k), list):
+                return reply[k]
+        return []
+    if isinstance(reply, list):
+        if len(reply) == 1 and isinstance(reply[0], str):
+            return relation_rows(reply[0], keys)
+        return [row for row in reply if isinstance(row, dict)]
+    return []
+
+
 async def run() -> int:
     from fastmcp import Client
     from fastmcp.client.transports import PythonStdioTransport
@@ -134,25 +212,20 @@ async def run() -> int:
 
         # ── 4. the contradiction: is doc-05 wired against doc-01? ───────
         # Search both sides, then expand the doc-01 decision point's edges.
-        r = await _call(client, "tortoise_search",
-                        {"query": "we choose ColdPath Logistics as our delivery partner",
-                         "limit": 5})
-        out["decision_search"] = r
-        dec = next((x for x in _rows(r.get("reply"))
-                    if "choose ColdPath" in str(x.get("content", ""))), None)
-        dec_id = (dec or {}).get("id")
-        out["decision_point_id"] = dec_id
-        print(f"\n=== decision point: {dec_id} — {str((dec or {}).get('content'))[:90]}")
+        # Every id is DISCOVERED by content and a failed pick is recorded, so a
+        # missing id can no longer be written down as a successful read.
+        dec_id = await _pick(client, out, "decision",
+                             "We choose ColdPath Logistics as our delivery partner")
 
-        r2 = await _call(client, "tortoise_search",
-                         {"query": "we revert to NordicFreight and stop using ColdPath",
-                          "limit": 5})
-        out["reversal_search"] = r2
-        rev = next((x for x in _rows(r2.get("reply"))
-                    if "revert" in str(x.get("content", "")).lower()), None)
-        rev_id = (rev or {}).get("id")
-        out["reversal_point_id"] = rev_id
-        print(f"=== reversal point: {rev_id} — {str((rev or {}).get('content'))[:90]}")
+        rev_id = await _pick(
+            client, out, "reversal",
+            "We revert to NordicFreight as our delivery partner and stop using "
+            "ColdPath Logistics")
+
+        out["relation_read_findings"] = []
+        if not dec_id:
+            out["relation_read_findings"].append(
+                "no decision point was selected — expand/explore never ran")
 
         if dec_id:
             out["expand_decision"] = await _call(
@@ -166,6 +239,12 @@ async def run() -> int:
             print("\n=== explore_connections(decision, 2 hops) ===")
             print(json.dumps(out["explore_decision"].get("reply"),
                              indent=1, default=str)[:4000])
+            if not relation_rows(out["expand_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({dec_id}) returned no relations")
+            if not relation_rows(out["explore_decision"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"explore_connections({dec_id}) returned no connected nodes")
 
         if rev_id:
             out["expand_reversal"] = await _call(
@@ -173,6 +252,12 @@ async def run() -> int:
             print("\n=== expand_relationships(reversal) ===")
             print(json.dumps(out["expand_reversal"].get("reply"),
                              indent=1, default=str)[:3000])
+            if not relation_rows(out["expand_reversal"].get("reply")):
+                out["relation_read_findings"].append(
+                    f"expand_relationships({rev_id}) returned no relations")
+
+        for issue in out["relation_read_findings"]:
+            print(f"!! RELATION READ INCOMPLETE: {issue}")
 
         # ── 5. provenance: can the product trace a claim to its source? ──
         # ⛔ NOT the `provenance` artifact key. This is a CALL RECEIPT for a
@@ -188,13 +273,13 @@ async def run() -> int:
         print(json.dumps(out["confidence_provenance_read"].get("reply"),
                          indent=1, default=str)[:3000])
 
-    code = 0 if out.get("decision_point_id") else 1
+    code = verdict(out)
     out["ok"] = code == 0
     (OUT / "census.json").write_text(json.dumps(out, indent=2, default=str) + "\n")
     print(f"\nwrote {OUT / 'census.json'}")
     if code:
-        print("!! census NOT OK: the decision search surfaced no row whose content "
-              "IS the decision, so no relation read was attempted")
+        print("!! census NOT OK: a target did not resolve to its claim sentence or "
+              "a relation read returned no rows")
     return code
 
 
