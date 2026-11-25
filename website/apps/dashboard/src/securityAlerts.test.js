@@ -304,8 +304,21 @@ test('#10156: the panel source never reintroduces the blanket imperative', () =>
     .join('\n')
   assert.doesNotMatch(surfaces, /Revoke any key/i)
   assert.doesNotMatch(surfaces, /Suspicious activity detected/i)
-  // …and the render shows the SERVER's message, not a copy of its own.
+  // …and the render shows the SERVER's message, not a copy of its own. Both halves
+  // are asserted: the ledger derives the sentence from `alert.message`, and the
+  // component renders the derived `entry.message`. Asserting only the first (as an
+  // earlier version did) passes even if the render invents its own copy.
   assert.match(readFileSync(join(here, 'notificationLedger.js'), 'utf8'), /alert\.message/)
+  assert.match(readFileSync(join(here, 'notificationPanel.jsx'), 'utf8'), /entry\.message/)
+})
+
+test('#14686: the `flagged` badge points at the surface that exists', () => {
+  // The badge used to read "Suspicious activity detected — see security alerts",
+  // naming the heading of the block #14686 removed. A pointer to a surface that no
+  // longer exists is how a reader learns the dashboard is stale.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  assert.doesNotMatch(main, /see security alerts/i)
+  assert.match(main, /see notifications/i)
 })
 
 test('#14686: the alerts no longer render as blocks inside the dashboard content', () => {

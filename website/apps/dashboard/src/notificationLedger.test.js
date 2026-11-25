@@ -13,6 +13,9 @@ import assert from 'node:assert/strict'
 
 import {
   DETAIL_NO_DETAIL,
+  KIND_ACTIVITY,
+  KIND_INCIDENT,
+  KIND_UNCLASSIFIED,
   SNOOZE_PERIODS,
   buildLedger,
   detailOf,
@@ -330,6 +333,43 @@ test('two rows that share an identity render as ONE row, and the newest wins', (
   assert.equal(buildLedger({ alerts: [olderBout, newerBout], state, now: NOW }).unresolved, 0)
 })
 
+test('an ACKNOWLEDGED newest row must not hide an older UNACKNOWLEDGED one', () => {
+  // Review finding (P1): the server's identity for a `flag` is type + RULE, and the
+  // customer message deliberately omits the rule — so two genuinely different
+  // episodes share the client key. Collapsing to the newest meant that once
+  // today's bout was acknowledged, an older unacknowledged one was neither listed
+  // nor counted: an alert made invisible on a security surface.
+  const olderUnacked = alert({
+    message: 'same wording',
+    at: new Date(NOW.getTime() - 20 * DAY).toISOString(),
+    count: 3,
+    acked: false,
+  })
+  const newerAcked = alert({
+    message: 'same wording',
+    at: new Date(NOW.getTime() - 1 * HOUR).toISOString(),
+    count: 9,
+    acked: true,
+    episode: 'flag||different-rule',
+  })
+  for (const input of [[olderUnacked, newerAcked], [newerAcked, olderUnacked]]) {
+    const ledger = buildLedger({ alerts: input, state: emptyState(), now: NOW })
+    assert.equal(ledger.unresolved, 1, 'the unacknowledged bout must be counted')
+    assert.equal(ledger.acked.length, 0, 'the identity is unresolved, so it is not "acked"')
+    const listed = [...ledger.current, ...ledger.older]
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0].countLabel, '\u00d73', 'the row describes the UNRESOLVED bout')
+  }
+  // Both acknowledged -> the identity is acknowledged, and leaves the ledger.
+  const bothAcked = buildLedger({
+    alerts: [olderUnacked, newerAcked].map((a) => ({ ...a, acked: true })),
+    state: emptyState(),
+    now: NOW,
+  })
+  assert.equal(bothAcked.unresolved, 0)
+  assert.equal(bothAcked.acked.length, 1)
+})
+
 test('an activity row is flagged as a measurement, an incident row is not', () => {
   const [incident] = buildLedger({ alerts: [alert()], state: emptyState(), now: NOW }).current
   const [activity] = buildLedger({
@@ -409,6 +449,33 @@ test('a detail payload is shown only through the customer-safe allow-list', () =
   const json = JSON.stringify(shown.extra)
   assert.ok(!json.includes('point_create'))
   assert.ok(!json.includes('scope'))
+})
+
+test('an EMPTY detail payload carries nothing, and is not reported as carrying detail', () => {
+  // Review finding: `details: {}` rendered "This alert carries machine detail that
+  // the dashboard does not display." It carries none.
+  const detail = detailOf(alert({ details: {} }), NOW)
+  assert.equal(detail.detailState, 'none')
+})
+
+test('an unclassified row does not claim that nothing was changed', () => {
+  // `registerOf` FAIL-QUIETS an unknown row into the activity register, so the
+  // activity sentence ("It changed nothing.") would be an affirmative claim about a
+  // row this client cannot read. Only a server-stamped register earns it.
+  const unclassified = detailOf(alert({ type: 'brand_new', register: undefined }), NOW)
+  const kind = unclassified.fields.find((f) => f.label === 'Kind').value
+  assert.equal(kind, KIND_UNCLASSIFIED)
+  assert.doesNotMatch(kind, /changed nothing/)
+  // A stamped activity row still gets its own sentence.
+  const activity = detailOf(
+    alert({ type: 'read_velocity', register: 'activity', message: 'x' }), NOW,
+  )
+  assert.equal(activity.fields.find((f) => f.label === 'Kind').value, KIND_ACTIVITY)
+  // …and an incident row is never described as a measurement.
+  assert.equal(
+    detailOf(alert(), NOW).fields.find((f) => f.label === 'Kind').value,
+    KIND_INCIDENT,
+  )
 })
 
 test('a payload with nothing displayable is NOT reported as "nothing was recorded"', () => {

@@ -1309,6 +1309,7 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
   header.dash-header .header-cluster { max-width: 100%; gap: 8px; }
   .header-cluster .account-name { max-width: 72px; }
 }
+.notif-panel-head h2 { font-size: 13px; margin: 0; font-weight: 600; }
 .notif-panel-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   padding: 2px 4px 8px; margin-bottom: 6px;

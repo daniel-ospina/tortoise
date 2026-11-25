@@ -250,6 +250,23 @@ export function episodeRangeLabel(alert) {
     : `${first.toLocaleDateString()} ${time(first)} → ${last.toLocaleDateString()} ${time(last)}`
 }
 
+// ── #14686: RESIDUE ────────────────────────────────────────────────────────
+//
+// The exports below this line lost their only production consumer when the
+// two-register panel (`securityAlertsPanel.jsx`, deleted) became the notifications
+// ledger: `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`,
+// `ACKED_CHIP`/`ACK_BUTTON`/`ACK_PENDING`, `SHOW_OLDER`/`HIDE_OLDER`,
+// `NOTHING_RECENT`/`ALL_RECENT_ACKED`, `isCurrent`, `groupAlerts`, `isEmptyFeed`.
+// They are kept only because their tests still assert them, and they are NOT
+// reachable from any render — a reader looking for the copy a customer sees must
+// read `notificationLedger.js` (the ledger's copy) and the server's
+// `_alert_dict` (the per-row sentences), not this file's headings.
+//
+// This note exists so a lane can tell DEAD COPY from live copy instead of
+// trusting that an export with passing tests is in use; deleting them is a copy
+// review (the register distinction they encode is now a per-row chip), not a
+// mechanical remove.
+
 /**
  * Split the feed into the two registers, each further split into what renders
  * now and what is behind "Show older".
