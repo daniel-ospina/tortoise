@@ -33,7 +33,7 @@ is what the product TELLS a caller about the refusal it just made.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -66,6 +66,12 @@ PRO_HARD_STOP_MB = PRO_CAP_MB * _STORAGE_BAND.cap_band.refuse_at
 #: The figure measured on the deployed graph when the defect was found.
 MEASURED_USED_MB = 329.0
 
+#: How old this file's meter reading may be. Generous next to the 300 s offset the
+#: fixture uses, and far below `allowance_gate.STALE_AFTER_SECONDS` — the point is
+#: to catch a LITERAL date (thousands of seconds old within a day of merging, or
+#: negative when future-dated), not to squeeze the offset.
+_FRESH_FIXTURE_MAX_AGE_S = 360
+
 
 def test_the_cap_under_test_is_the_artifact_number_not_a_literal():
     """`PRO_CAP_MB` is derived so the 1.5x arithmetic survives a price revision.
@@ -90,18 +96,41 @@ def _single_sample_meter(used: float):
 
     ``repeats`` is None, so the gate takes its single-sample arm and composes the
     refusal this test is about (``… the reading comes from a single sample``).
+
+    ⛔ ``measured_at`` is RELATIVE TO THE RUN, never a literal date (#9127, third
+    recurrence): this dimension is bounded by ``allowance_gate.STALE_AFTER_SECONDS``
+    (24 h), and ``_stale()`` treats a reading past that bound as stale — which
+    leaves the cap UNARMED and the gate serving the write, so the refusal this file
+    pins stops being composed at all. The literal this replaces
+    (``2026-11-24T02:00:00+00:00``) was inside the bound when it merged
+    (`da4b76a5851c`, 2026-11-23) and reddened the required `test (e)` shard exactly
+    one staleness bound later at 2026-11-25T02:00Z, with no commit in between. A
+    fixture that must be FRESH is written as an offset from now, always: the bound
+    is the thing under test, so the fixture must not be racing it.
+
+    ⛔ And the RULE is asserted, not just described (P3 on this repair's review):
+    a bare docstring left the class open — a future-dated literal
+    (``2027-06-01T00:00:00+00:00``) passed all ten tests, because a date in the
+    future is a bomb with a later fuse and ``_stale()`` cannot see a negative age.
+    So the age is bounded on BOTH sides below. A literal lands outside this window
+    within minutes of being written and stays outside forever after (a future-dated
+    one is outside immediately); the 300 s offset above cannot drift out from under
+    it. The window is deliberately a little wider than the offset (60 s of headroom)
+    because the two ``now`` reads sit microseconds apart inside one call.
     """
+    measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    age = (datetime.now(UTC) - datetime.fromisoformat(measured_at)).total_seconds()
+    assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
+        f"this fixture's reading is {age:.0f}s old; it must be written as an offset "
+        f"from now (-60s <= age <= {_FRESH_FIXTURE_MAX_AGE_S}s — the window is a "
+        "little wider than the 300 s offset it expects), never as a literal date. "
+        "A literal is a calendar bomb: past the 24 h bound the cap goes UNARMED, the "
+        "gate SERVES the write, and the refusal these tests pin is never composed "
+        "— which reddens the required `test (e)` shard one bound after it merges, "
+        "with no commit in between (#9127, third recurrence).")
     return lambda _org: MeterReading(
         used=used,
-        # ⛔ CLOCK-DERIVED, NEVER A LITERAL (#9127). The gate ages a reading
-        # against `STALE_AFTER_SECONDS` (24 h) and, past that bound, leaves the
-        # dimension UNARMED — so a hardcoded stamp is a FRESHNESS fixture with a
-        # shelf life: stamped `2026-11-24T02:00:00+00:00` it was true for one
-        # day, then reddened this file on 2026-11-25 with NO code change and no
-        # diff to blame, taking `python-ci-gate` (the REQUIRED aggregate) red for
-        # every PR. This stamp is not a parse input, so deriving it from the
-        # clock is the only form that cannot rot.
-        measured_at=datetime.now(UTC).isoformat(),
+        measured_at=measured_at,
         estimated=True,
         note="SAMPLING ESTIMATE that excludes the HNSW vector index",
     )

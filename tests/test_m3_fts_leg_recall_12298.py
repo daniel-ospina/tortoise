@@ -1425,12 +1425,29 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # live file with `sed -n "<n>p"`, never nudged by a constant — the three rows did
     # move by the same delta this time, which is a measurement, not an assumption.
     # The SYMBOLS are unchanged; only the numbers moved.
-    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21042`"),
-    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
-     "`:21485`"),
-    ("tortoise/projection/__init__.py", 21927,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
+    #
+    # ⛔ AND AGAIN, the SAME way (#14639): two merges grew the same module above all
+    # three rows and neither re-derived them — `3bbe5567df24` (#14596) +25, then
+    # `939e37f664e5` (#14567) +124, so the pin sat 149 lines behind `main` and shard
+    # `test (c)` reddened on every head. Measured per hop, not by adding a delta to
+    # the previous number: the same three symbols were located at 21042/21485/21927
+    # (`e0accb8fe63`), 21067/21510/21952 (`3bbe5567df24`) and 21191/21634/22076
+    # (`939e37f664e5`). Uniform shift per hop is a MEASUREMENT here, not an
+    # assumption — the symbol text is what moved the number, and neither changed.
+    #
+    # ⛔ AND ONCE MORE, by a lane that owns no index change at all (#14621): the
+    # `:Source`-denial fix added +9 net lines to `tortoise/projection/__init__.py`
+    # (`_resolve_entity` now selects `labels(n) AS nodeLabels` and carries a
+    # `labels` key) ABOVE all three rows, so §1 of the brief and this pin were
+    # 9 lines behind the tree. Re-measured on the LIVE file — 21200/21643/22085 —
+    # not derived by adding 9 to the previous three: the uniform delta is what was
+    # measured, never what was assumed. The SYMBOLS are unchanged.
+    ("tortoise/projection/__init__.py", 21200, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21200`"),
+    ("tortoise/projection/__init__.py", 21643, "def _create_fulltext_index(",
+     "`:21643`"),
+    ("tortoise/projection/__init__.py", 22085,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22085`"),
 )
 
 
