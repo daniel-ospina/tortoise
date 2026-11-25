@@ -267,7 +267,7 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: operator shape that carries a vector at all — measured on a scratch graph
 #: (`tests/test_14560_operator_vectors.py`, with the docker lane's URI): a
 #: `create_operator` Point lands NO
-#: `embedding` in either store (operators store no content, `#548`), while a hybrid
+#: VECTOR in either store (operators store no content, `#548`), while a hybrid
 #: Point lands one in the graph AND journals it, so its record row is filled by the
 #: same write.
 #:

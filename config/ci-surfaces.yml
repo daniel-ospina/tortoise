@@ -10181,7 +10181,7 @@ surfaces:
   # (the false PASS the pin exists to remove).
   - test_14192_read_wave_tool.py
   # #14560: the OPERATOR slice's population and denominator, MEASURED on a real graph —
-  # a pure `create_operator` carries no `embedding` in either store, a hybrid
+  # a pure `create_operator` carries no VECTOR in either store, a hybrid
   # (`create_point(op_type=…)`) carries one in BOTH, and `_label_vector_count("operator")`
   # reads the SLICE rather than the whole `:Point` label. ⛔ `core` IS THE LOAD-BEARING ROW and
   # the `sdk` row further down is NOT a substitute for it: the file's subjects are
@@ -11502,7 +11502,7 @@ surfaces:
   - eval/write_path/test_value_span_census_2684.py
   - test_12855_outdated_rewrite.py  # #12855: dual-registered with `core` (see the `core` row) — an `sdk`-selecting diff (e.g. `tortoise/retrieval.py`) REPLACES the `core` fallback, so the suite needs its own `sdk` row
   # #14560: the OPERATOR slice's population and denominator, MEASURED on a real graph —
-  # a pure `create_operator` carries no `embedding` in either store, a hybrid
+  # a pure `create_operator` carries no VECTOR in either store, a hybrid
   # (`create_point(op_type=…)`) carries one in BOTH, and `_label_vector_count("operator")`
   # reads the SLICE rather than the whole `:Point` label. DUAL-REGISTERED, and the SPLIT IS
   # MEASURED rather than assumed, because the two rows are not equal evidence: a diff to the

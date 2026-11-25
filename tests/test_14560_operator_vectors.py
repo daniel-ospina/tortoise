@@ -80,14 +80,15 @@ def sdk():
 def journalled_sdk(tmp_path):
     """The same fresh graph, but with a REAL journal configured.
 
-    ⛔ THIS FIXTURE EXISTS BECAUSE `_Journal` CANNOT ANSWER THE RECORD'S SHAPE. That hook
-    reads `kw["point"]` — the dict `_emit_event` RECEIVED — and `_emit_event` then COPIES
-    it and forces `embedding` present before journalling. So an arm that reads the INSERT
-    off `_Journal` grades the caller's argument, and a MUTANT that deletes the forcing
-    (`tortoise/sdk.py` → `clean.setdefault("embedding", None)`) leaves it green. The
-    default `sdk` fixture has NO journal (`event_log_path=None`), which is exactly why
-    that chokepoint is unreachable there — so the arm that makes a claim about the RECORD
-    runs here instead, against the JSONL the production write actually appends.
+    ⛔ EVERY ARM ABOUT THE RECORD'S SHAPE RUNS HERE, because a hook CANNOT answer it.
+    `_emit_event` receives the CALLER's dict, COPIES it, and forces `embedding` present
+    before journalling (`tortoise/sdk.py` → `clean.setdefault("embedding", None)`,
+    `#5004`). An arm that grades the argument therefore measures the caller's INTENT: a
+    MUTANT that deletes the forcing — or that strips the vector on the way into the
+    journal — leaves it GREEN. The default `sdk` fixture has NO journal
+    (`event_log_path=None`), which is exactly why that chokepoint is unreachable there,
+    so the arm that makes a claim about the RECORD runs here instead, against the JSONL
+    the production write actually appends.
     """
     _skip_unless_live_uri()
     reset_circuit_breakers()
@@ -123,50 +124,6 @@ def _vector(hot: int = 3) -> list[float]:
     values = [0.0] * _DIM
     values[hot] = 1.0
     return values
-
-
-class _Journal:
-    """Capture what a write JOURNALS — the snapshot the record projection reads.
-
-    The record has no other input: `record_projection.mutations_for` projects the
-    journal record, so "does the record's row carry a vector?" is answered by the
-    snapshot, not by the graph and not by the projection's code.
-
-    ⛔ THE SNAPSHOT CAPTURED HERE IS THE CALLER'S INTENT, NOT THE JOURNALLED RECORD
-    (#14572 review). The `hook` below reads `kw["point"]` — the dict `_emit_event`
-    RECEIVED — and `_emit_event` then COPIES it and FORCES `embedding` present
-    (`sdk.py` → `clean.setdefault("embedding", None)`, `#5004` "presence is
-    ownership"). So an arm that reads the INSERT off this dict measures the argument,
-    not the production row: the record the journal holds carries `embedding: None` on
-    a pure operator. ⛔ ANY ARM ABOUT THE RECORD'S SHAPE BELONGS ON `journalled_sdk`
-    INSTEAD — that fixture configures a real `event_log_path`, so the assertion can be
-    made against the JSONL the production write appended (and can RED if the forcing is
-    deleted). Forcing the key here in the test instead would certify itself.
-    """
-
-    def __init__(self, sdk):
-        self.events: dict[str, tuple[dict, dict]] = {}
-        self._sdk = sdk
-        self._original = sdk._emit_event
-
-    def __enter__(self):
-        def hook(type_, payload=None, **kw):
-            self.events.setdefault(type_, (payload or {}, kw))
-            return self._original(type_, payload, **kw)
-
-        self._sdk._emit_event = hook
-        return self
-
-    def __exit__(self, *_exc):
-        self._sdk._emit_event = self._original
-        return False
-
-    def record(self, type_: str) -> dict:
-        payload, kw = self.events[type_]
-        record = {"type": type_, **payload}
-        if kw.get("point"):
-            record["point"] = kw["point"]
-        return record
 
 
 def _graph_vector_counts(sdk) -> tuple[int, int]:
@@ -209,25 +166,33 @@ def _point_insert_columns(record: dict) -> str:
 
 # ── the measurement ────────────────────────────────────────────────────────
 
-def test_the_point_table_CAN_hold_a_vector_so_the_absence_below_means_something(sdk):
-    """The control the two cases below rest on: the column exists and is populated.
+def test_the_point_table_CAN_hold_a_vector_so_the_absence_below_means_something(
+        journalled_sdk):
+    """The control the operator arm rests on: a vector-bearing Point lands its vector.
 
-    Without this, "the operator's INSERT has no `embedding` column" would be
-    indistinguishable from "no INSERT ever carries one" — and a reader would be free
-    to conclude the record cannot store a Point vector at all.
+    ⛔ THE CONTROL'S JOB is to separate "the operator's column is bound to NULL" from
+    "no INSERT ever carries an `embedding` column" — the distinction the operator arm's
+    two halves assert. So it must FAIL if a vector is lost on the way into the record,
+    which means it grades the JOURNALLED snapshot (`journalled_sdk`), not the dict the
+    caller handed `_emit_event`: that dict already carries the vector, so an arm reading
+    it stays GREEN under a write that strips the vector from the journalled copy.
     """
     columns = record_projection.table_columns()["point"]
     assert "embedding" in columns, sorted(columns)
     assert "embedding_vec" in columns, sorted(columns)
 
-    with _Journal(sdk) as journal:
-        sdk._create_point("statement", "a plain claim carries a vector",
-                          embedding=_vector())
-    record = journal.record("PointAdded")
-    assert "embedding" in (record.get("point") or {}), sorted(record.get("point") or {})
+    sdk, journal_path = journalled_sdk
+    vector = _vector()
+    sdk._create_point("statement", "a plain claim carries a vector", embedding=vector)
+    record = _journalled_record(journal_path, "PointAdded")
+    snapshot = record.get("point") or {}
+    assert snapshot.get("embedding") == pytest.approx(vector), (
+        "a plain Point's vector did not survive into the JOURNALLED record — then the "
+        "operator arm below is vacuously green and grades nothing: "
+        f"{sorted(snapshot)}")
     assert "embedding" in _point_insert_columns(record).split(", "), (
-        "a plain Point's journal vector did not reach the record's INSERT — then the "
-        "control below is vacuously green and the operator arm grades nothing")
+        "a plain Point's JOURNALLED vector did not reach the record's INSERT — then the "
+        "operator arm below is vacuously green and grades nothing")
     # ⛔ THE ASSERTIONS ABOVE ARE THE CONTROL'S TEETH. An `assert point["id"]` stood
     # here and could not red under any mutation of this diff (the SDK always returns an
     # id), so it was dead weight rather than a third grade — #14560 review, advisory 2.
@@ -244,11 +209,12 @@ def test_a_pure_operator_carries_no_vector_in_either_store(journalled_sdk):
     `mirror_required('operator')` therefore cannot be protecting one.
 
     ⛔ BOTH HALVES ARE GRADED ON THE OBJECT THEY ARE ABOUT, which is why this arm takes
-    the JOURNALLED fixture rather than `_Journal`: the graph read-back is asserted off
-    `_get_point`, and the record's shape off the JSONL the production write appended. An
-    arm that read the INSERT off `_Journal`'s captured argument would assert about a dict
-    the journal never holds, and would stay GREEN if the `setdefault` that forces the key
-    were deleted — a false grade over the exact mechanism this whole diagnosis rests on.
+    the JOURNALLED fixture rather than a hook on `_emit_event`: the graph read-back is
+    asserted off `_get_point`, and the record's shape off the JSONL the production write
+    appended. An arm that read the INSERT off the CALLER's dict — the one `_emit_event`
+    RECEIVES — would assert about a record the journal never holds, and would stay GREEN
+    if the `setdefault` that forces the key were deleted — a false grade over the exact
+    mechanism this whole diagnosis rests on.
     """
     sdk, journal_path = journalled_sdk
     a = sdk._create_point("statement", "anchor one", embedding=_vector(1))
@@ -278,14 +244,14 @@ def test_a_pure_operator_carries_no_vector_in_either_store(journalled_sdk):
     # ⛔ AND THE RECORD'S ROW IS NOT COLUMN-LESS. `embedding` is present on the journalled
     # snapshot and bound to NULL, so the INSERT HAS the column. The earlier cut asserted
     # the column was ABSENT — false about the production row — because it graded
-    # `_Journal`'s captured argument, a dict the journal never holds.
+    # the CALLER's argument, a dict the journal never holds.
     columns = _point_insert_columns(record).split(", ")
     assert "embedding" in columns, (
         "the operator's record row carries no `embedding` column even though the "
         f"journalled snapshot binds it to NULL: {columns}")
 
 
-def test_a_hybrid_operator_carries_its_vector_in_BOTH_stores(sdk):
+def test_a_hybrid_operator_carries_its_vector_in_BOTH_stores(journalled_sdk):
     """The one operator shape WITH a vector, and it never needs a copy.
 
     `create_point(op_type=…)` writes `is_operator = false` WITH an `op_type` — the
@@ -298,16 +264,22 @@ def test_a_hybrid_operator_carries_its_vector_in_BOTH_stores(sdk):
     short — the write already lands it on both sides. The measured `fillable` for
     such a slice is zero by construction, not by luck.
     """
-    with _Journal(sdk) as journal:
-        hybrid = sdk._create_point("statement", "a hybrid operator claim",
-                                   op_type="IMPL", embedding=_vector())
+    sdk, journal_path = journalled_sdk
+    vector = _vector()
+    hybrid = sdk._create_point("statement", "a hybrid operator claim",
+                               op_type="IMPL", embedding=vector)
     whole, kinded = _graph_vector_counts(sdk)
     assert (whole, kinded) == (1, 1), (whole, kinded)
 
-    record = journal.record("PointAdded")
-    assert "embedding" in (record.get("point") or {}), sorted(record.get("point") or {})
+    # ⛔ THE RECORD HALF IS READ OFF THE JOURNAL, not off a hook on `_emit_event`: the
+    # hook sees the CALLER's dict, so it would stay green even if the write stripped the
+    # vector out of the copy it journalled — and the claim made here is about the record.
+    record = _journalled_record(journal_path, "PointAdded")
+    assert (record.get("point") or {}).get("embedding") == pytest.approx(vector), (
+        "the hybrid operator's vector did not survive into the JOURNALLED record: "
+        f"{sorted(record.get('point') or {})}")
     assert "embedding" in _point_insert_columns(record).split(", "), (
-        "the hybrid operator's vector did not reach the record's INSERT")
+        "the hybrid operator's JOURNALLED vector did not reach the record's INSERT")
     assert hybrid.get("is_operator") is False and hybrid.get("op_type") == "IMPL", hybrid
 
 
