@@ -200,19 +200,21 @@ def list_layer(
     # GET that creates the store it was asked to read is a write, and this module
     # holds only reads.
     #
-    # ⚠️ INHERITED RESIDUE, stated rather than implied: this module's OWN calls
-    # hold the rule, but THREE delegations it reaches still resolve through
-    # GRAPH.QUERY — `projection._resolve_entity` (behind every by-id route and
-    # `/belief`), `navigation._resolve_root` (behind `entity_relations`), and the
-    # SDK arm `/v1/sources` delegates to: `TortoiseSDK.list_knowledge(kind=
-    # 'source')` -> `TortoiseSDK._list_sources`, which runs
-    # `MATCH (s:Source) …` over `proj.g.query` (`sdk.py::_list_sources`). So
-    # "the new GETs cannot mint a graph" is true of the Cypher below and NOT yet
-    # of those three; fixing them is pre-existing debt in their own homes, not a
-    # guarantee this module's comment can confer. A reviewer read the sentence
-    # above as covering them, which is why the residue is named here — and read
-    # it as covering only the two IDENTITY resolutions, which is why the third is
-    # named with the route that reaches it.
+    # ⚠️ INHERITED RESIDUE, stated as a MECHANISM rather than a list: this module's
+    # OWN calls hold the rule, and that is the whole of what it can promise. A GET
+    # that delegates inherits whatever verb the arm it delegates to uses, and
+    # several of these mint — `projection._resolve_entity` (behind every by-id route
+    # and `/belief`), `navigation._resolve_root` (behind `entity_relations`),
+    # `TortoiseSDK._list_sources` (the `list_knowledge(kind='source')` arm behind
+    # `/v1/sources`, `MATCH (s:Source) …` over `proj.g.query`), and `/belief`'s
+    # `TortoiseSDK._provenance` (further `proj.g.query` sites, reached on that
+    # route's most common input, a Point). ⛔ There is deliberately NO COUNT here: a
+    # number is a claim about call sites in OTHER modules, so it goes stale without
+    # anyone touching this file — which is why an earlier cut of this paragraph said
+    # "two" and was wrong. What stays true: "the new GETs cannot mint a graph" is a
+    # guarantee about the Cypher BELOW, never about these routes end to end. Fixing
+    # the delegated arms is pre-existing debt in their own homes; `grep -n
+    # 'g\.query(' ` on the module a route delegates to is how to audit it.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set
