@@ -73,13 +73,16 @@ version: 1
 # `tests/test_sdk_privatise_sweep.py` at **28.0 s** — a `core` file whose weight is not flat, so do
 # not read that list as "all 2.0 s".
 # ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
-# in `durations` (one of four here: `#14597`'s, `#14560`'s, `#14552`'s and `#14592`'s, plus the
+# in `durations` (one of five here: `#14597`'s, `#14560`'s, `#14552`'s, `#14592`'s and the
 # RATCHET's — measured at this head, 5 rows among the files named above). A REGISTRATION is a surface
-# entry on ANY `surfaces` key — `fast_pool()` folds every one of them
-# (`for s, files in manifest["surfaces"].items(): classified.update(files)`,
-# `tools/ci_selection.py:5694`) — so it puts the file in `fast_pool()` and lets the header's
-# `DEFAULT_FAST_WEIGHT` apply. `core` is the common case but is not the definition: the `#14544`
-# sentence below is carried by an `eval` registration ALONE. That is what `#14574`'s file and
+# entry on ANY `surfaces` key — `fast_pool()` folds every one of them (its
+# `for s, files in manifest["surfaces"].items(): classified.update(files)`), and a registration is
+# NECESSARY but NOT sufficient for pool membership: the same call then subtracts `slow_files`,
+# `ENV_BROKEN_FILES`, `carve_out` and `on_demand` (measured at this head: 1513 registered, 176 of
+# them not in `fast_pool()` — `test_guard.py` is `core`-registered and `carve_out`). For a file that
+# IS in the pool, a registration is what puts it there and lets the header's `DEFAULT_FAST_WEIGHT`
+# apply. `core` is the common case but is not the definition: the `#14544` sentence below is carried
+# by an `eval` registration ALONE. That is what `#14574`'s file and
 # `#14607`'s two have (measured: 0 `durations` rows each), so calling any of them a "row" is a false
 # claim about the map and the arm that grades it,
 # `test_the_fast_shards_header_block_calls_a_row_only_what_has_one`, reds on that spelling. Nor is a
@@ -88,22 +91,26 @@ version: 1
 # zero, so a `--emit-push-matrix` run on `main` lands on the same two bins. ⛔ That agreement is a
 # READING of this head, never a licence to copy a parent's figure in — and none is copied; the verb
 # was run on the tree this block merges INTO. The delta is ZERO here, and it was MEASURED, not
-# reasoned: `fast_pool()` holds 1337 files at this head and every one of them is `main`'s, because
-# this PR adds no test file — the two sides' parsed manifests are identical — every surface list, all
-# 1503 `durations` rows and every `durations_floors` entry compared value by value, zero differing —
-# so the comment-only `durations` rewrites on either side move no member of the pool. ⛔ That zero is
-# a READING of this head, never a promise about the next fold: `fast_pool()` takes its inputs from
-# the tree being measured (the manifest, the selector's own constants, and the filesystem under an
-# `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with `rglob("test_*.py")`
-# on purpose — a file added to a non-gating subtree must not silently re-enter the gate), so
-# re-measure the delta on the tree you are merging INTO rather than carrying this sentence's zero.
+# reasoned: this PR adds no test file and leaves the selector untouched, so the pool and the parse on
+# this tree compare EQUAL to `main`'s — every surface list, every `durations` row and every
+# `durations_floors` entry, value by value, zero differing — and a comment-only `durations` rewrite on
+# either side moves no member of the pool. ⛔ NO POOL SIZE AND NO ROW COUNT ARE STATED HERE, on
+# purpose: written as figures they owe a re-measurement to whoever next moves one and nothing grades
+# them, which is exactly the rot this block's own doctrine names — the invariant above is what holds.
+# ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes its
+# inputs from the tree being measured (the manifest, the selector's own constants, and the
+# filesystem under an `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with
+# `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
+# the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
+# sentence's zero.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
-# well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
-# row cannot move a bin.
+# well, so `fast_pool()` still carries it (measured at this head, weight 90.0), and dropping the `core`
+# REGISTRATION cannot move a bin — the weight comes from the file's own `durations` row, not from
+# either registration.
 #
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
 # form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /

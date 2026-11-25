@@ -9191,7 +9191,14 @@ _DERIVATION_LOOKAHEAD = 60
 #: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
 #: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
 #: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
-_ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`\s+rows?\b")
+#: ⛔ CASE-INSENSITIVE ON PURPOSE (#14612 review round 3, P3). This block states its own vocabulary
+#: in CAPS — "A REGISTRATION IS NOT A ROW", "A ROW is an entry in `durations`" — so a matcher bound
+#: to lowercase `row` is bound to a spelling the block does not itself use. MEASURED: re-spelling
+#: "drift-reporter registration (`tests/test_fly_secret_declaration_report.py`)" as "drift-reporter
+#: **ROW** (`…`)" left `missing == []` and the arm GREEN, over exactly the false claim it exists to
+#: catch. Markdown emphasis around the word (`**ROW**`) is admitted for the same reason.
+_ROW_CLAIM_AFTER_FILE_RE = re.compile(
+    r"`tests/(?P<file>[\w/.-]+\.py)`[\s*_]+rows?\b", re.IGNORECASE)
 #: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
 #: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
 #: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
@@ -9199,7 +9206,14 @@ _ROW_CLAIM_AFTER_FILE_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`\s+rows?\b
 #: graded and the second, which is the one a later fold is free to leave behind, was not: the same
 #: "a claim graded by nothing rots" class this block exists to warn about, reproduced inside the
 #: arm cut to catch it.
-_ROW_CLAIM_BEFORE_LIST_RE = re.compile(r"\brows?\s*\((?P<names>[^)]*)\)")
+_ROW_CLAIM_BEFORE_LIST_RE = re.compile(
+    r"\brows?\b[\s*_]{0,4}\((?P<names>[^)]*)\)", re.IGNORECASE)
+#: The COLON shape — `rows: `A`, `B`` — which is a second spelling of the same claim and was graded
+#: by nothing. It has no closing paren to bound the capture, so this pattern takes only a
+#: comma-separated RUN of test paths; anything else after the colon ends the run.
+_ROW_CLAIM_BEFORE_COLON_RE = re.compile(
+    r"\brows?\b[\s*_]{0,4}:\s*(?P<names>`?tests/[\w/.-]+\.py`?"
+    r"(?:\s*,\s*`?tests/[\w/.-]+\.py`?)*)", re.IGNORECASE)
 _ROW_CLAIM_PATH_IN_LIST_RE = re.compile(r"`?tests/(?P<file>[\w/.-]+\.py)`?")
 
 
@@ -9237,6 +9251,9 @@ def _row_claims(header: str) -> list[str]:
     unquoted = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
     found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
     for claim in _ROW_CLAIM_BEFORE_LIST_RE.finditer(unquoted):
+        found |= {m.group("file")
+                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+    for claim in _ROW_CLAIM_BEFORE_COLON_RE.finditer(unquoted):
         found |= {m.group("file")
                   for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
     return sorted(found)
@@ -9912,17 +9929,22 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "`tests/test_registration_not_a_row.py` registration, `#4`'s "
         "`tests/eval/retrieval/test_row_claim_subdir.py` row, — quoted for the record, so not "
         "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\", and `#6`'s two `core` rows "
-        "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`)")
+        "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`), `#7`'s "
+        "drift-reporter **ROW** (`tests/test_row_claim_upper.py`) — the CAPS spelling this block "
+        "itself uses — and `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`")
     assert _row_claims(fixture) == [
         "eval/retrieval/test_row_claim_subdir.py",
         "test_row_claim_after.py",
         "test_row_claim_before.py",
+        "test_row_claim_colon.py",
         "test_row_claim_list_first.py",
         "test_row_claim_list_second.py",
+        "test_row_claim_upper.py",
     ], (
-        "the row-claim matcher no longer reads BOTH reversion shapes (a file then `row`, and "
-        "`row (` then the file), or it misses a SUBDIRECTORY row, or it reads only the FIRST "
-        "name of a `row (`…`, `…`)` LIST while its siblings go ungraded, or it reads a "
+        "the row-claim matcher no longer reads every reversion shape (a file then `row`, "
+        "`row (` then the files, and `rows:` then the files), or it misses a SUBDIRECTORY row, or "
+        "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
+        "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
         "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
         f"{_row_claims(fixture)!r}")
     # ⛔ …and an ODD number of quotes is REFUSED, never read as "no row claim" (#14612 review
