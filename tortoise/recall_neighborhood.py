@@ -163,11 +163,22 @@ def relations_from_block(block: dict | None, *,
         if len(out) >= limit:
             return out
         if isinstance(alt, dict):
+            # ⛔ A TRADE-OFF is NOT shaped like a support. `why.py` emits
+            # `{point_id, label, ep_weight, mitigation, operator_id}` — there is no
+            # `edge` and no `content_snippet`, so reading those keys produced an
+            # empty `peer`, the renderer fell back to the raw ULID, and the
+            # MITIGATION (the reason the option was set aside — the business logic
+            # this module exists to surface) was dropped before it could render.
+            mitigation = alt.get("mitigation")
+            peer = alt.get("label") or (mitigation if isinstance(
+                mitigation, str) else "")
             out.append({
-                "predicate": alt.get("edge") or "alternative",
+                "predicate": alt.get("predicate") or "alternative",
                 "direction": "outgoing",
                 "peer_id": alt.get("point_id") or "",
-                "peer": alt.get("content_snippet") or "",
+                "peer": peer if isinstance(peer, str) else "",
+                "weight": alt.get("ep_weight"),
+                "mitigation": mitigation if isinstance(mitigation, str) else "",
                 "kind": "tradeoff",
             })
     return out
@@ -216,9 +227,14 @@ def render_pointer_lines(ptr: dict, hood: dict) -> list[str]:
             suffix = f" (ep {weight:.2f})" if isinstance(weight, (int, float)) else ""
             severity = rel.get("severity")
             suffix += f" [{severity}]" if severity else ""
+            # A trade-off's MITIGATION is the reason the option was set aside — the
+            # business logic — so it rides the relation to the renderer instead of
+            # being dropped between assembly and render.
+            mitigation = rel.get("mitigation")
             rendered.append(
                 f"{rel.get('predicate', 'IMPL')} {arrow} "
-                f"\"{detail}\"{suffix}".strip())
+                f"\"{detail}\"{suffix}"
+                + (f" — rejected: {mitigation}" if mitigation else ""))
         lines.append("  · relations: " + "; ".join(rendered))
     source = hood.get("source") or ""
     if source:

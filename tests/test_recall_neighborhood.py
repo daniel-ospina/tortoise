@@ -424,3 +424,32 @@ def test_the_excerpt_really_comes_from_the_hit(monkeypatch):
         "the excerpt survived `excerpt_from_hit` returning nothing — so the block is "
         "NOT fed by the search hit, and the no-extra-read guard above is measuring "
         "the wrong path")
+
+
+def test_a_tradeoff_carries_its_LABEL_and_MITIGATION_not_a_bare_id():
+    """A trade-off is NOT shaped like a support, and reading it as one lost it.
+
+    `why.py::_assemble_tradeoffs` emits `{point_id, label, ep_weight, mitigation,
+    operator_id}` — no `edge`, no `content_snippet`. So the old assembly produced
+    `peer=""`, the renderer fell back to the raw ULID, and the mitigation (the
+    reason the option was set aside — the business logic this module exists to
+    surface) was dropped before it could render.
+    """
+    relations = rn.relations_from_block({"tradeoffs": [{
+        "point_id": "01JABCDEFTRADEOFF",
+        "label": "Option B: cheaper at scale",
+        "operator_id": "01JOPERATOR",
+        "ep_weight": 0.42,
+        "mitigation": "cost review landed 2026-04",
+    }]})
+    assert len(relations) == 1
+    rel = relations[0]
+    assert rel["peer"] == "Option B: cheaper at scale", rel
+    assert rel["weight"] == 0.42
+    assert rel["mitigation"] == "cost review landed 2026-04"
+    rendered = " ".join(rn.render_pointer_lines({"id": "pt_0"},
+                                               {"relations": relations}))
+    assert "Option B: cheaper at scale" in rendered
+    assert "01JABCDEFTRADEOFF" not in rendered, (
+        "the raw ULID reached the block instead of the option's text")
+    assert "cost review landed 2026-04" in rendered

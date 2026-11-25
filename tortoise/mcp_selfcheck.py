@@ -302,7 +302,7 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     for a found entry, else the class that explains the miss (``entry-absent`` or
     ``probe-unknown`` for a format this verifier does not parse).
     """
-    project_dir = Path(project_dir or Path.cwd())
+    project_dir = Path(project_dir or Path.cwd()).resolve()
     rels = HARNESS_CONFIG_PATHS.get(harness)
     if rels is None:
         return None, None, [], PROBE_UNKNOWN
@@ -316,8 +316,12 @@ def read_entry(harness: str, *, project_dir: Path | None = None
         return None, None, read, PROBE_UNKNOWN
     read: list[str] = []
     for rel in rels:
-        path = Path(rel.replace("~", str(Path.home()))) \
-            if rel.startswith("~") else project_dir / rel
+        if rel.startswith("~"):
+            path = Path(rel.replace("~", str(Path.home())))
+        else:
+            path = _project_layer(project_dir, rel)
+            if path is None:
+                continue
         if not path.exists():
             continue
         read.append(str(path))
@@ -333,8 +337,49 @@ def read_entry(harness: str, *, project_dir: Path | None = None
     return None, None, read, ENTRY_ABSENT
 
 
-def credentials_present() -> list[str]:
-    """Which credential sources resolve to a NON-BLANK value (names only)."""
+def _repo_root(project_dir: Path) -> Path | None:
+    """The git top-level at or above `project_dir`, or None outside a work tree.
+
+    `.git` is a DIRECTORY in a normal checkout and a FILE in a linked worktree, so
+    existence is the test for both.
+    """
+    for candidate in (project_dir, *project_dir.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _project_layer(project_dir: Path, rel: str) -> Path | None:
+    """The first `rel` found WALKING UP from `project_dir` to the git top-level.
+
+    ⛔ A harness does not read only `<cwd>/<rel>`. `pi`'s `mcp-client` extension
+    resolves its REPO layer by walking up from the cwd and stopping at the git
+    top-level, then merges it over the user layer with the repo winning. Reading
+    only `<project_dir>/…` therefore named the WRONG file, transport and class for
+    any cwd below the repo root: measured from `<worktree>/tortoise`, this verifier
+    named `~/.pi/agent/.mcp.json` (http) while the harness loads the worktree
+    root's `.mcp.json` (stdio bridge, which WINS) — and a `--live` probe would then
+    grade an endpoint the harness never contacts.
+    """
+    stop = _repo_root(project_dir)
+    for candidate in (project_dir, *project_dir.parents):
+        path = candidate / rel
+        if path.exists():
+            return path
+        if stop is not None and candidate == stop:
+            break
+    return None
+
+
+def credentials_present(project_dir: Path | None = None) -> list[str]:
+    """Which credential sources resolve to a NON-BLANK value (names only).
+
+    `project_dir` scopes the store lookup. Scanning with the CALLER's cwd made
+    `mcp-status --dir <repo>` read one directory's config while looking for
+    another's credential — a false `no-credential` whose remedy is to mint a key
+    that is already on disk in the project.
+    """
+    scope = Path(project_dir or Path.cwd())
     found: list[str] = []
     for name in CREDENTIAL_ENV_NAMES:
         if (os.environ.get(name) or "").strip():
@@ -346,7 +391,7 @@ def credentials_present() -> list[str]:
         # source this module's own docstring names — was told `no-credential`
         # with the key sitting in the file it was supposed to read.
         path = Path(rel.replace("~", str(Path.home()))) \
-            if rel.startswith("~") else Path.cwd() / rel
+            if rel.startswith("~") else scope / rel
         data = _read_json(path)
         if not data:
             continue
@@ -433,7 +478,7 @@ def classify(harness: str, *, project_dir: Path | None = None
         names = ", ".join(f"${n}" for n in unset)
         blank_credential = any(
             "author" in p.lower() for p, _v in leaves) or \
-            not credentials_present()
+            not credentials_present(project_dir)
         detail = (f"the entry interpolates {names}, which the harness "
                   f"environment does not set — an unset variable expands to an "
                   f"empty string")
@@ -512,7 +557,7 @@ def classify(harness: str, *, project_dir: Path | None = None
             source=source, transport=transport, configs_read=read)
 
     # http
-    if not _header_carries_credential(entry) and not credentials_present():
+    if not _header_carries_credential(entry) and not credentials_present(project_dir):
         return Verdict(
             status=NO_CREDENTIAL,
             detail=("the entry carries no credential and no credential resolves "

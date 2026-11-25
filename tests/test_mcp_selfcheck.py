@@ -807,3 +807,58 @@ def test_a_withheld_credential_is_not_classified_as_a_server_error():
         f"only its host disagrees: {fix!r}")
     assert "re-mint" not in fix.lower(), (
         f"re-minting a valid key does not fix a host mismatch: {fix!r}")
+
+
+# ── the entry is resolved the way the harness resolves it (walk UP) ───────
+
+def test_a_cwd_below_the_repo_root_still_finds_the_repo_entry(tmp_path):
+    """`pi`'s mcp-client walks UP to the git top-level; reading only the cwd lies.
+
+    Measured before this fix: from `<worktree>/tortoise`, `mcp-status` named
+    `~/.pi/agent/.mcp.json` (http) while the harness loads the worktree root's
+    `.mcp.json` (stdio bridge, which WINS) — the wrong file, the wrong transport
+    and the wrong class.
+    """
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    nested = root / "tortoise" / "deep"
+    nested.mkdir(parents=True)
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "type": "stdio", "command": "python3",
+        "args": ["-m", "tortoise.mcp_bridge"],
+        "env": {"TORTOISE_MCP_URL": "http://127.0.0.1:9999/mcp"}}}}),
+        encoding="utf-8")
+    source, entry, _read, status = mcp_selfcheck.read_entry("pi", project_dir=nested)
+    assert status == mcp_selfcheck.OK, source
+    assert source == str(root / ".mcp.json"), source
+    assert entry["type"] == "stdio"
+
+
+def test_the_walk_stops_at_the_git_top_level(tmp_path):
+    """A `.mcp.json` ABOVE the repo must not be adopted."""
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"tortoise": {
+        "type": "http", "url": "https://wrong-14607.invalid/mcp"}}}),
+        encoding="utf-8")
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    source, entry, _read, status = mcp_selfcheck.read_entry("pi", project_dir=root)
+    assert entry is None, f"adopted an entry above the git top-level: {source}"
+    assert status == mcp_selfcheck.ENTRY_ABSENT
+
+
+# ── the project credential store is scoped to project_dir ────────────────
+
+def test_the_project_credential_store_is_read_from_project_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".tortoise").write_text(
+        json.dumps({"api_key": "tt_project_store_key"}), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert any(".tortoise" in s
+               for s in mcp_selfcheck.credentials_present(project)), (
+        "the project's own credential store was not read when the cwd differed — a "
+        "false `no-credential` whose remedy is a key that is already on disk")
