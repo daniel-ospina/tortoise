@@ -256,9 +256,36 @@ class TestToolGroupFiltering:
         )
 
     def test_no_group_lists_all_http_tools(self, make_client):
+        """An UNSCOPED server advertises the whole HTTP population, and that
+        population is the registry's `http_policy=True` set — not a literal.
+
+        The literal this used to pin (`len(names) > 30`) was the PRE-#11609
+        population, so it reddened on a CORRECT surface: retiring the nine
+        envelope doors moved the HTTP listing 34 → 26 (30 live − the four
+        `http_policy=False` rows; the ninth door, `expand_relationships`, was
+        one of those four, so it left without moving the population). A floor
+        on a number states nothing about the property the test is named for and
+        rots on the next retirement; deriving it from the same single authority
+        the server's own `HTTP_ALLOWED` derives from (`get_http_allowed`, #454 —
+        `mcp_auth.HTTP_ALLOWED is` that derivation, so the two cannot disagree)
+        makes the pin MOVE with the population.
+
+        It is not vacuous in either direction: a group filter leaking into an
+        unscoped server (#3877 — `missing` names the dropped tools) reds it, and
+        a name left in the declared HTTP set that the server no longer serves
+        reds it as `extra`.
+        """
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        declared = {t.name for t in TOOL_REGISTRY if t.http_policy}
         tc = make_client(auth_mode="none")
         names = self._list_tool_names(tc)
-        assert len(names) > 30  # full surface when no group filter
+        served = set(names)
+        assert served == declared, (
+            "an unscoped server must serve EXACTLY the declared HTTP population "
+            f"({len(declared)} tools): missing={sorted(declared - served)} "
+            f"extra={sorted(served - declared)}"
+        )
 
 
 def _lifespan_for(app):
