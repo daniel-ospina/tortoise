@@ -68,7 +68,7 @@ version: 1
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
 # holds 1335 files at this head against 1334 on `main`, and the ONE addition this lane brings is
 # `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s. ⛔ The rows `main` already carries at this head
+# `main`'s own. ⛔ The rows `main` already carries at this head
 # (`tests/test_14559_reaper_schedule.py`, `tests/test_14560_operator_vectors.py`,
 # `tests/test_fly_secret_declaration_report.py`, `tests/test_record_read_point_vector_keys.py` and
 # `tests/test_14592_operating_model_evidence.py`) are `main`'s at this head, NOT this lane's: each
