@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P11-1795579456-p4131025-5fca29b5",
+  "_sha": "5841fb1e2d8129abfa254195648404702d64ee3e",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P11.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/11609-last-12"
+    },
+    {
+      "kind": "sha",
+      "value": "e8f3a43f4df5ff31663f955bc701e899926c6962"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P11"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 22200,
+  "duration_s": 21608,
+  "ended_at": 1795601064,
+  "exit_code": 143,
+  "heartbeat_at": 1795601064,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P11-1795579456-p4131025-5fca29b5",
+  "lease_until": 1795623264,
+  "pid": 4131025,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795579456,
+  "state": "FAILED",
+  "tag": "P11",
+  "worktree": "/home/cmux/.worktrees/P11"
+}
