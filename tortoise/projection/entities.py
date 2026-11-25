@@ -7924,3 +7924,99 @@ def filter_source_props(props: dict) -> tuple[dict, list[str]]:
     denied = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
     kept = {k: v for k, v in props.items() if k in _SOURCE_NODE_PROP_NAMES}
     return kept, denied
+
+#: Which labels' WHOLE property map a read surface may publish. ⛔ Graded as a
+#: SET, never as a node's first label: a node may carry several
+#: (``(:Object:Source)``, ``(:Subject:Source)``, ``(:Object:Event)`` are named
+#: production shapes elsewhere in this tree), and the read side sees only the
+#: branch it resolved through — so a rule keyed on one label is only as strong as
+#: that label's position. Lives HERE, not in a route module, because the decision
+#: is shared by the REST by-id routes, the ``/belief`` provenance arm, the SDK
+#: entity accessor (``TortoiseSDK._get_entity``) and the MCP auto-detect arm
+#: (``mcp_server._get_auto_detect``); a second copy is a second rule.
+#: ⛔ NOT every door that can answer an entity: ``TortoiseSDK.get_entity`` on an
+#: ARMED ``prefer``/``record`` deployment takes ``_get_entity_served``, which
+#: returns the record row's map without calling this predicate —
+#: ``record_serve.ServedAnswer`` carries props but no label set to grade with. That
+#: arm is an open residual, so the list above names the doors that DO call it.
+#: ⛔ ``Session`` is in the set because it is a READ ROOT and its props are not a
+#: payload. ``navigation._ROOT_BRANCHES`` carries it as "the one deliberate
+#: addition (a legacy root outside ``_CANONICAL_ENTITY_ID_PROPS``)", so
+#: ``entityProfile`` / ``tortoise_traverse`` / ``entity_relations``' root preview
+#: all resolve through it — and while it was OUTSIDE this set a session root
+#: published ``{id, type}`` alone (measured: ``turn_count``, ``harness``,
+#: ``model``, ``machine_id`` and ``created_at`` dropped) while the SAME node as a
+#: NEIGHBOUR under a DIFFERENT root on the same surface came back whole, because the
+#: neighbour path (``_parse_node_with_identity``) filters ``:Source`` rather than
+#: allow-listing. The figures are not secret and are already served by the session
+#: doors themselves — ``hosted_api``'s ``GET /v1/sessions`` (``list_sessions``'
+#: query) and ``GET /v1/sessions/{id}`` (the detail query) both ``RETURN s.id,
+#: s.created_at, s.turn_count, …, s.harness, s.machine_id, s.model``, and
+#: ``activation_scorecard.FUNNEL_QUERY`` returns the same three scalar columns — so
+#: denying them here made one surface contradict the door beside it. ⛔ Cited by
+#: NAME, not by line: this very lane's review had to re-derive three rotted
+#: ``hosted_api.py:<n>`` cites, and a line number in a permanent rationale is the
+#: next one to rot. ⛔ NOT ``LIFETIME_MEMORY_QUERY``: that one aggregates
+#: (``min(s.created_at)``, ``count(DISTINCT s)``) and returns none of these columns;
+#: citing it here was a review finding against this comment's first cut.
+#: ⛔ This is NOT a widening beyond the pre-#14593
+#: behaviour: the root used to publish ANY label's map unfiltered, so including
+#: ``Session`` is strictly narrower than what shipped. And it opens no ``:Source``
+#: leak — the grading is a SET and deny-by-default, so a hybrid
+#: ``(:Session:Source)`` still fails on the ``Source`` half (measured).
+PUBLISHABLE_PAYLOAD_LABELS: frozenset = frozenset(
+    {"Point", "Object", "Subject", "Event", "Session"})
+
+
+def label_set_publishable(labels) -> bool:
+    """May a read surface publish this node's whole property map?
+
+    ⛔ DENY BY DEFAULT INCLUDES ABSENCE. An empty set is NOT publishable:
+    ``all(... for lbl in [])`` is vacuously True, which would let a label-less
+    node through — a mutant measured passing an earlier version of this rule.
+
+    Accepts the label list the resolution returns additively (``labels``), and
+    callers that only have the older single spelling pass a one-element list; the
+    pair is deliberately the same decision either way.
+    """
+    if not labels:
+        return False
+    if isinstance(labels, str):
+        labels = [labels]
+    kept = [lbl for lbl in labels if lbl]
+    if not kept:
+        return False
+    return all(lbl in PUBLISHABLE_PAYLOAD_LABELS for lbl in kept)
+
+
+def publishable_payload(props: dict, labels) -> dict:
+    """One property map under the ``#3998`` disclosure rule, graded as a SET.
+
+    The COMPOSITION of the two halves that live here — the decision
+    (:func:`label_set_publishable`) and the filter (:func:`filter_source_props`) —
+    so a read surface that publishes a resolved node's map has ONE call to make
+    and cannot get the pair wrong.
+
+    ⛔ THIS EXISTS BECAUSE THE PAIR WAS RE-ASSEMBLED PER DOOR AND ONE DOOR WAS
+    MISSED (#14593 review P1). By the time of that finding, four surfaces already
+    spelled out the same two lines (the REST by-id routes via
+    ``hosted_api._layer_payload``, the ``/belief`` provenance arm, the SDK entity
+    accessor, the MCP auto-detect arm) — and ``entity_reads.list_layer``, the
+    read behind ``GET /v1/objects`` and ``GET /v1/subjects``, spelled out neither,
+    so a hybrid ``(:Object:Source)`` / ``(:Subject:Source)`` published its stored
+    ``text``/``content`` on the LIST routes while the by-id routes withheld it.
+    A door that has to remember two calls is a door that can forget both; a door
+    that has to remember one is the shape this function makes possible.
+
+    ``labels`` is the label SET (``labels(n)``), never a single branch label — the
+    resolution's ``label`` field is the branch that MATCHED, which is only as
+    strong as that branch's position in the union. Callers holding solely the
+    older single spelling pass a one-element list and keep exactly the previous
+    behaviour.
+
+    Returns a NEW dict in both arms: a caller must not be able to mutate the
+    resolved entry's own map through this.
+    """
+    if label_set_publishable(labels):
+        return dict(props)
+    return filter_source_props(props)[0]
