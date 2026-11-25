@@ -65,7 +65,15 @@ def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
     fake.seed("organizations", [{
         "id": TEAM, "name": "abuse-team", "tier": "free",
         "email": "owner@abuse.test", "graph_name": f"org_{TEAM}",
-        "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
+        "max_users": 1, "max_graphs": 1,
+        # #14687: the R1 fire level is now max(TORTOISE_ABUSE_POINT_THRESHOLD,
+        # ratio × the org's OWN allowance), so the fixture's allowance and its
+        # threshold have to describe ONE tier. The `env` fixture sets the
+        # threshold to 5 to make a 6-point burst fire; a realistic 10 000
+        # allowance would put the level at 5 000 (half of it) and no small-burst
+        # test could ever fire again. 8 keeps the tier floor REAL and non-zero
+        # while leaving the configured 5 as the level that governs.
+        "ops_allowance": 8,
         "graph_size_cap": 100000, "suspended_at": suspended,
         "flagged_at": flagged,
     }])
@@ -1422,6 +1430,14 @@ class TestAlertRegistersAndAcks:
             "Manage your team in Settings.",
             "Ask your security team to revoke the key.",
             "Ask your own security desk to revoke the key.",
+            # #14687: the shipped R1/R2 copy. It states the measurement (units,
+            # window, level) and the route, and it names no human — the property
+            # this fixture exists to hold, checked against the string a customer
+            # will actually read.
+            "Memory writes reached 2,309 units in the last 1 hour, against an "
+            "alert level of 500 units. This is informational; it did not "
+            "change anything. If this activity isn't yours, review your API "
+            "keys in Keys.",
             # …and the same phrase form where the whole phrase is
             # CUSTOMER-DETERMINED. Note the reason carefully: `engineering` is
             # outside the staff vocabulary but `team` and `security` are INSIDE
@@ -1430,7 +1446,6 @@ class TestAlertRegistersAndAcks:
             # reject them.
             "Your engineering team reviewed this.",
             "Your security team reviewed this.",
-            "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
         ]
@@ -1502,10 +1517,14 @@ class TestAlertRegistersAndAcks:
                                 "created_at": "2026-09-25T17:19:05+00:00"})
         assert "review your API keys" in velocity["message"], velocity["message"]
         assert not self._claims(velocity["message"])
-        # …and the review row still says what it CAN know: what THIS alert did.
+        # …and the review row still says what it CAN know: what THIS alert did,
+        # in the numbers it recorded. #14687 replaced "It did not disable
+        # anything" with the activity register's own"did not change anything"
+        # clause (one phrase for one fact, so the two registers cannot drift) and
+        # kept the route the tier-relative level makes true.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "It did not disable anything" in msg, msg
+        assert "did not change anything" in msg, msg
         assert "support@premiselabs.co" in msg, msg
         # Every RATE detector shares ONE shape (round-14 finding: recovery_velocity
         # was the only one without the informational clause and read as an
