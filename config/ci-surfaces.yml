@@ -13429,14 +13429,23 @@ durations:
   # `test_13043_record_allocator_cli.py` row records — a file a PR ADDS can never
   # carry a CI junit reading yet, so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading. What the weight covers, on the
-  # DB-free lane: every creation door calls the hook (AST-pinned for
-  # `hosted_api._provision_graph_record`,
-  # `supabase_control._provision_default_graph_record` and
-  # `sdk._graph_create`); the hook ARMS (the plan's §A7.8 item 8 / M16 falsifier)
-  # and reuses `seed`; the uncut registry's cap, its overflow counter and its
-  # NO-tenant-identifiers rule; `/health` seeding the three keys and folding `ok`
-  # on an armed deployment carrying an uncut graph while leaving `degraded`'s
-  # window meaning alone. The DB-backed legs (a first record write APPLYING after
+  # DB-free lane: every creation door that CAN be hooked calls it (AST-pinned on
+  # the DOOR's own body for `hosted_api._provision_graph` and
+  # `supabase_control.ensure_default_graph_row`'s three id-yielding arms), and the
+  # door that must NOT be is pinned as not hooked (`sdk._graph_create` — its
+  # Supabase arm persists no graph row and its registry arm creates a graph
+  # `public.graphs` never holds, so `record_cursor`'s FK refuses every one); the
+  # hook ARMS a graph it created (the plan's §A7.8 item 8 / M16 falsifier), reuses
+  # `seed`, and leaves a PRE-EXISTING `seeded`/`halted` row un-armed (#14610 review
+  # F5: a `seeded` row is an operator's unfinished cutover, and arming it silently
+  # bypasses the CLI's `--acknowledge-cutover` gate); the uncut registry's cap, its
+  # overflow counter and its NO-tenant-identifiers rule; `/health` publishing the
+  # six uncut/halted COUNT keys plus `armed_but_uncut_reasons`, the two
+  # clear/cost NOTES (`armed_but_uncut_clears`, `armed_but_halted_clears`), and
+  # folding `ok` on an armed deployment carrying an uncut graph while leaving
+  # `degraded`'s window meaning alone; and every operator-facing remedy naming the
+  # WHOLE arming chain rather than a bare `backfill` (#14610 review F1). The
+  # DB-backed legs (a first record write APPLYING after
   # the hook, the divergence refusal, the door helpers against a real
   # `public.graphs` row, and `backfill`'s three counts + `--dry-run`) skip
   # without `TEST_RECORD_DB_URI`. ⛔ The CASE COUNT is deliberately not quoted: it

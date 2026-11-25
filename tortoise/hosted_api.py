@@ -222,6 +222,10 @@ from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 # would route a NON-DURABLE journal into the durable branch and downgrade the
 # "stored NOWHERE" ERROR to a WARNING.
 from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
+#: ⛔ ONE HOME FOR THE UNCUT-GRAPH REMEDY (#14610 review F1). Every operator-facing
+#: line this module publishes names the same command the seam builds, so a future
+#: edit cannot leave `hosted_api` telling an operator to run half of it.
+from tortoise.record_writer import uncut_graph_remedy
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -8437,20 +8441,44 @@ def _backup_watcher_health() -> dict:
 #: HOW `record.armed_but_uncut` CAN BE RETRACTED, published BESIDE it (#14610
 #: review F3). The register is PROCESS MEMORY fed from this process's own
 #: observations, so ⛔ an OUT-OF-PROCESS repair cannot retract an entry:
-#: `record_allocator_cli.py backfill` heals the RECORD, while the entry clears on
-#: that graph's next ARMED write to THIS process, a successful provision, or a
-#: restart. A QUIESCENT graph never gets that later write, and with the allocator
-#: flag OFF `record_owns_position` returns before its read at all — so there the
-#: entry, and the `ok` it drives, clear ONLY on a restart. Publishing the count
-#: without that sentence names a remedy that leaves the field red: the latch
-#: class the fold exists to avoid. `ok` is therefore a statement about THIS
-#: PROCESS, not about the deployment's population (which is a `sweep` query).
+#: `record_allocator_cli.py backfill --arm --acknowledge-cutover` cuts the RECORD
+#: over (a bare `backfill` only SEEDS the row, and a `seeded` row allocates
+#: nothing — #14610 review F1), while the entry clears on that graph's next ARMED
+#: write to THIS process, a successful provision, or a restart. A QUIESCENT graph
+#: never gets that later write, and with the allocator flag OFF
+#: `record_owns_position` returns before its read at all — so there the entry, and
+#: the `ok` it drives, clear ONLY on a restart. Publishing the count without that
+#: sentence names a remedy that leaves the field red: the latch class the fold
+#: exists to avoid. `ok` is therefore a statement about THIS PROCESS, not about
+#: the deployment's population (which is a `sweep` query).
 _UNCUT_CLEARS_NOTE = (
     "a restart, or an observation of that graph by THIS process (an armed write "
     "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
-    "`record_allocator_cli.py backfill` heals the RECORD but runs in another "
-    "process, so on a quiescent graph — or with the allocator flag off — this "
-    "process's entry, and `ok`, clear only on restart"
+    "`record_allocator_cli.py backfill --arm --acknowledge-cutover` cuts the "
+    "RECORD over (a bare `backfill` only seeds the ROW, and a `seeded` row "
+    "allocates nothing) but runs in another process, so on a quiescent graph — "
+    "or with the allocator flag off — this process's entry, and `ok`, clear "
+    "only on restart"
+)
+
+#: ⛔ WHAT A `halted` GRAPH IS ACTUALLY LOSING, published BESIDE
+#: `record.armed_but_halted` (#14610 review F2). The `ok` fold deliberately does
+#: NOT include the halted population — a halt is an OPERATOR's decision and a
+#: sanctioned red would be permanent — but that is a reason not to RED the
+#: deployment, never a reason to claim the graph is unharmed. It is not: a halted
+#: row refuses the allocator's arm (`ALLOCATION_SQL` is scoped `mode = 'active'`)
+#: and, with the writer flag off, refuses the enumerated replay too (the row, not
+#: the mode, is the fact), so its record accumulates NOTHING until an operator
+#: reopens it. An earlier cut of this module said the opposite in three places
+#: ("KEEPS the JSONL append — nothing is lost"), which is true of the journal LINE
+#: and false of the record.
+_HALTED_CLEARS_NOTE = (
+    "an OPERATOR's stop: a halted graph's record writes are REFUSED until "
+    "`record_allocator_cli.py reopen --graph-id <graph>` -> `seed --journal "
+    "<path>` -> `arm --acknowledge-cutover`. It is published here INSTEAD of "
+    "reddening `ok`, because a sanctioned halt must not pin a deployment red for "
+    "ever — not because the graph keeps up: its record accumulates nothing "
+    "while halted"
 )
 
 
@@ -8633,6 +8661,9 @@ def _record_health() -> dict:
                 # rather than a measurement — the clear route does not depend on
                 # the snapshot that failed.
                 "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+                # #14610 review F2: what a halted graph is losing, on the same
+                # footing — a constant, so it survives a failed snapshot too.
+                "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
@@ -8706,6 +8737,11 @@ def _record_health() -> dict:
         # documented `backfill` must be told that this process's entry stays red
         # until it observes the graph again or restarts.
         "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+        # ⛔ AND WHAT THE HALTED POPULATION IS LOSING (#14610 review F2). It is
+        # published beside `armed_but_halted` for the same reason and with the
+        # same polarity: out of the `ok` fold because the stop is SANCTIONED,
+        # not because the graph keeps up with the record.
+        "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -8949,11 +8985,17 @@ def _record_health() -> dict:
     # thing. ``ok`` is the cumulative channel it belongs on, exactly like a
     # malformed DSN above.
     # ``armed_but_halted`` is deliberately NOT in this fold: a `halted` row is an
-    # OPERATOR's decision (the documented remedy for a duplicate position), and in
-    # that mode `record_owns_position` returns False so the JSONL append is KEPT —
-    # nothing is lost. Folding it in would let a sanctioned halt red the deployment
-    # permanently, and a halt does not clear on its own, so that red would be
-    # indistinguishable from a real one. It is still PUBLISHED, on its own key.
+    # OPERATOR's decision (the documented remedy for a duplicate position), so its
+    # gap is SANCTIONED and must not red the deployment permanently — a halt does
+    # not clear on its own, so that red would be indistinguishable from a real one.
+    # ⛔ AND THE REASON IS NOT THAT THE GRAPH LOSES NOTHING (#14610 review F2). An
+    # earlier cut said `record_owns_position` returns False in that mode, so the
+    # JSONL append is KEPT and "nothing is lost" — true of the LINE, false of the
+    # RECORD: with the writer flag on, `ALLOCATION_SQL`'s `AND mode = 'active'`
+    # matches no row; with it off, the enumerated arm is refused because the row
+    # exists (`_refuse_an_enumerated_replay`). Neither writes a position, so a
+    # halted graph's record accumulates NOTHING. It is published on its own key,
+    # with what it is actually losing beside it (`armed_but_halted_clears`).
     #
     # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE PER ITEM (#14587 review P1). `ok`
     # therefore follows ONLY `armed_but_uncut` — the tracked map, which every
@@ -31027,11 +31069,16 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     here can undo a graph; and a record outage must not 500 a user's graph
     creation when the record itself is optional and `write_live_record` is
     fail-soft by contract. What is NOT acceptable is silence, and that is what
-    `/health`'s `record.armed_but_uncut` + `record_allocator_cli.py backfill`
-    are for. ⛔ The two are DIFFERENT repairs and the operator needs both halves:
-    the backfill heals the RECORD in its own process, while `/health`'s entry is
-    process memory and clears on that graph's next armed write here or on a
-    restart (published as `record.armed_but_uncut_clears`, #14610 review F3).
+    `/health`'s `record.armed_but_uncut` + :func:`record_writer.uncut_graph_remedy`
+    are for. ⛔ THE REMEDY IS A CHAIN, NOT A VERB (#14610 review F1): a bare
+    `backfill` SEEDS, and a `seeded` row allocates nothing (`ALLOCATION_SQL` is
+    scoped `active`), so it fixes the ROW and not the leg — and on a deployment
+    whose writer flag is not yet rolled it also refuses the enumerated replay the
+    graph was still landing records through. ⛔ The two are DIFFERENT repairs and
+    the operator needs both halves: the arming command cuts the RECORD over in its
+    own process, while `/health`'s entry is process memory and clears on that
+    graph's next armed write here or on a restart (published as
+    `record.armed_but_uncut_clears`, #14610 review F3).
     (The atomic form the plan asked for — §A7.8 item 8's
     one-transaction RPC — is not buildable from here: the record's app role has
     no grant on `public.graphs`. Tracked against #14582.)
@@ -31044,9 +31091,8 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
         _logger.error(
             "graph %s (%s) was created but its record cursor could NOT be "
             "provisioned (the record seam is unimportable) — every record this "
-            "graph writes is refused until it is seeded: run "
-            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
-            graph_id, org_id, org_id, exc_info=True)
+            "graph writes is refused until its row is ARMED: run %s",
+            graph_id, org_id, uncut_graph_remedy(org_id), exc_info=True)
 
 
 async def _graph_quota_gate(org: dict) -> None:

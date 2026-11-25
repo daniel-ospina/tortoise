@@ -2991,23 +2991,34 @@ _UNCUT_HALTED_UNTRACKED = 0
 _UNCUT_OBSERVATIONS = 0
 #: Graphs whose row exists but is `halted` — SEEN, reported, and deliberately NOT
 #: folded into `armed_but_uncut`. ⛔ The two are different populations and the
-#: difference decides whether a graph is losing anything: `halted` is the state an
-#: OPERATOR chose (`record_allocator.raise_named`'s remedy for a duplicate
-#: position), and in it `record_owns_position` returns False, so
-#: `live_write.write` KEEPS the JSONL append — the graph loses nothing. A graph
-#: with NO row is one the hook never reached, and that is the gap this registry
+#: difference is SANCTION, not loss: `halted` is the state an OPERATOR chose
+#: (`record_allocator.raise_named`'s remedy for a duplicate position), so its gap
+#: is KNOWN and deliberate and must not pin a deployment red for ever; a graph
+#: with NO row is one a cutover never reached, and that is the gap this registry
 #: exists for. Folding them together would report an operator's sanctioned action
 #: as a deployment-wide defect that never clears (the halt is deliberate and
 #: persists), i.e. a false red on `/health` for the life of the process.
 #:
-#: ⛔ "KEEPS ITS APPEND" IS NOT THE DISCRIMINATOR ON ITS OWN — a `seeded` graph
-#: keeps its append too, so that test does not separate the two modes (#14587
-#: review, reasoning note). The line that DOES separate them: `halted` is a
-#: decision an OPERATOR took on a graph whose row EXISTS, while an un-armed graph
-#: (`seeded`, `no_cursor_row`, a failed provision) is an incomplete CUTOVER — the
-#: gap this registry exists to surface. Both states stay visible on their own keys
-#: ('armed_but_halted' vs 'armed_but_uncut'), so nothing is hidden by the split;
-#: do NOT "fix" the asymmetry by folding `seeded` out of `armed_but_uncut`.
+#: ⛔ "IT KEEPS ITS APPEND" IS NOT THE ARGUMENT, AND AN EARLIER CUT OF THIS BLOCK
+#: MADE IT ONE — "in it `record_owns_position` returns False, so `live_write.write`
+#: KEEPS the JSONL append — the graph loses nothing" (#14610 review F2). **A
+#: HALTED GRAPH'S RECORD ACCUMULATES NOTHING.** `record_owns_position` returning
+#: False proves the JOURNAL LINE is durable, not that the record keeps up: with the
+#: writer flag ON, `allocate=True` reaches `ALLOCATION_SQL`'s `AND mode = 'active'`
+#: and matches no row (`cursor_not_active`); with the flag OFF, the enumerated arm
+#: is refused because the row exists (`_refuse_an_enumerated_replay`). Neither arm
+#: writes a position. So the sanctioned-stop ground above is the whole reason, and
+#: what a halted graph loses is published BESIDE the count
+#: (`record.armed_but_halted_clears`) rather than denied here.
+#:
+#: ⛔ "KEEPS ITS APPEND" IS ALSO NOT THE DISCRIMINATOR ON ITS OWN — a `seeded` graph
+#: keeps its append too, so that test does not separate the two modes. The line
+#: that DOES separate them: `halted` is a decision an OPERATOR took on a graph
+#: whose row EXISTS, while an un-armed graph (`seeded`, `no_cursor_row`, a failed
+#: provision) is an incomplete CUTOVER — the gap this registry exists to surface.
+#: Both states stay visible on their own keys ('armed_but_halted' vs
+#: 'armed_but_uncut'), so nothing is hidden by the split; do NOT "fix" the
+#: asymmetry by folding `seeded` out of `armed_but_uncut`.
 _UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
@@ -3117,8 +3128,14 @@ def armed_but_uncut() -> dict[str, Any]:
     degraded for the life of the process over a graph that was fixed an hour ago.
 
     `armed_but_halted` is a SEPARATE population and is NOT part of
-    `armed_but_uncut`: a `halted` row is an operator's decision and that graph
-    keeps its JSONL append (`record_owns_position` → False), so it loses nothing.
+    `armed_but_uncut`: a `halted` row is an OPERATOR's decision, so its gap is
+    sanctioned and must not pin the deployment red for ever. ⛔ IT IS NOT A GRAPH
+    THAT LOSES NOTHING (#14610 review F2): a halted graph's record writes are
+    REFUSED — `ALLOCATION_SQL` is scoped `active`, and with the writer flag off
+    the enumerated arm is refused because the row exists — so what it accumulates
+    is nothing until an operator runs `reopen` → `seed` → `arm`. `/health`
+    publishes that sentence BESIDE the count (`armed_but_halted_clears`) instead
+    of claiming the halt is free.
     `armed_but_halted_untracked_observations` is its overflow count (lifetime, not
     folded, for the reasons above), so a population past the cap is still COUNTED
     even where it cannot be named.
@@ -3196,6 +3213,26 @@ UNCUT_GRAPH_WARN_SECONDS = 60.0
 _uncut_warned_at: dict[str, float] = {}
 
 
+def uncut_graph_remedy(org_id: str = "<org>") -> str:
+    """The operator command that CUTS AN UNCUT GRAPH OVER — ONE home (#14610 F1).
+
+    ⛔ `backfill` ALONE IS HALF A REMEDY, and naming only that half is how an
+    operator does the right thing and stays red. `backfill` SEEDS; `ALLOCATION_SQL`
+    is scoped `AND mode = 'active'`, so a `seeded` row allocates nothing — the
+    graph's record writes are still refused `cursor_not_active`, `/health` still
+    folds `record.ok: false`, and on a deployment whose `TORTOISE_RECORD_ALLOCATE`
+    is not yet rolled the new row REFUSES the enumerated replay that graph was
+    still landing records through (`_refuse_an_enumerated_replay`: the ROW, not
+    the mode, is the fact). The ARM is the half that cuts it over, and it carries
+    the same `--acknowledge-cutover` gate `arm` does (#13043 review P1-2).
+
+    It is a FUNCTION rather than a constant so the six sites that publish it
+    cannot drift apart, and so the org id is interpolated where it is known.
+    """
+    return (f"`tools/record_allocator_cli.py backfill --org-id {org_id} --arm "
+            f"--acknowledge-cutover`")
+
+
 def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     """Say, rate-limited per TENANT, that this graph's record leg is off.
 
@@ -3206,7 +3243,7 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     operator re-runs the wrong thing.
 
     ⛔ AND THE REPAIR SPLITS IN TWO (#14610 review F3): the backfill heals the
-    RECORD, this process's `/health` entry is PROCESS MEMORY, so it clears on that
+    ROW, this process's `/health` entry is PROCESS MEMORY, so it clears on that
     graph's next armed write here, on a successful provision, or on a restart —
     never on the backfill itself. Both halves are said, because a line naming only
     the first leaves an operator staring at a red `ok` after doing the right
@@ -3228,13 +3265,15 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         "graph writes is REFUSED and its journal lines are the only durable "
         "copy — `/health` reports this under `record.armed_but_uncut`. Remedy: "
         "`tools/record_allocator_cli.py status --org-id %s --graph-id %s`, then "
-        "`backfill` (or `seed` + `arm` for this one graph) if it should be cut "
-        "over; a `halted` graph stays halted BY DESIGN until an operator "
-        "reopens it. The backfill heals the RECORD: THIS process's `/health` "
-        "entry is process memory and clears only on this graph's next armed "
-        "write here, on a successful provision, or on a restart. "
+        "%s (or `seed` + `arm` for this one graph) to CUT IT OVER — a bare "
+        "`backfill` only seeds the row and allocates nothing; a `halted` graph "
+        "stays halted BY DESIGN until an operator reopens it. The row is "
+        "healed by that command; THIS process's `/health` entry is process "
+        "memory and clears only on this graph's next armed write here, on a "
+        "successful provision, or on a restart. "
         "This line repeats at most once per %.0fs per graph",
-        org_id, graph_id, reason, org_id, graph_id, UNCUT_GRAPH_WARN_SECONDS,
+        org_id, graph_id, reason, org_id, graph_id, uncut_graph_remedy(),
+        UNCUT_GRAPH_WARN_SECONDS,
     )
 
 
@@ -3244,8 +3283,14 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     """The CREATION HOOK the doors call (#14582): give a new graph its counter row.
 
     Called from every graph-creation door the census found
-    (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`,
-    `sdk._graph_create`'s registry arm).
+    (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`).
+
+    ⛔ NOT FROM `sdk._graph_create` — its Supabase arm persists no graph row and
+    its registry arm creates a graph `public.graphs` never holds, so the cursor
+    row's FK refuses every one; `sdk.py` says so in capitals and
+    `tests/test_14582_creation_hook.py` reds if it is hooked. An earlier cut of
+    this docstring listed it as a caller, which is the claim that pin exists to
+    keep out (#14610 review F6).
 
     THREE PROPERTIES, each of which a tidy-looking variant would lose:
 
@@ -3264,7 +3309,13 @@ def provision_graph_record(*, org_id: str, graph_id: str,
        different connection), so a hard failure here would leave an orphan row
        behind every refusal AND 500 the create. The failure is therefore made
        LOUD and VISIBLE instead: counted and named on `/health` as
-       `armed_but_uncut`, and healed by `record_allocator_cli.py backfill`.
+       `armed_but_uncut`, and healed by :func:`uncut_graph_remedy` — ⛔ THE WHOLE
+       CHAIN, not just `backfill`: a bare `backfill` SEEDS the row, and a
+       `seeded` row allocates nothing (`ALLOCATION_SQL` is scoped `active`), so
+       the graph's writes stay refused and `/health` stays red; on a deployment
+       whose writer flag is not yet rolled the new row also REFUSES the
+       enumerated replay the graph was still landing records through. Name the
+       arm (#14610 review F1).
     3. ⛔ **IT COMMITS, ONCE, AND ONLY ON SUCCESS.** The seed and the arm are one
        transaction (`record_allocator.provision_graph_record` does not commit),
        so a graph is never left in the state that allocates nothing.
@@ -3273,10 +3324,13 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     reads `JOURNAL_COUNT_SQL` for this graph in the same tenant-scoped
     transaction, which is the seed's own quantity ("how many positions already
     exist"). ⛔ A door must NOT have to know it, and a hard-coded `0` would be
-    WRONG for a graph that is older than the call site assuming it is new — the
-    default row's credential self-heal reaches a graph that may predate this hook,
-    and its journal holds exactly the positions a floor of `0` claims cannot
-    exist. Either way the number is not trusted: `SEED_SQL` refuses
+    WRONG for a graph that is older than the call site assuming it is new — a
+    re-entered hook after a partial commit, or a concurrent create that raced
+    this one, reaches a graph whose journal holds exactly the positions a floor
+    of `0` claims cannot exist. (⛔ THE BROADER PRE-EXISTING POPULATION IS NOT
+    REACHED BY CREDENTIAL TRAFFIC — #14610 review F3; see
+    `supabase_control._provision_default_graph_record`.) Either way the number is
+    not trusted: `SEED_SQL` refuses
     (`SeedRefused(reason="divergence")`) when the journal's `MAX(seq)` exceeds the
     enumeration, so a real disagreement is REFUSED rather than silently seeded.
     """
@@ -3321,9 +3375,10 @@ def provision_graph_record(*, org_id: str, graph_id: str,
         _logger.warning(
             "the graph's record cursor could NOT be provisioned for %s/%s "
             "(%s: %s) — the graph was created and every record it writes is "
-            "refused until it is seeded (`record_allocator_cli.py backfill`). "
+            "refused until its row is ARMED. Remedy: %s "
             "`/health` reports this under `record.armed_but_uncut`",
-            org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+            org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
+            uncut_graph_remedy(org_id))
         return {"provisioned": False, "reason": "provision_failed"}
     else:
         try:
@@ -3332,10 +3387,30 @@ def provision_graph_record(*, org_id: str, graph_id: str,
             note_uncut_graph(org_id, graph_id, reason="provision_failed")
             _logger.warning(
                 "the graph's record cursor could not be COMMITTED for %s/%s "
-                "(%s: %s) — the graph exists and is uncut; remedy: "
-                "`record_allocator_cli.py backfill --org-id <org>`",
-                org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+                "(%s: %s) — the graph exists and is uncut; remedy: %s",
+                org_id, graph_id, type(exc).__name__, _bounded_cause(exc),
+                uncut_graph_remedy(org_id))
             return {"provisioned": False, "reason": "commit_failed"}
+        # ⛔ ONLY A CUT-OVER OUTCOME IS A CUTOVER (#14610 review F4). A successful
+        # commit is not the same fact as an `active` row: the hook deliberately
+        # does NOT resume a `halted` row, and (review F5) it does NOT arm a
+        # pre-existing `seeded` one — both commit a MONOTONE SEED and cut nothing
+        # over. Reporting `provisioned: True` for those would (a) claim a cutover
+        # that did not happen and (b) call `clear_uncut_graph`, which pops the
+        # `_UNCUT_HALTED` entry `armed_but_halted` promises to keep publishing —
+        # so an operator's halt would flicker with traffic, and `/health` would
+        # read `armed_but_halted: 0` for a graph that is still halted.
+        if outcome.mode != ra.MODE_ACTIVE:
+            return {
+                "provisioned": False,
+                "reason": outcome.mode,
+                "graph_id": graph_id,
+                "org_id": org_id,
+                "seq": outcome.seq,
+                "mode": outcome.mode,
+                "already_cut_over": outcome.already_cut_over,
+                "seeded": outcome.seeded,
+            }
         # The graph IS cut over now, so any earlier observation of it is stale.
         clear_uncut_graph(org_id, graph_id)
         return {

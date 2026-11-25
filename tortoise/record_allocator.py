@@ -182,10 +182,18 @@ class SeedResult:
 class ProvisionedRecord:
     """What :func:`provision_graph_record` did for one graph (#14582).
 
-    `mode` is the row's mode AFTER the call, so a caller can tell the three
-    outcomes apart without re-reading: `active` (cut over and allocating),
-    `halted` (an operator stopped it — the hook never resumes one), and
-    `already_cut_over` (the row was already `active`, so nothing was written).
+    `mode` is the row's mode AFTER the call, so a caller can tell the FOUR
+    outcomes apart without re-reading: `active` (cut over and allocating — this
+    call, or a previous one), `seeded` (a row an OPERATOR seeded and this call
+    deliberately did NOT arm, #14610 review F5), `halted` (an operator stopped
+    it — the hook never resumes one), and `already_cut_over` (the row was already
+    `active`, so nothing was written).
+
+    ⛔ `active` IS NOT THE SAME AS "THIS CALL CUT IT OVER": only `already_cut_over`
+    distinguishes those, and only a `mode` that is NOT `active` means the graph is
+    still uncut after a successful call — a caller that treats every non-raising
+    return as "provisioned" reports a graph as cut over that allocates nothing
+    (#14610 review F4).
     """
 
     org_id: str
@@ -193,7 +201,7 @@ class ProvisionedRecord:
     seq: int
     mode: str
     #: The row was ALREADY `active`: this call wrote nothing. The door may be
-    #: re-entered (a retry, a self-heal) and must not be punished for it.
+    #: re-entered (a retry after a partial commit) and must not be punished for it.
     already_cut_over: bool
     #: This call wrote the seed (fresh row, or a monotone re-seed).
     seeded: bool
@@ -561,16 +569,29 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
       it is :data:`JOURNAL_COUNT_SQL` for this graph, which is the seed's own
       quantity ("how many positions already exist"), read in the same
       tenant-scoped transaction. A door must not have to know it: a brand-new
-      graph enumerates 0, and a graph that PREDATES the hook (the default row's
-      credential self-heal, a graph whose hook failed) enumerates N — and a
+      graph enumerates 0, and a graph the hook is RE-ENTERED on after a partial
+      commit (or that a concurrent create raced) enumerates N — and a
       hard-coded `0` would refuse that second population as `divergence` with
       text that is false ("the record claims positions this journal cannot
       reproduce") when the journal holds exactly those positions. Deriving it is
       also what keeps this function honest when it is called on a graph that is
-      older than the call site assuming it is new;
+      older than the call site assuming it is new. ⛔ THE PRE-EXISTING-GRAPH
+      POPULATION IS NOT REACHED BY CREDENTIAL TRAFFIC (#14610 review F3): an org
+      whose default ROW exists never re-enters this function from a credential
+      resolver, so those graphs are healed by an operator verb or by a
+      re-provisioning, not by traffic;
     * already `{MODE_ACTIVE}` → an idempotent NO-OP (`already_cut_over`), because
       `seed` refuses to re-base a live allocator and a door that is re-entered
       must not fail;
+    * a PRE-EXISTING `{MODE_SEEDED}` row → seeded (monotone) and **NOT armed**, the
+      same posture `{MODE_HALTED}` gets. ⛔ THIS IS THE `#14610` REVIEW'S F5: `seed`
+      and `backfill` without `--arm` are what PRODUCE a `seeded` row, and moving
+      it to `active` is the per-graph cutover decision the CLI refuses without
+      `--acknowledge-cutover` (#13043 review P1-2) — arming a graph whose writer
+      flag is not yet rolled turns the record path OFF, so the hook cannot take
+      that transition on an operator's behalf. The rule is the ROW: a graph with
+      NO counter row has no operator statement to respect, and it IS born cut
+      over (that is the population the hook exists for);
     * `{MODE_HALTED}` → seeded (monotone) but NOT re-armed. A halt is an
       operator's statement about a graph; a hook that silently resumed one would
       erase the only record that somebody stopped it.
@@ -586,9 +607,9 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
     (the guard's own condition), so on a graph that is ALREADY `active` and has
     position rows, a `floor = 0` call reports `reason="divergence"` — a healthy
     cut-over graph accused of holding unreproducible positions. A re-entered hook
-    (a retry, the default row's credential self-heal) would then publish a
-    healthy graph as uncut and red `/health` for nothing. So the `active` case is
-    decided by the ROW, before any seed runs.
+    (a retry after a partial commit, a concurrent duplicate create) would then
+    publish a healthy graph as uncut and red `/health` for nothing. So the
+    `active` case is decided by the ROW, before any seed runs.
 
     ⚠️ `record_cursor` carries `(org_id, graph_id) REFERENCES public.graphs`, so
     this CANNOT create a row for an id the graphs table does not hold — a foreign
@@ -597,6 +618,22 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
     opinion.
     """
     existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
+    # ⛔ ARM ONLY A ROW THIS CALL CREATED (#14610 review F5). A pre-existing row
+    # in `seeded` was put there BY AN OPERATOR (`seed`, or `backfill` without
+    # `--arm`), and moving it `seeded -> active` is exactly the transition the
+    # CLI refuses without `--acknowledge-cutover` (#13043 review P1-2): arming
+    # before the writer flag is rolled in every process turns the record path
+    # OFF, because on a cut-over graph the enumerated replay is refused by name
+    # (`_refuse_an_enumerated_replay`) and the allocator's arm is the flag. A
+    # hook that took that transition silently would make the acknowledgement
+    # gate conditional on which door a re-provisioning happened to enter
+    # through.
+    #
+    # The rule is the ROW, not the mode, for the same reason `halted` is
+    # respected: a row IS an operator's statement. NO row is not one — a graph
+    # with no counter row is the population the hook exists for (it was created
+    # before the hook landed, or its hook failed), so it is still born cut over.
+    created_here = existing is None
     if existing is not None and existing[1] == MODE_ACTIVE:
         return ProvisionedRecord(
             org_id=org_id, graph_id=graph_id, seq=existing[0],
@@ -622,21 +659,24 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
         if exc.reason != "armed":
             raise
         # The row is already `active`: the graph IS cut over, and a re-entered
-        # hook (a retry after a partial commit, the credential self-heal on the
-        # default row) is a no-op rather than a refusal.
+        # hook (a retry after a partial commit, a concurrent duplicate create)
+        # is a no-op rather than a refusal.
         existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
         if existing is None:  # pragma: no cover - `armed` implies the row exists
             raise
         return ProvisionedRecord(
             org_id=org_id, graph_id=graph_id, seq=existing[0],
             mode=existing[1], already_cut_over=True, seeded=False)
-    if result.mode == MODE_SEEDED:
+    if result.mode == MODE_SEEDED and created_here:
         seq = arm(conn, org_id=org_id, graph_id=graph_id)
         return ProvisionedRecord(
             org_id=org_id, graph_id=graph_id, seq=seq, mode=MODE_ACTIVE,
             already_cut_over=False, seeded=True,
             healed_tail=result.healed_tail, burned=result.burned)
-    # `halted`: seeded, deliberately NOT resumed. See the docstring.
+    # A PRE-EXISTING `seeded`/`halted` row: seeded (monotone) and deliberately NOT
+    # resumed. `seeded` is an operator's unfinished cutover and `halted` is an
+    # operator's stop; the hook does not overturn either. See :attr:`created_here`
+    # and the docstring.
     return ProvisionedRecord(
         org_id=org_id, graph_id=graph_id, seq=result.seq, mode=result.mode,
         already_cut_over=False, seeded=True,
