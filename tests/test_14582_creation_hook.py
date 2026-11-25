@@ -88,15 +88,31 @@ _DOORS = (
     ("tortoise/hosted_api.py", "_provision_graph", "_provision_graph_record"),
     ("tortoise/supabase_control.py", "ensure_default_graph_row",
      "_provision_default_graph_record"),
+    # ⛔ #14587 review P2: these two MINT the same `kind='default'` row when the
+    # org has none — `set_graph_name` from `PATCH /v1/graphs/{id}` with the
+    # `default` sentinel, `set_graph_recording` from the recording override — and
+    # neither called the hook. The minted row is a read HIT on every later
+    # credential path, so `ensure_default_graph_row`'s hook is never reached for
+    # that org: the graph's record writes are refused `cursor_not_active` for
+    # ever while `write_live_record` (fail-soft by contract) reports success.
+    ("tortoise/supabase_control.py", "set_graph_name",
+     "_provision_default_graph_record"),
+    ("tortoise/supabase_control.py", "set_graph_recording",
+     "_provision_default_graph_record"),
 )
 
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
 #: yields an id from THREE arms (active-row self-heal, mint, convergent adopt) and
-#: hooks each; a refactor that collapses them to one silently drops two.
+#: hooks each; a refactor that collapses them to one silently drops two. The two
+#: default-row minters hook their MINT and their CONVERGENT-ADOPT arm — the PATCH
+#: arm writes to a row that already exists and mirrors `ensure_default_graph_row`'s
+#: read-hit reach (see `_provision_default_graph_record`'s docstring).
 _DOOR_HOOK_CALLS = {
     ("tortoise/hosted_api.py", "_provision_graph"): 1,
     ("tortoise/supabase_control.py",
      "ensure_default_graph_row"): 3,
+    ("tortoise/supabase_control.py", "set_graph_name"): 2,
+    ("tortoise/supabase_control.py", "set_graph_recording"): 2,
 }
 
 #: The helpers those doors call must themselves reach the writer's hook.
@@ -116,6 +132,18 @@ _UNHOOKED = (("tortoise/sdk.py", "_graph_create"),)
 #: alongside it (`provision_graph_record_`) matches nothing in the tree, so that
 #: half was inert (`#14587` review, residual); see :func:`_hook_call_names`.
 _HOOK_PREFIX = "provision_graph_record"
+
+#: The DOOR-SIDE hook helpers — the two functions a door calls instead of the
+#: writer's `record_writer.provision_graph_record` directly. They are NOT prefix
+#: matches of :data:`_HOOK_PREFIX` (`_provision_default_graph_record` carries
+#: `default` in the middle), so a mint-site pin built on that prefix reports every
+#: hooked door as unhooked — measured while adding
+#: :func:`test_every_graph_minting_site_is_declared`. Listed exactly, and their own
+#: wiring is pinned separately by :data:`_HELPERS`.
+_HOOK_HELPERS = (
+    "_provision_graph_record",
+    "_provision_default_graph_record",
+)
 
 #: The DELEGATED sites: an entry point that creates a graph WITHOUT minting the id
 #: itself, so it is covered by the door it routes through. `(module, entry point,
@@ -335,6 +363,324 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "so each create logs a warning and the deployment reads "
         "`record.armed_but_uncut` forever. If this door is to be hooked, the "
         "graph-row mint has to land first")
+
+
+# ── DB-free: the MINTING sites, enumerated from the INSERT and not from names ──
+#
+# ⛔ WHY THIS EXISTS. `_DOORS` above can only pin a door SOMEONE LISTED, and the
+# census that produced it searched for NAMES (`create_graph`, `_graph_create`,
+# `insert_graph`, `ensure_default_graph_row`, `create_memory_graph`, …).
+# `supabase_control.set_graph_name` and `set_graph_recording` mint a
+# `kind='default'` row through an inline `cp.query("graphs", method="POST", …)`,
+# so no name search could see them — and at the reviewed head they created
+# graphs with no cursor row, the exact defect this PR exists to close
+# (#14587 review P2). A pin that reds on a NEW minting arm is the only form that
+# cannot be re-opened by the next arm nobody lists.
+
+#: Every site in `tortoise/**` that INSERTS a `public.graphs` row, keyed by the
+#: site's own identity, with what covers it:
+#:   * `hooked`    — the site's body calls the creation hook itself;
+#:   * `delegated` — a mint HELPER: it writes the row for a caller, so every
+#:                   caller of it must be a hooked door (asserted below).
+_GRAPH_MINT_SITES = {
+    # The one mint helper. Its two production callers are `_DOORS` entries
+    # (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`),
+    # which is what makes this entry a DECLARATION and not an exemption.
+    ("tortoise/supabase_control.py", "insert_graph"): "delegated",
+    ("tortoise/supabase_control.py", "set_graph_name"): "hooked",
+    ("tortoise/supabase_control.py", "set_graph_recording"): "hooked",
+}
+
+
+def _calls_a_door_hook(node: ast.AST) -> bool:
+    """Does `node` call either door-side hook helper (:data:`_HOOK_HELPERS`)?"""
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name in _HOOK_HELPERS:
+            return True
+    return False
+
+
+def _is_graphs_insert(node: ast.AST) -> bool:
+    """Does this node INSERT a `public.graphs` row through the control plane?
+
+    The shape is `cp.query("graphs", method="POST", json_body=…)` — matched
+    structurally (table + method as constants), so a differently-named
+    transport is still seen and a POST to any other table is not.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "query"):
+        return False
+    table = node.args[0] if node.args else next(
+        (kw.value for kw in node.keywords if kw.arg == "table"), None)
+    if not (isinstance(table, ast.Constant) and table.value == "graphs"):
+        return False
+    method = next(
+        (kw.value for kw in node.keywords if kw.arg == "method"), None)
+    return isinstance(method, ast.Constant) and method.value == "POST"
+
+
+def _enclosing_sites(predicate) -> dict[tuple[str, str], ast.AST]:
+    """`{(module, INNERMOST enclosing function): function node}` for every call
+    in `tortoise/**` that `predicate` accepts.
+
+    Innermost on purpose: a mint inside a nested helper is reported as that
+    helper, which is the thing a reader has to classify, not its outer shell.
+    """
+    found: dict[tuple[str, str], ast.AST] = {}
+
+    def walk(rel: str, node: ast.AST, current: ast.AST | None) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            current = node
+        if predicate(node):
+            assert current is not None, (
+                "a `public.graphs` INSERT outside any function — this pin cannot "
+                "attribute it to a door")
+            found[(rel, current.name)] = current
+        for child in ast.iter_child_nodes(node):
+            walk(rel, child, current)
+
+    for path in sorted((_ROOT / "tortoise").rglob("*.py")):
+        rel = str(path.relative_to(_ROOT))
+        walk(rel, ast.parse(path.read_text()), None)
+    return found
+
+
+def _call_sites(callee: str) -> set[tuple[str, str]]:
+    """`{(module, innermost enclosing function)}` for every `<callee>(…)` call in
+    `tortoise/**`."""
+
+    def is_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        return name == callee
+
+    return set(_enclosing_sites(is_call))
+
+
+def test_every_graph_minting_site_is_declared():
+    """⛔ THE COMPLETENESS PIN: no `public.graphs` INSERT may exist unclassified.
+
+    A mint that is not hooked (and not a helper whose every caller is) creates a
+    graph with no cursor row — the user's writes succeed, the record accumulates
+    nothing for that graph, and `/health` reads green until the graph's first
+    refused write. This enumerates the INSERTs themselves, so the next arm added
+    anywhere under `tortoise/` reds HERE instead of shipping as a silent gap.
+
+    Two closes for a red: HOOK it, or declare it a named residual with a tracked
+    issue and its reason (which is what `_UNHOOKED` does for the doors that must
+    NOT be hooked). What is not a close is leaving it out of the table.
+    """
+    measured = _enclosing_sites(_is_graphs_insert)
+    undeclared = sorted(set(measured) - set(_GRAPH_MINT_SITES))
+    assert not undeclared, (
+        f"these functions INSERT a `public.graphs` row and are NOT in "
+        f"_GRAPH_MINT_SITES: {undeclared}. If it MINTS a graph, every record "
+        "that graph writes is refused `cursor_not_active` until something seeds "
+        "it, and nothing raises (write_live_record is fail-soft by contract) — "
+        "so either call the creation hook on the arm that minted the row, or "
+        "declare it a residual with a tracked issue and say why hooking it is "
+        "wrong")
+    stale = sorted(set(_GRAPH_MINT_SITES) - set(measured))
+    assert not stale, (
+        f"_GRAPH_MINT_SITES declares sites that no longer INSERT a `public.graphs` "
+        f"row: {stale}. A stale declaration is a pin on nothing — update the "
+        "table to the measured set rather than leaving a name that outlived its "
+        "mint")
+
+    unhooked = [f"{rel}::{fn}" for (rel, fn), node in measured.items()
+                if _GRAPH_MINT_SITES[(rel, fn)] == "hooked"
+                and not _calls_a_door_hook(node)]
+    assert not unhooked, (
+        f"these `public.graphs` minters are declared `hooked` and call no "
+        f"creation hook: {unhooked} — the declaration is now the lie the defect "
+        "used to be")
+
+    doors = {(rel, fn) for rel, fn, _callee in _DOORS}
+    unprovisioned = sorted(
+        site for (rel, fn), node in measured.items()
+        if _GRAPH_MINT_SITES[(rel, fn)] == "delegated"
+        for site in _call_sites(fn) - doors)
+    assert not unprovisioned, (
+        f"these functions call a `public.graphs` mint HELPER without being a "
+        f"hooked door themselves: {unprovisioned}. The helper writes the row; the "
+        "caller owes the cursor, so a new caller of it is a new unhooked mint")
+
+
+def _first_call(source: str) -> ast.AST:
+    """The first `Call` in `source` — the node :func:`_is_graphs_insert` takes."""
+    return next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Call))
+
+
+def test_the_mint_census_is_not_vacuous():
+    """Non-vacuity for :func:`test_every_graph_minting_site_is_declared`.
+
+    That pin is green when it finds NOTHING, so a matcher that answers `{}` (a
+    refactor that stops recognising the INSERT shape) silences it without
+    reddening a thing — the failure mode the hook matcher's own non-vacuity pin
+    was added for. These are the four shapes that matter: the tree's own two, and
+    the two that must NOT count.
+    """
+    assert _is_graphs_insert(_first_call(
+        "def f(cp):\n    cp.query('graphs', method='POST', json_body=row)\n"
+    )), "the inline one-positional shape is no longer recognised"
+    assert _is_graphs_insert(_first_call(
+        "def f(cp):\n    cp.query(\n        'graphs', method='POST',\n"
+        "        json_body={})\n"
+    )), "the multi-line shape is no longer recognised"
+    assert not _is_graphs_insert(_first_call(
+        "def f(cp):\n    cp.query('graphs', method='PATCH', json_body={})\n"
+    )), "a PATCH is not a mint and must not be counted as one"
+    assert not _is_graphs_insert(_first_call(
+        "def f(cp):\n    cp.query('api_keys', method='POST', json_body={})\n"
+    )), "a POST to another table must not be counted as a graph mint"
+    # And the census really does see the two arms the #14587 review found.
+    measured = set(_enclosing_sites(_is_graphs_insert))
+    assert {("tortoise/supabase_control.py", "set_graph_name"),
+            ("tortoise/supabase_control.py", "set_graph_recording"),
+            ("tortoise/supabase_control.py", "insert_graph")} <= measured, (
+        f"the census answered {sorted(measured)} — it no longer sees the default-row "
+        "mints, which is exactly how those two arms went unhooked and unnoticed")
+
+
+class _MintControlPlane:
+    """The three control-plane calls `set_graph_name` / `set_graph_recording` make.
+
+    DB-free on purpose: the pins below are about WHICH ID the hook is called for,
+    and a real record DSN would make them skip in the fast matrix.
+    """
+
+    def __init__(self, *, graphs=None, org_graph_name="team_mint",
+                 post_error=None, adopt_row=None):
+        self.graphs = [dict(g) for g in (graphs or [])]
+        self.org_graph_name = org_graph_name
+        self.post_error = post_error
+        self.adopt_row = adopt_row
+        self.posts = 0
+
+    def query(self, table, *, select=None, filters=None, method=None,
+              json_body=None):
+        if table == "organizations":
+            return [{"graph_name": self.org_graph_name}]
+        assert table == "graphs", f"unexpected control-plane read: {table}"
+        if method == "POST":
+            self.posts += 1
+            if self.post_error is not None:
+                # A concurrent writer won: its row appears between this call's
+                # read and this POST, which is the convergent-adopt arm.
+                if self.adopt_row is not None:
+                    self.graphs.append(dict(self.adopt_row))
+                raise self.post_error
+            self.graphs.append(dict(json_body or {}))
+            return None
+
+        def matches(row: dict) -> bool:
+            for column, op, value in (filters or []):
+                got = row.get(column)
+                if op == "eq" and got != value:
+                    return False
+                if op == "neq" and got == value:
+                    return False
+            return True
+
+        rows = [r for r in self.graphs if matches(r)]
+        if method == "PATCH":
+            for row in rows:
+                row.update(json_body or {})
+            return None
+        return [{key: r.get(key) for key in (select or ["id"])} for r in rows]
+
+
+def _record_hook(monkeypatch) -> list[tuple[str, str]]:
+    from tortoise import supabase_control as sc
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(sc, "_provision_default_graph_record",
+                        lambda org, gid: calls.append((org, gid)))
+    return calls
+
+
+def test_a_rename_that_mints_the_default_row_provisions_it(monkeypatch):
+    """#14587 review P2, the live endpoint: `SET name` on an org with no row."""
+    from tortoise import supabase_control as sc
+
+    calls = _record_hook(monkeypatch)
+    cp = _MintControlPlane()
+    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
+    assert cp.posts == 1, "the rename no longer mints a row — this leg is stale"
+    minted = cp.graphs[0]["id"]
+    assert calls == [("org-1", minted)], (
+        f"the rename minted graph {minted} and the hook was called with {calls} — "
+        "a default graph minted by a rename has no cursor row, is a read HIT for "
+        "every later credential path, and its record writes are refused "
+        "`cursor_not_active` for ever")
+
+
+def test_a_recording_override_that_mints_the_default_row_provisions_it(
+        monkeypatch):
+    """#14587 review P2, the other live endpoint."""
+    from tortoise import supabase_control as sc
+
+    calls = _record_hook(monkeypatch)
+    cp = _MintControlPlane()
+    assert sc.set_graph_recording(cp, "org-1", "default", True) is True
+    assert cp.posts == 1, "the override no longer mints a row — leg stale"
+    minted = cp.graphs[0]["id"]
+    assert calls == [("org-1", minted)]
+
+
+def test_a_convergent_mint_provisions_the_row_that_became_durable(monkeypatch):
+    """The adopt arm provisions the WINNER's id, not the one this call invented."""
+    from tortoise import supabase_control as sc
+
+    winner = {"id": "g_winner", "org_id": "org-1", "kind": "default",
+              "status": "active", "namespace": "team_mint", "recording": None}
+    calls = _record_hook(monkeypatch)
+    cp = _MintControlPlane(post_error=RuntimeError("duplicate key"),
+                          adopt_row=winner)
+    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
+    assert calls == [("org-1", "g_winner")], (
+        f"the adopt arm provisioned {calls} instead of the durable winner")
+
+    calls.clear()
+    cp = _MintControlPlane(post_error=RuntimeError("duplicate key"),
+                          adopt_row=winner)
+    assert sc.set_graph_recording(cp, "org-1", "default", False) is True
+    assert calls == [("org-1", "g_winner")]
+
+
+def test_a_default_row_that_already_exists_is_not_re_provisioned(monkeypatch):
+    """The PATCH arm is bounded: an existing row is the read-hit population.
+
+    ⛔ THE NEGATIVE HALF of the two pins above, and the one that keeps this claim
+    from overreaching a THIRD time: the hook runs on the arms that MINT (or adopt
+    a mint), never on a row that already exists. That population is the one
+    `_provision_default_graph_record`'s docstring names — healed by the operator
+    verb or observed on the graph's next write, not healed here.
+    """
+    from tortoise import supabase_control as sc
+
+    row = {"id": "g_existing", "org_id": "org-1", "kind": "default",
+           "status": "active", "namespace": "team_mint", "recording": None}
+    calls = _record_hook(monkeypatch)
+    cp = _MintControlPlane(graphs=[row])
+    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
+    assert sc.set_graph_recording(cp, "org-1", "default", False) is True
+    assert cp.posts == 0 and calls == [], (
+        "an existing default row is a read HIT — the mint arms are the only ones "
+        f"this change hooks, and {calls} says otherwise")
+    assert cp.graphs[0]["name"] == "Team HQ"
+    assert cp.graphs[0]["recording"] is False
 
 
 def _same_module_call_graph(rel: str) -> dict[str, set[str]]:

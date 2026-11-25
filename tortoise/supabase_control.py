@@ -4326,6 +4326,24 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     uncut. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
     repeat costs one scoped read.
 
+    ⛔ AND AT EVERY ARM OF THE TWO FUNCTIONS THAT MINT THE SAME ROW *WITHOUT*
+    :func:`ensure_default_graph_row`: :func:`set_graph_name` and
+    :func:`set_graph_recording` each POST a `kind='default'` row when the org has
+    none, and each hooks its mint and its convergent-adopt arm (#14587 review
+    P2). ⛔ Both were MISSING until that review, and nothing could see it: the
+    census that found the other doors searched `tortoise/` for NAMES
+    (`create_graph`, `ensure_default_graph_row`, `insert_graph`, …), and these
+    mint through an inline `cp.query("graphs", method="POST", …)` that no name
+    search matches. The structural pin that replaces the name search — every
+    `graphs` INSERT in `tortoise/**`, by AST, with each site declared hooked or
+    residual — is
+    `tests/test_14582_creation_hook.py::test_every_graph_minting_site_is_declared`,
+    so a NEW minting arm reds instead of re-opening this gap. ⚠️ An
+    ALREADY-EXISTING row is still not healed here: a rename/override on a row
+    that exists takes the PATCH arm, and the population minted before this
+    cutover is the one the operator verb heals (`record_allocator_cli.py seed` +
+    `arm` per graph) or the graph's own next write observes.
+
     ⛔ THE SHORT-CIRCUIT IS **NOT** A REQUEST-PATH SELF-HEAL, and until the #14587
     review's P2-1 this docstring sold it as one. The reach, stated exactly:
     :func:`default_graph_for_credential` returns BEFORE the mint whenever the
@@ -4991,8 +5009,26 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
                          ("org_id", "eq", org_id)],
                 json_body={"name": name},
             )
+            # #14582: the CONVERGENT-ADOPT arm mints no row of its own — it
+            # adopts the winner's — so the hook runs for the id that actually
+            # became durable, not the one this call invented (same discipline as
+            # `ensure_default_graph_row`'s adopt arm). `provision_graph_record`
+            # is idempotent on an `active` graph, so a winner that already
+            # provisioned costs one scoped read.
+            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
+    # #14582 — THIS ARM MINTS A `public.graphs` ROW, SO IT OWNS PROVISIONING.
+    # The #14587 review (P2) found this arm and `set_graph_recording`'s mint arm
+    # creating a default graph with no `record_cursor` row: the minted row is a
+    # read HIT on every later credential path, so `ensure_default_graph_row` —
+    # and its hook — is never reached for that org, and the graph's record writes
+    # are refused `cursor_not_active` for ever while `write_live_record`
+    # (fail-soft by contract) reports success. Reachable from
+    # `PATCH /v1/graphs/{id}` with the `default` sentinel. Best-effort and
+    # never-raising, per the recorded #14582 decision (`OVERRIDES:` plan §A7.8
+    # item 8's fail-hard) — a rename must not fail because the record is down.
+    _provision_default_graph_record(org_id, gid)
     return True
 
 
@@ -5084,8 +5120,21 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
                          ("org_id", "eq", org_id)],
                 json_body={"recording": value},
             )
+            # #14582: the CONVERGENT-ADOPT arm adopts the winner's row, so the
+            # hook runs for the id that became durable (mirror of
+            # `set_graph_name`'s adopt arm).
+            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
+    # #14582 — THIS ARM MINTS A `public.graphs` ROW, SO IT OWNS PROVISIONING.
+    # The #14587 review (P2): without this call the row is a read HIT on every
+    # later credential path, `ensure_default_graph_row`'s hook is never reached,
+    # and this graph's record writes are refused `cursor_not_active` for ever —
+    # silently, because `write_live_record` is fail-soft by contract. Reachable
+    # from the recording override endpoint. Best-effort, never-raising (the
+    # recorded #14582 `OVERRIDES:` decision): the override still succeeds when
+    # the record is unreachable, and `/health` names the uncut graph instead.
+    _provision_default_graph_record(org_id, gid)
     return True
 
 

@@ -51568,8 +51568,13 @@ class TortoiseSDK:
         #   warning each time, and publish a permanently-red
         #   `record.armed_but_uncut` for a deployment that has no gap (#14582 F3).
         #
-        # So the hooks live where a control-plane row is minted: `hosted_api._provision_graph`
-        # and `supabase_control.ensure_default_graph_row`. A selfhost deployment
+        # So the hooks live where a control-plane row is minted: `hosted_api._provision_graph`,
+        # `supabase_control.ensure_default_graph_row`, and the two
+        # `supabase_control` arms that mint the same default row on demand
+        # (`set_graph_name`, `set_graph_recording` — #14587 review P2: this
+        # sentence named only two and was FALSIFIED by those two INSERT arms, so
+        # a rename of an org with no default row created a graph with no cursor
+        # row). A selfhost deployment
         # that arms the record without a control plane is out of its reach by
         # construction, not by oversight — `tests/test_14582_creation_hook.py`
         # pins both arms' absence so this note cannot silently rot.
