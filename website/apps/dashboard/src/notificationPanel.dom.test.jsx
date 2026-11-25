@@ -42,7 +42,6 @@ import {
   DETAIL_NO_DETAIL,
   DETAIL_TITLE,
   LEDGER_ALL_CLEAR,
-  LEDGER_ALL_QUIET_SNOOZED,
   SAVE_FAILED,
   SNOOZE_PERIODS,
   STORAGE_UNAVAILABLE,
@@ -270,11 +269,13 @@ test('#14686: a snoozed-only ledger does not claim everything was dealt with', (
   const during = renderBell({ alerts: [row], storage, now: new Date(NOW.getTime() + 10 * MIN) })
   fireEvent.click(bell(during.container))
   assert.equal(during.container.querySelector('.notif-list .notif-row'), null)
-  assert.ok(
-    !during.container.textContent.includes(LEDGER_ALL_CLEAR),
+  assert.doesNotMatch(
+    during.container.textContent,
+    /has been acknowledged or dismissed/,
     'a snoozed alert has NOT been acknowledged or dismissed',
   )
-  assert.ok(during.container.textContent.includes(LEDGER_ALL_QUIET_SNOOZED))
+  // …and the sentence that does print NAMES the third state.
+  assert.match(during.container.textContent, /acknowledged, dismissed or snoozed/)
 })
 
 test('#14686: "1 hour" is an hour from the CLICK, not from when the panel opened', () => {
@@ -303,6 +304,49 @@ test('#14686: "1 hour" is an hour from the CLICK, not from when the panel opened
   } finally {
     vi.useRealTimers()
   }
+})
+
+test('#14686: a dismissal made WITHOUT a working store survives the panel being REOPENED', () => {
+  // Review finding (P1): the re-read on open replaced in-memory state with the
+  // store's, so with no store at all the dismissal vanished on the next open — the
+  // "I dismissed it and it came back" defect, inside the panel rather than across a
+  // reload. The panel already says such a dismissal will not survive a reload; it
+  // must still survive a reopen.
+  const { container } = renderBell({ alerts: [alert({ message: 'no store here' })], storage: null })
+  fireEvent.click(bell(container))
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+  fireEvent.click(bell(container))  // close
+  fireEvent.click(bell(container))  // reopen
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications',
+    'the dismissal must not reappear on reopen')
+  assert.ok(!container.textContent.includes('no store here'))
+})
+
+test('#14686: Escape from inside the panel restores focus to the bell', () => {
+  const { container } = renderBell({ alerts: [alert()] })
+  fireEvent.click(bell(container))
+  const openRow = container.querySelector('.notif-open')
+  openRow.focus()
+  assert.equal(document.activeElement, openRow)
+  fireEvent.keyDown(openRow, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-panel'), null)
+  // Review finding: focus landed on <body> — a keyboard user was stranded.
+  assert.equal(document.activeElement, bell(container))
+})
+
+test('#14686: the trigger declares what it controls', () => {
+  const { container } = renderBell({ alerts: [alert()] })
+  const control = bell(container)
+  fireEvent.click(control)
+  const panelEl = panel(container)
+  assert.ok(panelEl.id, 'the panel needs an id for aria-controls to point at')
+  assert.equal(control.getAttribute('aria-controls'), panelEl.id)
+  assert.equal(control.getAttribute('aria-haspopup'), 'true')
+  // The panel's own title is a real heading, reachable by heading navigation.
+  assert.equal(panelEl.querySelector('h2').textContent, 'Notifications')
 })
 
 // ── 4. Dismiss, and the reload proof ───────────────────────────────────────
@@ -358,6 +402,19 @@ test('#14686: the dismissal is scoped to this user and Organization', () => {
   // Another Organization on the same browser still sees its own notification.
   const other = renderBell({ alerts: [row], storage, orgId: 'org-2' })
   assert.equal(bell(other.container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
+})
+
+test('#14686: an all-snoozed ledger does not claim everything was acknowledged or dismissed', () => {
+  // Review finding: "Every alert in this window has been acknowledged or dismissed"
+  // printed directly above "Snoozed (1)". Nothing was acknowledged or dismissed.
+  const { container } = renderBell({ alerts: [alert({ message: 'only row' })] })
+  fireEvent.click(bell(container))
+  fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+  const text = container.textContent
+  assert.ok(text.includes(LEDGER_ALL_CLEAR))
+  assert.match(LEDGER_ALL_CLEAR, /snoozed/)
+  assert.doesNotMatch(LEDGER_ALL_CLEAR, /acknowledged or dismissed\.$/)
+  assert.ok(text.includes('Snoozed (1)'))
 })
 
 test('#14686: a store that cannot be written says so instead of pretending', () => {

@@ -17,9 +17,13 @@
 // live in `notificationLedger.js` (pure, `node --test`); this file is the render.
 //
 // WHAT IT MUST NOT DO, because the previous surface did:
-//   * render anything into the page flow — the panel is positioned under the bell
-//     and closes; the dashboard content never moves (pinned by a DOM assertion
-//     that the panel is not a sibling of `<main>`'s content);
+//   * render anything into the page flow. This COMPONENT cannot prove that — it
+//     renders itself wherever it is mounted, so a DOM test here would pass even if
+//     `main.jsx` put it back inside `<main>` (review finding: the header comment
+//     used to claim the DOM assertion pinned the placement, and it does not). The
+//     placement is pinned where the placement lives: `securityAlerts.test.js`
+//     asserts the bell is inside `header.dash-header` and BEFORE the next `<main>`,
+//     and that nothing mounts `SecurityAlertsPanel` at all;
 //   * offer a clearing control that only an owner can use — every reader gets
 //     Snooze and Dismiss, and the owner-only org-wide Acknowledge lives in the
 //     DETAIL view where its refusal can be shown;
@@ -27,10 +31,12 @@
 //     words, because that absence is the second half of the owner's complaint.
 //
 // A11Y: the disclosure pattern the account menu settled on (#1148-ux, P2-1) —
-// `aria-expanded` on the trigger, a labelled `role="group"` panel, plain buttons,
-// Escape closes and returns focus to the bell, and a pointerdown outside closes.
-// No `role="menu"`: the APG menu contract needs roving arrow-key focus, and a
-// declared menu without it is worse than none.
+// `aria-expanded` + `aria-controls` + `aria-haspopup` on the trigger, a labelled
+// `role="group"` panel whose title is a real heading, plain buttons, Escape closes
+// and returns focus to the bell (from inside the panel too, not only from the
+// trigger), and a pointerdown outside closes. No `role="menu"`: the APG menu
+// contract needs roving arrow-key focus, and a declared menu without it is worse
+// than none.
 import React from 'react'
 
 import {
@@ -47,7 +53,6 @@ import {
   DISMISSED_HIDE,
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
-  LEDGER_ALL_QUIET_SNOOZED,
   LEDGER_EMPTY,
   OLDER_HIDE,
   OLDER_TOGGLE,
@@ -72,7 +77,6 @@ import {
   storageKey,
   undismiss,
   unsnooze,
-  snoozedUntil,
   writeState,
 } from './notificationLedger.js'
 // The two "we could not look" sentences are the SAME facts the previous surface
@@ -170,11 +174,9 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
   )
 }
 
-function DetailView({ alert, now, state, canAcknowledge, onAcknowledge, ackPending,
-                      ackError, onBack, onDismiss, onUnsnooze }) {
+function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
+                      ackError, onBack, onDismiss }) {
   const detail = detailOf(alert, now)
-  const key = detail.entry.key
-  const snoozedUntilMs = snoozedUntil(state, key, now)
   const pending = Boolean(ackPending) && ackPending === (alert && alert.episode)
   const error = ackError && alert && ackError.episode === (alert && alert.episode)
     ? ackError.message
@@ -219,15 +221,12 @@ function DetailView({ alert, now, state, canAcknowledge, onAcknowledge, ackPendi
         </div>
       ) : null}
       <div className="row notif-detail-actions">
-        {snoozedUntilMs ? (
-          <button type="button" className="ghost small" onClick={() => onUnsnooze(key)}>
-            {UNSNOOZE}
-          </button>
-        ) : (
-          <button type="button" className="ghost small" onClick={() => onDismiss(detail.entry)}>
-            {DISMISS}
-          </button>
-        )}
+        {/* Only the dismissal is offered here. A snoozed row has no detail entry
+            (the snoozed list offers Unsnooze directly), so an Unsnooze branch was
+            unreachable code wearing a test-shaped disguise — review finding. */}
+        <button type="button" className="ghost small" onClick={() => onDismiss(detail.entry)}>
+          {DISMISS}
+        </button>
         {/* Org-wide dismissal — owner/admin only, because the route 403s everyone
             else. Offered here rather than in the list so its refusal (403/404/
             409/503) renders where the reader is looking. */}
@@ -296,6 +295,10 @@ export function NotificationBell({
   const [lastKey, setLastKey] = React.useState(key)
   const rootRef = React.useRef(null)
   const bellRef = React.useRef(null)
+  // The panel's id, so the bell's `aria-expanded` has something to control. `useId`
+  // rather than a literal: two bells on one page (a future surface) would otherwise
+  // share an id, and `aria-controls` would point at whichever rendered first.
+  const panelId = React.useId()
 
   // Switching Organization (or account) must switch the ledger. Adjusting state
   // DURING render is React's documented alternative to an effect for "a prop
@@ -345,16 +348,25 @@ export function NotificationBell({
     if (opening) {
       // Re-read on open: another tab may have snoozed or dismissed something, and
       // a reloaded page is not the only way this store changes.
-      const fresh = readState(storage, key, freshClock())
-      // …but a decision THIS session made and could not STORE survives it. With
-      // no store, a refusing one, or a full one, the re-read returns an empty
-      // state, and taking it silently undid the click the reader had just made —
-      // while `SAVE_FAILED` promises the dismissal holds "until this page
-      // reloads". `persisted: false` is exactly that fact, so it wins.
-      setLedger((prev) => (prev.persisted ? fresh : { state: prev.state, persisted: false }))
+      //
+      // ⛔ ONLY WHEN THE STORE IS HEALTHY. A re-read cannot contain a write that
+      // never reached storage, so re-reading after a FAILED write (or with no store
+      // at all) threw away the in-memory dismissal and the row came back on the
+      // very next open — the "I dismissed it and it came back" defect this module
+      // exists to remove, reproduced with `storage={null}` (review P1). The
+      // in-memory state is this session's only record in that case, and the panel
+      // already says out loud that it will not survive a reload.
+      if (ledger.persisted) setLedger(readState(storage, key, freshClock()))
       setOpenedAt(freshClock())
       setDetailKey(null)
     }
+  }
+
+  /** Close the panel and hand focus back to the bell. */
+  const closePanel = () => {
+    setOpen(false)
+    setDetailKey(null)
+    if (bellRef.current) bellRef.current.focus()
   }
 
   // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
@@ -385,6 +397,13 @@ export function NotificationBell({
   const detailEntry = detailKey ? everyEntry.find((e) => e.rowKey === detailKey) || null : null
   const detailAlert = detailEntry ? detailEntry.alert : null
 
+  // The badge counts UNRESOLVED notifications (not unread ones), and the label says
+  // so. This is a deliberate departure from the usual "unread" bell: nothing here
+  // marks a notification read, opening the panel does not clear the badge, and
+  // reading a security row is not the same as dealing with it — the owner's
+  // complaint was "I can't clear them", so the number counts what still needs a
+  // decision. A count that dropped because the panel was opened would be a lie
+  // about the account's state.
   const count = ledgerView.unresolved
   // A read that failed must be visible on the CLOSED bell too: the sentences that
   // say so live inside the panel, so without this the surface was pixel-identical
@@ -407,14 +426,12 @@ export function NotificationBell({
         ref={bellRef}
         onClick={toggleOpen}
         onKeyDown={(e) => {
-          if (e.key === 'Escape' && open) {
-            setOpen(false)
-            // Escape from inside the panel must not strand focus on an unmounted
-            // control.
-            if (bellRef.current) bellRef.current.focus()
-          }
+          // Escape from the bell itself (focus is still on the trigger).
+          if (e.key === 'Escape' && open) closePanel()
         }}
         aria-expanded={open}
+        aria-controls={panelId}
+        aria-haspopup="true"
         aria-label={bellLabel}
         title={bellLabel}
       >
@@ -425,17 +442,24 @@ export function NotificationBell({
       {open ? (
         <div
           className="notif-panel"
+          id={panelId}
           role="group"
           aria-label={PANEL_TITLE}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
+              // Inside the panel, Escape must also RESTORE FOCUS — the bell's own
+              // handler cannot fire while focus is in here, so the panel closed and
+              // left `document.activeElement` on `<body>` (review finding).
               if (detailKey) setDetailKey(null)
-              else setOpen(false)
+              else closePanel()
             }
           }}
         >
           <div className="notif-panel-head">
-            <strong>{PANEL_TITLE}</strong>
+            {/* A real heading, not a `<strong>`: the panel is a surface a reader
+                can jump to by heading navigation, and a styled span is invisible
+                to it. */}
+            <h2>{PANEL_TITLE}</h2>
             {count ? <span className="dim small">{count} unresolved</span> : null}
           </div>
 
@@ -443,14 +467,12 @@ export function NotificationBell({
             <DetailView
               alert={detailAlert}
               now={clock}
-              state={ledger.state}
               canAcknowledge={canAcknowledge}
               onAcknowledge={onAcknowledge}
               ackPending={ackPending}
               ackError={ackError}
               onBack={() => setDetailKey(null)}
               onDismiss={handleDismiss}
-              onUnsnooze={handleUnsnooze}
             />
           ) : (
             <>
@@ -465,11 +487,7 @@ export function NotificationBell({
               ) : null}
               {!unavailable && !scanSaturated && count === 0 ? (
                 <p className="dim small notif-note">
-                  {!alerts.length
-                    ? LEDGER_EMPTY
-                    : ledgerView.snoozed.length
-                      ? LEDGER_ALL_QUIET_SNOOZED
-                      : LEDGER_ALL_CLEAR}
+                  {!alerts.length ? LEDGER_EMPTY : LEDGER_ALL_CLEAR}
                 </p>
               ) : null}
               {/* Two different failures, two different sentences: the store is

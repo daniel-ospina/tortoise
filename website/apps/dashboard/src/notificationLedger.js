@@ -71,6 +71,7 @@
 // `tortoise/abuse.py::_episode_acknowledged`).
 import {
   OLD_AFTER_DAYS,
+  REGISTER_ACTIVITY,
   REGISTER_ALERT,
   ageLabel,
   episodeCountLabel,
@@ -112,6 +113,12 @@ export function periodMs(id) {
 // an org field: `localStorage` has no transactions, so a single blob means a
 // concurrent write from another tab can drop an entry belonging to an org the
 // writer never touched. Per-org keys make the blast radius one Organization.
+//
+// ⚠️ That bounds the blast radius; it does not make writes concurrent-safe. Two
+// tabs in the SAME Organization both write the whole blob from their own
+// snapshot, so the second write can drop the first tab's dismissal. The re-read on
+// open narrows the window; nothing closes it, because the Web Storage API offers
+// no compare-and-swap. Stated rather than implied by the per-org key.
 //
 // The user segment is the session's own identity (the account menu already shows
 // that email), so two people sharing a browser do not inherit each other's
@@ -508,11 +515,23 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   const acked = []
   const dismissed = []
   // ONE ROW PER **ROW** — keyed on `rowKey` (the server's `episode`), never on
-  // the decision identity. Two episodes that share `type|message` are two
-  // facts and stay two rows: collapsing them hid a whole episode behind its
-  // sibling, and the duplicate-key shape it avoided is fixed by keying on the
-  // per-row identity instead of by deleting a row. The dedupe that remains is
-  // for a feed that returns the SAME episode twice, which really is one row.
+  // the decision identity. Two episodes that share `type|message` are two facts
+  // and stay two rows.
+  //
+  // ⛔ THIS REPLACES THE IDENTITY COLLAPSE, and the reason is the failure the
+  // collapse could not survive: the server's identity for a `flag` is type + RULE
+  // while the customer message is a constant that deliberately omits the rule
+  // (`_alert_subject` vs `_alert_dict`), so two genuinely different episodes
+  // collide on the client key. Collapsing to one row per identity meant that once
+  // today's bout was acknowledged, an OLDER unacknowledged one was neither listed
+  // nor counted — an alert made invisible and uncountable on the security surface
+  // — and "prefer the unacknowledged one" only moves which row disappears. With a
+  // per-row identity the question does not arise: each row is bucketed on its own
+  // `acked`/dismissed/snoozed state, so an identity is unresolved iff any of its
+  // rows is, and no row has to be deleted to keep the React keys unique.
+  //
+  // The dedupe that remains is for a feed that returns the SAME episode twice,
+  // which really is one row.
   const byRowKey = new Map()
   for (const alert of alerts || []) {
     if (!alert) continue
@@ -551,6 +570,15 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
 
 // ── The detail view ────────────────────────────────────────────────────────
 
+//: The detail view's `Kind` line, one sentence per register. `KIND_UNCLASSIFIED`
+//: exists because `registerOf` fail-quiets an unrecognised row: asserting that an
+//: unclassified event "changed nothing" is a claim about a row we cannot read.
+export const KIND_INCIDENT = 'Something happened on this Organization.'
+export const KIND_ACTIVITY =
+  'A rate measurement from an abuse detector. It changed nothing.'
+export const KIND_UNCLASSIFIED =
+  'We could not classify this alert. Treat it as needing review.'
+
 /** The facts the feed records for one alert, and whether a further detail
  *  payload travels with it.
  *
@@ -565,6 +593,14 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
 export function detailOf(alert, now = new Date()) {
   const entry = entryOf(alert, now)
   const extra = isPlainObject(alert && alert.details) ? alert.details : null
+  // ⛔ `registerOf` FAIL-QUIETS an unrecognised row into the activity register, so
+  // the activity sentence below must not be printed for one. "A rate measurement
+  // from an abuse detector. It changed nothing." is an affirmative claim about a
+  // row we did not classify — stronger than the data, and the exact class of copy
+  // defect this surface exists to avoid. The register is only KNOWN when the
+  // server stamped it (a type this client does not know can still arrive stamped).
+  const registerKnown = alert
+    && (alert.register === REGISTER_ALERT || alert.register === REGISTER_ACTIVITY)
   const fields = [
     { label: 'What', value: entry.message || entry.label },
     {
@@ -573,8 +609,10 @@ export function detailOf(alert, now = new Date()) {
       // whether anything happened, and it is why an incident row must not read
       // like a rate measurement (#10156).
       value: entry.isIncident
-        ? 'Something happened on this Organization.'
-        : 'A rate measurement from an abuse detector. It changed nothing.',
+        ? KIND_INCIDENT
+        : registerKnown
+          ? KIND_ACTIVITY
+          : KIND_UNCLASSIFIED,
     },
     { label: 'Newest', value: entry.stamp || 'not recorded' },
     { label: 'Age', value: entry.ageLabel || 'not recorded' },
@@ -602,17 +640,21 @@ export function detailOf(alert, now = new Date()) {
         .filter(([k]) => extra[k] !== undefined && extra[k] !== null && extra[k] !== '')
         .map(([k, label]) => ({ label, value: String(extra[k]) }))
     : []
+  // An EMPTY payload carries nothing, so it must not be reported as carrying
+  // machine detail the dashboard hides (review finding: `{}` said exactly that).
+  const hasPayload = Boolean(extra) && Object.keys(extra).length > 0
   return {
     entry,
     fields,
     extra: shown,
-    // `'none'` — nothing was recorded beyond what was already on screen, and the
-    // view must SAY so (the owner's "because I have no details it's just noise").
+    // `'none'` — the row carries no further detail beyond what the view already
+    // shows, and the view must SAY so (the owner's "because I have no details it's
+    // just noise").
     // `'undisplayable'` — a detail payload exists but none of it is customer-safe;
     // claiming "nothing was recorded" there would be a false statement about the
     // record, so it gets its own sentence.
     // `'shown'` — at least one customer-safe field is rendered.
-    detailState: shown.length ? 'shown' : extra ? 'undisplayable' : 'none',
+    detailState: shown.length ? 'shown' : hasPayload ? 'undisplayable' : 'none',
   }
 }
 
@@ -623,16 +665,12 @@ export function detailOf(alert, now = new Date()) {
 export const BELL_LABEL = 'Notifications'
 export const PANEL_TITLE = 'Notifications'
 export const LEDGER_EMPTY = 'You have no notifications.'
+//: Every actionable row is put away — by acknowledgement, dismissal or a snooze.
+//: A snoozed row is NOT acknowledged or dismissed, so the earlier wording ("has
+//: been acknowledged or dismissed") printed an affirmative beside its own
+//: "Snoozed (1)" line and was false (review finding).
 export const LEDGER_ALL_CLEAR =
-  'Every alert in this window has been acknowledged or dismissed.'
-// A snooze is SUPPRESSION, not a resolution (Carbon's notifications guidance:
-// an all-clear appears only when no active, acknowledged OR SNOOZED item
-// remains). Printing the sentence above over a ledger whose only row is
-// "Snoozed (1) … in 1 h" told the reader that alert had been dealt with.
-// This one names the third state instead of claiming it is one of the other two.
-export const LEDGER_ALL_QUIET_SNOOZED =
-  'Every other alert in this window has been acknowledged or dismissed; the '
-  + 'snoozed ones below come back when their time is up.'
+  'Every alert in this window is acknowledged, dismissed or snoozed.'
 export const OLDER_TOGGLE = (n) => `Older than ${OLD_AFTER_DAYS} days (${n})`
 export const OLDER_HIDE = `Hide older than ${OLD_AFTER_DAYS} days`
 export const SNOOZED_TOGGLE = (n) => `Snoozed (${n})`
@@ -656,9 +694,14 @@ export const DETAIL_TITLE = 'Notification detail'
 export const DETAIL_NO_DETAIL = 'No further detail was recorded for this alert.'
 export const DETAIL_UNDISPLAYABLE =
   'This alert carries machine detail that the dashboard does not display.'
+//: Scoped to the FEED on purpose. "Nothing else about this event was recorded"
+//: would be false for a `flag` row — the server records `rule` (it is load-bearing
+//: for episode identity) and simply does not ship it here. What is true is that the
+//: dashboard's alert feed does not carry the per-event records.
 export const DETAIL_NO_DETAIL_LEAD =
-  'The alert feed stores the description above and nothing else about this '
-  + 'event. If you need the underlying records, contact support@premiselabs.co.'
+  'The alert feed carries the description above; it does not include the '
+  + 'per-event records (which key, which source, the measured rate). Ask '
+  + 'support@premiselabs.co if you need them.'
 export const STORAGE_UNAVAILABLE =
   'Your browser blocked local notification storage, so snooze and dismiss '
   + 'cannot be remembered here. Server-side dismissals still apply on reload.'
