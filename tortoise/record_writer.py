@@ -373,6 +373,10 @@ CONNECT_TIMEOUT_SECONDS = 10
 #: caller gets a fresh connect (see ``_take_idle_connection``) — so expiring one
 #: costs a reconnect, never a surfaced error. A DSN that sets its own
 #: ``idle_in_transaction_session_timeout`` WINS, for the same reason
+#: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
+#: named.
+IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
+
 #: How long the CREATION HOOK may spend connecting to the record, in seconds.
 #: ⛔ SHORTER THAN THE LIVE DOOR'S :data:`CONNECT_TIMEOUT_SECONDS` (10), on
 #: purpose: the hook runs on a graph-creation REQUEST, and in `hosted_api` that
@@ -381,10 +385,6 @@ CONNECT_TIMEOUT_SECONDS = 10
 #: creation must cost the user a bounded pause, not the live path's full budget —
 #: the graph is created either way and `/health` publishes the gap.
 PROVISION_CONNECT_TIMEOUT_SECONDS = 3
-
-#: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
-#: named.
-IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
 
 #: How long the LIVE door stops trying after a connect to the record FAILED, in
 #: seconds. :data:`CONNECT_TIMEOUT_SECONDS` bounds ONE connect; it does not bound

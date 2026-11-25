@@ -609,7 +609,23 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
             mode=existing[1], already_cut_over=True, seeded=False)
     floor = enumerated_floor
     if floor is None:
-        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE RECORD'S OWN ENUMERATION.
+        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE **RECORD'S** OWN ENUMERATION —
+        # and not from the JSONL journal's line count, which is the coordinate
+        # :func:`seed`'s parameter is NAMED for (#14587 P3-5). The two agree
+        # only while the record is the authority on this graph: a graph the
+        # record has never seen writing has ZERO position rows, so the derived
+        # value is 0 whatever its JSONL journal holds — which is exactly the
+        # number the per-graph remedy prints (`seed --graph-id …
+        # --enumerated-floor 0`), because the record's positions begin at the
+        # NEXT allocation, not at the journal's history. Where the two can
+        # disagree on the record's own axis, `SEED_SQL`'s
+        # `MAX(seq) <= enumerated_floor` guard refuses (`divergence`) instead of
+        # seeding a number nobody measured — a gap makes COUNT(*) < MAX(seq), so
+        # a count-derived floor refuses a gapped graph rather than renumbering
+        # it (the distinction `JOURNAL_COUNT_SQL`'s own docstring spells out).
+        # ⛔ The BORN-UNCUT shape has no DB leg here (measured: the legs
+        # populate `public.journal_event` directly), so this paragraph is the
+        # record of that gap rather than a claim a test pins.
         # `scope_tenant` is transaction-local, so the count is read under the
         # tenant this connection is already bound to — or, on a connection that
         # has not been scoped yet, under no tenant at all, in which case RLS

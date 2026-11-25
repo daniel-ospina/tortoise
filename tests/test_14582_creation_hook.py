@@ -100,6 +100,12 @@ _HELPERS = (
 #: never holds it, and `record_cursor`'s FK refuses it).
 _UNHOOKED = (("tortoise/sdk.py", "_graph_create"),)
 
+#: The creation hook's own name. An absence pin matches callees by this PREFIX
+#: rather than by one exact spelling — the exact spelling the pin used to carry
+#: alongside it (`provision_graph_record_`) matches nothing in the tree, so that
+#: half was inert (`#14587` review, residual); see :func:`_hook_call_names`.
+_HOOK_PREFIX = "provision_graph_record"
+
 #: The DELEGATED sites: an entry point that creates a graph WITHOUT minting the id
 #: itself, so it is covered by the door it routes through. `(module, entry point,
 #: door)` — and the route is RESOLVED through that module's own AST rather than
@@ -188,6 +194,29 @@ def _hook_calls(node: ast.AST, callee: str) -> int:
     return count
 
 
+def _hook_call_names(node: ast.AST) -> list[str]:
+    """Callee names in `node` that ARE the creation hook, matched by PREFIX.
+
+    ⛔ The absence pin below cannot use an exact spelling: it previously also
+    matched ``provision_graph_record_`` (a trailing underscore), a name that
+    exists nowhere in the tree, so that clause was INERT — it could never fire
+    (`#14587` review, residual). A name-based AST walk cannot see a hook that is
+    renamed or aliased, so the honest pin is the PREFIX: any callee starting with
+    the hook's own name counts as a call to it, and a differently-spelled hook is
+    caught instead of sailed past.
+    """
+    found: list[str] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name and name.startswith(_HOOK_PREFIX):
+            found.append(name)
+    return found
+
+
 def test_every_creation_door_calls_the_hook():
     """⛔ THE WIRING PIN. A door that drops the call is the defect, not a style.
 
@@ -239,9 +268,10 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
     for rel, function in _UNHOOKED:
         node = _functions(rel).get(function)
         assert node is not None, f"{rel}::{function} is gone — re-run the census"
-        if _hook_calls(node, "provision_graph_record") or _hook_calls(
-                node, "provision_graph_record_"):
-            hooked.append(f"{rel}::{function}")
+        names = _hook_call_names(node)
+        if names:
+            hooked.append(
+                f"{rel}::{function} calls {sorted(set(names))}")
     assert not hooked, (
         f"{hooked} now calls the creation hook, and it must not: its Supabase "
         "arm persists no graph row (so the cursor row would be seeded for an id "
