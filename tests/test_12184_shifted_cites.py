@@ -129,10 +129,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ And §5's #11928 move names `tortoise/live.py` with NO row at all, which is how the cites drifted
     # +58 past a re-point that was correct when it was written (`:1313,1323` -> `:1371,1381`).
     (_SUBSTRATE, 'tortoise/live.py:1371', _LIVE, 1371, "``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through"),
-    # ⚠️ AND THE SECOND HALF NEEDS ITS OWN ROW: `_token_spans` only accepts a COMMA form's first number
-    # as an address span (the shipped `:36687,36718`-style token yields `(first, first)`), so ONE
-    # comma-form row would leave `:1381` graded by nothing — the pair half-covered, which is how the
-    # `:38024` defect survived. The document therefore names the two lines separately and each has a row.
+    # ⚠️ AND THE SECOND HALF GETS ITS OWN ROW. Two cites in one sentence is how the `:38024` defect
+    # survived: one number graded, its neighbour read by nothing. Here the document ALSO names the two
+    # lines separately (the clearest prose for a reader), and each half is pinned on its own line so a
+    # later re-point of `:1381` alone reds on the row that grades it, not on a neighbour's.
     (_SUBSTRATE, '`:1381`', _LIVE, 1381, ":data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/"),
     # ⛔ The same parenthesis makes a NEGATIVE claim about two `sdk.py` addresses ("neither naming
     # `:Document`") and both were stale by +357 / +148 while the sentence asserted they had been
@@ -373,7 +373,11 @@ def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> 
 
 #: Every address a TOKEN names, as `(first, last)` spans. One span per match, never the hull of
 #: a token's numbers — see `_token_spans`.
-_TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+#: ⛔ The first group is a COMMA LIST (`:1371,1381`, `:36687,36718` — the shape these documents
+#: actually write for a two-line cite), not a single number. Reading only the number after the
+#: colon made a comma token name ONE address, so its second line could be re-pointed while the row
+#: stayed green — the false PASS the `/`-form control below refuses, one spelling further out.
+_TOKEN_SPAN = re.compile(r":(\d+(?:,\d+)*)(?:-(\d+))?")
 
 
 def _token_spans(token: str) -> list[tuple[int, int]]:
@@ -383,18 +387,25 @@ def _token_spans(token: str) -> list[tuple[int, int]]:
     unrelated addresses (`:58603`/`:58605`) names two lines, NOT the line between them. Taking
     `min..max` over every number turned such a token into a range, so the arm accepted the `58604`
     the token never mentions — the exact false PASS this arm exists to refuse, one indirection
-    further out. Measured at this head: 0 of the surviving rows carries more than one address, so
-    no row's verdict moves; only the door the next row could have walked through is closed.
+    further out.
+
+    A COMMA list is two addresses for that same reason (`:1371,1381`), and each member gets its own
+    span; a `-END` suffix ranges only the LAST member (`:1371,1381-1390` = one line + one range).
+    Reading just the first member was a live hole, not a hypothetical: `#14671`'s fix first had to
+    write the two `live.py` cites as SEPARATE mentions of the arm — a workaround, now unnecessary
+    and no longer needed by any row, because the arm reads the form the documents write.
 
     ⛔ RESTORED (round 4, P1) after the test-bureaucracy cut dropped it with the deleted
     document's apparatus. It grades `_PINS`, which SURVIVES: the subject is the pin table, not
     the census. Only its `_MAIN_SET_MISSED` leg is gone, because that table died with the
     document it described.
     """
-    return [
-        (int(match.group(1)), int(match.group(2) or match.group(1)))
-        for match in _TOKEN_SPAN.finditer(token)
-    ]
+    spans: list[tuple[int, int]] = []
+    for match in _TOKEN_SPAN.finditer(token):
+        members = [int(n) for n in match.group(1).split(",")]
+        spans.extend((n, n) for n in members[:-1])
+        spans.append((members[-1], int(match.group(2) or members[-1])))
+    return spans
 
 
 def _rows_outside_their_token(rows) -> list[str]:
@@ -523,6 +534,20 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
         assert not _rows_outside_their_token((row,)), (
             f"{named} is an address the token names, so it must pass"
         )
+    # ⛔ The COMMA spelling — the shape these documents actually write (`:1371,1381`,
+    # `:36687,36718`) — was the SAME false PASS until `#14671`: `:(\d+)` read only the FIRST number,
+    # so a comma token named one address and its second line could be re-pointed with no row grading
+    # it. That is why this PR's own fix first had to split its two cites in PROSE; the arm now reads
+    # the form, so the split is a readability choice rather than a requirement.
+    # MEASURED non-vacuous: the `comma` row below IS a problem on the pre-fix regex ("names 1371, but
+    # it GRADES line 1381") and is silent on this one; the hull between the members is still refused.
+    comma = (_SUBSTRATE, "`:1371,1381`", "tortoise/live.py", 1381,
+             ":data:`KIND_PROPERTIES` for the scope")
+    assert not _rows_outside_their_token((comma,)), (
+        "a comma token names BOTH addresses, so grading the second must pass"
+    )
+    hull = (comma[0], comma[1], comma[2], 1376, comma[4])
+    assert _rows_outside_their_token((hull,)), "the comma form must still refuse the hull"
 
 
 def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
