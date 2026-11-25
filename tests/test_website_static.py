@@ -5653,7 +5653,8 @@ def _beats_whose_ground(selector: str, side: str,
     return out
 
 
-def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
+def _beat_auto_margin_homes(
+        html: str) -> dict[str, list[tuple[str, str, float]]]:
     """`{beat: [(ground_side, height), …]}` for every auto-margin centring rule.
 
     `height` is the `N` of the `@media (max-height: Npx)` block the rule lives
@@ -5671,14 +5672,28 @@ def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
     height_spans = _max_height_media_spans(html)
     other_media = _media_block_spans(html)
     beat_ids = _beat_section_ids(html)
-    homes: dict[str, list[tuple[str, float]]] = {}
+    homes: dict[str, list[tuple[str, str, float]]] = {}
     for match in re.finditer(r"([^{}]+)\{", blanked):
         prelude = " ".join(match.group(1).split())
         if not prelude or prelude.startswith("@"):
             continue
         body = _brace_block(blanked, match.end() - 1)
-        if not re.search(
-                r"margin-(?:top|bottom|block-start|block-end)\s*:\s*auto", body):
+        # The WINNING value per property, never "the string appears" (#14683
+        # review cycle 2, findings 1 and 2). Two measured fail-opens: appending
+        # `margin-top: 0` below the `auto` (an ordinary way to disable it) and
+        # swapping the pair (`margin-bottom: auto` on the FIRST child) both left
+        # this reader reporting the mechanism intact while the rendered page was
+        # back to #14677 at 375x812 — 32px top gap, the beat's own padding.
+        # `_effective_decl` is this file's existing answer to exactly that
+        # hazard (#14020 review cycle 3, P1), so the reader uses it rather than
+        # reintroducing a substring scan.
+        centred_props = {
+            prop
+            for _side, props in GROUND_ENDS
+            for prop in props
+            if _effective_decl(body, prop) == "auto"
+        }
+        if not centred_props:
             continue
         height = math.inf
         for block_height, start, end in height_spans:
@@ -5689,9 +5704,16 @@ def _beat_auto_margin_homes(html: str) -> dict[str, list[tuple[str, float]]]:
             if any(start <= match.start() < end for start, end in other_media):
                 continue
         for part in (p for p in prelude.split(",") if p.strip()):
-            for side, _props in GROUND_ENDS:
+            for side, props in GROUND_ENDS:
+                # ⛔ The PROPERTY is part of the home, not just the side (#14683
+                # review cycle 2, finding 1): `margin-bottom: auto` on
+                # `:first-child` is not `margin-top: auto`, it is
+                # `space-between` — recorded without the property, a swap
+                # satisfied the wrong end and the guard stayed green.
+                matched = centred_props.intersection(props)
                 for beat in _beats_whose_ground(part, side, beat_ids):
-                    homes.setdefault(beat, []).append((side, height))
+                    for prop in matched:
+                        homes.setdefault(beat, []).append((side, prop, height))
     return homes
 
 
@@ -5708,13 +5730,26 @@ def _base_beat_justify_values(html: str) -> list[str] | None:
     leaks a bogus value into the list (no false red).
 
     `None` and `[]` are kept distinct on purpose: an absent rule and a rule
-    with no `justify-content` are different defects and get different messages.
+    with no live `justify-content` are different defects and get different
+    messages.
+
+    ⛔ The WINNING value of the LAST base rule that declares it — not the first
+    `.beat {` block on the sheet and not `[-1]` over everything (#14683 review
+    cycle 2, finding 3). An appended `.beat { justify-content: center; }` — the
+    ordinary cascade shape, and what `_css_declarations` exists for — won the
+    cascade while a first-match reader still reported `safe center`, so the
+    ≤320px pill clearance could be deleted with the row green (measured: h1 top
+    80.0 → 55.8 against a pill bottom of 54.4 at 320x821). The old pattern's
+    exact `\n    ` indent was also a false red on any reformat, reported with a
+    message claiming no base rule existed.
     """
-    base = re.search(r"\n    \.beat \{([^{}]*)\}", _css_blanked(html))
-    if base is None:
+    if _css_declarations(html, ".beat") is None:
         return None
-    return [" ".join(d.split()) for d in re.findall(
-        r"justify-content\s*:\s*([^;}]+)", base.group(1))]
+    declaring = _css_last_declaring_body(html, ".beat", "justify-content")
+    if declaring is None:
+        return []
+    value = _effective_decl(declaring, "justify-content")
+    return [value] if value is not None else []
 
 
 def _short_viewport_centring_problems(html: str) -> list[str]:
@@ -5760,8 +5795,8 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             continue
         for height in sorted(arms[beat]):
             for side, props in GROUND_ENDS:
-                if any(home_side == side and home_height >= height
-                       for home_side, home_height in homes.get(beat, ())):
+                if any(h_side == side and h_prop in props and h_height >= height
+                       for h_side, h_prop, h_height in homes.get(beat, ())):
                     continue
                 problems.append(
                     f"{beat} > :{side}: no `{props[0]}: auto` fires at "
@@ -6187,6 +6222,47 @@ class TestShortViewportCentringIsGradedPerBlock:
                    for p in problems), problems
         assert not any("beat-hero > :first-child" in p for p in problems), problems
 
+    def test_the_swapped_margin_pair_is_red(self):
+        """`margin-bottom: auto` on the FIRST child is not centring — measured.
+
+        #14683 review cycle 2, finding 1: the reader recorded the SIDE a rule
+        called and discarded which PROPERTY it set, so the pair swapped end for
+        end still read as the mechanism intact. Rendered at 375x812 the swap
+        puts every beat back at a 32px top gap (its own `padding`), i.e. #14677
+        — and the row said `[]`.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin-bottom: auto; }"
+            + "\n      #beat-hero > :last-child { margin-top: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "the swapped pair was reported CLEAN: `margin-bottom: auto` on the "
+            "first child absorbs the space BETWEEN the two, which is "
+            "`space-between`, not centring")
+        assert any("beat-hero > :first-child" in p and "margin-top" in p
+                   for p in problems), problems
+
+    def test_a_later_declaration_that_disables_the_auto_margin_is_red(self):
+        """The winning declaration, not the presence of `auto` (finding 2).
+
+        `margin-top: auto; margin-top: 0;` is the ordinary way an editor turns
+        the centring off, and it reproduced the PR body's own "before" column
+        (32px top gap, 606.1px of dead space under `#beat-ingest`) while the
+        substring scan stayed green.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: auto; "
+              "margin-top: 0; }"
+            + "\n      #beat-hero > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "`margin-top: 0` appended below `margin-top: auto` was ignored — "
+            "the reader graded the presence of a string, not the winning "
+            "declaration")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
+
 
 class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
     """The base `.beat` guard must read the LIVE sheet, not the comment text.
@@ -6208,6 +6284,10 @@ class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
     def _page(declaration: str) -> str:
         return (
             "<!doctype html>\n<html><head><style>\n"
+            # A leading rule on purpose: `_css_rules_with_scope` takes the text
+            # since the previous `{`/`}` as a rule's prelude, so without a
+            # closed rule in front of it the prologue glues onto `.beat`.
+            "    body { margin: 0; }\n"
             "    .beat {\n"
             f"{declaration}\n"
             "      padding: 2rem;\n"
@@ -6242,6 +6322,27 @@ class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
 
     def test_the_absent_rule_is_None_not_empty(self):
         assert _base_beat_justify_values("<html><style>.x{}</style></html>") is None
+
+    def test_a_later_base_rule_wins(self):
+        """The LAST base rule, not the first (finding 3) — the ordinary cascade.
+
+        Appending `.beat { justify-content: center; }` is how a later edit
+        overrides the declaration. A first-match reader still saw `safe center`
+        and stayed green while plain `center` governed at 320x821, putting the
+        h1 24.2px under the Login pill — the ≤320px clearance the assertion
+        itself claims to protect.
+        """
+        page = (
+            "<!doctype html>\n<html><head><style>\n"
+            "    body { margin: 0; }\n"
+            "    .beat { justify-content: safe center; }\n"
+            "    .beat { justify-content: center; }\n"
+            "</style></head><body>\n"
+            '<section id="beat-hero" class="beat"><div>copy</div></section>\n'
+            "</body></html>\n")
+        assert _base_beat_justify_values(page) == ["center"], (
+            "the FIRST base `.beat` rule was read, so an appended override won "
+            "the cascade with the guard still reporting `safe center`")
 
 
 class TestARenderedCodeElementGetsAMonoFace:
