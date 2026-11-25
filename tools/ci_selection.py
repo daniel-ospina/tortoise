@@ -1988,17 +1988,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # #13098: the same silent-drop class, one artefact over, and the reason it is
              # worth a third entry for a `.md`: the Cypher census's pins
              # (`tests/test_13098_cypher_inventory.py`, registered `core`) compare the tool's
-             # own count against the numbers PINNED IN THAT DOCUMENT, so a doc-only edit is
-             # exactly how a count drifts. Measured before these entries:
+             # own count against the numbers PINNED IN THAT DOCUMENT'S SOURCE, so a
+             # source-only edit is exactly how a count drifts. ⛔ THE ENTRY NAMES THE
+             # TRACKED SOURCE, NOT THE RENDERED DOCUMENT: `CYPHER-INVENTORY.md` is a gitignored
+             # build artifact (`--render`'s output), so a diff can never carry it and an entry
+             # naming it would select nothing, forever, silently — the failure class this very
+             # entry exists to close. Measured before these entries:
              # `select(["tools/cypher_inventory.py"])`, `select(["tools/cypher_diff_harness.py"])`
-             # and `select(["docs/architecture/CYPHER-INVENTORY.md"])` each → `surfaces: []`
+             # and `select(["docs/architecture/CYPHER-INVENTORY.src.md"])` each → `surfaces: []`
              # with the suite ABSENT — `tools/` is in `NON_PYTHON_PREFIXES`, so the path is
              # filtered out BEFORE the "not matched -> core" fallback and takes the docs-only
              # early return. With them: `surfaces: ['core']` and the suite selected. Pinned by
              # tests/test_ci_selection.py::test_the_cypher_census_tool_and_doc_select_the_census_suite.
              "tools/cypher_inventory.py",
              "tools/cypher_diff_harness.py",
-             "docs/architecture/CYPHER-INVENTORY.md",
+             "docs/architecture/CYPHER-INVENTORY.src.md",
              # #13436 P7 (PR #13445) review P1: the write-path-cost instrument and its
              # evidence directory are subjects of `tests/test_measure_13436_write_costs.py`
              # (`core`-registered), and every one of its pins reads one of them — the

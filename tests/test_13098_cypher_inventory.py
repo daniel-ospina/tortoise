@@ -2,8 +2,10 @@
 
 WHAT THIS SUITE IS FOR
 ======================
-`docs/architecture/CYPHER-INVENTORY.md` publishes counts, and a published count
-without a gate is a number that rots the first time a statement is added. Two
+`docs/architecture/CYPHER-INVENTORY.src.md` publishes counts — the tracked SOURCE,
+whose 25 pins `--check` grades; `CYPHER-INVENTORY.md` beside it is `--render`'s
+gitignored output — and a published count without a gate is a number that rots the
+first time a statement is added. Two
 things are therefore pinned here:
 
 1. **The census reconciles and the doc matches it** — `tools/cypher_inventory.py
@@ -49,9 +51,43 @@ from tools import cypher_diff_harness as harness  # noqa: E402
 from tools import cypher_inventory as census  # noqa: E402
 
 # --------------------------------------------------------------------------- #
+# THE DOCUMENT IS RENDERED, NOT COMMITTED (#13098)
+# --------------------------------------------------------------------------- #
+# `docs/architecture/CYPHER-INVENTORY.src.md` is the hand-authored SOURCE — the
+# prose, the 25 pins — and the only TRACKED file. `docs/architecture/
+# CYPHER-INVENTORY.md` is `--render`'s OUTPUT: the source plus one `file:line`
+# row per statement site, appended from the live tree, and it is GITIGNORED.
+#
+# ⛔ WHY. The appendix's rows carry a line number each, so any product commit
+# that moves a statement restamps every later row. While that output was
+# COMMITTED, every such PR had to carry its own regenerated 1,327-row copy —
+# measured 2026-11-24 at `939e37f664`: 8 of 11 open PRs held an edited copy, it
+# was in 6 of 6 then-conflicting PRs, and 3 of the last 20 commits on `main`
+# regenerated it. A committed generated artifact plus N open branches is a
+# guaranteed conflict on every merge round.
+#
+# ⛔ WHAT IS PRESERVED, EXACTLY. The pin/prose arms grade the SOURCE; the appendix
+# arms grade a freshly RENDERED document — the same prose, and the same rows a
+# committed copy carried — and `--check` still reads the same 25 pins. A census
+# that disagrees with the tree still reds (proved on this change: one added
+# statement site reds `--check` and the published-decomposition arm). What went
+# away is only the obligation to COMMIT a regenerated copy.
+DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
+
+
+def _source_text() -> str:
+    """The tracked SOURCE: prose + the 25 pins, and NOT one census row."""
+    return DOC_SRC.read_text(encoding="utf-8")
+
+
+def _document_text() -> str:
+    """The DOCUMENT: the source + THIS run's appendix, rendered from the tree."""
+    return census.render(DOC_SRC, census.census(("tortoise",)))
+
+# --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
 # --------------------------------------------------------------------------- #
-# The arms below marked `@requires_doc_pin` compare a COMMITTED census document
+# The arms below marked `@requires_doc_pin` compare the RENDERED census document
 # against the live tree. Any product commit can move those counts, so in the
 # pre-merge matrix (where this file is `core`-registered and rides the REQUIRED
 # `python-ci-gate`) each of them redded PRs that touched neither the census tool
@@ -64,7 +100,7 @@ from tools import cypher_inventory as census  # noqa: E402
 # which is not a required context AND is already path-filtered to exactly the
 # diffs that can move a count (`tortoise/**`, `supabase/migrations/**`,
 # `tools/cypher_inventory.py`, `tools/cypher_diff_harness.py`,
-# `docs/architecture/CYPHER-INVENTORY.md`, this file). Nothing was deleted: the
+# `docs/architecture/CYPHER-INVENTORY.src.md`, this file). Nothing was deleted: the
 # arms, the tool and `cypher_inventory.py --check` all still run there, and a
 # genuinely wrong census still reds a job — just not somebody else's merge.
 #
@@ -87,7 +123,7 @@ requires_doc_pin = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 @requires_doc_pin
 def test_the_doc_counts_match_the_census():
-    """The pinned counts in CYPHER-INVENTORY.md are the census's own numbers."""
+    """The pinned counts in CYPHER-INVENTORY.src.md are the census's own numbers."""
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), "--check"],
         capture_output=True, text=True, cwd=ROOT,
@@ -96,7 +132,7 @@ def test_the_doc_counts_match_the_census():
 
 
 @requires_doc_pin
-def test_the_doc_appendix_is_the_tools_own_output():
+def test_the_doc_appendix_is_the_tools_own_output(tmp_path):
     """Appendix A is DERIVED from the tree, so the doc must carry the tool's output.
 
     ⛔ THIS ARM EXISTS BECAUSE THE PINS DO NOT REACH THE APPENDIX, and the gap is
@@ -120,11 +156,26 @@ def test_the_doc_appendix_is_the_tools_own_output():
     still carried the 6 stale rows.
     """
     marker = "## Appendix A — every statement site, by shape\n"
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
+    # ⛔ RENDERED IN A SEPARATE PROCESS FROM THIS ARM'S OWN CENSUS CALL, on
+    # purpose: the teeth here are that the FILE `--render` writes carries every
+    # row, in order, exactly once — a truncated, duplicated or mis-ordered write
+    # reds even though `markdown_table` itself is fine.
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, f"--render refused:\n{proc.stdout}\n{proc.stderr}"
+    doc = out.read_text(encoding="utf-8")
     assert marker in doc, (
-        "CYPHER-INVENTORY.md no longer carries Appendix A's heading — this arm\n"
+        "the rendered document no longer carries Appendix A's heading — this arm\n"
         "reads the table from that heading, so re-point it rather than deleting it")
+    # ⛔ AND THE SOURCE CARRIES NO ROW ITSELF. A row pasted back into the tracked
+    # file is the conflict this split removed, returning silently.
+    assert not census.CENSUS_ROW.search(_source_text()), (
+        f"{DOC_SRC.relative_to(ROOT)} carries a census row — the appendix is "
+        "GENERATED: delete the rows and let `--render` append them")
     appendix = doc[doc.index(marker) + len(marker) + 1:]
     result = census.census(("tortoise/",))
     expected = census.markdown_table(result["sites"]) + "\n"
@@ -150,35 +201,79 @@ def test_the_doc_appendix_is_the_tools_own_output():
         else:
             shown = "  same row count and every shared row matches — differs only in trailing bytes"
     raise AssertionError(
-        "Appendix A is not the census tool's own output — it is DERIVED from the\n"
-        "tree, so regenerate it at THIS head rather than editing rows by hand:\n"
-        "    python tools/cypher_inventory.py --markdown\n"
-        "then replace everything after the `## Appendix A` heading with that\n"
-        "output. This failure is what a stale `file:line` index looks like — the\n"
-        "pins cannot see it, because counts do not move when code moves within a\n"
-        "file that already carries sites (measured on #13223, twice).\n"
+        "the rendered Appendix A is not the census tool's own output — it is\n"
+        "DERIVED from the tree, so the RENDERER (or the source it appends to) is\n"
+        "what is wrong; no row is ever edited by hand:\n"
+        "    python tools/cypher_inventory.py --render\n"
+        "A row pasted back into `CYPHER-INVENTORY.src.md` is REFUSED — exit 2 by\n"
+        "`--render`, exit 1 (naming the rows) by `--check` — the rows belong to\n"
+        "the generator.\n"
         f"rows: doc={len(head_rows)} tool={len(tool_rows)}; "
         f"{len(stale)} row(s) differ.\n" + shown)
 
 
 @requires_doc_pin
-def test_the_doc_appendix_row_count_is_the_census_site_count():
+def test_the_doc_appendix_row_count_is_the_census_site_count(tmp_path):
     """The appendix's row count is §0's `sites` pin — one row per classified site.
 
     A cheap second angle on the same artifact: a truncated or duplicated appendix
-    that happens to keep the surviving rows byte-identical still reds here, and
-    the message names the number the document itself publishes.
+    still reds here, and the message names the number the document itself publishes.
+
+    ⛔ AND IT GRADES THE FILE `--render` WRITES, not an in-process re-render. The
+    first cut of this split read `_document_text()`, which assembles the table from
+    `markdown_table()` — one row per site BY CONSTRUCTION — so the arm could not
+    fail however broken the renderer was (the vacuity `#11859` names, caught in
+    review of this change rather than by it).
     """
     marker = "## Appendix A — every statement site, by shape\n"
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, f"--render refused:\n{proc.stdout}\n{proc.stderr}"
+    doc = out.read_text(encoding="utf-8")
     appendix = doc[doc.index(marker) + len(marker) + 1:]
     rows = [ln for ln in appendix.splitlines() if ln.startswith("| `")]
     result = census.census(("tortoise/",))
     assert len(rows) == len(result["sites"]), (
-        f"Appendix A carries {len(rows)} site rows, the census classifies "
-        f"{len(result['sites'])} — regenerate it with "
-        "`python tools/cypher_inventory.py --markdown` rather than hand-editing")
+        f"the rendered Appendix A carries {len(rows)} site rows, the census "
+        f"classifies {len(result['sites'])} — re-render it with "
+        "`python tools/cypher_inventory.py --render` rather than hand-editing")
+
+
+def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsys):
+    """The split's guard: the appendix cannot be pasted back into the source.
+
+    ⛔ WITHOUT THIS THE CONFLICT ENGINE COMES BACK SILENTLY. The obvious way to
+    "refresh the census" is to copy `--markdown` into the tracked file — that is
+    what the tracked document WAS for eight PRs' worth of merges. `--render`
+    therefore REFUSES a source that already carries a census row rather than
+    appending a second copy, and `--check` refuses it too: a committed appendix
+    is the defect this split removed, and it must fail loudly, not render twice.
+    """
+    source = _source_text()
+    assert not census.CENSUS_ROW.search(source), (
+        "the shipped source carries a census row — the appendix is generated")
+    rowed = tmp_path / "rowed.src.md"
+    rowed.write_text(
+        source
+        + "| `tortoise/sdk.py:1` | `f` | plain | read | candidate:SQL-shaped | `RETURN 1` |\n",
+        encoding="utf-8",
+    )
+    result = census.census(("tortoise",))
+    with pytest.raises(SystemExit) as refused:
+        census.render(rowed, result)
+    # 2 is this tool's "could not run" — never 1, which is the DRIFT verdict the
+    # `--check` arm above reserves (`SystemExit(<str>)` would have been 1).
+    assert refused.value.code == 2, (
+        f"the refusal must exit 2 (could not run), got {refused.value.code!r}")
+    assert "carries 1 census row" in capsys.readouterr().err, (
+        "the refusal must name the row it found on stderr")
+    assert census.check(rowed, result) == 1, (
+        "`--check` must refuse a SOURCE that carries the appendix (exit 1), not "
+        "grade its pins over a committed copy of the rows")
 
 
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
@@ -471,7 +566,7 @@ def test_the_published_decomposition_names_the_measured_operands():
     --json` (`sites` / `files_with_sites`); see §7's "third place the same cut can
     leave stale".
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     result = census.census(("tortoise",))
     sites = len(result["sites"])
     non_cypher = result["non_cypher_door_calls"]
@@ -505,7 +600,7 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
     `test_every_anchored_arm_refuses_a_duplicate`, which is where their proof lives
     (`#13458` review P2-3: this docstring used to claim "an arm", i.e. any arm).
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     result = census.census(("tortoise",))
     sites = len(result["sites"])
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
@@ -642,8 +737,7 @@ def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, meas
     ⛔ Step 4 is what makes this non-vacuous per arm: revert JUST that arm to `re.search` and
     only that arm's case reds, so the failure names the arm it belongs to.
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
+    doc_text = _source_text()
     section = re.search(bounds, doc_text, re.MULTILINE | re.DOTALL)
     assert section, f"arm ({arm}): its section bounds moved; re-cut this pin with them"
     section_text = section.group(0)
@@ -720,8 +814,8 @@ def test_the_census_pin_can_report_drift(tmp_path):
     way the pin is supposed to fail.
     """
     result = census.census(("tortoise",))
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
-    assert census.check(ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md", result) == 0
+    doc_text = _source_text()
+    assert census.check(DOC_SRC, result) == 0
 
     def write(text: str):
         path = tmp_path / "doc.md"
@@ -1544,7 +1638,7 @@ def test_the_files_scanned_count_is_pinned_too(tmp_path):
     document before it is graded.
     """
     result = census.census(("tortoise",))
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     assert "<!-- cypher-inventory:files_scanned = " in doc_text
     path = tmp_path / "doc.md"
     path.write_text(doc_text.replace(
@@ -2112,7 +2206,7 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
     Measured non-vacuous: on the pre-fix blob (`a642d54b8678`) this fails at line
     69 with `no-trailing` AND `colcount` (4 pipes where the separator declares 5).
     """
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc = _document_text()
     lines = doc.split("\n")
 
     def pipes(text: str) -> int:
@@ -2148,7 +2242,13 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
         i = j
 
     assert not offenders, (
-        "a markdown table row in docs/architecture/CYPHER-INVENTORY.md is broken across "
-        "physical lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is "
-        "one line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
+        "a markdown table row is broken across physical lines, which reds the "
+        "REQUIRED `docs` check as MD055/MD056. \u26d4 The graded text mixes BOTH "
+        "halves of the split: the PROSE tables come from the tracked "
+        "`docs/architecture/CYPHER-INVENTORY.src.md` (which is what `docs` lints — "
+        "the rendered `CYPHER-INVENTORY.md` is gitignored and never in the changed "
+        "set), while an offender inside Appendix A would be a `markdown_table`/"
+        "`_digest` bug rather than a row to re-join, because every generated row "
+        "is one line by construction. A row is one line — re-join it rather than "
+        "re-wrapping it:\n" + "\n".join(offenders)
     )
