@@ -360,11 +360,12 @@ def layer_kind_values(proj: Any, label: str) -> frozenset[str]:
 
 
 #: The most characters of a neighbour's own text a relation row carries. The
-#: same bound ``search_engine.get_relationships`` applies to its ``related_content``
-#: — a relation list is per-EDGE, so an unbounded preview scales as
+#: same VALUE as the inline ``[:200]`` in ``search_engine.get_relationships``'
+#: ``related_content`` (there is no named constant there to share) — a relation
+#: list is per-EDGE, so an unbounded preview scales as
 #: ``limit × largest neighbour body`` (#14593 review P2, measured at 4000 chars
-#: through a Point). Deliberately NOT read from ``search_engine``: that constant
-#: is private to its own rendering, and coupling the two would mean a change there
+#: through a Point). Deliberately NOT imported from ``search_engine``: that slice
+#: is inline to its own rendering, and coupling the two would mean a change there
 #: silently re-caps a public REST field here.
 _ENDPOINT_NAME_MAX = 200
 
@@ -403,7 +404,7 @@ def _endpoint_preview(row: Any) -> dict:
     caller cannot detect is the "absence read as an answer" class this PR
     removes elsewhere.
 
-    ⛔ And the per-layer SELECTION is done in Cypher (``_relation_endpoint_name``
+    ⛔ And the per-layer SELECTION is done in Cypher (``_RELATION_ENDPOINT_NAME``
     above the two UNION branches), because a single blanket ``coalesce(m.name,
     m.content, m.url)`` reached ``content`` for a ``:Source`` too — the ``#3998``
     payload disclosure arriving through the name field, which

@@ -911,7 +911,10 @@ def test_relations_bounds_and_marks_a_long_neighbour_body(tmp_path):
     with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
         hub = client.post("/v1/points", json={
             "content": "the anchor", "kind": "statement"}).json()
-        long_body = "x" * 4000
+        # DISTINCTIVE, not one repeated character: with "x" * 4000 the value
+        # assertion below is satisfied by ANY 200 "x"s, so a mutant returning a
+        # different slice stayed green (measured).
+        long_body = "EDGE-OF-THE-BODY" + "y" * 4000
         far = client.post("/v1/points", json={
             "content": long_body, "kind": "statement"}).json()
         sdk = _sdk(ha)
