@@ -173,10 +173,15 @@ def test_the_disposition_names_both_measured_producers():
     The installer's guard covers the legacy ``tortoise-capture/`` **directory**
     (``capture_install.LEGACY_PI_DIRNAME``). The second producer is a top-level
     ``reflect-hook.ts`` — measured to be a real file on
-    ``agent-infra@origin/main``, not the symlink #3512's body once claimed —
-    which the guard does not touch. Naming only the guarded one is how the
-    "one recorder, one home" claim stayed readable while two producers were
-    live on a farm machine.
+    ``agent-infra@origin/main``, not the symlink #3512's body once claimed.
+    Naming only the guarded one is how the "one recorder, one home" claim
+    stayed readable while two producers were live on a farm machine.
+
+    #14342 added a SECOND guard covering this producer
+    (``capture_install.PI_SECOND_PRODUCER_NAME``), so the reason this test
+    exists is no longer "the guard does not touch it": the record must keep
+    naming the producer whose bytes live outside this repo, and the shim
+    disposition that would remove it at source.
     """
     readme = _text(SEAM_README)
     assert capture_install.LEGACY_PI_DIRNAME in readme

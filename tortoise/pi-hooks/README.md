@@ -123,11 +123,65 @@ install guard.
 
 ### The second producer, and the disposition of the agent-infra copy (#3512)
 
-The guard above covers **one** of the two producers agent-infra installs. The
-other is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
+The guard above covers the legacy **directory**. The other producer agent-infra
+installs is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
 second, independent extension whose only handler is the `session_shutdown`
 (`quit`) capture: it writes a JSONL fallback into
 `~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint.
+
+**The installer disables it too, as of #14342.** After the capture artifact is
+VERIFIED in place (`assert_seam_target`), `_disable_pi_second_producer` renames
+it to `reflect-hook.ts.disabled` — a name Pi's loader does not load (it takes
+top-level `*.ts` / `*.js`, so a `.disabled` suffix is not a loadable extension),
+with the bytes preserved and a loud refusal if that name already exists. The
+ORDERING is the safety property, not a style choice: disabling the other
+producer before the replacement is verified would open a window with NO producer
+at all, and capture silently stopping is worse than the duplication. A seam that
+installs while both producers stay registered is reported as a failure, never as
+a green install.
+
+#### Why it is a duplicate — measured, not inferred (#14342)
+
+On the reference box, 2026-11-25:
+
+| | capture spool (this seam) | `session-events/` (reflect-hook) |
+|---|---|---|
+| sessions / records | 265 | 17 894 |
+| writes when | every `turn_end` (plus `session_shutdown`) | `quit` only |
+| on disk | 265 sessions' meta + turn logs | 22 day-files, 106 MB |
+| filed by | `capture_spool` / `store_sync` | `session_events_drain` (the store-sync leg) |
+
+**265 of 265** spool sessions were also in `session-events` — spool-only: zero.
+Compared turn for turn: **179 byte-identical**, and the other **86 differ only
+by the truncation marker** (the spool annotates a 5 000-character cut,
+reflect-hook hard-slices), i.e. 1 415 559 vs 1 415 558 characters of content.
+The four fields only reflect-hook records
+(`metadata.team/projectRoot/prs/charCount`) are **dropped at filing time**:
+`session_events_drain`'s payload builder forwards only
+`harness`/`session_id`/`conversation`/`machine_id`/`source`/`model`. Nothing
+unique reaches the graph — so this is a duplicate payload in a second substrate,
+not a second capability.
+
+#### The residual, stated
+
+agent-infra's farm **re-materializes** `extensions/reflect-hook.ts` from its
+`manifest.json` (entry 13), so this guard holds on a box where
+`tortoise install pi` runs and is **reverted by the next farm sync** — observed:
+every agent-infra extension carries the same farm mtime while a hand-disabled
+copy keeps its own. The durable removal is the #3512 decision above (reduce
+agent-infra's copy to a shim of `tortoise/pi-hooks/`, carrying no capture code
+of its own), which is `daniel-ospina/agent-infra#1671`. Until that lands, the
+installer's guard is the product-side answer and the farm is the reason it can
+regress.
+
+#### The backlog is a decision, not a delete
+
+Where the product seam is NOT installed, `session-events/` is the **only**
+local capture on the box — so it is not a duplicate there, it is the sole copy,
+and deleting it destroys undelivered work (the failure #10479 exists to
+prevent). The order is: restore the product seam, then drain the backlog
+through its existing store-sync leg, then apply a retention (seal/compress with
+`tools/seal_session_events.py`) — never a delete to make a directory small.
 
 **Its egress gate changed under this record.** Until agent-infra `7e77470e4`
 (2026-10-16 UTC, agent-infra #803 / #848) `reflect-hook` uploaded whenever the API
