@@ -112,15 +112,18 @@ def _single_sample_meter(used: float):
     a bare docstring left the class open — a future-dated literal
     (``2027-06-01T00:00:00+00:00``) passed all ten tests, because a date in the
     future is a bomb with a later fuse and ``_stale()`` cannot see a negative age.
-    So the age is bounded on BOTH sides below: any hardcoded literal is outside
-    ``[-60 s, 360 s]`` by construction, while the offset above is 300 s old and
-    cannot drift out from under it.
+    So the age is bounded on BOTH sides below. A literal lands outside this window
+    within minutes of being written and stays outside forever after (a future-dated
+    one is outside immediately); the 300 s offset above cannot drift out from under
+    it. The window is deliberately a little wider than the offset (60 s of headroom)
+    because the two ``now`` reads sit microseconds apart inside one call.
     """
     measured_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     age = (datetime.now(UTC) - datetime.fromisoformat(measured_at)).total_seconds()
     assert -60 <= age <= _FRESH_FIXTURE_MAX_AGE_S, (
         f"this fixture's reading is {age:.0f}s old; it must be written as an offset "
-        f"from now (0 <= age <= {_FRESH_FIXTURE_MAX_AGE_S}s), never as a literal date. "
+        f"from now (-60s <= age <= {_FRESH_FIXTURE_MAX_AGE_S}s — the window is a "
+        "little wider than the 300 s offset it expects), never as a literal date. "
         "A literal is a calendar bomb: past the 24 h bound the cap goes UNARMED, the "
         "gate SERVES the write, and the refusal these tests pin is never composed "
         "— which reddens the required `test (e)` shard one bound after it merges, "
