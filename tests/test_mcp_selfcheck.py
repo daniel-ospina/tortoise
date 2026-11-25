@@ -1134,16 +1134,76 @@ def test_a_LEGAL_closer_indent_is_still_a_closed_fence():
         "closer (4 chars = 4 columns) is the SAME indent, not a deeper one; the "
         "comparison must be in columns")
 
-    # ⛔ AND THE NESTED-EXAMPLE PROTECTION SURVIVES the fallback: a fence nested four
-    # columns deep still does NOT close the outer one, because the strict reading
-    # closes the file and the lenient one is therefore never consulted.
-    nested = ("# House rules\n\n```md\nWrite the block inside a list item:\n"
-              "    ```\n    " + harness_onboard.BEGIN_MARK +
-              "\n    never delete this example body\n    " +
-              harness_onboard.END_MARK + "\n    ```\n```\n")
-    assert "never delete this example body" in harness_onboard._strip_block(nested), (
-        "the lenient fallback must not be reached when the strict reading closes the "
-        "file — a +4 nested example is documentation, not the block")
+    # ⛔ AND THE COLUMNS ARM MUST BE ABLE TO FAIL. The two shapes above do NOT
+    # discriminate it: counting a tab as ONE still reads that closer as deeper in
+    # strict and still lets the lenient pass close it (`4 <= 1 + 3`), so reverting
+    # `_indent_columns` to `len(line) - len(line.lstrip())` left the WHOLE FILE GREEN
+    # (measured: `104 passed`). That is the same "a guard that cannot fail is not
+    # coverage" shape the END-half finding names, on the third arm of this fix.
+    #
+    # This shape separates the two readings: a tab opener is 4 COLUMNS but 1
+    # CHARACTER, so a 6-space closer is `+2` (legal) in columns and `+5` (illegal) in
+    # characters — legal in columns it must close, in characters both passes leave it
+    # open and the file is refused.
+    assert harness_onboard._indent_columns("\t```") == 4, (
+        "the tab stop is 4 COLUMNS (CommonMark's own), not 1 character")
+    assert harness_onboard._indent_columns("\t\tx") == 8, (
+        "a second tab advances to the NEXT 4-column stop, not to 5")
+    tab_to_six_spaces = "# House rules\n\n\t```md\nexample\n      ```\n"
+    _spans, unclosed = harness_onboard._fence_scan(tab_to_six_spaces)
+    assert unclosed is None, (
+        "a tab opener is 4 COLUMNS, so a 6-space closer is only +2 beyond it and "
+        "LEGAL; counted in characters the opener looks like 1 and this closer like "
+        "+5, which refused a file CommonMark closes — it was refused as unclosed on "
+        f"line {unclosed}")
+    assert harness_onboard._markers_well_formed(tab_to_six_spaces) == (True, ""), (
+        "a tab-opener/six-space-closer file carries no markers and must be "
+        "well-formed, not refused: "
+        + repr(harness_onboard._markers_well_formed(tab_to_six_spaces)))
+
+    # ⛔ THE STRICT READING MUST BE PREFERRED — AND THIS IS WHERE THAT CAN FAIL.
+    # The arm below originally pinned a `+4` nested example, which discriminates
+    # NOTHING: `_fence_scan_pass` never reads a `+4` fence as a closer under EITHER
+    # allowance, so deleting the strict-first preference entirely (pure LENIENT)
+    # left the WHOLE FILE GREEN (measured: `104 passed`). The preference is the
+    # entire point of the two-pass fix, so a guard that cannot fail on it is the
+    # same defect class as the END-half finding.
+    #
+    # The shapes that DO discriminate are the ones where the two readings disagree —
+    # a nested example indented `+1..+3`, where CommonMark says the inner fence closes
+    # the OUTER one and strict says it does not. Erring toward "this is
+    # documentation" is the deliberate direction (`_fence_scan`: *"erring toward
+    # 'this is documentation, leave it' is the only direction that cannot destroy
+    # text"*), and it is what stops `--uninstall` from reading the example's markers
+    # as the real block. Measured under pure LENIENT, every one of `+1..+3` DELETES
+    # the example body (`body_kept=False`); under the strict-first scan it survives.
+    for shallow in (1, 2, 3, 4):
+        pad = " " * shallow
+        nested = ("# House rules\n\n```md\nWrite the block inside a list item:\n"
+                  + pad + "```\n" + pad + harness_onboard.BEGIN_MARK + "\n"
+                  + pad + "never delete this example body\n"
+                  + pad + harness_onboard.END_MARK + "\n"
+                  + pad + "```\n```\n\nMy own later notes: never delete this.\n")
+        stripped = harness_onboard._strip_block(nested)
+        assert "never delete this example body" in stripped, (
+            f"a +{shallow} nested example's body was deleted: the lenient reading "
+            "closed the OUTER fence on the inner closer, so the markers shown in the "
+            "example read as the real block — the strict pass must be tried FIRST "
+            "and kept whenever it closes the file")
+        assert "My own later notes: never delete this." in stripped, (
+            f"+{shallow}: the user's own line outside the example was deleted")
+
+    # ⛔ AND THE LENIENT PASS IS STILL ALLOWED TO CLOSE A FILE THE STRICT ONE CANNOT
+    # — that is finding 1's fix, and this asserts the two rules coexist: the strict
+    # preference must not have been bought back by refusing legal files again.
+    legal = "# House rules\n\n```md\nexample\n  ```\n"
+    _spans, strict_unclosed = harness_onboard._fence_scan_pass(legal, allowance=0)
+    assert strict_unclosed is not None, (
+        "fixture check: this file's closer is deeper than its opener, so the STRICT "
+        "reading is expected to leave it open")
+    assert harness_onboard._fence_scan(legal)[1] is None, (
+        "the lenient fallback must still close a file whose only closer is a legal "
+        "+2, or finding 1's regression is back")
 
 
 def test_an_unclosed_fence_is_still_refused_when_BOTH_readings_leave_it_open():
