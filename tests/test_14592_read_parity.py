@@ -277,6 +277,71 @@ def test_sources_list_pages_over_a_TOTAL_order_so_a_walk_cannot_drop_a_row(
         assert len(set(walk)) == len(walk), walk
 
 
+def test_sources_list_imposes_a_TOTAL_order_the_callee_does_not_guarantee(
+        tmp_path, monkeypatch):
+    """⚠️ The callee orders by `points DESC` ONLY, and `points` ties are the
+    COMMON shape (a provenance Source with one extracted Point is the ordinary
+    row) — so the order `/v1/sources` pages over is NOT total (#5346), and the
+    route re-reads the whole population on EVERY page.
+
+    A non-total order therefore lets an offset walk repeat one row and drop
+    another while the marker still reports the enumeration complete — the exact
+    silent-loss shape `entity_reads.list_layer` closes on the sibling route with
+    `ORDER BY n.{order_prop}, id(n)`.
+
+    ⛔ The callee is REPLACED here rather than seeded through the graph on
+    purpose, and the reason is MEASURED on both lanes: the tie order is
+    ENGINE-DEPENDENT. The embedded carve-out lane hands equal-`points` groups
+    back in key order (so the graph-seeded test above passes there even with the
+    sort removed), while the docker lane returned `mike, zeta, alpha` for
+    creation order `zeta, alpha, mike` (that is the peer fix's own measurement).
+    A graph fixture is therefore non-vacuous on at most ONE lane, and
+    `ORDER BY points DESC` promises nothing about ties on either. This fixture is
+    the contract violation itself: the SAME row set, with the tie order flipping
+    between calls, which is what "not total" means for a route that re-issues
+    the read per page.
+
+    Pre-fix this test is RED — the walk returns `[mm, aa, aa]` (a duplicate) and
+    never yields `zz` (a dropped row) — which is what makes it a pin.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    rows = [
+        {"url": "https://example.test/mm", "sourceKind": "web", "points": 2},
+        {"url": "https://example.test/zz", "sourceKind": "web", "points": 1},
+        {"url": "https://example.test/aa", "sourceKind": "web", "points": 1},
+    ]
+    calls = {"n": 0}
+
+    def _callee(self, kind=None):
+        calls["n"] += 1
+        # Same population, tie order flipped on every read: `points DESC`
+        # permits EITHER, and a per-page re-read sees both.
+        ties = [rows[1], rows[2]] if calls["n"] % 2 else [rows[2], rows[1]]
+        return [dict(rows[0]), *[dict(r) for r in ties]]
+
+    with _graph(str(tmp_path / "g.db")) as _ha, _rest_client() as client:
+        monkeypatch.setattr(TortoiseSDK, "list_knowledge", _callee)
+        body = client.get("/v1/sources", params={"limit": 50}).json()
+        assert [r["url"] for r in body["sources"]] == [
+            "https://example.test/mm",
+            "https://example.test/aa",
+            "https://example.test/zz",
+        ], body
+
+        walked: list[str] = []
+        expected_truncated = {0: True, 1: True, 2: False, 3: False}
+        for offset, truncated in expected_truncated.items():
+            page = client.get("/v1/sources",
+                              params={"limit": 1, "offset": offset}).json()
+            assert page["truncated"] is truncated, (offset, page)
+            walked.extend(r["url"] for r in page["sources"])
+        # Every row exactly once, in the documented order — no drop, no repeat.
+        assert walked == ["https://example.test/mm",
+                          "https://example.test/aa",
+                          "https://example.test/zz"], walked
+
+
 def test_objects_list_excludes_ended_rows_and_the_id_still_reads(tmp_path):
     """The `/v1/points` tombstone contract, one layer over: ended rows leave the
     listing surface and stay retrievable BY ID."""
@@ -855,6 +920,74 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
+
+
+def _plant_malformed_event(sdk, seq: int) -> None:
+    """Write a `ConfidenceChanged` row whose `payload` is NOT JSON.
+
+    `append_event` serialises its payload (`json.dumps`), so the one shape that
+    makes `latest_for_node`'s parse arm matter cannot be produced through it; a
+    store written by an older/other producer can carry it, which is the row the
+    docstring's "SKIPPED, not fatal" promise is about.
+    """
+    proj = sdk._get_proj()
+    proj.g._query(
+        "CREATE (e:GraphEvent {seq:$seq, ts:'2026-01-01T00:00:00+00:00', "
+        "type:'ConfidenceChanged', event_id:$eid, payload:$payload})",
+        params={"seq": int(seq), "eid": f"ev-14592-malformed-{seq}",
+                "payload": "not json"},
+        read_only=False,
+    )
+
+
+def test_belief_matches_the_parsed_id_and_skips_a_malformed_payload(tmp_path):
+    """`latest_for_node`'s TWO hardening promises, each pinned by its own row.
+
+    1. The id is matched on the PARSED payload, never by substring: a NEWER row
+       whose id merely CONTAINS this node's id (`<id>-shadow`) must not be
+       reported as this node's transition.
+    2. A row whose payload will not parse is SKIPPED, not fatal: one bad write
+       must not hide every later one (nor 500 the read).
+
+    Both rows are planted NEWER than the real one, so each promise is the only
+    thing standing between the assertion and the wrong answer — a substring
+    match selects the shadow row, and an unguarded `json.loads` raises on the
+    malformed one.
+    """
+    from tortoise import event_store
+
+    with _graph(str(tmp_path / "g.db")) as ha, _rest_client() as client:
+        p = client.post("/v1/points", json={
+            "content": "a measured claim with shadowing neighbours",
+            "kind": "statement"}).json()
+        sdk = _sdk(ha)
+        try:
+            sdk._set_point_baseline(p["id"], 8.0, 2.0)
+            seq = _plant_confidence_event(
+                sdk, p["id"], confidence=0.8, alpha=8.0, beta=2.0)
+            proj = sdk._get_proj()
+            # Promise 1: the id IS A PREFIX of this newer row's id.
+            shadow_seq = event_store.next_seq(proj)
+            assert event_store.append_event(
+                proj, shadow_seq, "ConfidenceChanged",
+                {"id": f"{p['id']}-shadow", "confidence": 0.2,
+                 "posterior_alpha": 2.0, "posterior_beta": 8.0},
+                f"ev-14592-shadow-{shadow_seq}") is True
+            # Promise 2: an unparseable payload, newer still.
+            _plant_malformed_event(sdk, event_store.next_seq(proj))
+        finally:
+            sdk.close()
+
+        r = client.get(f"/v1/entities/{p['id']}/belief")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["lastBeliefWrite"]["seq"] == seq, body
+        assert body["lastBeliefWrite"]["committed"] == {
+            "confidence": 0.8, "posteriorAlpha": 8.0, "posteriorBeta": 2.0,
+        }, body
+        # The shadow row would have published the OTHER node's transition.
+        assert body["current"]["alpha"] == 8.0, body
+        assert body["current"]["beta"] == 2.0, body
 
 
 def test_belief_refuses_an_uncalibrated_graph_rather_than_substituting_a_number(tmp_path):
