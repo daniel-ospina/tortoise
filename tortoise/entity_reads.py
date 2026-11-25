@@ -262,6 +262,19 @@ def list_layer(
     # COMPLETE residual, so an enumeration that is short by even one is a false
     # clean verdict on a route — the "claim wider than the measurement" class
     # this comment exists to prevent.
+    #
+    # ⛔ And ONE MORE, which the five above do not cover and a review measured
+    # (P3): every one of the eight routes is served with
+    # `attach_projection=True` (`hosted_api._data_sdk_with_projection`), and
+    # `Projection.__init__` runs `_ensure_indexes()`, whose body issues
+    # `self.g.query("CREATE INDEX …")` / a `DROP INDEX …` — so on a graph whose
+    # schema is not current, the FIRST GET of ANY route here mints schema. That
+    # is a SEPARATELY DECLARED write class (`_graph_metadata_write_scope(
+    # "schema-ddl")`, #9124), not an undeclared one, and it is conditional on
+    # `_schema_is_current()` — but it does mean no route in this file is literally
+    # free of `GRAPH.QUERY`, so a reader must not take the five resolutions above
+    # as the whole story: "the new GETs cannot mint a graph" is true of the Cypher
+    # in THIS MODULE and of those resolutions only.
     total_rows = proj.g.ro_query(
         f"MATCH (n:{label}) WHERE {where} RETURN count(n)", params=params,
     ).result_set

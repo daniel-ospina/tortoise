@@ -990,6 +990,11 @@ def test_belief_returns_the_current_posterior_and_the_last_write(tmp_path):
         # reported 1000 on a graph holding one row (#14593 review).
         assert body["lastBeliefWriteScan"]["windowRows"] >= 1
         assert "eventsScanned" not in body["lastBeliefWriteScan"], body
+        # …and it is the CONSTANT, not a count: `>= 1` cannot tell a count from a
+        # limit, so pin the identity. Both arms assert it because this one can
+        # SKIP under load with INCONCLUSIVE [#5049], and a skip is not a pass.
+        from tortoise.event_store import LATEST_FOR_NODE_SCAN
+        assert body["lastBeliefWriteScan"]["windowRows"] == LATEST_FOR_NODE_SCAN, body
         # Provenance is recorded for Points, and said so.
         assert body["evidence"]["provenanceRecordedFor"] == "Point"
         assert body["evidence"]["provenance"]["point"]["id"] == p["id"], body
@@ -1053,6 +1058,14 @@ def test_belief_does_not_let_a_null_last_write_read_as_never_moved(tmp_path, mon
         monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
         assert "PointRevised" not in _graph_event_types()
         assert "journal" in reason["message"], body
+        # The scan block is published here too, and its window is a LIMIT, never
+        # a count (review P2) — pinned in THIS arm because under load the
+        # populated-case sibling can SKIP with INCONCLUSIVE [#5049], and a
+        # skip is not a pass: the contract must be observed somewhere that runs.
+        from tortoise.event_store import LATEST_FOR_NODE_SCAN
+        assert body["lastBeliefWriteScan"]["windowRows"] == LATEST_FOR_NODE_SCAN, body
+        assert "eventsScanned" not in body["lastBeliefWriteScan"], body
+        assert "windowKind" not in body["lastBeliefWriteScan"], body
 
 
 def _plant_malformed_event(sdk, seq: int) -> None:

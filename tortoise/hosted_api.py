@@ -16515,6 +16515,10 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
         # name — a published count the store does not hold (#14593 review).
         "lastBeliefWriteScan": {
             "eventType": "ConfidenceChanged",
+            # ⛔ NOT `eventsScanned` and not a bare `window`: `windowRows` states
+            # the dimension, so the same constant (the window's SIZE) cannot be
+            # read as a count of rows examined. Superseded by an equivalent fix
+            # from the peer lane on this branch; taken wholesale to keep one name.
             "windowRows": event_store.LATEST_FOR_NODE_SCAN,
             "bounds": "retained rows, not the store's scan",
         },
@@ -16544,8 +16548,14 @@ async def get_entity_belief(entity_id: str, org: dict = Depends(get_current_org_
                     "`PointRevised` under the change feed), and "
                     "`ConfidenceChanged` is in neither, so no row of that type "
                     "exists to read — the belief change itself IS durable, in the event "
-                    "journal. Read it there (`tortoise_belief_timeline`) "
-                    "rather than concluding the belief is static."),
+                    "journal, but NOTHING READABLE EXPOSES THAT JOURNAL YET: "
+                    "no MCP tool and no REST route returns `ConfidenceChanged` "
+                    "rows (`tortoise_belief_timeline` is a retired alias that "
+                    "answers a different question — decision Points "
+                    "`aboutObject`-connected to a topic, never the journal), so "
+                    "no remedy is named here rather than naming a tool that "
+                    "would send a caller somewhere else. This is a read-parity "
+                    "gap of its own, not evidence about the belief."),
                 "recordedEventTypes": _graph_event_types(),
             }),
         "evidence": {
