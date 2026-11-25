@@ -310,16 +310,16 @@ names the retired label in order to explain a rule about it — and it is the fi
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
 retirement prose in `tortoise/mcp_server.py:4543`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37917` and `_file_human_approval`'s `:37959`, one line each in a file this population already
+`tortoise/sdk.py:37942` and `_file_human_approval`'s `:37984`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4448` is the `# prop named "error"
 must not suppress the onboarding observation.` comment and the
 `:Document` retirement prose is at `:4543`; `sdk.py:37126` is a
 ``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37366`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37917` in `record_decision` (opening `:37897`;
-`:37916` is the `:Source` line immediately above it) and `:37959` in `_file_human_approval`
-(opening `:37937`)**), whose
+`:Document` docstring lines are `:37942` in `record_decision` (opening `:37922`;
+`:37941` is the `:Source` line immediately above it) and `:37984` in `_file_human_approval`
+(opening `:37962`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
