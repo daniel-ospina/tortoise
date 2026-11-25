@@ -21759,8 +21759,9 @@ def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # rendered document's re-stage diff is the one where that is most misleading: the
     # path still takes the docs-only early return, so the outcome is `surfaces: []` with
     # 107 `test_files` remaining — the census suite is ABSENT, the selection is NOT empty
-    # (measured: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)` -> `surfaces=[]`,
-    # `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`).
+    # (measured WITH THAT ENTRY REMOVED: `select(["docs/architecture/CYPHER-INVENTORY.md"], …)`
+    # -> `surfaces=[]`, `n_test_files=107`, against 189 for `STORAGE-ARCHITECTURE.md`;
+    # with the entry in place the same call answers `surfaces=['core']`, `n_test_files=968`).
     for subject in (
         "tools/cypher_inventory.py",
         "tools/cypher_diff_harness.py",
