@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a29b5f24ce95` folded in, which itself
+# reader of the prose can see. On THIS tree — `origin/main` `c3dca6998156` folded in, which itself
 # carried `#14612`'s and `#14606`'s re-writes of this very block — every registration the partition
 # below counts is `main`'s EXCEPT the ONE row this PR adds. `main`'s are `#14596`'s
 # `tests/test_14560_operator_vectors.py` and `#14552`'s
