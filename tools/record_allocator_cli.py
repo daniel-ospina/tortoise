@@ -153,11 +153,21 @@ must be true before the flag is rolled, and none of them is this command's to do
      graphs created from that point on are born cut over. ⛔ IT IS
      BEST-EFFORT: a record outage at creation does not fail the create, it
      leaves the graph UNCUT — which `/health` reports as
-     `record.armed_but_uncut` and which `%(prog)s backfill` heals. And it does
-     not reach the graphs that already existed when it landed. So find the
-     population with `%(prog)s sweep --org-id <org> --dsn <dsn>`, seed it with
-     `%(prog)s backfill --org-id <org> --dry-run` (read it, write nothing) and
-     then for real — BEFORE the flag is rolled.
+     `record.armed_but_uncut` and which `%(prog)s backfill --org-id <org> --arm`
+     heals. ⛔ AN ARM, not a bare `backfill`: seeding alone leaves the row
+     `seeded`, ALLOCATION_SQL is scoped `mode='active'`, and the graph's writes
+     stay refused — a bare `backfill` seeds the ROW and heals nothing.
+     And the hook does not reach the graphs that already existed when it landed.
+     So find the population with `%(prog)s sweep --org-id <org> --dsn <dsn>`,
+     read it with `%(prog)s backfill --org-id <org> --dry-run` (write nothing),
+     then seed AND ARM it for real with the same `backfill` plus `--arm` —
+     BEFORE the flag is rolled.
+     ⛔ AND THE POPULATION VERB DOES NOT REACH EVERY UNCUT GRAPH: it walks
+     graphs with NO counter row (`UNCUT_GRAPHS_SQL` keeps `c.graph_id IS NULL`),
+     so a graph whose row already exists in mode `seeded` (`/health` reason
+     `mode_seeded`) is outside it — `backfill` prints `considered: 0`, heals
+     nothing and exits 0. Cure THAT one with `%(prog)s arm --org-id <org>
+     --graph-id <graph>` (and `reopen` first if it is `halted`).
 
   3. CUTOVER IS PER GRAPH, AND THIS COMMAND'S SCOPE IS %(scope_upper)s.
      %(scope_note)s

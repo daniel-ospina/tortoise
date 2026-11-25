@@ -72,6 +72,19 @@ _DOORS = (
     ("tortoise/hosted_api.py", "_provision_graph", "_provision_graph_record"),
     ("tortoise/supabase_control.py", "ensure_default_graph_row",
      "_provision_default_graph_record"),
+    # ⛔ THE TWO CONTROL-PLANE MINT PATHS (#14610 review, P2 — found by a
+    # fresh-context reviewer, not by this census). Both POST a `kind='default'`
+    # `public.graphs` row and neither called the hook, so a default graph minted
+    # by a RENAME or a RECORDING-OVERRIDE was born UNCUT — the exact defect this
+    # PR exists to close — while this census (`_DOORS` had two entries) and the
+    # CLI's operator ack ("called at every create door") both claimed the doors
+    # were covered. A structural pin cannot discover a door it does not list, so
+    # the listing is the gate: `rg -n 'method="POST"' -A6 tortoise/supabase_control.py`
+    # over the `graphs` table is the census this entry comes from.
+    ("tortoise/supabase_control.py", "set_graph_name",
+     "_provision_default_graph_record"),
+    ("tortoise/supabase_control.py", "set_graph_recording",
+     "_provision_default_graph_record"),
 )
 
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
@@ -83,6 +96,12 @@ _DOOR_HOOK_CALLS = {
     ("tortoise/hosted_api.py", "_provision_graph"): 1,
     ("tortoise/supabase_control.py",
      "ensure_default_graph_row"): 3,
+    # The mint AND the convergent adopt, per function: the adopt arm's row may
+    # have been minted by a pre-fix process during a rolling deploy, and the hook
+    # is idempotent. A refactor that drops the adopt call leaves one silently
+    # unhooked shape, so both are counted.
+    ("tortoise/supabase_control.py", "set_graph_name"): 2,
+    ("tortoise/supabase_control.py", "set_graph_recording"): 2,
 }
 
 #: The helpers those doors call must themselves reach the writer's hook.
@@ -1418,6 +1437,224 @@ def test_the_uncut_clear_note_names_the_arm_too():
     assert "seeds the ROW" in note, (
         "the note must say what a bare `backfill` actually does (seeds the row), "
         "because the old text said it 'heals the RECORD' and it does not")
+
+
+def _modes():
+    """The allocator's own mode spellings, read rather than transcribed."""
+    from tortoise import record_allocator as ra
+    return ra.MODE_SEEDED, ra.MODE_HALTED, ra.MODE_ACTIVE
+
+
+def test_the_remedy_is_state_aware_because_one_command_cannot_reach_both():
+    """⛔ P2 (#14610 review): the published remedy could not reach `mode_seeded`.
+
+    The `armed_but_uncut` registry files a graph whose row EXISTS in mode
+    `seeded` under reason `mode_seeded`, and the message published for it named
+    the POPULATION verb — `backfill --arm --acknowledge-cutover`. That verb walks
+    `UNCUT_GRAPHS_SQL`, which keeps `c.graph_id IS NULL`, so a `seeded` graph is
+    excluded from its own remedy's population: MEASURED against a seeded row, it
+    printed `considered: 0, seeded: 0, refused: 0, armed: 0` and returned
+    `EXIT_OK` while the record leg stayed refused and `/health` stayed
+    non-`ok`. The verb that cures it is the single-graph `arm` (`ARM_SQL` is
+    scoped `AND mode = 'seeded'`), and a `halted` row needs `reopen` first
+    because `arm` refuses it BY DESIGN.
+
+    NON-VACUITY: pre-fix this function took no keyword arguments at all, so this
+    call raises `TypeError` — and even a caller that could pass them would get
+    the population verb back, which is exactly the assertion below that fails.
+    """
+    seeded, halted, _active = _modes()
+
+    population = rw.uncut_graph_remedy("org-14610")
+    assert "backfill" in population and "--arm" in population, population
+
+    seeded_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_seeded", reason=f"mode_{seeded}")
+    assert "backfill" not in seeded_remedy, (
+        "a `mode_seeded` graph is OUTSIDE `backfill`'s population (`c.graph_id "
+        "IS NULL`), so publishing it is a false clean — the command exits 0 "
+        f"over 0 graphs — got {seeded_remedy!r}")
+    assert "arm" in seeded_remedy and "--graph-id g_seeded" in seeded_remedy, (
+        "the single-graph verb must name BOTH the graph and the arm — got "
+        f"{seeded_remedy!r}")
+    assert "org-14610" in seeded_remedy and "--acknowledge-cutover" in seeded_remedy, (
+        f"a remedy that is not runnable as printed is not a remedy — got {seeded_remedy!r}")
+
+    halted_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_halted", reason=f"mode_{halted}")
+    assert "reopen" in halted_remedy and halted_remedy.index("reopen") < (
+        halted_remedy.index("arm --org-id")), (
+        "`ARM_SQL` is scoped `mode = 'seeded'`, so naming `arm` for a HALTED row "
+        "sends an operator to a no-op; `reopen` must come first — got "
+        f"{halted_remedy!r}")
+
+    # A reason this function cannot place keeps the population verb, which is the
+    # correct one for the no-row population it names.
+    for other in ("no_cursor_row", "provision_failed", "malformed_dsn", None):
+        got = rw.uncut_graph_remedy("org-14610", graph_id="g_1", reason=other)
+        assert "backfill" in got, (other, got)
+
+
+def test_the_warning_publishes_the_verb_that_reaches_the_observed_state(caplog):
+    """The LOG SITE, not just the builder: `_warn_uncut_graph` knows the reason.
+
+    It is the one site that has both the reason and the graph at hand, so it is
+    the site that can publish a command an operator can paste. It passed NEITHER
+    before this fix (`uncut_graph_remedy()` with no arguments), so the line for a
+    `mode_seeded` graph named the wrong verb — which is the P2 in its shipped form.
+
+    NON-VACUITY: pre-fix the emitted line carries `backfill` and no `--graph-id`.
+    """
+    import logging
+
+    seeded, _halted, _active = _modes()
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_seeded", reason=f"mode_{seeded}")
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert "g_seeded" in line and "org-14610" in line, line
+    assert "backfill --org-id" not in line, (
+        "the warning for a `mode_seeded` graph still names the population verb, "
+        f"which cannot reach it — got {line!r}")
+    assert "arm --org-id org-14610 --graph-id g_seeded" in line, (
+        f"the warning must name the verb that reaches this graph — got {line!r}")
+
+
+def test_reset_uncut_graphs_also_resets_the_warning_throttle(caplog):
+    """P3 (#14610 review cycle 3): the reset seam left the throttle populated.
+
+    `reset_uncut_graphs` documented itself as zeroing "the registry" and cleared
+    three of the four maps this module keeps for it, so a process that re-armed
+    kept SUPPRESSING the per-graph warning for up to `UNCUT_GRAPH_WARN_SECONDS`
+    after the state it warned about was reset. `tests/conftest.py` papered over it
+    by clearing the map from the outside, which also meant the production seam
+    was untested; that direct clear is gone, so this test is the only thing
+    keeping the suite honest about it.
+
+    NON-VACUITY: pre-fix the second recording is empty (the throttle keeps it).
+    """
+    import logging
+
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+        first = len(caplog.records)
+        assert first == 1, "the throttle suppressed the FIRST warning, so this "
+        "test cannot observe the reset at all"
+        rw.reset_uncut_graphs()
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+    assert len(caplog.records) == 2, (
+        "`reset_uncut_graphs()` did not clear `_uncut_warned_at`, so the next "
+        "warning for the same graph stayed SUPPRESSED after the state was "
+        f"reset — got {len(caplog.records)} record(s): "
+        f"{[r.getMessage()[:60] for r in caplog.records]}")
+
+
+class _RecordingCP:
+    """The control-plane reads/writes the two minting doors actually perform.
+
+    `existing` is returned only for the CONVERGENT re-read after a lost POST —
+    the first read must miss, or the door takes its PATCH arm and never mints,
+    which is the path these tests are not about. A filter-aware fake would be a
+    second implementation of PostgREST; a state machine on the one distinction
+    that matters is not.
+    """
+
+    def __init__(self, *, existing=(), org_graph_name="team-14610",
+                 fail_post=False):
+        self._existing = [dict(r) for r in existing]
+        self._org_graph_name = org_graph_name
+        self._fail_post = fail_post
+        self._post_attempted = False
+        self.posted: list[dict] = []
+
+    def query(self, table, *, select=None, filters=None, method=None,
+              json_body=None):
+        if table == "organizations":
+            return [{"graph_name": self._org_graph_name}]
+        if table != "graphs":
+            raise AssertionError(f"unexpected table {table!r}")
+        if method == "POST":
+            self._post_attempted = True
+            if self._fail_post:
+                raise RuntimeError("duplicate key value violates unique constraint")
+            self.posted.append(dict(json_body))
+            return [dict(json_body)]
+        if method == "PATCH":
+            return []
+        return [dict(r) for r in self._existing] if self._post_attempted else []
+
+
+@pytest.fixture
+def _hooked_doors(monkeypatch):
+    """Capture the hook call without touching the record seam."""
+    from tortoise import supabase_control as sc
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(sc, "_provision_default_graph_record",
+                        lambda org_id, graph_id: seen.append((org_id, graph_id)))
+    return seen
+
+
+def test_a_default_row_minted_by_a_rename_is_provisioned(_hooked_doors):
+    """⛔ P2 (#14610 review): a `set_graph_name` MINT is a create door.
+
+    `set_graph_name` POSTs a `kind='default'` `public.graphs` row "created on
+    demand" when none exists. It never called the hook, so that row was born
+    UNCUT — precisely the #14582 defect this PR closes — and traffic does not
+    heal it (`default_graph_for_credential` returns on a row hit without ever
+    calling `ensure_default_graph_row`). The wiring pin could not see it either:
+    `_DOORS` listed two entries under a test named
+    `test_every_creation_door_calls_the_hook`.
+
+    NON-VACUITY: pre-fix `_provision_default_graph_record` is never called, so
+    `seen` is empty and the first assertion fails.
+    """
+    from tortoise.supabase_control import set_graph_name
+
+    cp = _RecordingCP()
+    assert set_graph_name(cp, "org-14610", "default", "renamed") is True
+    minted = [row["id"] for row in cp.posted]
+    assert len(minted) == 1, cp.posted
+    assert _hooked_doors == [("org-14610", minted[0])], (
+        "the row `set_graph_name` minted was never handed to the creation hook, "
+        "so the graph is born uncut and every record it writes is refused "
+        f"`cursor_not_active` — hook saw {_hooked_doors!r}, minted {minted!r}")
+
+
+def test_a_default_row_minted_by_a_recording_override_is_provisioned(_hooked_doors):
+    """The same door in its other spelling (P2, second mint path)."""
+    from tortoise.supabase_control import set_graph_recording
+
+    cp = _RecordingCP()
+    assert set_graph_recording(cp, "org-14610", "default", True) is True
+    minted = [row["id"] for row in cp.posted]
+    assert len(minted) == 1, cp.posted
+    assert _hooked_doors == [("org-14610", minted[0])], (
+        "`set_graph_recording` minted a default row with no counter row — hook "
+        f"saw {_hooked_doors!r}, minted {minted!r}")
+
+
+@pytest.mark.parametrize("door", ["name", "recording"])
+def test_the_convergent_adopt_arm_is_provisioned_too(door, _hooked_doors):
+    """A row ADOPTED after a lost POST race is provisioned by the winner — which
+    may be a PRE-FIX process during a rolling deploy. The hook is idempotent
+    (seed+arm in one transaction, no-op on `active`), so hooking the adopt arm
+    costs one best-effort call and closes that window.
+
+    NON-VACUITY: pre-fix neither door calls the hook on either arm.
+    """
+    from tortoise import supabase_control as sc
+
+    cp = _RecordingCP(existing=[{"id": "g_winner"}], fail_post=True)
+    if door == "name":
+        assert sc.set_graph_name(cp, "org-14610", "default", "n") is True
+    else:
+        assert sc.set_graph_recording(cp, "org-14610", "default", True) is True
+    assert _hooked_doors == [("org-14610", "g_winner")], (
+        f"the convergent ADOPT arm ({door}) adopted a row and left it uncut — "
+        f"hook saw {_hooked_doors!r}")
+
 
 
 def test_the_health_payload_states_what_a_halted_graph_loses(monkeypatch):

@@ -3223,7 +3223,23 @@ def armed_but_uncut_reasons() -> dict[str, int]:
 
 
 def reset_uncut_graphs() -> None:
-    """Zero the registry. For tests, and for a process that re-arms."""
+    """Zero the registry — EVERY map this module keeps for it.
+
+    For tests, and for a process that re-arms.
+
+    ⛔ IT ZEROES THE WARNING THROTTLE TOO (#14610 review cycle 3, P3). This
+    docstring said "the registry" while the body left `_uncut_warned_at`
+    populated, so a re-armed process silently kept SUPPRESSING the per-graph
+    warning for up to `UNCUT_GRAPH_WARN_SECONDS` after the state it warned about
+    was reset — the throttle outlived the thing it throttles. `tests/conftest.py`
+    cleared the map from the outside, which made the gap visible and also meant
+    the production reset seam was untested; clearing it here is the fix and the
+    fixture's direct clear is deleted so this line is what the suite exercises.
+
+    `_uncut_warned_at` is defined BELOW this function on purpose (it belongs with
+    the warning constants it is read by); a module-global is resolved at CALL
+    time, so the forward reference is safe and does not need the map moved.
+    """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED, _UNCUT_HALTED_UNTRACKED
     with _UNCUT_GUARD:
         _UNCUT_GRAPHS.clear()
@@ -3231,6 +3247,7 @@ def reset_uncut_graphs() -> None:
         _UNCUT_OBSERVATIONS = 0
         _UNCUT_UNTRACKED = 0
         _UNCUT_HALTED_UNTRACKED = 0
+        _uncut_warned_at.clear()
 
 
 #: How often the "this graph has no usable cursor" WARNING may repeat, in
@@ -3241,7 +3258,9 @@ UNCUT_GRAPH_WARN_SECONDS = 60.0
 _uncut_warned_at: dict[str, float] = {}
 
 
-def uncut_graph_remedy(org_id: str = "<org>") -> str:
+def uncut_graph_remedy(org_id: str = "<org>", *,
+                       graph_id: str | None = None,
+                       reason: str | None = None) -> str:
     """The operator command that CUTS AN UNCUT GRAPH OVER — ONE home (#14610 F1).
 
     ⛔ `backfill` ALONE IS HALF A REMEDY, and naming only that half is how an
@@ -3256,8 +3275,40 @@ def uncut_graph_remedy(org_id: str = "<org>") -> str:
 
     It is a FUNCTION rather than a constant so the six sites that publish it
     cannot drift apart, and so the org id is interpolated where it is known.
+
+    ⛔ AND IT IS STATE-AWARE, because ONE command cannot reach every state
+    (#14610 review, P2 — measured against a `seeded` row, not read off the
+    source). The population verb above walks `UNCUT_GRAPHS_SQL`, which joins the
+    cursor row and keeps `WHERE c.graph_id IS NULL` (`record_allocator.py:318-323`)
+    — i.e. graphs that have NO row. A graph whose row EXISTS in mode `seeded` is
+    outside that population by construction: `/health` reports it as
+    `armed_but_uncut` reason `mode_seeded` (`:2934` is what builds that string),
+    and running the population verb over it prints `considered: 0`, heals
+    nothing, and exits `EXIT_OK`. The verb that DOES cure it is the single-graph
+    `arm` (`ARM_SQL` is scoped `AND mode = 'seeded'`), which needs `--graph-id`
+    and carries the same `--acknowledge-cutover` gate; a `halted` row needs the
+    operator's `reopen` first (`ARM_SQL` refuses `halted` BY DESIGN, so naming
+    `arm` alone there would send them to a no-op).
+
+    So the callers that KNOW the reason and the graph pass them. A caller with
+    no reason (`:3303`'s pre-fix call shape, a static site) still gets the
+    population verb, which is correct for the state it can name.
     """
-    return (f"`tools/record_allocator_cli.py backfill --org-id {org_id} --arm "
+    prefix = "`tools/record_allocator_cli.py "
+    mode = None
+    if graph_id is not None and reason is not None and reason.startswith("mode_"):
+        mode = reason[len("mode_"):]
+    if mode is not None and mode == record_projection.MODE_HALTED:
+        # A halt is an OPERATOR's stop: `ARM_SQL` is scoped `mode = 'seeded'`, so
+        # the arm ALONE is a no-op here and publishing it would be the same
+        # class of defect this function exists to fix.
+        return (f"{prefix}reopen --org-id {org_id} --graph-id {graph_id}` then "
+                f"{prefix}arm --org-id {org_id} --graph-id {graph_id} "
+                f"--acknowledge-cutover`")
+    if mode is not None and mode != record_projection.MODE_ACTIVE:
+        return (f"{prefix}arm --org-id {org_id} --graph-id {graph_id} "
+                f"--acknowledge-cutover`")
+    return (f"{prefix}backfill --org-id {org_id} --arm "
             f"--acknowledge-cutover`")
 
 
@@ -3293,14 +3344,17 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         "graph writes is REFUSED and its journal lines are the only durable "
         "copy — `/health` reports this under `record.armed_but_uncut`. Remedy: "
         "`tools/record_allocator_cli.py status --org-id %s --graph-id %s`, then "
-        "%s (or `seed` + `arm` for this one graph) to CUT IT OVER — a bare "
-        "`backfill` only seeds the row and allocates nothing; a `halted` graph "
-        "stays halted BY DESIGN until an operator reopens it. The row is "
-        "healed by that command; THIS process's `/health` entry is process "
-        "memory and clears only on this graph's next armed write here, on a "
-        "successful provision, or on a restart. "
+        "%s to CUT IT OVER — a bare `backfill` only seeds the row and allocates "
+        "nothing, and a `halted` graph stays halted BY DESIGN until an operator "
+        "reopens it. The row is healed by that command; THIS process's "
+        "`/health` entry is process memory and clears only on this graph's next "
+        "armed write here, on a successful provision, or on a restart. "
         "This line repeats at most once per %.0fs per graph",
-        org_id, graph_id, reason, org_id, graph_id, uncut_graph_remedy(),
+        org_id, graph_id, reason, org_id, graph_id,
+        # ⛔ THE REASON AND THE GRAPH, so the published verb is the one that
+        # reaches THIS state (#14610 review, P2): `mode_seeded` is outside the
+        # population verb's population and needs the single-graph `arm`.
+        uncut_graph_remedy(org_id, graph_id=graph_id, reason=reason),
         UNCUT_GRAPH_WARN_SECONDS,
     )
 

@@ -869,15 +869,16 @@ def _no_ambient_uncut_graphs():
     on that module importing cleanly, and a process that never loaded it has no
     registry to clear.
 
-    ⛔ `reset_uncut_graphs()` zeroes the COUNT maps but NOT
-    ``record_writer._uncut_warned_at`` — the per-graph WARNING throttle, keyed
-    the same ``org\\0graph`` way and equally process-global (#14610 review cycle 2,
-    P3, measured with a teardown-hook probe: it survives setup, teardown and every
-    later test). It is latent today because no test asserts the warning's presence
-    or absence, so the fixture clears it directly rather than editing the
-    production reset seam — a one-line change there would shift every
-    ``record_writer.py:<line>`` cite below it, which is the cascade this PR just
-    spent two commits repairing. The production gap is recorded on the PR.
+    ⛔ ``record_writer._uncut_warned_at`` — the per-graph WARNING throttle, keyed
+    the same ``org\\0graph`` way and equally process-global (#14610 review cycle
+    2, P3, measured with a teardown-hook probe: it survives setup, teardown and
+    every later test) — used to survive ``reset_uncut_graphs()`` too, and this
+    fixture cleared it from the outside. That was the defect, not the workaround:
+    the production reset seam documented itself as zeroing "the registry" and
+    cleared three of the four maps. #14610 review cycle 3 fixed the seam (it
+    clears the throttle now, so a re-armed process warns again) and the direct
+    clear is DELETED here, so `test_reset_uncut_graphs_also_resets_the_warning_
+    throttle` is the only thing keeping the suite honest about it.
     """
     import sys
 
@@ -886,8 +887,10 @@ def _no_ambient_uncut_graphs():
     def _reset() -> None:
         if record_writer is None:
             return
+        # ⛔ ALL of the registry, including the warning throttle — see this
+        # docstring. Never clear `_uncut_warned_at` here: a fixture that patches
+        # over the production seam cannot red when the seam regresses.
         record_writer.reset_uncut_graphs()
-        record_writer._uncut_warned_at.clear()
 
     _reset()
     yield

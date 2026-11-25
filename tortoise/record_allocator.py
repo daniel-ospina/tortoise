@@ -305,7 +305,13 @@ JOURNAL_COUNT_SQL = (
 #: not reach — the ones created before it landed, and the ones whose hook failed
 #: best-effort (a record outage at creation must not fail a user's graph, so that
 #: case is reported on `/health` as `armed_but_uncut` and healed by
-#: `tools/record_allocator_cli.py backfill`).
+#: `tools/record_allocator_cli.py backfill --arm` — ⛔ the ARM, not a bare
+#: `backfill`, which only seeds the row and leaves it allocating nothing).
+#: ⛔ AND `backfill --arm` IS STILL NOT THE REMEDY FOR EVERY GRAPH `/health` FILES
+#: (#14610 review, P2): this query keeps `c.graph_id IS NULL`, so a row that
+#: EXISTS in mode `seeded` is outside it — that one takes the single-graph `arm`.
+#: `record_writer.uncut_graph_remedy` is the one home that publishes the right
+#: verb for the observed state.
 #:
 #: ⛔ IT READS `journal_event`, NOT `public.graphs`, and the reason is a GRANT,
 #: not a preference: `tortoise_record_app` has no privilege on `public.graphs`

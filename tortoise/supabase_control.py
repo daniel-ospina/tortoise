@@ -4998,8 +4998,27 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
                          ("org_id", "eq", org_id)],
                 json_body={"name": name},
             )
+            # ⛔ THE ADOPT ARM MINTS NOTHING, BUT THE ROW IT ADOPTS MAY HAVE BEEN
+            # MINTED BY A PRE-FIX PROCESS (a rolling deploy), and
+            # `provision_graph_record` is idempotent — it seeds+arms in ONE
+            # transaction and no-ops on an `active` row — so hooking here costs
+            # one best-effort call and closes that window. Same three-arm
+            # reasoning `ensure_default_graph_row` documents.
+            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
+    # ⛔ THE CREATION HOOK (#14582, #14610 review P2). This POST is one of the
+    # control-plane paths that MINTS a `kind='default'` `public.graphs` row, and
+    # it mints it with no `record_cursor` — a graph born UNCUT, which is the
+    # exact defect the hook exists to close: every record it writes is refused
+    # `cursor_not_active` while `write_live_record` (fail-soft by contract)
+    # reports success, so nothing reds and the loss only shows at a rebuild.
+    # Traffic does NOT heal it (`default_graph_for_credential` returns on a row
+    # hit without calling `ensure_default_graph_row`), so the hook must run HERE.
+    # Best-effort by the same contract as every other door: it logs and folds
+    # into `/health` `record.armed_but_uncut`, never raises, because the row the
+    # caller asked to rename is already committed.
+    _provision_default_graph_record(org_id, gid)
     return True
 
 
@@ -5091,8 +5110,17 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
                          ("org_id", "eq", org_id)],
                 json_body={"recording": value},
             )
+            # The ADOPT arm: see `set_graph_name`'s identical note — the row it
+            # adopts may have been minted by a pre-fix process, and the hook is
+            # idempotent.
+            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
+    # ⛔ THE CREATION HOOK (#14582, #14610 review P2) — second of the two
+    # control-plane mint paths, for `set_graph_name`'s reasons. A `kind='default'`
+    # row minted here with no `record_cursor` is a graph born UNCUT, and traffic
+    # does not heal it.
+    _provision_default_graph_record(org_id, gid)
     return True
 
 

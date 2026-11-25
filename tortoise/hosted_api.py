@@ -8453,11 +8453,17 @@ def _backup_watcher_health() -> dict:
 _UNCUT_CLEARS_NOTE = (
     "a restart, or an observation of that graph by THIS process (an armed write "
     "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
-    "`record_allocator_cli.py backfill --arm --acknowledge-cutover` cuts the "
-    "RECORD over (a bare `backfill` only seeds the ROW, and a `seeded` row "
-    "allocates nothing) but runs in another process, so on a quiescent graph — "
-    "or with the allocator flag off — this process's entry, and `ok`, clear "
-    "only on restart"
+    "⛔ TWO STATES, TWO VERBS — one command does not reach both (#14610 review, "
+    "P2): for a graph with NO cursor row `record_allocator_cli.py backfill "
+    "--org-id <org> --arm --acknowledge-cutover` cuts the RECORD over (a bare "
+    "`backfill` only seeds the ROW, and a `seeded` row allocates nothing), "
+    "while a graph whose row already exists in mode `seeded` (`reason: "
+    "mode_seeded`) is OUTSIDE that verb's population — `backfill` prints "
+    "`considered: 0` and exits 0 — and is cured by `record_allocator_cli.py "
+    "arm --org-id <org> --graph-id <graph> --acknowledge-cutover`; a `halted` "
+    "one needs `reopen` first. Either runs in another process, so on a quiescent "
+    "graph — or with the allocator flag off — this process's entry, and `ok`, "
+    "clear only on restart"
 )
 
 #: ⛔ WHAT A `halted` GRAPH IS ACTUALLY LOSING, published BESIDE
@@ -8473,11 +8479,12 @@ _UNCUT_CLEARS_NOTE = (
 #: and false of the record.
 _HALTED_CLEARS_NOTE = (
     "an OPERATOR's stop: a halted graph's record writes are REFUSED until "
-    "`record_allocator_cli.py reopen --graph-id <graph>` -> `seed --journal "
-    "<path>` -> `arm --acknowledge-cutover`. It is published here INSTEAD of "
-    "reddening `ok`, because a sanctioned halt must not pin a deployment red for "
-    "ever — not because the graph keeps up: its record accumulates nothing "
-    "while halted"
+    "`record_allocator_cli.py reopen --org-id <org> --graph-id <graph>` -> "
+    "`seed --org-id <org> --graph-id <graph> --journal <path>` -> `arm "
+    "--org-id <org> --graph-id <graph> --acknowledge-cutover`. It is published "
+    "here INSTEAD of reddening `ok`, because a sanctioned halt must not pin a "
+    "deployment red for ever — not because the graph keeps up: its record "
+    "accumulates nothing while halted"
 )
 
 
