@@ -62,8 +62,9 @@ def fuse_expansion_pass(
         ``r > (61+h1)(61+h2)/(122+h1+h2) - 61``, TIES it at equality and loses
         below. ⛔ The inequality runs the OTHER WAY from the
         ``r < (h1 + h2 - 61) / 2`` this docstring first published, which was
-        false in BOTH directions: it said a top-slot shared id never wins, and
-        that a shared id at 1-based 63 in BOTH lists beats a lone rank-1. Two
+        false in BOTH directions: it denied the win at a shared id's top slot in
+        BOTH lists (``h1 == h2 == 0``), and granted one at 1-based 63/63, where
+        ``2/123 < 1/61``. Two
         consequences, both of them that closed form specialised, and the second
         is the one this bullet used to omit: (a) the SYMMETRIC case
         ``h1 == h2 == h`` — the only one a same-rank fixture can build — beats a
