@@ -173,15 +173,15 @@ def ending_axes(status, outdated: bool = False, *, is_closed=None,
     :func:`_terminal_expression`, ``coalesce(n.pipelineSlot, '') <>
     'terminal'``) served it as CURRENT — the silent-drop direction, and the one
     value that disagreed by construction. The exact comparison is also what
-    ``pipeline`` itself does (``PipelineStage.is_terminal`` and the stage
-    resolution in ``pipeline.py`` compare the slot with ``==``), so all three
-    representations now agree on every input, including the padded one.
+    ``pipeline`` does where it compares a SLOT — ``PipelineStage.is_terminal``
+    and its declaration/transition validations, NOT the stage RESOLVER (which
+    strips its probe: it resolves by id/label) — so the padded value agrees.
 
     The CYPHER twin is :func:`_terminal_excluded` (the KEEP direction); it is a
     second REPRESENTATION of this one rule because it has to be, and
     ``tests/test_13034_currency_rule_reads_position.py`` pins the two together
-    over every combination rather than leaving the agreement to inspection —
-    ``" terminal "`` included, which is the case that used to fall outside the
+    over every BOOLEAN combination of those inputs rather than leaving agreement
+    to inspection — ``" terminal "`` included, which used to fall outside the
     enumeration while the two sides disagreed on it.
     """
     axes: list[str] = []

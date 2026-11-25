@@ -1172,7 +1172,7 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
 
 
 def test_the_branch_containment_arm_reads_branches_only(monkeypatch):
-    """A GitHub MERGE ref is not a branch — the arm above must not read one as one.
+    """A GitHub MERGE ref is not a branch — the arm below must not read one as one.
 
     `git branch -r --contains` lists every ref under `refs/remotes/`, so on a
     self-hosted runner whose workspace carries a previous job's
