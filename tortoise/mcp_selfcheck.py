@@ -197,12 +197,20 @@ def _expand(expr: str) -> tuple[str, list[str]]:
 
 
 def _walk_strings(node, path: str = "") -> list[tuple[str, str]]:
-    """Every (json-path, string) leaf of an entry — for interpolation scanning."""
+    """Every (json-path, string) leaf of an entry — for interpolation scanning.
+
+    `_comment` values are SKIPPED: they are prose about the entry, not values a
+    client sends, so a `_comment` that quotes an expression (as this repo's own
+    entries do) must not be classified as an unset variable. That false class
+    would send a reader to fix a variable nothing reads.
+    """
     out: list[tuple[str, str]] = []
     if isinstance(node, str):
         out.append((path, node))
     elif isinstance(node, dict):
         for k, v in node.items():
+            if str(k).startswith("_"):
+                continue
             out.extend(_walk_strings(v, f"{path}.{k}" if path else str(k)))
     elif isinstance(node, list):
         for i, v in enumerate(node):
@@ -495,7 +503,7 @@ def probe(*, project_dir: Path | None = None) -> Verdict:
     """
     try:
         from . import mcp_client
-        from .mcp_client import _BearerProvider, _client, _run_guarded
+        from .mcp_client import _BearerProvider, _client
     except Exception as exc:  # noqa: BLE001
         return Verdict(
             status=PROBE_UNKNOWN,

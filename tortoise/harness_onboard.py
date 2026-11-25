@@ -251,16 +251,34 @@ def write_config(harness: str, project_dir: Path, *, url: str = DEFAULT_MCP_URL,
     out.planned.append(str(path))
     if dry_run:
         return out
-    if before:
+    if before and not _git_tracks(path):
+        # A backup ONLY for a file git is not already keeping: in a repository
+        # the previous content is in the history this very diff is committed to,
+        # and a `*.bak` left in a checkout is litter the next `git status` shows
+        # to someone who never asked for it (measured: this installer left one).
         backup = path.with_suffix(path.suffix + ".bak-14607")
         try:
             backup.write_text(before, encoding="utf-8")
+            out.actions.append(f"{path}: previous content saved to {backup.name}")
         except OSError:
             pass                          # a failed backup never blocks the write
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(after, encoding="utf-8")
     out.wrote.append(str(path))
     return out
+
+
+def _git_tracks(path: Path) -> bool:
+    """Is `path` tracked by git? Unknown ⇒ False (write the backup, be safe)."""
+    import subprocess
+    try:
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["git", "ls-files", "--error-unmatch", str(path.name)],
+            cwd=str(path.parent), capture_output=True, text=True, timeout=10,
+            check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
 
 
 # ── Instruction file (the two sentences), delimiter-marked + reversible ───
