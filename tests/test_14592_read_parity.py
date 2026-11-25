@@ -1468,3 +1468,52 @@ def test_layer_lists_call_the_layers_own_terminal_vocabulary(monkeypatch):
     # Point default.
     for query in proj.g.queries:
         assert "n.outdated" not in query, query
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_layer_list_pages_over_a_TOTAL_order_at_the_call_site(label):
+    """#5346: the offset walk is only safe if the PAGE statement orders totally.
+
+    ⛔ MEASURED GAP (review at ``f775e1a990ef``): deleting ``, id(n)`` from the page
+    statement left the ENTIRE file green — 40 passed. Two reasons, both measured:
+    the same-name fixture asserts NAMES (two ``SAME`` rows are one string, so a
+    repeated row and a dropped row look identical), and this engine happened to
+    break equal-name ties the same way on every per-page re-query, so even an
+    id-based assertion on that fixture would not have reddened.
+
+    So the order is graded where it is WRITTEN — on the emitted statement — the
+    way `test_layer_lists_call_the_layers_own_terminal_vocabulary` grades the
+    terminal predicate. `id(n)` rather than `n.id` is the point: entity ids are
+    not unique across labels (the module states it), so only the node id makes
+    ``(name, id(n))`` total.
+    """
+    from tortoise import entity_reads
+
+    class _Graph:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def ro_query(self, cypher, params=None):
+            self.queries.append(cypher)
+            result = [[0]] if "count(n)" in cypher else []
+
+            class _R:
+                def __init__(self):
+                    self.result_set = result
+
+            return _R()
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    proj = _Proj()
+    entity_reads.list_layer(proj, label, limit=5, offset=10)
+
+    pages = [q for q in proj.g.queries if "SKIP $skip" in q]
+    assert pages, proj.g.queries
+    order_prop = entity_reads.LAYER_ORDER_PROP[label]
+    for query in pages:
+        assert f"ORDER BY n.{order_prop}, id(n) SKIP $skip LIMIT $limit" in query, query
+        # and NOT the non-total form, which is the mutant this row exists for
+        assert f"ORDER BY n.{order_prop} SKIP" not in query, query
