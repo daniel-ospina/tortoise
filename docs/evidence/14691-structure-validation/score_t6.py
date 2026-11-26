@@ -929,6 +929,38 @@ def _door_findings() -> list[dict]:
                              "not_measured": sorted(set(probes) - set(measured_empties))},
             })
 
+    # ⛔ AND D2 OWNS ITS EVIDENCE TOO (3rd fresh-context review, 2nd cycle, P2).
+    # D1/D2 were the last two findings still copied from `readback.json` prose with
+    # nothing re-reading the rows they cite. Measured: setting
+    # `readback.json.unresolved_elements = []` — the artifact literally asserting
+    # "0 of 32 unresolved" while the report's D2 row said "NO for 2 of 32" — kept
+    # the suite GREEN. D3 got this guard, D4/D6 got one; D2 did not.
+    #
+    # The answer is DERIVED from the two committed evidence blocks (`elements` is
+    # the 32-row walk, `unresolved_elements` the names it could not resolve), which
+    # reproduces the artifact's own wording exactly on the committed data — so this
+    # is a re-derivation, not a new claim. (The readback receipt cannot be
+    # regenerated: REPORT §8 records that decision, and its sha is the artifact's
+    # provenance binding.)
+    unresolved = READBACK.get("unresolved_elements")
+    walked = READBACK.get("elements") or []
+    if isinstance(unresolved, list) and walked:
+        idx = next((i for i, f in enumerate(found) if f.get("id") == "D2"), None)
+        if idx is not None:
+            if unresolved:
+                found[idx] = {
+                    "id": "D2",
+                    "question": found[idx].get("question"),
+                    "answer_over_mcp": (f"NO for {len(unresolved)} of {len(walked)}"),
+                    "evidence": {"unresolved_elements": list(unresolved),
+                                 "walked": len(walked),
+                                 "elements": [e.get("name") for e in walked]},
+                }
+            else:
+                # nothing unresolved is not the same finding: withdraw it rather
+                # than report a claim its own evidence denies
+                del found[idx]
+
     if not any(f.get("id") == "D4" and witness for f in found):
         # ⛔ AN ERROR IS NOT SILENCE (#14691 review, 5th cycle, N1). An
         # `{"error": …}` reply satisfied `not rows(...)` and MANUFACTURED D4 —

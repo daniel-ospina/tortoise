@@ -1063,8 +1063,10 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
     # ⛔ A DIAGNOSTIC CODE IS NOT CONTENT (#14691 review, 5th cycle, NEW-6).
     # `audit.exit_code` counts issues the audit check FOUND (as do `node_count`
     # and `summary.total_issues`, which stay counted); scoring it too refused a
-    # legitimate run with the wrong reason (measured: `{'audit.exit_code': 3}` on
-    # the receipt's own empty graph).
+    # legitimate run with the wrong reason. ⚠️ CONSTRUCTED case, not a measurement:
+    # the receipt's own `empty_before` carries `exit_code: 0` and no committed
+    # artifact carries `3` — an earlier revision claimed "measured" and an artifact
+    # check falsified it. This arm drives the constructed case.
     diagnostic = json.loads(json.dumps(before))
     diagnostic["audit"]["exit_code"] = 3
     assert ingest.refuse_if_not_fresh(diagnostic) is None, (
@@ -1144,6 +1146,53 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
 
 
 # ── the 6th review cycle: the artifact's EVIDENCE rows, and the prose ────
+def test_the_remaining_prose_figures_are_the_artifacts_figures():
+    """Reds on the three figures that sat outside every pin (3rd review, P3).
+
+    Measured green before this arm: §2's POST-ingest taxonomy block (all five
+    counts -> 99), the sentence-scope relation figure (`8 of 46` -> `3 of 46`),
+    and every tool NAME in `out/tool-surface.json` (39 names -> `junk_tool_N`,
+    count preserved). The last one makes `VERIFICATION-independent.md:14`'s
+    "lists 39 tools and neither name" unfalsifiable, which is worse than an
+    unguarded number: it is a claim about a NAMED absence.
+    """
+    receipt = _receipt()
+    a4 = _score()["A4_no_invention"]
+
+    # (a) the graph's shape AFTER the write, from the receipt that recorded it
+    after = (receipt.get("graph_overview_after") or {}).get("taxonomy")
+    assert after, "the receipt records no post-ingest taxonomy"
+    row = _report_line(r'^"taxonomy"')
+    assert row, "REPORT.md has no post-ingest taxonomy line"
+    assert json.dumps(after) in row, (
+        f"§2's post-ingest taxonomy block is not the receipt's: expected "
+        f"{json.dumps(after)!r} in {row!r}")
+
+    # (b) the stricter relation figure — 8 of 46 are not co-stated in one SENTENCE
+    sentence_scope = a4["relations_not_co_stated_at_SENTENCE_scope"]
+    relations = _score()["edge_count"]
+    flat = " ".join(_report().split())
+    assert (f"{sentence_scope} of {relations} are not co-stated within a single "
+            f"*sentence*") in flat, (
+        f"the sentence-scope figure is not the artifact's "
+        f"({sentence_scope} of {relations})")
+
+    # (c) the tool NAMES, not just their count: the documents cite the ABSENCE of
+    # two specific tools, and an absence claim is only checkable if the list is.
+    tools = json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+    assert len(tools) == 39, len(tools)
+    for name in ("tortoise_get_entity", "tortoise_search_knowledge",
+                 "tortoise_explore_connections", "tortoise_graph_overview",
+                 "tortoise_mine_knowledge_from_session"):
+        assert name in tools, (
+            f"{name} is missing from the committed MCP surface, so a document "
+            "that describes it is describing a tool this surface does not have")
+    for absent in ("tortoise_recall", "tortoise_get_governance"):
+        assert absent not in tools, (
+            f"{absent} IS advertised on the committed surface, so "
+            "VERIFICATION-independent.md:14's 'neither name' claim is false")
+
+
 def test_the_score_artifact_is_what_the_scorer_DERIVES_from_its_inputs():
     """Reds if `out/t6-score.json` stops being `score_t6.build_score()`'s output.
 
@@ -1343,11 +1392,19 @@ def test_report_figures_across_the_sections_are_the_artifacts_figures():
     line(r"^\| doc-01 \|",
          f"| {doc1['calls']} | {doc1['prompt_tokens']:,} | "
          f"{doc1['completion_tokens']:,} |", "§2's doc-01 cost row")
-    line(r"^.*prompt \+ " if False else r"^.*prompt tokens", 
-         f"{tokens['prompt_tokens']:,}", "§2's prompt-token total") \
-        if _report_line(r"^.*prompt tokens") else None
-    assert f"{tokens['prompt_tokens']:,}" in _report(), "prompt-token total"
-    assert f"{tokens['completion_tokens']:,}" in _report(), "completion-token total"
+    # ⛔ THIS USED TO BE A PIN THAT NEVER RAN (3rd fresh-context review, P2).
+    # It read `line(... if False else r"^.*prompt tokens", ...) if _report_line(
+    # r"^.*prompt tokens") else None` — and REPORT.md contains no line matching
+    # `prompt tokens`, so `_report_line` returned "" and the ternary skipped the
+    # call entirely. The two bare-token asserts below then accepted ANY document
+    # containing "130,804" and "17,137" anywhere, which is the weakened form §8.1
+    # claims to have retired. Measured: `(130,804 prompt + 17,137 completion)` ->
+    # `(130,805 … 17,136 …)` (arithmetic still summing to 147,941) stayed green.
+    line(r"^\| extraction tokens \|",
+         f"**{tokens['total_tokens']:,}** ({tokens['prompt_tokens']:,} prompt + "
+         f"{tokens['completion_tokens']:,} completion) over "
+         f"**{tokens['calls']}** model calls",
+         "§2's extraction-token line")
 
     # §3 — the assertion counts
     line(r"^⚠️ \*\*\d+ `hasPart` write rows",

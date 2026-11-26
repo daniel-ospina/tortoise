@@ -1605,10 +1605,47 @@
       "id": "D2",
       "question": "can a declared structure element be resolved by NAME through the MCP doors?",
       "answer_over_mcp": "NO for 2 of 32",
-      "unresolved": [
-        "component:ingest-gateway",
-        "ownedThing:ingest-gateway"
-      ]
+      "evidence": {
+        "unresolved_elements": [
+          "component:ingest-gateway",
+          "ownedThing:ingest-gateway"
+        ],
+        "walked": 32,
+        "elements": [
+          "Lumen Core",
+          "Lumen Field",
+          "Grid Map",
+          "Outage Alerts",
+          "Load Forecast",
+          "Crew Dispatch",
+          "Asset Register",
+          "Platform team",
+          "Product team",
+          "Customer team",
+          "Staff Engineer",
+          "Site Reliability Engineer",
+          "Product Manager",
+          "Account Executive",
+          "Dana Whitlock",
+          "Tomas Ferreira",
+          "Amara Osei",
+          "Jonas Bauer",
+          "ingest-gateway",
+          "event-bus",
+          "fact-store",
+          "signal-engine",
+          "web-dashboard",
+          "auth-service",
+          "identity-db",
+          "Northwind Logistics",
+          "Helio Health",
+          "mid-market utilities",
+          "Lumen Core",
+          "ingest-gateway",
+          "on-call rotation",
+          "enterprise renewals"
+        ]
+      }
     },
     {
       "id": "D3",
