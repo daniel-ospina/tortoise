@@ -1899,7 +1899,16 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 # while its bare twin is a declared-RED row (#14679 review cycle 51, measured).
 # The claim is now the literal.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
-            r"|now|still|always|often|never|ever)")
+            r"|now|still|always|often)")
+# ⛔ `never`/`ever` MUST NOT BE ADDED TO `_ADVERBS`, and cycle 51 added them —
+# which broke the decision recorded two blocks above: `Never confirm the tools
+# are actually there. Restart your client.` is copy telling the user NOT to do
+# it, and form (f) consumes this class as a LEADING ADVERB RUN BEFORE THE
+# PREDICATE, so membership made it a FALSE RED (#14679 review cycle 52,
+# measured). The caller that genuinely needs them is the NEGATED-CUE lead
+# (`Don't ever restart your client until …`), which is a different position, so
+# it gets a caller-local run instead of widening the shared class.
+_CUE_LEAD_ADVERBS = (r"(?:" + _ADVERBS + r"|never|ever)")
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
 # THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
 # hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
@@ -3060,7 +3069,7 @@ _SEQUENCER_FRAGMENT_RE = re.compile(
     r"|need|needs|have|has|to|be|sure|make|makes"
     r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
     r"|probably|likely|maybe|perhaps|want|wants|better|best|had|ought"
-    r"|always|simply|prefer|very|really|actually|definitely|surely"
+    r"|always|often|never|ever|simply|prefer|very|really|actually|definitely|surely"
     # ⛔ THE OPEN `-ly` ADVERB CLASS, AND THE FILLER IDIOMS. `_ADVERBS` is the
     # OPEN class (`\w+ly` + a closed remainder) precisely because "a noun list
     # cannot be completed"; form (f) and form (a) both use it, while THIS list
@@ -3203,7 +3212,7 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     #     GREEN  Don't ever restart your client until you have confirmed …
     #
     # …and `You shouldn't ever/immediately/simply …`, `Don't just/now …` likewise.
-    r"(?:\s+(?:" + _ADVERBS + r"))*\s*$", re.IGNORECASE)
+    r"(?:\s+(?:" + _CUE_LEAD_ADVERBS + r"))*\s*$", re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
 # nor form (a)'s or (e)'s, so the whole negated-cue arm was unreachable for the
 # most idiomatic English spelling of "not … until":
@@ -6469,6 +6478,29 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # listed, run …` and its colon/dash twins are the recorded example). Pinned.
     ("Restart your client, but not until you have confirmed the tools are "
      "actually there.", False),
+    # ⛔ CYCLE 52 — CYCLE 51'S OWN REGRESSION, and the class disagreement behind it.
+    #
+    # 52a. `never`/`ever` were added to the SHARED `_ADVERBS` to fix the
+    #      negated-cue lead, and form (f) consumes that class as a LEADING ADVERB
+    #      RUN BEFORE THE PREDICATE — so a negated imperative became a false RED.
+    #      The decision to keep them out was already recorded in the file; the
+    #      caller that needs them is a DIFFERENT POSITION, so it now gets a
+    #      caller-local run (`_CUE_LEAD_ADVERBS`) and the shared class is restored.
+    ("Never confirm the tools are actually there. Restart your client, then run "
+     "a query.", False),
+    ("You never need to confirm the tools are actually there. Restart your "
+     "client, then run a query.", False),
+    # …while the caller that DOES need them still reds.
+    ("Don't ever restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    # 52b. `_SEQUENCER_FRAGMENT_RE` carried `always` but not `often|never|ever` —
+    #      the same closed frequency family, split across two arms. A fragment it
+    #      does not pop becomes the governing clause and the confirmation behind
+    #      it is discarded.
+    ("Confirm the tools are actually there, then never restart your client.",
+     True),
+    ("Confirm the tools are actually there, then often restart your client.",
+     True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
