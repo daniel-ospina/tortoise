@@ -308,13 +308,13 @@ from this section is the false claim, not a stale measurement.
   vacated and going green. The `index`-bearing form is not converged — a human
   moves it aside.
 - **The loader rule is TRANSCRIBED, not executed, and nothing pins it to Pi's
-  version.** `_pi_entry_is_loadable` (`tortoise/capture_install.py:1901-1946`)
+  version.** `_pi_entry_is_loadable` (`tortoise/capture_install.py`)
   models `dist/core/extensions/loader.js`, and the test helper
-  `_registered_producers` (`tests/test_capture_install.py:1281-1322`) models the
+  `_registered_producers` (`tests/test_capture_install.py`) models the
   same rule again. They share the MANIFEST reader (`_pi_manifest_entries`), so
   that half cannot drift between them — but the suffix test and the
   `index.ts`/`index.js` fallback are written twice, and
-  `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py:2157`) grades
+  `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py`) grades
   the end state with the SAME function that decided the retirement, so it adds
   no independent signal. ⛔ **Measured against real Pi, not read off the source**
   (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0): a ``reflect-hook.ts``

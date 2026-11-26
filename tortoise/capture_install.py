@@ -1401,6 +1401,15 @@ def legacy_extension_obstacle(harness: str,
     # names a command that refuses — the drift this predicate exists to stop.
     for other_name in PI_SECOND_PRODUCER_OTHER_NAMES:
         if _pi_entry_is_loadable(root_path / other_name):
+            # ⛔ A GUESS IS NOT A MEASUREMENT (#14342 round 21, finding 4). The
+            # installer's own receipt says "could not be VERIFIED — it may still
+            # register" on exactly this branch, so a hint asserting "is
+            # registered" would have two surfaces of one guard contradict each
+            # other on the same shape.
+            if _pi_loadability_is_guessed(root_path / other_name):
+                return (f"a second copy of the second capture producer could "
+                        f"not be VERIFIED at {other_name} — it may still "
+                        f"register; move it out of the extensions directory")
             return (f"a second copy of the second capture producer is "
                     f"registered at {other_name} — move it out of the "
                     f"extensions directory")
@@ -1875,42 +1884,6 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
-def _pi_package_main(path: Path) -> tuple[str | None, str | None]:
-    """The directory's npm ``main`` entry point, as NODE resolution reads it.
-
-    ⛔ THIS IS A DIFFERENT FIELD FROM ``pi.extensions`` AND A DIFFERENT CODE
-    PATH (#14342 round 20, finding 1). A ``*.ts`` / ``*.js`` SYMLINK TO A
-    DIRECTORY is pushed by ``discoverExtensionsInDir`` as a direct entry, and
-    the loader then resolves the directory the way node does — ``package.json``
-    ``main`` first, else ``index.ts`` / ``index.js``.
-    ``resolveExtensionEntries`` (which owns ``pi.extensions``) is NOT consulted
-    on that path, so a `main`-resolving producer was invisible to this module
-    and the install reported GREEN with two live producers.
-
-    Returns ``(main, error)`` with the same three-way shape as
-    :func:`_pi_manifest_entries`:
-
-    * ``("hook.js", None)`` — a readable ``main`` string;
-    * ``(None, None)`` — no ``package.json``, or none Pi would honour (an
-      unparseable file, or a non-string ``main``) — the loader falls through to
-      the index names;
-    * ``(None, "<reason>")`` — the file exists but cannot be READ, so no
-      assumption is safe and the caller must fail closed.
-    """
-    manifest = path / "package.json"
-    if not manifest.is_file():
-        return None, None
-    try:
-        # `utf-8-sig`, matching `readPiManifest`'s BOM strip.
-        declared = json.loads(manifest.read_text("utf-8-sig"))
-    except ValueError:
-        return None, None
-    except OSError as e:
-        return None, f"{manifest}: {e.__class__.__name__}: {e}"
-    main = declared.get("main") if isinstance(declared, dict) else None
-    return (main, None) if isinstance(main, str) else (None, None)
-
-
 def _pi_manifest_entries(path: Path) -> tuple[list[str] | None, str | None]:
     """The ``pi.extensions`` entries Pi's own manifest reader would ACCEPT.
 
@@ -1991,21 +1964,29 @@ def _pi_entry_is_loadable(path: Path) -> bool:
     on exactly that tree). Only the SYMLINK takes this path: a real directory
     named `foo.ts` is not a direct entry at all, so it keeps the
     ``resolveExtensionEntries`` rule.
+
+    ⛔ AND THIS IS DELIBERATELY **CONSERVATIVE**, NOT A MODEL OF NODE. Hand-
+    modelling node's resolution here was tried three times and produced a NEW
+    under-count each time (`main` absent → index fallback; extensionless `main`
+    → `.js` appended; `main` → a directory). Every one of those is the LENIENT
+    direction, i.e. `install_capture` reporting GREEN over two live producers
+    (#14342 rounds 20-21, two of them P0). The guard's ONE job is never to
+    certify that state, so the answer is not a better model — it is a rule that
+    cannot under-count: **a suffix-named symlink to a NON-EMPTY directory is
+    treated as loadable.** Measured against real Pi, every non-empty target
+    either registers (via `main`, `main + '.js'`, an index, or a subdirectory
+    `main`) or is one of the shapes Pi ignores — and Pi ignoring it costs only a
+    refusal, which is the safe direction and is already a documented residual.
+    An EMPTY target registers nothing, so it is the one case answered ``False``.
     """
     try:
         if not os.path.lexists(path):
             return False
         if path.is_dir():
-            suffix = path.name.endswith((".ts", ".js"))
-            if path.is_symlink() and suffix:
-                # node resolution, as the loader does for a pushed direct entry
-                main, unreadable = _pi_package_main(path)
-                if unreadable:
-                    return True  # may resolve anything; never guess it away
-                if main is not None:
-                    target = path / main
-                    return os.path.lexists(target) or target.is_dir()
-                return (path / "index.ts").is_file() or (path / "index.js").is_file()
+            if path.is_symlink() and path.name.endswith((".ts", ".js")):
+                # Conservative, never a model — see the docstring. A non-empty
+                # target MAY register; an empty one cannot.
+                return any(True for _ in path.iterdir())
             entries, unreadable = _pi_manifest_entries(path)
             if unreadable:
                 return True  # may declare entries; never guess it away
@@ -2456,28 +2437,29 @@ def _disable_pi_second_producer(
                     dry_run=True,
                     unverified=_pi_retirement_unverifiable(active))}")
         if active.is_symlink() and active.is_dir():
-            # The real run renames the LINK to `retired` and THEN asserts on
-            # it; a suffixed link to a directory is still resolved through
-            # `resolveExtensionEntries`, so it refuses — AFTER mutating. A
-            # preview that reports this shape as fine is a false PASS on the
-            # plane whose whole job is previewing the real run (#14342 round
-            # 10, finding 2). Model the post-mutation predicate here.
+            # Model the post-mutation predicate here — and model it CORRECTLY:
+            # the renamed name is `reflect-hook.ts.disabled`, which is
+            # NON-SUFFIXED, so Pi resolves it through `resolveExtensionEntries`
+            # (manifest, else index) and `main` is no longer read (#14342 round
+            # 21, finding 3). Asking `_pi_loadability_is_guessed(retired)` about
+            # a path that does not exist under `--dry-run` answered False and
+            # produced a refusal for a shape the real run completes GREEN.
+            _post_entries, _post_unreadable = _pi_manifest_entries(active)
+            _post_loadable = bool(
+                _post_unreadable
+                or (_post_entries and any(os.path.exists(active / name)
+                                          for name in _post_entries))
+                or (active / "index.ts").is_file()
+                or (active / "index.js").is_file())
+            if not _post_loadable:
+                return True, [f"[dry-run] would retire {active} \u2192 {retired}"], None
             return False, [], (
-                f"the capture seam would be in place, but the second capture "
-                f"producer could not be disabled ({active}): renaming the link "
-                f"to {retired} leaves a suffixed SYMLINK to a directory, and "
-                # ⛔ THIS ARM IS THE THIRD OF THREE AND WAS THE ONLY ONE WITH
-                # NO GUESS SPLIT (#14342 round 19, finding 2). Measured: the
-                # post-rename `.disabled` link to a target whose `package.json`
-                # is unreadable and which has no index registers NOTHING, while
-                # this sentence asserted the mechanism AND the count.
-                + (f"whether Pi still registers it COULD NOT be verified — it "
-                   f"may still load, so every session could be captured twice"
-                   if _pi_loadability_is_guessed(retired) else
-                   f"Pi resolves it through `resolveExtensionEntries` (its "
-                   f"`package.json` manifest, else its index file) — so both "
-                   f"producers would stay registered")
-                + f". Nothing was written (a dry run); move "
+                f"{seam_state}, but the second capture producer could not be "
+                f"disabled ({active}): renaming the link to {retired} leaves a "
+                f"non-suffixed SYMLINK to a directory that Pi still resolves "
+                f"through `resolveExtensionEntries` (its `package.json` "
+                f"manifest, else its index file) — so both producers would "
+                f"stay registered. Nothing was written (a dry run); move "
                 f"{active} out of the extensions directory by hand and re-run.")
         if active.is_dir() and not active.is_symlink():
             return True, [f"[dry-run] would retire the entry point inside "
