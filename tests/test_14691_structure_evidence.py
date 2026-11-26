@@ -19,6 +19,7 @@ other is the failure mode this file exists to prevent.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -87,11 +88,12 @@ def _measured(reply, what: str):
     `reply` then reads exactly like a door that answered "nothing here".
 
     `test_an_ERROR_reply_is_not_an_EMPTY_answer` pins the SCORER's arm for D4 by
-    replacing the whole call dict in-process. That leaves the committed artifact
-    open, measured on this head: rewriting both `bare_kind_probes` replies (and
-    all seven witness `expand_relationships[*].reply` values) with
-    `{"error": …, "ok": false}` — the exact shape the review used — kept **27
-    passed**, because nothing read those replies through this distinction.
+    replacing the whole call dict in-process. That left the committed artifact
+    open: MEASURED BEFORE THIS ARM EXISTED (head 9ea2f606), rewriting both
+    `bare_kind_probes` replies (and all seven witness
+    `expand_relationships[*].reply` values) with `{"error": …, "ok": false}` —
+    the exact shape the review used — kept the whole suite green, because nothing
+    read those replies through this distinction. It reds now: this arm.
     """
     payload = reply
     if isinstance(payload, str):
@@ -992,13 +994,13 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
     ⛔ #14691 review, 5th cycle, (b) — the residual half. `test_the_quote_breakdown
     _in_the_report_is_the_claim_layer` pins §7's flat sentence, and it holds. It
     does NOT reach the two places the same three numbers appear as a TABLE, and
-    both were measured green on this head:
+    both were MEASURED GREEN AT HEAD 9ea2f606, before this arm existed:
 
       * §3's A4 table — `verbatim **11**`, `paraphrase **27**`, `invented **12**`
-        rewritten to `**50** / **0** / **0**` → **27 passed**;
+        rewritten to `**50** / `**0**` / `**0**` — the whole suite stayed green;
       * §8's artifact table — `its quote-fidelity audit (11 verbatim / 27
-        paraphrase / 12 not in corpus)` rewritten to `(50 / 0 / 0)` → **27
-        passed**.
+        paraphrase / 12 not in corpus)` rewritten to `(50 / 0 / 0)` — likewise.
+      (Both red now: this arm.)
 
     A claim stated three times and guarded once is guarded in one place out of
     three. Each row is now pinned to the claim layer it quotes.
@@ -1031,11 +1033,14 @@ def test_the_isolation_refusal_is_WIRED_into_the_ingest_runner():
     """Reds if `main()` stops CALLING the occupancy refuse it defines.
 
     ⛔ A guard function is not a guard while nothing calls it. The review's
-    demonstrated mutant was this shape — replace the check with `if False:` and
-    the suite stays green — and it is STILL green on this head, measured: flipping
-    `if contamination:` to `if False:` in `run_ingest.main()` left **27 passed**,
-    because `test_the_isolation_refusal_is_enforced_on_the_whole_overview` drives
-    `occupancy()` directly and never reaches the call site.
+    demonstrated mutant was this shape — replace the check with `if False:` —
+    and it was MEASURED GREEN AT HEAD 9ea2f606: flipping `if contamination:` to
+    `if False:` in `run_ingest.main()` left the whole suite green, because
+    `test_the_isolation_refusal_is_enforced_on_the_whole_overview` drives
+    `occupancy()` directly and never reaches the call site. (A textual pin alone
+    is still not enough — an inserted filter can make the branch inert with every
+    substring intact — so `test_the_refusal_FIRES_on_the_run_path` drives
+    `main()` and pins the EFFECT.)
 
     The run path is pinned as source, so deleting the call reds even though the
     function still works.
@@ -1056,3 +1061,378 @@ def test_the_isolation_refusal_is_WIRED_into_the_ingest_runner():
     assert "raise SystemExit(" in source.split("if contamination:")[1][:400], (
         "run_ingest.main() branches on the contamination verdict without raising "
         "it, so a populated graph would be measured anyway")
+
+
+# ── the 6th review cycle: the artifact's EVIDENCE rows, and the prose ────
+def test_the_score_artifact_is_what_the_scorer_DERIVES_from_its_inputs():
+    """Reds if `out/t6-score.json` stops being `score_t6.build_score()`'s output.
+
+    ⛔ #14691 review, 6th cycle, finding 2 (P1). The 5th cycle's lesson — "nothing
+    in the tree opened this file" — was applied to `t6-quote-audit.json` and not
+    to the PRIMARY artifact. Everything a test did not happen to name was free,
+    measured green on head 43fbd256, each mutant alone:
+
+      * `corpus_chars` 4,295 → 1 (while REPORT says "4,295 characters");
+      * `A4_no_invention.warnings` {36,26,1,2} → {3,0,0,0} (while REPORT says
+        "26 of 36 warnings");
+      * `edge_count` 46 → 999 (while REPORT says "0 of 46 relations");
+      * every `A2_edges.ownership[].verdicts` emptied and `present` flipped — the
+        EVIDENCE for the bundle's headline FAIL;
+      * `extraction_tokens.by_doc`, `entity_names_checked` 35 → 1, every A5
+        probe's `first_rank_in_search`/`top8`, `per_type.team.right_kind` → 0,
+        `door_findings[0].evidence`.
+
+    `build_score()` is a pure function of the committed corpus/receipt/readback
+    (it writes nothing), so the whole artifact is checkable: one mutation to any
+    derived field reds here, including the two that otherwise contradict
+    REPORT.md while both stay green.
+    """
+    module = _load_score_module()
+    derived = json.loads(json.dumps(module.build_score(), default=str))
+    committed = _score()
+    if derived != committed:
+        diverged = sorted(k for k in set(derived) | set(committed)
+                          if derived.get(k) != committed.get(k))
+        raise AssertionError(
+            "out/t6-score.json is no longer what score_t6.py derives from the "
+            "committed corpus/receipt/readback — re-run the scorer instead of "
+            f"editing the artifact. Diverging top-level keys: {diverged}")
+    # non-vacuity: the derivation must actually produce the evidence the review
+    # found rewritable, or this arm would pass on a score with those fields gone.
+    assert committed["corpus_chars"] and committed["edge_count"]
+    assert committed["A4_no_invention"]["warnings"]["total"] > 0
+    assert all(item["verdicts"] for item in committed["A2_edges"]["ownership"])
+    assert all(p["top8"] is not None for p in committed["A5_retrieval"]["probes"])
+
+
+def test_the_example_BUCKETS_are_the_bands_their_names_claim():
+    """Reds if the paraphrase/invented example lists are swapped or emptied.
+
+    ⛔ #14691 review, 6th cycle, finding 3 (P2). The COUNT half of N5 holds; the
+    BUCKET identity was unguarded — measured green on 43fbd256: swapping
+    `invented_examples` with `paraphrase_examples` (overlap bands 0.2-0.4 ↔
+    0.636-1.0) and emptying both lists left **28 passed**, while REPORT §8.1
+    states "the paraphrase rows live under `paraphrase_examples`" and §3 quotes
+    three of the invented rows as examples of invention.
+    """
+    quotes = _score()["A4_no_invention"]["quotes"]
+    cap = 10
+    for bucket, band in (("invented_examples", "below"),
+                         ("paraphrase_examples", "at_or_above")):
+        rows = quotes[bucket]
+        assert rows, f"{bucket} is empty — the artifact shipped no examples"
+        assert len(rows) <= cap, (bucket, len(rows))
+        for row in rows:
+            over = row["best_sentence_overlap"]
+            if band == "below":
+                assert over < 0.6, (bucket, over)
+            else:
+                assert 0.6 <= over <= 1.0, (bucket, over)
+    # and the truncation is DECLARED, not implied by a silent cap
+    truncated = (quotes["invented"] > len(quotes["invented_examples"])
+                 or quotes["paraphrase"] > len(quotes["paraphrase_examples"]))
+    assert quotes["examples_truncated"] is truncated, (
+        quotes["examples_truncated"], truncated,
+        quotes["invented"], quotes["paraphrase"])
+
+
+def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
+    """Reds if a REPORT answer keeps its leading "No" and reverses its claim.
+
+    ⛔ #14691 review, 6th cycle, finding 4 (P2). `_polarity` reads the FIRST word,
+    so measured green on 43fbd256: D6's answer
+    `**No — \`[]\` for all four owners**, on a graph holding 6 \`ownedBy\` rows.`
+    → `**No — it returns every owned row for all 4 owners**, on a graph holding 6
+    …` — the bundle's headline mechanism finding inverted, with the leading "No"
+    kept so the polarity arm stayed quiet.
+
+    The answer cell must now CONTAIN the artifact's own answer text (markdown
+    stripped, whitespace flattened), so a reversal cannot keep a "No" beside it.
+    """
+    def _flat(text: str) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text).lower()).split())
+
+    for finding in _score()["door_findings"]:
+        row = _report_line(rf"^\| \*\*{finding['id']}\*\* \|")
+        assert row, f"REPORT.md has no row for door finding {finding['id']}"
+        answer = _flat(row.split("|")[3])
+        artifact = _flat(finding["answer_over_mcp"])
+        assert artifact, finding["id"]
+        # the artifact's sentence, compared on its first six words — prose may add
+        # to it, but the claim itself has to be present, not merely the sign
+        key = " ".join(artifact.split()[:6])
+        assert key in answer, (
+            f"door finding {finding['id']}'s ANSWER in REPORT.md does not carry "
+            f"the artifact's answer: report {answer[:140]!r} vs artifact "
+            f"{artifact[:140]!r}")
+
+
+def test_an_UNREADABLE_kind_is_not_graded_INVERTED_either():
+    """Reds if the `managedBy` mirror of N6 grades an unreadable row INVERTED.
+
+    ⛔ #14691 review, 6th cycle, finding 6 (P2). `produces` got its UNCLASSIFIABLE
+    bucket; `managedBy` did not — `dst_kind in subject_kinds` is False for an
+    absent `dst_kind`, so an unread row was asserted to be *the reverse of the
+    corpus* from a kind the scorer never read, and moved the very tallies A2's
+    tally paragraph is pinned to (`inverted` 15 → 16, distinct pairs 13 → 14).
+    Measured on 43fbd256: nothing reddened.
+    """
+    module = _load_score_module()
+    baseline = module.a2_edges()["totals"]
+    assert baseline["asymmetric_rows_unclassifiable"] == 0, baseline
+    row = {"doc": "test", "predicate": "managedBy", "write_path": "test",
+           "src_id": "UNKNOWN-SRC", "dst_id": "UNKNOWN-DST",
+           "src": "unknown-src", "dst": "unknown-dst",
+           "src_kind": "", "dst_kind": ""}
+    module.EDGES.append(row)
+    try:
+        mutated = module.a2_edges()["totals"]
+    finally:
+        module.EDGES.pop()
+    assert mutated["asymmetric_rows_unclassifiable"] == 1, (
+        "a `managedBy` row whose kinds this scorer cannot read was graded "
+        "instead of being reported UNCLASSIFIABLE")
+    assert mutated["asymmetric_rows_inverted"] == baseline["asymmetric_rows_inverted"], (
+        "an unreadable `managedBy` row was counted as INVERTED, so the artifact "
+        "asserts the reverse of the corpus from a kind it never read")
+    assert mutated["asymmetric_pairs_inverted"] == baseline["asymmetric_pairs_inverted"], (
+        "an unreadable `managedBy` row entered the distinct-pair count")
+
+
+def test_report_figures_across_the_sections_are_the_artifacts_figures():
+    """Reds if a number anywhere in REPORT.md drifts from the artifact it quotes.
+
+    ⛔ #14691 review, 6th cycle, finding 1 (P1). The N4 arms pinned the A1 and A3
+    HEADINGS and nothing else, so on head 43fbd256 each of these rewrites alone
+    stayed green (measured, one at a time): the A5 heading's `5/5`/`0/5`, §2's
+    isolation block (`"total_entities": 0` → 15, the taxonomy counts → Point 7/…),
+    §2's per-document cost/throughput row, §3's `8 hasPart write rows for 5
+    distinct pairs`, `26 of 36 warnings`, `0 of 46 relations`, §7's `4 ownedBy
+    pairs`, §0's `six ownership edges`, and §8's `(39 tools)`.
+
+    Most pointed: the isolation block is the run's own premise — the report could
+    claim the graph held 15 entities BEFORE the first write while the receipt-level
+    pin stayed green, because that pin grades the RECEIPT and not the prose.
+
+    Every figure below is derived from the committed artifact on the left of the
+    `|`, so a scorer change reds here and the prose gets updated with it.
+    """
+    score = _score()
+    receipt = _receipt()
+    a1 = score["A1_type_coverage"]
+    a3 = score["A3_hierarchy"]["reported"]
+    a4 = score["A4_no_invention"]
+    a5 = score["A5_retrieval"]["totals"]
+    tokens = score["extraction_tokens"]
+    before = receipt["empty_before"]
+    tools = json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+    ownedby_rows = sum(
+        1 for doc in receipt["documents"]
+        for e in (((doc.get("result") or {}).get("relation_write") or {})
+                  .get("edges") or []) if e.get("predicate") == "ownedBy")
+    ownedby_pairs = sum(1 for o in score["A2_edges"]["ownership"] if o["present"])
+
+    def line(pattern, expected, why):
+        got = _report_line(pattern)
+        assert got, f"REPORT.md has no line matching {pattern!r} ({why})"
+        assert expected in got, (
+            f"{why}: REPORT.md does not state the artifact's {expected!r} — "
+            f"{got!r}")
+
+    # §0 / §1 / §2 — the premise and the corpus
+    line(r"^.*all (?:six|seven|\w+) ownership edges",
+         f"all {_spell(ownedby_rows)} ownership edges",
+         "§0's ownership-edge count")
+    line(r"^.*4,295 characters", f"{receipt['corpus_chars']:,} characters",
+         "§1's corpus size")
+    line(r"^.*named elements, .* containment pairs",
+         f"{a1['declared']} named elements, {a3['hasPart_distinct_pairs']} "
+         "containment pairs", "§1's declared-structure counts")
+    counts = ", ".join(f'"{k}": {v}' for k, v in before["taxonomy"].items())
+    line(r'^"counts": \{', f'"counts": {{{counts}}}', "§2's pre-write taxonomy")
+    line(r'^"total_entities":', f'"total_entities": {before["status"]["total_entities"]}',
+         "§2's pre-write entity total")
+
+    # §2 — the per-document cost/throughput row
+    doc1 = tokens["by_doc"]["doc-01"]
+    line(r"^\| doc-01 \|",
+         f"| {doc1['calls']} | {doc1['prompt_tokens']:,} | "
+         f"{doc1['completion_tokens']:,} |", "§2's doc-01 cost row")
+    line(r"^.*prompt \+ " if False else r"^.*prompt tokens", 
+         f"{tokens['prompt_tokens']:,}", "§2's prompt-token total") \
+        if _report_line(r"^.*prompt tokens") else None
+    assert f"{tokens['prompt_tokens']:,}" in _report(), "prompt-token total"
+    assert f"{tokens['completion_tokens']:,}" in _report(), "completion-token total"
+
+    # §3 — the assertion counts
+    line(r"^⚠️ \*\*\d+ `hasPart` write rows",
+         f"**{a3['hasPart_write_rows']} `hasPart` write rows for "
+         f"{a3['hasPart_distinct_pairs']} distinct pairs**",
+         "§3's hasPart duplication counts")
+    line(r"^.*of \d+ warnings",
+         f"`{a4['warnings']['no_source_turn']}` of {a4['warnings']['total']} warnings",
+         "§3's no-source-turn warning count")
+    line(r"^.*of \d+ relations",
+         f"{len(a4['relations_not_co_stated'])} of {score['edge_count']} relations",
+         "§3's un-co-stated relation count")
+    line(r"^### A5 · ",
+         f"{a5['answered_by_search_text']} by text, "
+         f"{a5['walk_resolved_to_an_ENTITY']} by structure", "§3/A5's heading")
+
+    # §7 / §8 — the corroboration's own figures
+    line(r"^.*the same \*\*\d+\*\* `ownedBy` pairs",
+         f"the same **{ownedby_pairs}** `ownedBy` pairs", "§7's ownedBy pair count")
+    line(r"^.*the same `dev:code` typing for all",
+         f"the same `dev:code` typing for all "
+         f"{_spell(a1['per_type']['component']['right_kind'])} components",
+         "§7's dev:code typing count")
+    line(r"^\| `out/tool-surface\.json` \|",
+         f"({len(tools)} tools)", "§8's advertised-tool count")
+
+
+def test_the_second_measurements_CORROBORATION_fields_are_pinned():
+    """Reds if the fields the corroboration is CITED for are rewritten.
+
+    ⛔ #14691 review, 6th cycle, finding 5 (P2) — the (b) residual. The arm that
+    pins `t6-independent-verification.json` asserts its `declared` list and its
+    `A2` verdict; measured green on 43fbd256, each alone: every one of the nine
+    governance answers set to `[{"name": "something owned"}]` (i.e. the door DID
+    answer — the opposite of D6), `A2_edge_row_counts_from_receipt` ownedBy 6→0
+    and hasPart 8→0, `advertised_tools` 39→99, `A1.typed_nodes['dev:code']` 7→0
+    — while REPORT still cites those very numbers.
+
+    Each field is pinned to the artifact it corroborates, so it cannot disagree
+    with the primary record it exists to confirm.
+    """
+    indep = json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+    score = _score()
+    receipt = _receipt()
+    # (1) the ownership-door witness that corroborates D6 — all nine empty, and
+    #     the four owners present
+    gov = indep["witness_governance_door_returns_empty"]
+    assert all(v == [] for v in gov.values()), gov
+    assert {"Amara Osei", "Dana Whitlock", "Tomas Ferreira", "Jonas Bauer"} <= set(gov), gov
+    # (2) the receipt-derived row counts, counted here from the receipt
+    counted = {}
+    for doc in receipt["documents"]:
+        for edge in (((doc.get("result") or {}).get("relation_write") or {})
+                     .get("edges") or []):
+            counted[edge["predicate"]] = counted.get(edge["predicate"], 0) + 1
+    assert indep["A2_edge_row_counts_from_receipt"] == counted, (
+        indep["A2_edge_row_counts_from_receipt"], counted)
+    # (3) the tool surface it reports is the committed surface
+    tools = json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+    assert indep["tool_surface"]["advertised_tools"] == len(tools), (
+        indep["tool_surface"], len(tools))
+    # (4) its typed-node counts are the score's own kind population
+    assert indep["A1"]["typed_nodes"]["dev:code"] == (
+        score["A1_type_coverage"]["per_type"]["component"]["right_kind"]), (
+        indep["A1"]["typed_nodes"])
+    assert indep["A1"]["typed_nodes"]["product-strategy:product"] == (
+        score["A1_type_coverage"]["per_type"]["product"]["right_kind"])
+
+
+def test_every_audited_quote_ROW_is_a_real_quote_of_a_real_document():
+    """Reds if the quote audit's ROWS are replaced with sentences that are not there.
+
+    ⛔ #14691 review, 6th cycle, finding 5 (P2). The arm above pins that `audited`
+    is non-empty and that each row is non-verbatim and in-band — never that the
+    row's QUOTE exists. Measured green on 43fbd256: replacing every `audited`
+    row's `quote` with `"some other sentence entirely"` and its `doc` with
+    `"doc-99"`.
+    """
+    audit = json.loads((BUNDLE / "out" / "t6-quote-audit.json").read_text())
+    receipt_quotes = set()
+    for doc in _receipt()["documents"]:
+        for point in ((doc.get("result") or {}).get("points") or []):
+            quote = ((point.get("props") or {}).get("quote") or "")
+            if quote:
+                receipt_quotes.add(" ".join(quote.lower().split()))
+    assert receipt_quotes, "the receipt carries no quotes to audit"
+    for row in audit["audited"]:
+        # the audit stores the quote TRUNCATED (the scorer caps the row at 200
+        # chars), so the row must be a PREFIX of a recorded quote — a fabricated
+        # sentence is not a prefix of any of them.
+        quoted = " ".join(row["quote"].lower().split())
+        assert any(rq.startswith(quoted) or quoted in rq
+                   for rq in receipt_quotes), (
+            f"an audited row quotes a span the receipt never recorded: "
+            f"{row['quote'][:100]!r}")
+        assert row.get("point"), f"an audited row carries no point to attribute: {row}"
+
+
+def test_the_refusal_FIRES_on_the_run_path(monkeypatch, tmp_path):
+    """Reds if the guard is computed and never acted on, on the real run path.
+
+    ⛔ #14691 review, 6th cycle, finding 9 (P3). `run_ingest.main()` was pinned by
+    THREE SUBSTRINGS, and measured green on 43fbd256:
+
+        contamination = occupancy(before)
+        if contamination:
+            contamination = {k: v for k, v in contamination.items()
+                             if len(v) > 10**9}   # the guard is now inert
+
+    All three assertions still pass — the call is there, the branch is there, the
+    raise is there — and a populated graph is measured as if it were fresh. No
+    textual pin can see that, so this arm DRIVES `main()` against a stub SDK and
+    asserts the EFFECT: a populated overview raises before any capture is made,
+    and a fresh one is allowed through to the first capture.
+
+    `main()` writes `out/ingest-receipt.json` at the end, so `ingest.OUT` is
+    repointed at `tmp_path` — a test must never touch a committed artifact.
+    """
+    import importlib.util as _ilu
+
+    import tortoise.sdk as sdk_module
+
+    spec = _ilu.spec_from_file_location("t6_ingest_run", BUNDLE / "run_ingest.py")
+    ingest = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(ingest)
+    monkeypatch.setattr(ingest, "OUT", tmp_path)
+
+    fresh = json.loads(json.dumps(_receipt()["empty_before"]))
+    populated = json.loads(json.dumps(fresh))
+    populated["status"]["total_entities"] = 500
+    populated["status"]["counts"]["Point"] = 500
+
+    class _StubSDK:
+        captured = 0
+
+        def __init__(self, *a, **k):
+            pass
+
+        def graph_overview(self, section=None):
+            if section == "namespaces":
+                return {"namespaces": []}
+            return fresh if _StubSDK.mode == "fresh" else populated
+
+        def mine_knowledge_from_session(self, *a, **k):
+            _StubSDK.captured += 1
+            raise RuntimeError("stub capture")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdk_module, "TortoiseSDK", _StubSDK)
+
+    # (1) a POPULATED graph: refused, and no capture is attempted
+    _StubSDK.mode = "populated"
+    _StubSDK.captured = 0
+    try:
+        ingest.main()
+    except SystemExit as exc:
+        assert "NOT FRESH" in str(exc), exc
+    else:
+        raise AssertionError(
+            "run_ingest.main() measured a POPULATED graph without refusing — the "
+            "isolation premise is recorded and never enforced on the run path")
+    assert _StubSDK.captured == 0, (
+        "the refusal fired after a capture had already been attempted")
+
+    # (2) the non-vacuity control: a FRESH graph reaches the first capture
+    _StubSDK.mode = "fresh"
+    _StubSDK.captured = 0
+    with contextlib.suppress(SystemExit):
+        ingest.main()
+    assert _StubSDK.captured > 0, (
+        "a fresh graph never reached the ingest loop, so arm (1) is vacuous")

@@ -1023,6 +1023,7 @@
         },
         "direction": "->",
         "dst_kind_is_a_subject": false,
+        "src_kind_is_a_subject": true,
         "orientation": "INVERTED"
       },
       {
@@ -1037,6 +1038,7 @@
         },
         "direction": "->",
         "dst_kind_is_a_subject": false,
+        "src_kind_is_a_subject": true,
         "orientation": "INVERTED"
       },
       {
