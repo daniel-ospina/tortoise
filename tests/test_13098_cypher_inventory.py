@@ -4774,7 +4774,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 53` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 54` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
