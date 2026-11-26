@@ -10229,14 +10229,28 @@ _H_14544_CHANGE_VERB = (
 #: `all of the`, `these`, `those`, `no`, `both`, and an adverb (`directly`). That is a false PASS, not
 #: a false block, so the set is wide and the partitive is explicit.
 #: The residue (an adjunct set off by commas inside the verb phrase, or a coordinated object) is R1 on
-#: #14715, declared — it is a CLAUSE-PARSING residue and NOT a vocabulary one.
+#: #14715, declared — it is a CLAUSE-PARSING residue. ⛔ The quantifier VOCABULARY is a separate,
+#: separately-declared residue (R4 on the same issue): this object is anchored, and its determiner and
+#: quantifier words are a CLOSED list, so an unlisted quantifier is a miss.
 _H_14544_SUBORDINATOR = (
     r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
 _H_14544_SAME_CLAUSE = (
     r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
+#: The object is ANCHORED instead: a negated change takes the row as its object only when nothing
+#: but determiners stand between them, so no word list can decide it. ⛔ THE DETERMINER SET IS
+#: DELIBERATELY WIDE and admits a PARTITIVE: a first cut carried only `the|that|this|its|their|his|
+#: her|a|an|any|which`, and MEASURED at #14623 review round 11 that dropped NINE shapes the previous
+#: head banned — `any of the`, `some of the`, `either of the`, `all of the`, `these`, `those`, `no`,
+#: `both`, and an adverb (`directly`). That is a false PASS, not a false block, so the set is wide.
+#: ⛔ AND THE QUANTIFIER LIST IS CLOSED, WHICH IS THE RESIDUE R4 ON #14715 (declared, filed, with a
+#: comment on that issue): `none`, `most`, `several`, `a couple`, `half`, `a number`, `every one` and
+#: any other quantifier this list does not name still ship CLEAN. That residue is a VOCABULARY one,
+#: not the clause-parsing R1/R2/R3, and the comment below says so instead of claiming the class is
+#: closed. Do not read "admits a partitive" as "admits every partitive".
 _H_14544_OBJECT_DETERMINERS = (
     r"(?:the|that|this|its|their|his|her|a|an|any|which|no|every|each|some|both|all|either"
-    r"|neither|these|those|my|our|your|whose)\s+")
+    r"|neither|these|those|my|our|your|whose|none|most|several|many|half|few|number|couple"
+    r"|majority|plenty|one|two|three|four|five|anyone)\s+")
 _H_14544_PARTITIVE = r"(?:of\s+(?:the|these|those|them|which)\s+)?"
 #: A bounded ADVERB allowance, because `did not touch DIRECTLY the row` is the same claim. It is a
 #: CLOSED list on purpose: a catch-all `\w+` here read `move a bin` as a reach for the row and
@@ -10247,7 +10261,11 @@ _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
     + r"(?:" + _H_14544_OBJECT_DETERMINERS + r"|" + _H_14544_OBJECT_ADVERBS + r"){0,3}"
     + _H_14544_PARTITIVE
-    + r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
+    # ⛔ THE ROW NOUN MUST BE THE HEAD, not a premodifier of a different head (#14623 review round 11,
+    # P3): with the bare alternation, "does not move the `durations` row's BIN" matched `durations`
+    # as the object and red the paragraph's own TRUE bin claim. Requiring the head noun (optionally
+    # with `durations` in front) and rejecting a possessive after it fixes both halves.
+    + r"(?:`durations`\s+)?(?:rows?|entr(?:y|ies)|weight)(?![\u2019']s\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10753,6 +10771,15 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544` did not touch both `durations` rows.",
             "`#14544` did not touch those `durations` rows.",
             "`#14544` did not touch directly the `durations` row.",
+            # ⛔ THE QUANTIFIER FAMILY: `none`/`most`/`several`/`a couple`/`half`/`every one` all
+            # shipped CLEAN while the comment claimed the partitive was admitted (#14623 round 11).
+            # The list is closed and that closure is RESIDUE R4 on #14715, declared.
+            "`#14544` did not touch none of the `durations` rows.",
+            "`#14544` did not touch most of the `durations` rows.",
+            "`#14544` did not touch several of the `durations` rows.",
+            "`#14544` did not touch a couple of the `durations` rows.",
+            "`#14544` did not touch half of the `durations` rows.",
+            "`#14544` did not touch every one of the `durations` rows.",
             # ⛔ `\bnot\b` DOES NOT FIRE INSIDE `cannot` — the block's OWN auxiliary, folded to name
             # the row, shipped CLEAN at three preceding heads.
             "`#14544`'s removal of the file from the `core` surface cannot touch the `durations` row.",
@@ -10817,7 +10844,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # bin, the `eval` registration, and the block's own `cannot move a bin`.
             "`#14544` did not touch that `eval` registration, so the `durations` entry stands.",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin.",
-            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row."):
+            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row.",
+            # ⛔ THE ROW NOUN AS A PREMODIFIER IS NOT THIS CLAIM: "the `durations` row's BIN" is
+            # the bin the paragraph says the cut cannot move, and a head-blind object red it
+            # (#14623 review round 11, P3).
+            "`#14544`'s cut does not move the `durations` row's bin.",
+            "`#14544`'s cut does not touch the `durations` row's registration."):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
