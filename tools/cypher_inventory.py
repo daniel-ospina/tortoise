@@ -434,6 +434,16 @@ def _git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _GIT_RETARGETING_ENV}
 
 
+#: Seconds the git-metadata probe may take before it is read as `could not determine`.
+#: ⛔ WITHOUT IT THE COMMENT BELOW IS A CLAIM WITH NO CODE BEHIND IT (#14625 review,
+#: P3): the refusal block already counted "a timeout" among the failures that REFUSE,
+#: but no bound was passed, so a hung git hung `--render` — measured at `9e477cdb`, an
+#: external `timeout 40` returned **124**, having printed no refusal and written
+#: nothing. A false permit costs a repository git cannot restore; an unbounded probe
+#: costs the same by never finishing, so the bound is enforced rather than described.
+_GIT_PROBE_TIMEOUT_S = 30
+
+
 def _looks_like_git_metadata(directory: Path) -> bool:
     """True when ``directory`` itself holds git metadata, resolvable or not.
 
@@ -473,10 +483,16 @@ def surface_files(prefixes: tuple[str, ...]) -> list[str]:
     # scratch repo with a tracked `caf\xe9.py`: bare verb and `--check` both rc 1.
     # `surrogateescape` round-trips those bytes, so `ROOT / relpath` still opens the
     # file and the census reads it like any other.
+    #
+    # ⛔ AND IT IS BOUNDED (#14625 review, P3): this enumeration runs on EVERY verb, so
+    # an unbounded `git` here hangs the census, `--check` and `--render` alike — which
+    # is the case that made the metadata guard's "a timeout REFUSES" sentence false
+    # even after that probe was given a bound.
     out = subprocess.run(
         ["git", "ls-files", "-z", "--", *prefixes],
         cwd=ROOT, capture_output=True, text=True, check=True,
         encoding="utf-8", errors="surrogateescape",
+        timeout=_GIT_PROBE_TIMEOUT_S,
         # An inherited `GIT_DIR` would enumerate a PEER repository and hand its files
         # to the parser — a wrong document at exit 0, not a refusal. See
         # `_GIT_RETARGETING_ENV`.
@@ -1156,7 +1172,19 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
             # overwrote it at rc 0 (measured: 14 -> 145,745 bytes) — the self-locking
             # corruption this refusal describes.
             env=_git_env(),
+            # ⛔ AND BOUNDED (#14625 review, P3): this probe runs FIRST on every
+            # `--render`, so an unbounded `git` here hangs the write path before the
+            # metadata probe's own bound is ever reached — measured with a `git` that
+            # sleeps: the tool outlived an external `timeout 90` (124).
+            timeout=_GIT_PROBE_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired:
+        print(
+            f"render: could not probe {label} for tracking: git did not answer within "
+            f"{_GIT_PROBE_TIMEOUT_S}s",
+            file=sys.stderr,
+        )
+        return 2
     except OSError as err:
         print(f"render: could not probe {label} for tracking: {err}", file=sys.stderr)
         return 2
@@ -1378,7 +1406,26 @@ def main(argv: list[str] | None = None) -> int:
                     # an INTACT `<separate-git-dir>/config` at rc 0 (92 -> 145,745
                     # bytes; `git -C <repo> rev-parse` then answered 128).
                     env=_git_env(),
+                    # ⛔ AND A PROBE THAT NEVER ANSWERS IS BOUNDED, NOT AWAITED (#14625
+                    # review, P3). `timeout=` is what makes the "a timeout — REFUSES"
+                    # sentence below true: measured at `9e477cdb` with a `git` that
+                    # sleeps, `--render` had to be killed externally (124).
+                    timeout=_GIT_PROBE_TIMEOUT_S,
                 )
+            except subprocess.TimeoutExpired:
+                # ⛔ `TimeoutExpired` is NOT an `OSError`, so it does not reach the
+                # handler below: without this arm a hung git raises out of `main()` and
+                # the refuse path is never taken.
+                print(
+                    f"refusing to render over {args.render}: git did not answer within "
+                    f"{_GIT_PROBE_TIMEOUT_S}s whether it is GIT METADATA\n"
+                    "Git cannot restore what --render writes over, so a probe that "
+                    "never answers is refused rather than awaited.\n"
+                    "Pick another path (the default writes the gitignored "
+                    "`CYPHER-INVENTORY.md`).",
+                    file=sys.stderr,
+                )
+                return 2
             except OSError as err:
                 print(
                     f"render: could not probe {args.render} for git metadata: {err}",
@@ -1477,7 +1524,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.json
             else None
         )
-    except (OSError, subprocess.CalledProcessError) as err:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
         print(
             f"census: could not enumerate {prefixes}: {err} — this is 'could not "
             "run', not drift",
@@ -1532,7 +1579,7 @@ def main(argv: list[str] | None = None) -> int:
     # first `ls-files` and refuses the second).
     try:
         text = report(result)
-    except (OSError, subprocess.CalledProcessError) as err:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
         print(f"census: could not enumerate: {err} — this is 'could not run', not drift",
               file=sys.stderr)
         return 2
