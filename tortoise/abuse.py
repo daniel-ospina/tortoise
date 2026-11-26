@@ -2445,9 +2445,14 @@ class AbuseEngine:
         had before the tier term existed), and remember the answer briefly so an
         outage does not cost one blocking ``organizations`` read per capture.
 
-        Never 0-as-a-tier: lowering the level is the direction that CREATES
-        alerts, and this module's standing rule is that a store failure must
-        reduce alert volume, never increase it.
+        Never 0-as-a-tier: ``0`` is not an allowance, it is the ABSENCE of one,
+        so the answer is ``point_threshold_base()`` — the configured absolute
+        level. That LOWERS the level (a pro org drops from 25 000 to 500) and
+        errs toward ALERTING; it is DELIBERATE for the cold-start case and
+        declared in the ``_TIER_FLOOR_TTL_S`` note above, with
+        ``tests/test_abuse.py`` pinning it as "fail toward the SENSITIVE level on
+        a COLD START". Every failure WITH a known floor instead reuses that
+        floor, which is the direction that reduces alert volume.
         """
         with self._tier_lock:
             stale = self._tier_floor_cache.get(org_id)
