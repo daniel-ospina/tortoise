@@ -9459,8 +9459,8 @@ def _row_claims(header: str) -> list[str]:
     whole figure: a character span stood here and did not reproduce against the text it named — the
     quoted sentence is wrapped, so its width depends on which form is measured — which is the
     restated-figure class again, so no character span is stated.
-    MEASURED: `_row_claims` omitted the file, and DELETING its `durations` row left all six of
-    this PR's arms GREEN — the exact "a claim graded by nothing rots" class the block exists to
+    MEASURED: `_row_claims` omitted the file, and DELETING its `durations` row left every arm of
+    this family GREEN — the exact "a claim graded by nothing rots" class the block exists to
     warn about, reproduced in the matcher cut to catch it. The sentence was re-spelled to
     `<path> row in `durations`` (the same repair the `#14544` paragraph took), so the claim is
     now reachable and the row's deletion reds

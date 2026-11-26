@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a0cea3107867` folded in (the fold this
+# reader of the prose can see. On THIS tree — `origin/main` `a0cea310786d` folded in (the fold this
 # head carries, over the `bbef0b8840d7` fold before it; the rows below landed across both and the
 # folds before them), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
@@ -159,10 +159,14 @@ version: 1
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# ⛔ THIS BLOCK ARRIVES SPLICED ON EVERY FOLD, and that is mechanical rather than mysterious:
-# `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations, raises no conflict marker, and the guard then reads `<est stated twice>` /
-# `<ceil stated 2 times>`. Measured on THIS fold: two copies arrived, one naming `origin/main`
+# ⛔ THIS BLOCK ARRIVES SPLICED ON A FOLD THAT RE-DERIVES IT ON BOTH SIDES, and that is mechanical
+# rather than mysterious: `config/ci-surfaces.yml` carries a `merge=union` driver, so where both
+# parents change this text the fold applies BOTH derivations, raises no conflict marker, and the
+# guard then reads `<est stated twice>` / `<ceil stated 2 times>`. ⛔ NOT on every fold, and the
+# quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with the block changed on ONE
+# side applies that one derivation and cannot splice — measured on this branch's last eight folds,
+# five of them (`1d001462535a`, `ec138d054af0`, `a203dbc76ed2`, `fc4a3a4302c9`, `a5f68bf78e75`) changed
+# this file on one side only. Measured on THIS fold: two copies arrived, one naming `origin/main`
 # `bbef0b8840d7` with this branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
 # with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
 # the second copy gets the figures right by coincidence and the ATTRIBUTION wrong, calling
