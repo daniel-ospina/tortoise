@@ -167,8 +167,9 @@ version: 1
 # exempt: the bin is held by the `tests/test_dod_5090_probe.py` row in `durations`, and that row IS
 # `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
 # cutting its cases (its note on the row records exactly that) — so a packing change attributed to
-# that row is a cause this paragraph does NOT exclude, and the row's provenance is that cut rather
-# than the default. The weight is not restated here: the no-per-file-weight rule above binds the
+# that row is a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read
+# rather than the default (the ROW itself predates it — its own note records `new in `#10465``).
+# The weight is not restated here: the no-per-file-weight rule above binds the
 # figure, and a weight re-read is a packing input rather than the membership change this paragraph is
 # about.
 #

@@ -10201,14 +10201,22 @@ _H_14544_CHANGE_VERB = (
 #: clause pair with its halves swapped (#14623 review round 6, F1). A negated change of a
 #: REGISTRATION or of a BIN is the paragraph's own true claim, so only a negated change of the ROW
 #: is the retired one.
+#: A gap INSIDE one clause: any character except end punctuation, and a comma only when it does not
+#: introduce a new clause. Measured RED on the LIVE paragraph without this (#14623 review round 8):
+#: "… a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read …" chained
+#: the paragraph's TRUE `NOT exclude` into the next clause's `re-read` and refused the live block. A
+#: plain comma stays legal, because the claim's own adverbial carries them — "never, in that commit
+#: or any other, touched".
+_H_14544_SAME_CLAUSE = (
+    r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
-    r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
-    + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
+    r"(?:#14544|that\s+cut|the\s+cut)" + _H_14544_SAME_CLAUSE + r"{0,400}?" + _H_14544_NEGATION
+    + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB
     # ⛔ THE OBJECT MUST BE IN THE VERB'S OWN CLAUSE (`[^,;.!?]`), not merely within 40 characters:
     # measured at #14623 review round 7, "`#14544`'s cut does not move a bin, and the row in
     # `durations` is that edit" reached `row` at 35 characters ACROSS the comma, so a negated change
     # of a BIN — the paragraph's own true claim — was refused whenever the next clause named the row.
-    + r"[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
+    + _H_14544_SAME_CLAUSE + r"{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10254,14 +10262,49 @@ _H_14544_FOREIGN_AGENT_RE = re.compile(
     _H_14544_CHANGE_VERB
     + r"[a-z]{0,8}\s+by\s+`?(?!#14544|that\s+cut|the\s+cut)\w",
     re.IGNORECASE)
+
+
+def _h_14544_foreign_agent(sentence: str, match: "re.Match[str]") -> bool:
+    """True when the change verb's `by <agent>` names someone OTHER than the cut.
+
+    The pattern above excludes only the cut's OWN label, so a phrase that DESCRIBES the cut — "by
+    the commit that took the file off `core`, `#14544`" — read as foreign and the retired claim
+    shipped CLEAN (measured, #14623 review round 8, F2). The agent's own words are read here
+    instead, up to the clause: if the cut is named in them, the agent is the cut.
+    """
+    # ⛔ A COMMA DOES NOT END THE AGENT PHRASE: the descriptive form is an APPOSITIVE — "by the commit
+    # that took the file off `core`, `#14544`" — so the read stops at `;`/`.`/`?`/`!` and not at `,`.
+    # Stopping at the comma shipped that claim GREEN (#14623 review round 8, F2); allowing the whole
+    # rest of the sentence would re-open the round-7 false block, where the cut is named in a LATER
+    # clause after a `;`.
+    by = re.search(r"\bby\s+([^;.!?]{0,100})", sentence[match.end():])
+    if by is None:
+        return False
+    return _H_14544_ACTOR_RE.search(by.group(1)) is None
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     # ⛔ ONE CLAUSE PER GAP (`[^,;.!?]`), not `[\s\S]`: measured at #14623 review round 7, the
     # clause-bridging form read the REGISTRATION's adjective as the ROW's — "The `durations` row is
     # `#14544`'s own edit, and the `eval` registration was left alone by that cut." — two TRUE
     # statements in one sentence, refused. Both gaps stop at clause punctuation.
+    # ⛔ THE AGENT IS `by`, not `since`/`after`/`following`: measured RED at #14623 review round 8
+    # (F4) on the TRUE "the `durations` entry … is unchanged SINCE `#14544`" — a temporal relation
+    # asserts the opposite of "that cut did not change it", so only the agent preposition is graded.
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:untouched|unchanged|left\s+alone)[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
-    r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
+    r"(?:untouched|unchanged)[^,;.!?]{0,40}?\bby\s+(?:`?#14544|that\s+cut|the\s+cut)"
+    r"(?!\s*\w)"
+    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
+    r"left\s+alone\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
+    # neither … nor, in EITHER conjunct order: the round-8 reviewer swapped the two nouns of this
+    # very fixture and the claim shipped GREEN.
+    r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither[^,;.!?]{0,80}?\bnor\b",
+    re.IGNORECASE)
+#: …and the IMPERSONAL form, where the negation is the subject rather than an adverb — "Nothing about
+#: that row changed in `#14544`" is the retired claim with no adverb at all, and it reached neither
+#: arm above (measured GREEN, #14623 review round 8, F2). Graded by the same three parts: a
+#: negation word, a change verb, and the cut named in the clause.
+_H_14544_IMPERSONAL_NEGATION_RE = re.compile(
+    r"\bnothing\b[^,;.!?]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)",
     re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
@@ -10275,6 +10318,10 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
 _H_14544_INVERTED_RE = re.compile(
     r"both\s+halves[\s\S]{0,20}?(?:exempt|excluded)|both\s+(?:are|stay)\s+exempt"
     r"|neither\s+half\s+is\s+excluded|row\s+half\s+is\s+exempt"
+    # ⛔ THE NATURAL NEGATION OF `_H_14544_SCOPE_RE`, and the row-half spellings — measured GREEN
+    # beside the true claim at #14623 review round 8, F1: the inverse ban read five spellings and not
+    # the one a fold reaches for first when it wants the row exempt again.
+    r"|not\s+the\s+ONLY\s+half|row\s+half\s+is\s+the\s+exempt|exempts\s+the\s+row"
     r"|paragraph\s+DOES\s+exclude",
     re.IGNORECASE)
 
@@ -10299,11 +10346,14 @@ def _h_14544_banned_claim(block: str) -> str | None:
             return sentence.strip()
         if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
             return sentence.strip()
-        if (_H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
+        row_change = _H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
+        if (row_change
                 and _H_14544_ACTOR_RE.search(sentence)
-                and not _H_14544_FOREIGN_AGENT_RE.search(sentence)):
+                and not _h_14544_foreign_agent(sentence, row_change)):
             return sentence.strip()
         if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
+            return sentence.strip()
+        if _H_14544_IMPERSONAL_NEGATION_RE.search(sentence):
             return sentence.strip()
     return None
 
@@ -10338,7 +10388,13 @@ _H_14544_CONCLUSION_RE = re.compile(
 #: 6, F3): the paragraph must not restate a per-file weight. It may name the row, its provenance and
 #: the commit; the figure lives in `durations`, graded there by `_carry_row_claim_violations`. The
 #: pattern is a DECIMAL, so issue numbers and shas (`e66997b81e76`) are not read.
-_H_14544_WEIGHT_FIGURE_RE = re.compile(r"\b\d+\.\d+\b")
+_H_14544_WEIGHT_FIGURE_RE = re.compile(
+    # ⛔ THE FIGURE MUST BE THE ROW'S, and the DECIMAL ALONE is not evidence: measured RED at #14623
+    # review round 8 (F3) on the TRUE "the weight of shard a and the weight of shard b are 827.2 s
+    # and 827.3 s, neither of which moved" — the block itself quotes shard weights, shard minutes
+    # and a headroom ratio, and this block's rule is about a PER-FILE (row) weight only.
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b)[^,;.!?]{0,60}?\b\d+\.\d+\b"
+    r"|\b\d+\.\d+\b[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b)")
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
@@ -10491,6 +10547,9 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "Both are exempt.",
             "The row half is exempt too.",
             "Neither half is excluded.",
+            "The REGISTRATION is not the ONLY half exempt.",
+            "The ROW half is the exempt one.",
+            "This paragraph exempts the row too.",
             "On the record's own numbers this paragraph DOES exclude it."):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverse ban misses {inverse!r} — a constant no fixture exercises can be blanked "
@@ -10554,6 +10613,9 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "That row was untouched by `#14544`.",
             "The row's weight was unchanged by `#14544`.",
             "`#14544` touched neither that row nor its weight.",
+            "`#14544` touched neither its weight nor that row.",
+            "That row was not touched by the commit that took the file off `core`, `#14544`.",
+            "Nothing about that row changed in `#14544`.",
             "the `durations` entries were not touched by `#14544`",
             # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it — the shape an
             # actor-anywhere rule read as foreign and shipped CLEAN (#14623 review round 7, P1).
@@ -10587,6 +10649,13 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544`'s cut is separate, and the row was not touched by the reaper.",
             "The `durations` row was not touched by the reaper; that is separate from "
             "`#14544`'s cut.",
+            # round-8 TRUE prose: a TEMPORAL relation (unchanged SINCE), shard weights that are not a
+            # per-file weight, and two true statements in one sentence whose adjectives differ.
+            "The `durations` entry for that file is unchanged since `#14544`.",
+            "The weight of shard a and the weight of shard b are 827.2 s and 827.3 s, neither of "
+            "which moved.",
+            "The `durations` row is `#14544`'s own edit, and the `eval` registration was left alone "
+            "by that cut.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
