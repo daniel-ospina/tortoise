@@ -1196,6 +1196,41 @@ def test_pi_install_refuses_a_loaded_legacy_entry_point_behind_a_symlink(home):
     assert disabled.is_symlink()
 
 
+def test_pi_install_does_not_claim_an_install_the_noop_run_skipped(home):
+    """A REAL run whose seam is already current writes NOTHING (the byte
+    guard skips the copy), then reaches the legacy-symlink refusal — and used
+    to report "The capture seam at … WAS installed" beside its own
+    ``actions=()`` and ``changed_artifacts=()``.
+
+    That is the #10241 report shape on the REAL plane, and it is ordinary, not
+    exotic: every box that has run ``tortoise install pi`` before is in it. The
+    sentence is now keyed on the write, not on the mode (#14342 round 13).
+
+    Mutation: key the branch on ``dry_run`` alone (the pre-fix code) — this row
+    REDs on "WAS installed"."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    seeded = install_capture("pi", home=home)
+    assert seeded.ok, seeded.error
+    assert seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam")
+
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer, elsewhere\n")
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert res.actions == (), res.actions
+    assert "WAS installed" not in error, (
+        f"a no-op run claimed it installed the seam: {error!r}")
+    assert "ALREADY in place" in error, error
+
+
 #: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``.
 #: ``dist/core/extensions/loader.js``: a direct entry loads iff its name ENDS
 #: WITH ``.ts`` / ``.js`` (``isExtensionFile``); **every** subdirectory is

@@ -2040,6 +2040,23 @@ def _both_producers_clause(*, dry_run: bool) -> str:
             "twice")
 
 
+def _seam_state_clause(*, dry_run: bool, wrote: bool) -> str:
+    """What the seam's state IS, attributed to the run that produced it.
+
+    ⛔ KEYED ON THE WRITE, NOT ON THE MODE. A real run whose seam is already
+    current skips the write (`_is_regular_unchanged`) and still reaches these
+    refusals, so saying "the capture seam WAS installed" reports an event the
+    run did not perform — beside its own `actions=()` and
+    `changed_artifacts=()` (#14342 round 13). The same helper serves
+    `--dry-run`, where the seam merely WOULD be there and nothing is written.
+    """
+    if dry_run:
+        return "The capture seam WOULD be in place"
+    if wrote:
+        return "The capture seam is in place (see the actions above)"
+    return "The capture seam was ALREADY in place"
+
+
 def _assert_pi_entry_not_loadable(path: Path) -> str | None:
     """Fail closed when the retirement did not achieve what it claims."""
     if _pi_entry_is_loadable(path):
@@ -2050,7 +2067,8 @@ def _assert_pi_entry_not_loadable(path: Path) -> str | None:
 
 
 def _disable_pi_second_producer(
-        ext_dir: Path, *, dry_run: bool) -> tuple[bool, list[str], str | None]:
+        ext_dir: Path, *, dry_run: bool,
+        seam_written: bool = True) -> tuple[bool, list[str], str | None]:
     """Disable agent-infra's ``reflect-hook.ts`` — the other capture producer.
 
     Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the entry is
@@ -2068,16 +2086,15 @@ def _disable_pi_second_producer(
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
     retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
-    # ⛔ THE RECEIPT MUST NOT CLAIM THE DISK IS UNTOUCHED. Every refusal below
-    # runs AFTER `_install_pi` wrote and verified the seam, so the same
-    # InstallResult carries `actions=('installed …')` and
-    # `changed_artifacts=('tortoise-capture.ts',)`: saying "nothing was touched"
+    # ⛔ THE RECEIPT MUST NOT CLAIM A WRITE THIS RUN DID NOT MAKE. Every refusal
+    # below runs AFTER `_install_pi` handled the seam, so the same InstallResult
+    # may carry `actions=('installed …')` and
+    # `changed_artifacts=('tortoise-capture.ts',)` — saying "nothing was touched"
     # beside those is the #10241 report shape this module forbids (#14342 round
-    # 10, finding 3). Under `--dry-run` nothing is written, so the clause is
-    # subjunctive — one sentence must not lie in either mode.
-    seam_state = ("the capture seam WOULD be in place"
-                  if dry_run else
-                  "the capture seam is in place (see the actions above)")
+    # 10, finding 3). The clause is derived from the WRITE, not the mode, so a
+    # no-op run does not claim a write it skipped and a preview does not claim
+    # one it never made (#14342 round 13).
+    seam_state = _seam_state_clause(dry_run=dry_run, wrote=seam_written)
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
     # refusal that fires only in the run that performed the rename is not a
     # guard: run 1 renamed a SYMLINK TO A DIRECTORY and refused (a suffixed
@@ -2503,9 +2520,13 @@ def _install_pi(
                                         f"installed, so this box would run "
                                         f"BOTH producers; nothing was written."
                                         if dry_run else
-                                        f"The capture seam at {dst} WAS "
-                                        f"installed, so this box now runs "
-                                        f"BOTH producers.")
+                                        (f"The capture seam at {dst} WAS "
+                                         f"installed, so this box now runs "
+                                         f"BOTH producers."
+                                         if capture_written else
+                                         f"The capture seam at {dst} was "
+                                         f"ALREADY in place, so this box now "
+                                         f"runs BOTH producers."))
                                      + f" The link was not renamed and the "
                                        f"checkout it points at is untouched. "
                                        f"Move {legacy_disabled} out of the "
@@ -2596,7 +2617,7 @@ def _install_pi(
     # other producer first would open a window with NO producer at all — capture
     # silently stops, which is the failure this guard must never introduce.
     second_changed, second_actions, second_error = _disable_pi_second_producer(
-        ext_dir, dry_run=dry_run)
+        ext_dir, dry_run=dry_run, seam_written=capture_written)
     changed = changed or second_changed
     actions.extend(second_actions)
     if second_error:
