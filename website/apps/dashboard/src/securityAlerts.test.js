@@ -390,16 +390,26 @@ test('#14686: a team switch drops the previous Organization\'s alerts', () => {
 
 test('#14686: an in-flight alerts read cannot land on the wrong Organization', () => {
   // The reset above is only sound if a read started before the switch cannot
-  // resolve after it: `loadAlerts` has no other org guard, so without this one a
-  // slow org-A response overwrites org-B state — the same contamination, just
-  // harder to see.
+  // resolve after it: without this guard a slow org-A response overwrites org-B
+  // state — the same contamination, just harder to see.
   const main = readFileSync(join(here, 'main.jsx'), 'utf8')
   const start = main.indexOf('async function loadAlerts')
   assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
   const end = main.indexOf('\n  }', start)
   const body = main.slice(start, end)
-  assert.match(body, /if \(orgIdRef\.current !== tid\) return/,
+  // ⛔ The `orgIdRef.current &&` half is load-bearing. The guard must discard a
+  // KNOWN-but-different Organization — never a NOT-YET-KNOWN one. `completeLogin`
+  // calls `loadAlerts(t.org_id)` and does NOT call `setCurrentOrgId`, and it only
+  // bails above when `orgIdRef.current` is truthy AND differs, so on a fresh
+  // login `orgIdRef` is still null when this response lands. Written without the
+  // falsy allowance, `null !== tid` reads as "stale" and the SIGN-IN'S OWN feed
+  // load is dropped: an empty bell until the next team switch, which is the very
+  // defect this change removes. Asserted in both directions, because the
+  // falsy-blind form still "has a guard" and reads as correct.
+  assert.match(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return/,
     'a response for an Organization that is no longer current must be discarded')
+  assert.doesNotMatch(body, /if \(orgIdRef\.current !== tid\) return/,
+    'the falsy-blind form drops the LOGIN path\'s own read — `orgIdRef` is null there')
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────

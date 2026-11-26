@@ -5457,7 +5457,19 @@ function claimIntentInFlight() {
         // org's feed here would list its rows — and let a snooze/dismissal
         // written against them land in the NEW org's key. Same guard discipline
         // as the members/graphs loaders.
-        if (orgIdRef.current !== tid) return
+        //
+        // ⛔ `orgIdRef.current &&` is load-bearing, not defensive noise: this
+        // guard must DISCARD a KNOWN-but-different org, never a NOT-YET-KNOWN
+        // one. `completeLogin` calls `loadAlerts(t.org_id)` and does NOT call
+        // `setCurrentOrgId` — it only bails above when `orgIdRef.current` is
+        // truthy AND differs (`if (t?.org_id && orgIdRef.current && ...)`), so
+        // on a fresh login `orgIdRef` is still null here (logout sets it null at
+        // `setCurrentOrgId(null)`'s sibling). Without the falsy allowance this
+        // `null !== tid` reads as "stale" and the sign-in's own feed load is
+        // dropped — an empty bell until the next team switch, which is the
+        // defect this PR exists to fix. The same convention the guard three
+        // lines up the call stack already uses.
+        if (orgIdRef.current && orgIdRef.current !== tid) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
