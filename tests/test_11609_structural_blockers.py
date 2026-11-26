@@ -1057,27 +1057,42 @@ def _schema(name: str) -> dict | None:
 # ── the blockers are still live ──────────────────────────────────────────────
 
 @pytest.mark.parametrize("name", ENVELOPE_DOORS)
-def test_the_door_still_declares_the_array_envelope(name):
-    """`eval_str=True`: `mcp_server` defers annotations, so the raw value is a STRING."""
+def test_the_retired_door_still_declares_the_array_envelope(name):
+    """The SHAPE these nine doors shipped, pinned after their retirement.
+
+    `eval_str=True`: `mcp_server` defers annotations, so the raw value is a STRING.
+
+    ⛔ The doors retired FORWARD in #11609 lane P11, so this is a RECORD of what a
+    migrating caller was receiving, not a reason to keep it live. It still matters: the
+    container's list arm has to answer these same bytes, and
+    `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope` asserts that
+    on the wire. Reading the annotation here keeps the two halves comparable — if the
+    door's own declaration changed, the byte-equality the retirement rests on changed too.
+    """
     annotation = inspect.signature(getattr(ms, name), eval_str=True).return_annotation
     assert annotation == list[dict], (
-        f"{name} declares {annotation!r}. If it no longer does, the #8482 reason in "
-        "`PROTECTED` has been made false — move it out of that table in the SAME change, "
-        "and only after the container carries the envelope (S1/S2 of the plan)")
+        f"{name} declares {annotation!r}. The nine envelope doors all shipped the "
+        "`-> list[dict]` wrap envelope, which is the shape their container's list arm was "
+        "made to match before they retired (lane P11)")
 
 
 @pytest.mark.parametrize("name", LIST_CONTAINERS)
 def test_the_container_still_advertises_no_envelope(name):
-    """`typing.Any` ⇒ `output_schema is None` ⇒ no wrap ⇒ no #8482 repair on that door.
+    """`typing.Any` ⇒ `output_schema is None` ⇒ no ANNOTATION-derived wrap.
 
-    A non-`None` schema here means S1 landed. That is not a failure — it is the signal
-    that the doors above became retirable, and this pin is where that is noticed.
+    ⛔ THE ENVELOPE DOES NOT COME FROM THE SCHEMA ANY MORE — it is built at the
+    container by `_row_section_envelope` (lane P11), which is why the nine doors could
+    retire while every container here still advertises `None`. So this pin answers "is
+    the envelope still built by hand?", which is exactly why a future lane must NOT
+    read it as "the containers cannot carry one": if a container ever DOES gain a schema,
+    the hand-built wrap would double-wrap (`{\"result\": {\"result\": …}}`) and this is
+    the pin that notices first.
     """
     advertised = _schema(name)
     assert advertised is None, (
-        f"{name} now advertises an output schema ({advertised!r}) — the container has "
-        "gained an envelope, so the `PROTECTED` envelope doors may now be retired "
-        "(and their callers' `structuredContent` has moved one level down — see S1)")
+        f"{name} now advertises an output schema ({advertised!r}) while it also builds "
+        "the wrap envelope by hand (`_row_section_envelope`) — that double-wraps "
+        "`structuredContent`. Remove ONE of the two mechanisms in the same change")
 
 
 def test_every_envelope_door_destination_is_one_of_the_six_containers():
@@ -2797,7 +2812,7 @@ def test_two_distinct_rows_on_one_path_double_register():
     """
     import dataclasses
 
-    leaf = next(e for e in TOOL_REGISTRY if e.name == "tortoise_search")
+    leaf = next(e for e in RETIRED_TOOL_REGISTRY if e.name == "tortoise_search")
     container = next(e for e in TOOL_REGISTRY if e.name == "tortoise_search_knowledge")
     rehomed = dataclasses.replace(container, rest_spec=leaf.rest_spec)
     assert rehomed.name != leaf.name and rehomed.rest_spec.path == leaf.rest_spec.path
@@ -2815,12 +2830,30 @@ def test_the_search_door_is_held_by_the_envelope_not_the_route():
     """`tortoise_search` was listed under BOTH reasons; only one of them is real.
 
     Its `rest_spec` is stale (§1.5) — the served `GET /v1/search` is hand-written — so what
-    holds it is the `list[dict]` envelope, i.e. S1, not any route work. Losing that
-    distinction is what put three unnecessary steps in the plan.
+    held it was the `list[dict]` envelope, not any route work. Losing that distinction is
+    what put three unnecessary steps in the plan.
+
+    ⛔ RETIRED IN #11609 LANE P11, so the row now lives in `RETIRED_TOOL_REGISTRY` and the
+    assertion follows the door instead of asserting it is live. The RECORD is unchanged —
+    the `rest_spec` cell still names `/v1/search` — and the reason it was held is now
+    SATISFIED at the container (`search_knowledge` wraps its list arm), which is exactly
+    why the door could go. Both halves are asserted: the cell persists (a record), and the
+    retirement happened on the ENVELOPE axis with no route change behind it.
     """
-    entry = _live()["tortoise_search"]
-    assert entry.rest_spec is not None and entry.rest_spec.path == "/v1/search"
-    assert inspect.signature(ms.tortoise_search, eval_str=True).return_annotation == list[dict]
+    entry = {t.name: t for t in RETIRED_TOOL_REGISTRY}["tortoise_search"]
+    assert entry.rest_spec is not None and entry.rest_spec.path == "/v1/search", (
+        "the RECORD moved with the retirement — that cell is a fact about a route that "
+        "exists independently, never the thing that retained the door")
+    assert "tortoise_search" not in _live(), (
+        "`tortoise_search` is live again: it retired forward in lane P11 once its "
+        "container carried the envelope")
+    # The route survived the retirement, which is the claim §1.5 makes: the served
+    # `/v1/search` is a hand-written decorator reaching the SDK, not a row-derived route.
+    src = (Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.py").read_text()
+    assert '"/v1/search"' in src, (
+        "the served `GET /v1/search` disappeared with the registry row — §1.5 measured "
+        "that it is a hand-written decorator, so this would mean the route WAS row-derived "
+        "after all and the retirement broke a public route")
 
 
 # ── the seven are still not doors ─────────────────────────────────────────────

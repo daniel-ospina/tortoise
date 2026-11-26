@@ -667,7 +667,7 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
    tortoise team info       # hosted team + usage
    ```
 
-   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_graph_overview(section="structure")` (counts: total points + per-gate breakdown; `tortoise_summarize_structure` retired into it, #4282) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
+   Then call the structure tool over MCP on each surface — `tortoise_graph_overview` with `section="structure_check"` (chain integrity; `tortoise_check_structure` retired into it, #11609) and with `section="structure"` (counts: total points + per-gate breakdown; `tortoise_summarize_structure` retired into it, #4282) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 
@@ -721,7 +721,8 @@ docker://:falkordb@localhost:6379/tortoise`). Points land as **draft** in a
 W-3-gated batch — the SDK/MCP path returns `batch_status` in its result; the
 CLI prints event/point/operator counts (watch for `FalkorDB unavailable`
 warnings, which mean projection failed and you're in log-only mode). Review
-and promote drafts when you're ready (`tortoise_promote_point` MCP tool /
+and promote drafts when you're ready (`tortoise_refresh_confidence(scope="promote",
+point_id=…)` MCP tool — the door `tortoise_promote_point` was retired into, #11609 — /
 `TortoiseSDK.promote_point`).
 
 **Your own transcript:** any plain-text file with `Name: statement` lines.
@@ -732,10 +733,14 @@ demonstrates the full mix (meeting + decision + friction).
 
 - SDK: `TortoiseSDK(db_path).mine_corpus(directory)` — batch-mine a folder of
   transcripts (ingest + mine per file, resume + dedup built in).
-- MCP (stdio): `tortoise_mine_conversations(transcript=..., source_id=...)` or
-  `corpus_dir=...` for a batch. Hosted HTTP excludes
-  `tortoise_mine_conversations` entirely (both forms, security #1090) — run
-  `tortoise serve` locally (stdio) for either.
+- MCP (stdio): `tortoise_mine_knowledge_from_session(conversation=..., source_id=...)`
+  for one transcript, or `tortoise_mine_knowledge_from_directory(directory=...)`
+  for a batch — the two doors `tortoise_mine_conversations` was retired into
+  (#11609). Hosted HTTP excludes the directory door entirely, and the session door
+  on its raw-transcript arm only (`conversation=` as a string with `source_id=`),
+  keeping the retired door's posture per-arm (security #1090) — run `tortoise serve`
+  locally (stdio) for those. The session door's other arms (`conversation=` as a
+  turn list, `items=`) are served over hosted HTTP.
 
 Mining details and the W-3 batch gate: `tortoise/mining.py`
 (`ConversationMiner`, `mine_conversation`, `mine_corpus`); the onboarding
@@ -774,12 +779,15 @@ What it does:
 Output is the run summary (`documents`, `claims`, `NEW Points`, `Objects
 wired`, plus any per-file errors); every Point is `status=draft`, so nothing
 enters the live belief set until you promote it
-(`TortoiseSDK.promote_point(point_id)`, or the `tortoise_promote_point` MCP
-tool).
+(`TortoiseSDK.promote_point(point_id)`, or the
+`tortoise_refresh_confidence(scope="promote", point_id=…)` MCP tool — the successor to
+`tortoise_promote_point`, #11609).
 
 **Honest difference from the meeting path:** docs mining has **no MCP tool and
 no hosted endpoint** — it is a self-hosted CLI verb only. `tortoise
-mine-conversation` / `tortoise_mine_conversations` remain the transcript path.
+mine-conversation` / `tortoise_mine_conversations` remain the transcript path,
+and over MCP that same path is `tortoise_mine_knowledge_from_session` (the door
+`tortoise_mine_conversations` was retired into, #11609).
 
 ### Automatic capture (optional Minutes integration)
 
