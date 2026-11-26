@@ -9162,6 +9162,14 @@ _EMISSION_CLAUSE_RE = re.compile(
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
 _EMISSION_CEIL_RE = re.compile(
     r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
+#: The STATED HEADROOM RATIO that sits in the same sentence — `(1680 / 827.6 = 2.0300)`. ⛔ It is a
+#: FOURTH claim in that sentence and it was graded by NOTHING (#14623 review round 29, P3): mutating
+#: `2.0300` to `2.0400` left every `fast_shards`/emission/manifest/integrity arm GREEN (measured, 36
+#: passed). Read here so the ratio is DERIVED like its neighbours rather than asserted once by hand.
+#: Absence is legal (the block's doctrine is GRADED-OR-ABSENT — deleting the parenthetical drops the
+#: claim without falsifying it); a PRESENT ratio must be the one the code computes.
+_EMISSION_RATIO_RE = re.compile(
+    r"\((?P<window>\d+)\s*/\s*(?P<est>\d+\.\d+)\s*=\s*(?P<ratio>\d+\.\d+)\)")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -9374,6 +9382,17 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     #: — that is the fixture's job, not this alternation's.
     r"(?:(?:an?\s+)?(?:explicit\s+)?`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
+    # ⛔ THE VALUE AFTER THE NOUN. This note's own sentence states the graded PROPERTY as "names a
+    # file as carrying a `durations` row of THIS value" — the post-noun order — and the alternation
+    # above required the opposite one, so a TRUE rewrite of the live sentence
+    # ("… carry an explicit `durations` row of `2.0`") matched NOTHING. ⛔ THE FAILURE MODE IS A
+    # DESTRUCTIVE FALSE BLOCK, not a harmless red: `positive` empties, the non-vacuity assert
+    # reports the block as naming no file, and the obvious repair — silencing that assert — removes
+    # the ONLY grading of the four positive row claims (#14623 review round 29, P2; the same class as
+    # `explicit` at round 24 and the unit at rounds 5/6, this being the last of the three free
+    # choices in the value phrase). Pinned by a fixture below, so narrowing this branch REDs.
+    r"|(?:an?\s+)?(?:explicit\s+)?`?durations`?\s+(?:rows?|entr(?:y|ies))\s+(?:of|at)\s+"
+    r"`?(?P<value_after>\d+(?:\.\d+)?)(?:\s*s)?`?"
     r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
 )
@@ -9435,10 +9454,14 @@ def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, set[float]], set[str]
     for claim in _ROW_CLAIM_CARRY_RE.finditer(unquoted):
         names = {m.group("file")
                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
-        if claim.group("value") is None:
+        # ⛔ EITHER group may carry the value: `value` is the value-BEFORE-noun branch and
+        # `value_after` the value-AFTER-noun one. Python's `re` cannot give two branches one group
+        # name, so the caller resolves them here rather than the pattern losing a legal spelling.
+        stated_value = claim.group("value") or claim.group("value_after")
+        if stated_value is None:
             negative |= names
         else:
-            stated = float(claim.group("value"))
+            stated = float(stated_value)
             for name in names:
                 positive.setdefault(name, set()).add(stated)
     return positive, negative
@@ -9828,6 +9851,29 @@ def _emission_block_claims(
         f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
         "no longer states the code's own multiplier, so the figures beside it are not the ones "
         "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    # ⛔ THE STATED HEADROOM RATIO, checked against the code rather than trusted. The window is the
+    # emitted budget (`minutes x 60`) and the quotient is `ci_selection.watchdog_headroom`, so a
+    # block stating the right figure against the wrong estimate — or a hand-typed ratio that drifted
+    # — reds here instead of reading as verified. Tolerance is half the stated precision, so the
+    # block may round to as many places as it likes without the arm owning a spelling.
+    ceil_by_est = {float(e): int(m) for e, _h, m in ceil_matches}
+    for window_str, ratio_est_str, ratio_str in _EMISSION_RATIO_RE.findall(header):
+        ratio_est = float(ratio_est_str)
+        assert ratio_est in ceil_by_est, (
+            f"the block states a headroom ratio for {ratio_est} s, which no `ceil(...)` clause in "
+            "the same block derives — the ratio is arithmetic on a budget nothing states, so it is "
+            "checked against nothing. Re-derive it beside the emission that produced it.")
+        minutes = ceil_by_est[ratio_est]
+        assert int(window_str) == minutes * 60, (
+            f"the block states the headroom window as {window_str} s, but the emitted budget beside "
+            f"it is {minutes} m = {minutes * 60} s — the numerator is not the budget it divides.")
+        expected = cs.watchdog_headroom(ratio_est, minutes)
+        decimals = len(ratio_str.split(".")[1])
+        assert abs(float(ratio_str) - expected) <= 0.5 * 10 ** (-decimals), (
+            f"the block states the headroom ratio as `{window_str} / {ratio_est_str} = {ratio_str}`, "
+            f"but `ci_selection.watchdog_headroom({ratio_est_str}, {minutes})` is {expected:.6f} "
+            f"(={expected:.{decimals}f}) — the figure beside the emission is not the one the code "
+            "computes, so it will read as verified while it rots. Re-emit it with the verb.")
     if not groups:
         return None
     est_str, _headroom, minutes_str = ceil_matches[0]
@@ -11678,6 +11724,32 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             f"the `carry` matcher does not read {claim!r}, so a TRUE rewording of the block reds "
             "this arm and the diagnostic blames the matcher — the adjective was a spelling lock "
             f"(#14623 review round 24, P3): {adjective_positive!r}")
+    # ⛔ THE VALUE AFTER THE NOUN — the fourth and last free choice in the value phrase, and the one
+    # the alternation still locked (#14623 review round 29, P2). The note above states the graded
+    # PROPERTY as "names a file as carrying a `durations` row of THIS value", so the post-noun order
+    # is the spelling the note itself uses; the branch required value-BEFORE-noun, so this TRUE
+    # rewrite matched nothing. ⛔ The damage is destructive rather than a bare red: `positive` empties,
+    # the non-vacuity assertion fires with "names no file", and silencing it removes the only
+    # grading of the four positive row claims — so the fixture, not the live sentence, is what keeps
+    # the branch from being re-narrowed.
+    for claim in ("carry an explicit `durations` row of `2.0`",
+                  "carry a `durations` row of 2.0",
+                  "carries an explicit `durations` entry of `2.0`",
+                  "carry an explicit `durations` row at `2.0`"):
+        post_noun_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` {claim}")
+        assert post_noun_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read the value AFTER the noun ({claim!r}), so a TRUE "
+            "rewording of the block reds this arm and the diagnostic blames the matcher — the "
+            f"fourth spelling lock in the value phrase (#14623 review round 29, P2): {post_noun_positive!r}")
+    # …and it keeps the POLARITY: a post-noun row whose value moved must still red.
+    post_noun_positive, _ = _carry_row_claims(
+        "`tests/test_carry_planted_first.py` carry a `durations` row of 2.0")
+    assert _carry_row_claim_violations(
+        post_noun_positive, set(), {"test_carry_planted_first.py": 3.1})[0] == [
+            ("test_carry_planted_first.py", [2.0], 3.1)], (
+        "the post-noun branch read a file but lost the weight it states, so a `durations` row that "
+        "moved while the sentence still claimed the old value would pass GREEN")
     # …and making the adjective optional must not have dropped the VALUE the claim carries: the row
     # whose weight moved under a sentence still stating the old one has to red, or the loosening
     # traded a false block for a false PASS.
