@@ -247,22 +247,36 @@ extension VARIANTS (`denied_extension_stem`) — and its deny list is
 `reflect-hook*` variant either. Nothing currently refuses those: the hole is
 named here so it is not mistaken for coverage.
 
-⛔ **ONE MEASURED INSTANCE IS LIVE, AND IT IS WORSE THAN UNTOUCHED — IT
-EXECUTES.** The reference box carries `extensions/reflect-hook.test.ts` beside
-the `reflect-hook.ts` this guard retires (the provenance table in this README
-already lists it as a real file, not a symlink). It is a loadable `*.ts` with
-the producer stem, so Pi's `discoverExtensionsInDir` pushes it and the loader
-**runs the module at startup**, then drops it for having no default export —
-agent-infra's whole recorder suite executing inside every Pi start, whose tail
-is `if (failed > 0) process.exit(1)`: a Pi that exits during extension load.
-It does **not** file a duplicate session (its `fetch` is stubbed out and its
-fallback directory is a temp dir), so the one-producer claim is not falsified
-and the install is not wrong to report green — the box is simply not quiet, and
-nothing here names it. It is deliberately NOT added to
-`PI_SECOND_PRODUCER_OTHER_NAMES`: refusing on it would make `tortoise install pi`
-red on that box for a file that cannot double-capture. The durable fix belongs
-in **agent-infra: do not ship `extensions/*.test.ts` into the live extensions
-directory** — not a wider guard here.
+⛔ **ONE MEASURED INSTANCE IS LIVE — IT EXECUTES, AND IT RESHAPES THE REAL
+PRODUCER'S ENVIRONMENT.** The reference box carries
+`extensions/reflect-hook.test.ts` beside the `reflect-hook.ts` this guard
+retires (the provenance table in this README already lists it as a real file,
+not a symlink). It is a loadable `*.ts` with the producer stem, so Pi's
+`discoverExtensionsInDir` pushes it and the loader **runs the module at
+startup**, then drops it for having no default export — agent-infra's whole
+recorder suite executing inside every Pi start, whose tail is
+`if (failed > 0) process.exit(1)`: a Pi that exits during extension load.
+
+The suite also **assigns `process.env.TORTOISE_FALLBACK_DIR`** to a `mkdtemp`
+directory it later deletes (`reflect-hook.test.ts:28`), and the real producer
+binds that variable at module scope when it is imported (`reflect-hook.ts:61`,
+`process.env.TORTOISE_FALLBACK_DIR || ~/.tortoise/session-events`). So whether
+the LIVE producer's local record is diverted into a temp directory depends on
+**load order** — and this is where this record states its own limit instead of
+reassuring: on this box the consequence is NOT observed
+(`~/.tortoise/session-events/<day>.jsonl` is still growing and no
+`/tmp/reflect-hook-test-*` survives), so either the live startup path differs
+from `discoverAndLoadExtensions` in a way not yet found, or those records are
+written by a process that does not load the suite. **UNRESOLVED — do not read
+this as harmless.**
+
+What IS established: the suite swaps `fetch` out for its own run, so it cannot
+file a duplicate *session*, and the install is not wrong to report green. It is
+deliberately NOT added to `PI_SECOND_PRODUCER_OTHER_NAMES`: refusing on it would
+make `tortoise install pi` red on that box for a file that cannot
+double-capture. The durable fix belongs in **agent-infra: do not ship
+`extensions/*.test.ts` into the live extensions directory** — not a wider guard
+here.
 
 #### Other records still describe the pre-install state
 
@@ -299,8 +313,11 @@ from this section is the false claim, not a stale measurement.
   producer's taken-name collision, a **symlinked or non-regular preservation
   target** at the second producer's retired name, a **still-loadable RETIRED
   name** for the second producer (a suffixed link to a directory, which refuses
-  on every re-run), and a loadable **`reflect-hook.js`** — the same producer
-  under the other extension Pi accepts (`PI_SECOND_PRODUCER_OTHER_NAMES`).
+  on every re-run), a loadable **`reflect-hook.js`** — the same producer under
+  the other extension Pi accepts (`PI_SECOND_PRODUCER_OTHER_NAMES`) — and a
+  **symlink to an index-bearing directory** at the second producer's name (the
+  install renames the link and then still refuses, so it refuses on every run
+  while mutating on each one).
   NOT mirrored, so `hooks status`/`doctor` can still name a verb that refuses
   for them: a manifest-declared or unreadable-`package.json` directory (at
   either producer's name), and an existing
@@ -310,7 +327,9 @@ from this section is the false claim, not a stale measurement.
   earlier revision of this bullet called two arms UNMIRRORED that the predicate
   had already gained (the still-loadable retired name, round 24; the symlinked
   preservation target, round 25) while omitting the `reflect-hook.js` arm
-  entirely — and still closed with "it is the full set". Re-read
+  entirely — and still closed with "it is the full set". The symlink-to-a-
+  directory arm was a third instance: the installer refused (and renamed the
+  link) on a shape the hint answered `''` for. Re-read
   :func:`legacy_extension_obstacle` before quoting it. The mirror is the one
   thing that drifts; that is its documented hazard, not a new one, and
   `test_pi_legacy_obstacle_matches_the_installers_own_refusal` pins the shape it

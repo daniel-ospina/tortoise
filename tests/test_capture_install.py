@@ -2633,6 +2633,107 @@ def test_retire_pi_entry_does_not_half_retire_a_two_entry_directory(home):
         "the only preserved copy was overwritten")
 
 
+def test_retire_pi_entry_names_what_landed_when_a_later_rename_raises(
+        home, monkeypatch):
+    """An OSError on the SECOND rename must name what already landed (#14695
+    review round 2, finding 2).
+
+    The reorder above makes every REFUSAL describe an untouched disk, but the
+    renames still raise inside ``_retire_pi_entry``'s function-wide
+    ``except OSError`` arm — and that arm's own comment names "an immutable
+    target", a PER-FILE condition that can hit the second entry and not the
+    first. MEASURED before the fix: with ``Path.rename`` failing on
+    ``index.js``, ``index.ts`` was already ``index.ts.disabled`` while the
+    caller reported ``actions=()``.
+
+    Mutation: return the bare ``except OSError`` message (drop the landed
+    naming) — the ``PARTLY`` assertion below REDs over a modified disk.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+    (producer / "index.js").write_text("// js entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_js(self, target, *args, **kwargs):
+        if self.name == "index.js":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_js)
+
+    landed: list[Path] = []
+    error = capture_install._retire_pi_entry(producer, renamed=landed)
+
+    assert error and "PARTLY" in error, error
+    assert "index.ts" in error, error
+    assert [p.name for p in landed] == ["index.ts"], landed
+    # The rename landed BEFORE the failure, and the bytes are preserved.
+    assert (producer / "index.ts.disabled").read_text() == "// ts entry\n"
+    assert not (producer / "index.ts").exists()
+
+
+def test_legacy_obstacle_names_a_symlinked_directory_second_producer(home):
+    """The hint must not stay silent on a shape the installer REFUSES and
+    MUTATES (#14695 review round 2, finding 1).
+
+    ``reflect-hook.ts`` as a SYMLINK to a directory holding ``index.ts``, with
+    no retired copy yet: the installer renames the link and then refuses,
+    because a non-suffixed ``.disabled`` link still resolves through
+    ``resolveExtensionEntries`` and Pi registers the target's entry point — so
+    ``tortoise install pi`` fails on EVERY attempt. The predicate answered
+    ``''``, which is precisely the silent-over-a-refusing-verb drift it exists
+    to stop.
+
+    Mutation: delete the symlink-to-a-directory arm from
+    ``legacy_extension_obstacle`` — the obstacle assertion REDs while the
+    installer keeps refusing.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// producer\n")
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle, "the hint is silent over a verb that refuses on every run"
+    assert "SYMLINK" in obstacle, obstacle
+
+    res = install_capture("pi", home=home)
+    assert not res.ok, "the installer certified a box this shape keeps refusing"
+    # The mutating refusal is the fact that made the silence wrong.
+    assert not link.is_symlink(), "the link was not renamed"
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_legacy_obstacle_stays_silent_on_a_symlinked_INERT_directory(home):
+    """The new arm must not over-report (#14695 review round 2, finding 1).
+
+    A link to a directory with NO entry point and no manifest is retired
+    silently by the installer (nothing Pi resolves through it), so the hint must
+    stay silent — otherwise the fix for the silent shape becomes a hint that
+    withholds a command which works, the opposite drift.
+
+    Mutation: answer on ``is_symlink() and is_dir()`` alone, dropping the
+    entry-point test — this row REDs on a successful install.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("nothing Pi resolves\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+
+    assert capture_install.legacy_extension_obstacle("pi", ext_dir) == ""
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+
+
 def test_legacy_obstacle_names_a_symlinked_retired_copy(home):
     """The mirror must use the installer's PREDICATE, not a digest (#14342
     round 25, finding 2).

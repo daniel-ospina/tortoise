@@ -1425,6 +1425,39 @@ def legacy_extension_obstacle(harness: str,
             return (f"a second copy of the second capture producer is "
                     f"registered at {other_name} — move it out of the "
                     f"extensions directory")
+    # ⛔ A SYMLINK TO AN INDEX-BEARING DIRECTORY IS A REFUSAL THIS MIRROR DID
+    # NOT EXPRESS (#14695 review round 2, finding 1). The installer renames the
+    # LINK and then refuses, because a NON-suffixed `<name>.disabled` link
+    # resolves through `resolveExtensionEntries` and Pi registers the target's
+    # `index.ts` — so `tortoise install pi` fails on EVERY run, and it MUTATES
+    # on each one. This predicate answered '' for that shape: exactly the
+    # silent-over-a-refusing-verb drift it exists to stop. MEASURED before the
+    # arm: hint '', real `ok=False` with the link already renamed aside.
+    #
+    # Gated on `not lexists(retired)`: once a retired name exists, the arms below
+    # already answer for it. The loadability test is the SAME computation the
+    # `--dry-run` makes post-mutation (`_disable_pi_second_producer`), so the two
+    # surfaces cannot drift: an INERT target (no manifest entry, no index) is
+    # still retired silently by the installer and must stay silent here.
+    if (not os.path.lexists(retired) and active.is_symlink()
+            and active.is_dir()):
+        _link_entries, _link_unreadable = _pi_manifest_entries(active)
+        if _link_unreadable:
+            # A guess is not a measurement (same rule the arms above keep).
+            return (f"the second capture producer at {PI_SECOND_PRODUCER_NAME} "
+                    f"is a symlink to a directory whose package.json cannot be "
+                    f"read — it may register through the link, and the "
+                    f"install refuses; move it out of the extensions "
+                    f"directory")
+        if ((_link_entries and any(os.path.exists(active / name)
+                                   for name in _link_entries))
+                or os.path.exists(active / "index.ts")
+                or os.path.exists(active / "index.js")):
+            return (f"the second capture producer at {PI_SECOND_PRODUCER_NAME} "
+                    f"is a SYMLINK to a directory Pi resolves through its "
+                    f"entry point — the install renames the link and then "
+                    f"still refuses on every run; move it out of the "
+                    f"extensions directory")
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN —
     # mirrored here (#14342 round 24, finding 2). The installer re-reads
     # `retired` on EVERY run and refuses when Pi still loads it (the
@@ -2058,7 +2091,8 @@ def _pi_entry_is_loadable(path: Path) -> bool:
         return True
 
 
-def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
+def _retire_pi_entry(path: Path, *, dry_run: bool = False,
+                     renamed: list[Path] | None = None) -> str | None:
     """Make ``path`` unloadable WITHOUT destroying it. Returns an error or None.
 
     Retires in place, by the loader's own rule, so the file bytes never leave
@@ -2076,6 +2110,14 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
     refusal condition below is evaluated by the same code that performs the
     retirement, so a preview cannot claim a plan the real run refuses, and
     cannot omit a step the real run performs (#14342 round 9, finding 3).
+
+    ``renamed`` is an OUT-PARAMETER naming every entry this run ACTUALLY MOVED
+    (#14695 review round 2, finding 2). The reorder below makes every REFUSAL
+    leave an untouched disk, but the renames themselves can still raise inside
+    the ``except OSError`` arm — whose own comment names "an immutable target",
+    a PER-FILE condition that can hit the second entry and not the first — so
+    the returned error alone cannot tell a caller whether the disk changed.
+    Only real renames append: ``dry_run`` moves nothing and appends nothing.
     """
     try:
         # ⛔ A SYMLINK IS RETIRED BY RENAMING THE LINK, NEVER BY EDITING THROUGH
@@ -2094,6 +2136,8 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                         f"overwrite preserved bytes")
             if not dry_run:
                 path.rename(produced)
+                if renamed is not None:
+                    renamed.append(path)
             return None
         if path.is_dir():
             entries, unreadable = _pi_manifest_entries(path)
@@ -2153,8 +2197,29 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                                 f"{entry} would overwrite preserved bytes")
                     entries_to_retire.append(entry)
             if not dry_run:
+                landed_here: list[Path] = []
                 for entry in entries_to_retire:
-                    entry.rename(path / f"{entry.name}.disabled")
+                    try:
+                        entry.rename(path / f"{entry.name}.disabled")
+                    except OSError as e:
+                        # ⛔ A HALF-LANDED DIRECTORY MUST NAME WHAT LANDED
+                        # (#14695 review round 2, finding 2). The reorder above
+                        # makes a REFUSAL leave an untouched disk; an OSError
+                        # on the SECOND rename is a different event, and it
+                        # left the first entry renamed while the caller
+                        # reported `actions=()`. MEASURED with `Path.rename`
+                        # failing on `index.js`: `index.ts.disabled` existed and
+                        # the receipt named only the seam.
+                        landed_names = (
+                            ", ".join(p.name for p in landed_here)
+                            or "nothing")
+                        return (f"{entry}: {e.__class__.__name__}: {e} — but "
+                                f"{landed_names} was ALREADY retired (files "
+                                f"preserved), so this directory is PARTLY "
+                                f"retired; move the rest aside by hand")
+                    landed_here.append(entry)
+                    if renamed is not None:
+                        renamed.append(entry)
             return None
         # ⛔ THE PLAIN-FILE BRANCH MUST REFUSE LIKE ITS SIBLINGS (#14342 round
         # 25, finding 1). The symlink branch above and the directory-entry
@@ -2174,6 +2239,8 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                     f"overwrite preserved bytes")
         if not dry_run:
             path.rename(produced)
+            if renamed is not None:
+                renamed.append(path)
         return None
     except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
         return f"{path}: {e.__class__.__name__}: {e}"
@@ -2617,9 +2684,17 @@ def _disable_pi_second_producer(
     # (renaming the directory to ``reflect-hook.ts.disabled`` retires nothing —
     # a suffixed directory is still resolved through its index file).
     was_directory = active.is_dir() and not active.is_symlink()
-    error = _retire_pi_entry(active)
+    landed: list[Path] = []
+    error = _retire_pi_entry(active, renamed=landed)
     if error:
-        return False, [], (
+        # ⛔ A RENAME THAT LANDED BEFORE THE FAILURE MUST REACH THE RECEIPT
+        # (#14695 review round 2, finding 2). ``InstallResult`` requires it: a
+        # user told only FAILED cannot find what moved.
+        landed_actions = [
+            f"retired {moved.name} inside {active} (files preserved) — "
+            f"but the second capture producer could not be fully retired"
+            for moved in landed]
+        return bool(landed), landed_actions, (
             f"the capture seam is installed, but the second capture producer "
             f"could not be disabled ({active}): {_sentence(error)} "
             f"{_duplication_consequence(
@@ -3045,7 +3120,9 @@ def _install_pi(
                 f"{legacy_disabled} (Pi still loads it)")
             changed = True
         else:
-            legacy_error = _retire_pi_entry(legacy_disabled)
+            legacy_renamed: list[Path] = []
+            legacy_error = _retire_pi_entry(legacy_disabled,
+                                            renamed=legacy_renamed)
             retired_landed = legacy_error is None
             if retired_landed:
                 legacy_error = _assert_pi_entry_not_loadable(legacy_disabled)
@@ -3054,12 +3131,22 @@ def _install_pi(
                 # assertion then fails — the disk changed, so a receipt with
                 # no action lines would hide it (#14342 review, final round
                 # finding 3).
+                # ⛔ AND A RENAME THAT LANDED BEFORE AN OSError IS THE SAME
+                # FACT (#14695 review round 2, finding 2): `retired_landed` is
+                # False there, but `legacy_renamed` is not empty.
                 if retired_landed:
                     actions.append(
                         f"retired the legacy extension's entry point inside "
                         f"{legacy_disabled} (files preserved) — but Pi STILL "
                         f"loads it")
                     changed = True
+                else:
+                    for moved in legacy_renamed:
+                        actions.append(
+                            f"retired {moved.name} inside {legacy_disabled} "
+                            f"(files preserved) — but the legacy extension "
+                            f"could not be fully retired")
+                        changed = True
                 # ⛔ AN UNVERIFIABLE REFUSAL MUST NOT REPORT A MEASUREMENT
                 # (#14342 round 16, finding 1). `legacy_error` here is one of
                 # two DIFFERENT things: `_retire_pi_entry`'s message (which can
