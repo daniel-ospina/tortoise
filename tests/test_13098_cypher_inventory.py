@@ -1387,8 +1387,12 @@ def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
     def _hangs(argv, *args, **kwargs):
         # ⛔ ONLY THE METADATA PROBE. `census.subprocess` IS the module, so patching its
         # `run` reaches EVERY subprocess in `main()` — including the tracked-path probe,
-        # which answers first and has no timeout arm of its own. Delegating everything
-        # but `rev-parse` keeps this arm about the one bound it pins.
+        # which answers first. Delegating everything but `rev-parse` keeps this arm about
+        # the one bound it pins. ⛔ The tracked probe HAS its own bound and its own
+        # `TimeoutExpired` arm now (a later commit added both, after this arm was
+        # written), and neither is graded here: this fake delegates that call, so it
+        # cannot see whether a `timeout=` was passed. That gap is what
+        # `test_EVERY_git_probe_carries_the_modules_own_timeout_bound` closes.
         if list(argv[:2]) == ["git", "rev-parse"]:
             # ⛔ NOT `probe.update(kwargs)`. `python3 tools/sdk_privatise.py --check` is a
             # RATCHET over untyped `.update(`/`.query(`/`.delete(` receivers and this
@@ -1457,6 +1461,68 @@ def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkey
     err = capsys.readouterr().err
     assert "could not" in err.lower(), (
         f"each refusal must read as 'could not run'; stderr:\n{err}")
+
+
+def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
+    """The `timeout=` on every `subprocess.run` is graded at the CALL SITE, not only by
+    the exception it raises.
+
+    ⛔ THE HOLE THIS CLOSES (#14625 review, P3, OPENED AT 07:34 AND NOT CLOSED): the
+    arms above prove that when `subprocess.run` RAISES `TimeoutExpired` the verbs answer
+    2 — but a fake that raises unconditionally cannot see whether a bound was ever
+    passed, so `timeout=` could be deleted from a call site with the whole file green.
+    MEASURED at this head before the arm existed: deleting `timeout=_GIT_PROBE_TIMEOUT_S`
+    from `surface_files`'s `git ls-files` → `137 passed, 15 skipped` GREEN; deleting it
+    from `_tracked_destination_refusal`'s probe → GREEN again. The artifact claimed the
+    opposite in both places, which is the finding: an arm that grades a CONSEQUENCE is
+    not an arm that grades the CAUSE, and `_GIT_PROBE_TIMEOUT_S` is the cause.
+
+    So this arm reads the module's own AST: every `subprocess.run` in
+    `tools/cypher_inventory.py` is a git probe (asserted, not assumed), and every one of
+    them must pass the module constant — not a literal, so re-cutting the bound stays a
+    one-line edit and cannot leave a site pinned to a stale number.
+
+    ⛔ THE POPULATION IS PINNED TOO, and it is pinned EXACTLY — the same convention as
+    `len(test_functions)`/`len(split_arms)` in this file. Deleting a probe site whole
+    would otherwise shrink the population this arm walks and stay green; a NEW
+    `subprocess.run` that is not a git probe (a future `git apply`, a formatter) reds,
+    and the remedy is to classify it here rather than to widen the loop silently.
+    """
+    source = Path(census.__file__).read_text(encoding="utf-8")
+    calls = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+    ]
+    assert len(calls) == 4, (
+        f"expected EXACTLY 4 `subprocess.run` probe sites in the census; got "
+        f"{len(calls)} at lines {[c.lineno for c in calls]} — a probe site was removed "
+        "(its bound and its refusal went with it) or added (classify it here: this arm "
+        "asserts every site is a git probe and carries the module's bound)")
+    for call in calls:
+        argv = call.args[0] if call.args else None
+        assert isinstance(argv, ast.List) and argv.elts, (
+            f"the probe at line {call.lineno} does not pass a literal argv list, so this "
+            "arm cannot tell what it runs")
+        first = argv.elts[0]
+        assert isinstance(first, ast.Constant) and first.value == "git", (
+            f"the `subprocess.run` at line {call.lineno} is not a git probe "
+            f"(argv[0]={ast.dump(first)}); classify it here rather than leaving it "
+            "outside the bound")
+        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
+        assert "timeout" in kwargs, (
+            f"the git probe at line {call.lineno} passes NO `timeout=` — a hung git "
+            "hangs every verb that reaches it (measured pre-fix: external `timeout 90` "
+            "-> 124), and the raise-only arms above cannot see this")
+        bound = kwargs["timeout"]
+        assert isinstance(bound, ast.Name) and bound.id == "_GIT_PROBE_TIMEOUT_S", (
+            f"the git probe at line {call.lineno} carries a bound that is not the "
+            f"module's own (`{ast.dump(bound)}`); a literal here goes stale the moment "
+            "`_GIT_PROBE_TIMEOUT_S` is re-cut, and `timeout=None` is no bound at all")
+    assert census._GIT_PROBE_TIMEOUT_S > 0, "the bound must be a positive number of seconds"
 
 
 def test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR(
@@ -4253,10 +4319,19 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # the metadata probe left the TRACKED-path probe and the census's own
         # `git ls-files` unbounded, so a hung git still hung `--render` (measured:
         # external `timeout 90` -> 124) and an uncaught `TimeoutExpired` would exit 1,
-        # the DRIFT code. Deleting `timeout=` from `surface_files` or from the tracked
-        # probe reds this arm, and so does dropping `TimeoutExpired` from either
-        # census handler.
+        # the DRIFT code. ⛔ THIS ARM GRADES THE REFUSAL PATH ONLY — dropping
+        # `TimeoutExpired` from either census handler reds it. It does NOT grade that a
+        # `timeout=` was PASSED: its fake raises unconditionally, so dropping the kwarg
+        # left it GREEN (measured at this head, twice) — which is why the arm below
+        # exists, and why the sentence that used to stand here ("Deleting `timeout=`
+        # from `surface_files` or from the tracked probe reds this arm") was FALSE and
+        # carried a later review round to a wrong CLEAN verdict.
         "test_a_git_that_never_answers_makes_could_not_run_not_drift",
+        # ⛔ AND THE CAUSE THE ARM ABOVE CANNOT SEE (#14625 review, P3, the finding two
+        # rounds left OPEN): every `subprocess.run` in the census must pass the module's
+        # own bound, read from the module's AST rather than from a consequence, because
+        # a fake that always raises is green whether or not a `timeout=` exists.
+        "test_EVERY_git_probe_carries_the_modules_own_timeout_bound",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -4352,9 +4427,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 49, (
-        f"expected EXACTLY 49 named split arms; got {len(split_arms)} — either a "
-        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 50, (
+        f"expected EXACTLY 50 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4363,8 +4437,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 49` reds a name PRUNED from the literal and `missing` reds a
-    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 50` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4396,9 +4469,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
     # arm that keeps a git-disowned checkout out of the permit, and the over-block
     # counterweight. All three carry a #13098 split invariant and are named above.
-    assert len(test_functions) == 108, (
-        f"expected EXACTLY 108 test functions in this module; got "
-        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE ARM THAT GRADES THE `timeout=` ITSELF TAKES IT 108 -> 109
+    # (`split_arms` 49 -> 50): the raise-only arms above are green with the kwarg
+    # deleted, so without this one the bound is not graded at any call site.
+    assert len(test_functions) == 109, (
+        f"expected EXACTLY 109 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 
