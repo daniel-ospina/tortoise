@@ -1039,6 +1039,15 @@ fly ssh console -a tortoise-y4mjjq -C \
 (#11225) — the message is kept **verbatim** from the pre-#12992 wording, so an old prose matcher
 still matches, but it is not what a client should read.
 
+**The SIBLING `409` on the same route is typed too** (#14700), in the same envelope: a duplicate
+capture already in flight for that `session_id` answers `{"detail": {"code":
+"capture_session_in_flight", "message": …, "retry_after": 30}}` with the `Retry-After: 30` header
+kept — it is a same-key **concurrent writer**, so waiting for the winner to finish and retrying is
+the correct client response. The route's OTHER `409` — `Session recording is disabled for this
+team/graph` — carries **no `code`** and no `retry_after`: it is an org policy that no retry clears.
+`detail.code` is what makes that branch decidable; before #14700 an operator could not tell the two
+apart from a log line (measured: `reflect-hook` retried the policy refusal 4× as if it were capacity).
+
 ⛔ **The MCP tool `tortoise_session_capture` is NOT that surface and does not carry `code` or
 `retry_after`.** It reports a capacity refusal as `status: 429` plus the `message` sentence: its
 `code` field is the NUMERIC JSON-RPC vocabulary (`ERR_QUOTA = -32006`), so there is no field that
