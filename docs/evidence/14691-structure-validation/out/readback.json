@@ -3,9 +3,9 @@
   "db_uri": "127.0.0.1:16413/xv14691_business_structure",
   "provenance": {
     "probe_path": "docs/evidence/14691-structure-validation/run_readback.py",
-    "probe_sha256": "93d3b6223a6fc3509e85f82f4d5e38f00082e0c794452962aa6ae8e8f8666211",
+    "probe_sha256": "832701733324e63b39489badf5074c814298ac511b40ad3485eba16a007eb930",
     "graph": "xv14691_business_structure",
-    "generated_at": "2026-11-26T05:41:03+00:00"
+    "generated_at": "2026-11-26T05:43:56+00:00"
   },
   "door_findings": [
     {
@@ -48,6 +48,7 @@
           "product-strategy:customer": 2,
           "product-strategy:customerSegment": 4,
           "dev:code": 7,
+          "dev:architectureDoc": 1,
           "agent-ops:rule": 1,
           "core:workflow": 2,
           "core:team": 3,
@@ -58,6 +59,24 @@
           "object:product",
           "subject:team"
         ]
+      }
+    },
+    {
+      "id": "D4",
+      "question": "does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones?",
+      "answer_over_mcp": "NO \u2014 it returns [] for a node that has edges, so a structurally-connected entity reads as isolated",
+      "evidence": {
+        "nodes_read_as_isolated_by_expand": {
+          "Amara Osei": 6,
+          "Platform team": 10,
+          "event-bus": 10
+        },
+        "same_nodes_seen_by_explore_connections": {
+          "Amara Osei": 6,
+          "Platform team": 10,
+          "event-bus": 10
+        },
+        "code_path": "tortoise/entity_reads.py:551-559 \u2014 the read covers IMPL|NAND|hasPart only"
       }
     }
   ],
@@ -195,7 +214,7 @@
           "db": {
             "ok": true,
             "observed": true,
-            "latency_ms": 2.9,
+            "latency_ms": 1.6,
             "error": null
           },
           "falkordb": "connected",
@@ -243,8 +262,8 @@
           "offload_refusals": {},
           "server_code": {
             "stale": false,
-            "process_started_at": "2026-11-26T05:41:04Z",
-            "baseline_at": "2026-11-26T05:41:04Z",
+            "process_started_at": "2026-11-26T05:43:57Z",
+            "baseline_at": "2026-11-26T05:43:57Z",
             "tracked": 96,
             "changed": [],
             "changed_count": 0,
@@ -252,9 +271,9 @@
             "unverified": 0,
             "hint": null
           },
-          "uptime": 1.01,
+          "uptime": 0.96,
           "setup_timeout_clamped": true,
-          "setup_timeout_clamped_s": 2.950882143981289,
+          "setup_timeout_clamped_s": 2.9973013699927833,
           "quota": {
             "resource": "points",
             "state": "not_applicable",
@@ -2274,6 +2293,18 @@
       },
       "ok": true,
       "reply": []
+    },
+    "dev:architectureDoc": {
+      "tool": "tortoise_search_knowledge",
+      "args": {
+        "kind": "dev:architectureDoc",
+        "entity_type": "object",
+        "limit": 100
+      },
+      "ok": true,
+      "reply": [
+        "[{\"id\":\"1a2165d1c1b-4db69de09aaa\",\"content\":\"the seven-component dependency graph\",\"point_kind\":\"dev:architectureDoc\",\"match_source\":\"structural\",\"relationships\":[],\"topics\":[],\"summary\":\"\",\"sessionId\":\"\",\"eventId\":\"\",\"sourcePath\":\"\",\"similarity\":1.0,\"snippet\":\"the seven-component dependency graph\",\"scores\":{\"fts\":null,\"vector\":null,\"structural\":1.0,\"rrf\":1.0},\"status\":\"live\"}]"
+      ]
     },
     "marketing:campaign": {
       "tool": "tortoise_search_knowledge",
@@ -14718,6 +14749,12 @@
       "layer": "object",
       "name": "ingest-gateway component"
     },
+    "the seven-component dependency graph": {
+      "id": "1a2165d1c1b-4db69de09aaa",
+      "kind": "dev:architectureDoc",
+      "layer": "object",
+      "name": "the seven-component dependency graph"
+    },
     "ownership accountability convention": {
       "id": "1a2165cde0d-f1e6cd9792e5",
       "kind": "agent-ops:rule",
@@ -17587,6 +17624,123 @@
       }
     }
   ],
+  "link_witness": {
+    "Lumen Core": {
+      "id": "1a2165c9fd5-bb074a074bd4",
+      "kind": "product-strategy:product",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165c9fd5-bb074a074bd4"
+        },
+        "ok": true,
+        "reply": {
+          "result": [
+            {
+              "predicate": "supports",
+              "mechanism": "IMPL",
+              "related_id": "1a2165ca01a-05d22d3877b0",
+              "related_kind": "product-strategy:customerSegment",
+              "related_content": "control-room customers",
+              "direction": "outgoing",
+              "operator_id": "",
+              "related_status": "live"
+            }
+          ]
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165c9fd5-bb074a074bd4"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165c9fd5-bb074a074bd4 not found"
+        }
+      },
+      "explore_neighbour_count": 19
+    },
+    "Amara Osei": {
+      "id": "1a2165cddc0-0f8b3f3ba2e1",
+      "kind": "core:naturalPerson",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165cddc0-0f8b3f3ba2e1"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165cddc0-0f8b3f3ba2e1"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165cddc0-0f8b3f3ba2e1 not found"
+        }
+      },
+      "explore_neighbour_count": 6
+    },
+    "Platform team": {
+      "id": "1a2165cdd92-a48d8cae4dca",
+      "kind": "core:team",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165cdd92-a48d8cae4dca"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165cdd92-a48d8cae4dca"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165cdd92-a48d8cae4dca not found"
+        }
+      },
+      "explore_neighbour_count": 10
+    },
+    "event-bus": {
+      "id": "1a2165d1bf1-f6c7fdcb1f99",
+      "kind": "dev:code",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165d1bf1-f6c7fdcb1f99"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165d1bf1-f6c7fdcb1f99"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165d1bf1-f6c7fdcb1f99 not found"
+        }
+      },
+      "explore_neighbour_count": 10
+    }
+  },
   "structure_check": {
     "tool": "tortoise_check_structure",
     "args": {},

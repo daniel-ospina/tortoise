@@ -164,9 +164,13 @@ _ROLE_KINDS = {
     "team": {"core:team"},
     "role": {"core:role"},
     "person": {"core:naturalPerson"},
+    # ⛔ NO shipped pack declares a `component` kind. The set below is the
+    # DECLARED architecture/source concepts a component can legitimately land in;
+    # the catch-all `core:other` is deliberately NOT accepted, because accepting
+    # it would let "everything else" count as the right type and hide the
+    # absence this note records.
     "component": {"dev:code", "dev:software", "dev:infrastructure", "dev:api",
-                  "dev:database", "product-strategy:architecture",
-                  "core:workflow", "core:other"},
+                  "dev:database", "product-strategy:architecture"},
 }
 
 
@@ -197,6 +201,36 @@ def connects(a_name: str, b_name: str) -> list[dict]:
         if fwd or rev:
             out.append({**e, "name_match": fwd or rev})
     return out
+
+
+def orientation_verdict(predicate: str, src: str, dst: str,
+                        role_target: str | None) -> str:
+    """Apply the predicate's DECLARED direction to one reported row.
+
+    `role_target` is the party the declaration says the arrow points AT:
+    the **owner** for `ownedBy`/`managedBy`, the **dependency** for `dependsOn`,
+    the **producer** for `produces`. Both readings of the table converge on one
+    test — `->` (§3.6: "`investment --ownedBy--> fund`" — the fund owns it) and
+    `<-` (§8: "the TARGET brought the source into existence" — `A --produces-->
+    B` says B produced A) both require the DST end to be that party. That is why
+    this is one rule and not a per-predicate branch: two branches here is how the
+    census and the writer came to disagree about the same row (#11548).
+
+    Returns ``correct`` / ``INVERTED`` / ``symmetric`` (`hasPart` `<->`) /
+    ``no-direction`` (`related` `-`) / ``unknown`` (the table did not load).
+    """
+    direction = DIRECTIONS.get(predicate)
+    if direction in ("<->",):
+        return "symmetric"
+    if direction in ("-", None) and predicate not in _DST_ROLE:
+        return "no-direction"
+    if role_target is None:
+        return "unknown"
+    if _same_name(dst, role_target) and not _same_name(src, role_target):
+        return "correct"
+    if _same_name(src, role_target) and not _same_name(dst, role_target):
+        return "INVERTED"
+    return "unknown"
 
 
 def _compact(edge: dict) -> dict:
@@ -250,6 +284,9 @@ def a1_type_coverage() -> dict:
         "declared": len(declared), "present": present, "right_kind": right,
         "per_type": per_type, "missing": missing, "mis_typed": mis_typed,
         "name_variants": name_variants,
+        "accepted_kinds": {role: sorted(kinds)
+                           for role, kinds in _ROLE_KINDS.items()},
+        "component_kind_declared": False,
         "passes": present == len(declared) and right == len(declared),
         "kind_population": {
             "object": {k: [r.get("content") or r.get("name")
@@ -272,14 +309,21 @@ def a2_edges() -> dict:
         found = connects(product, feature)
         # The DECLARED pair is `product → feature`; `hasPart` is `<->`, so the
         # check is which END is the parent, not which way the arrow token runs.
-        correct = [e for e in found
-                   if _norm(e["src"]) == _norm(product)
-                   and _norm(e["dst"]) == _norm(feature)]
+        # `hasPart` is `<->` (composition, both traversals equivalent), so the
+        # ASSERTION here is "the two ends are connected as a composition", not
+        # which end the arrow token starts at. `parent_is_src` is recorded as an
+        # OBSERVATION — it is what the declared pack pair spells — never as the
+        # pass condition, because requiring a direction of a symmetric predicate
+        # would fail a row the ontology considers correct.
+        parent_is_src = [
+            e for e in found
+            if _same_name(e["src"], product) and _same_name(e["dst"], feature)]
         containment.append({
             "product": product, "feature": feature,
             "present": bool(found),
             "predicates": sorted({e["predicate"] for e in found}),
-            "parent_is_src": bool(correct), "edges": [_compact(e) for e in found],
+            "parent_is_src": bool(parent_is_src),
+            "edges": [_compact(e) for e in found],
         })
 
     # (b) membership person→team / person→role
@@ -291,7 +335,7 @@ def a2_edges() -> dict:
                            "predicates": sorted({e["predicate"] for e in found}),
                            "edges": [_compact(e) for e in found]})
     roles = []
-    for role, person in zip(DECL["roles"], DECL["people"]):
+    for role, person in DECL.get("holdsRole") or []:
         found = connects(role, person)
         roles.append({"role": role, "person": person,
                       "present": bool(found),
@@ -314,16 +358,13 @@ def a2_edges() -> dict:
                  if e["predicate"] in ("ownedBy", "managedBy")]
         verdicts = []
         for e in found:
-            direction = DIRECTIONS.get(e["predicate"], "?")
-            src_is_owner = bool(_same_name(e["src"], owner))
-            if direction == "->" and _DST_ROLE.get(e["predicate"]) == "owner":
-                oriented = not src_is_owner  # dst must be the owner
-            else:  # pragma: no cover — only reached if the table moves
-                oriented = None
-            verdicts.append({"edge": _compact(e), "direction": direction,
-                             "src_is_owner": src_is_owner,
-                             "orientation": ("correct" if oriented
-                                             else "INVERTED")})
+            verdicts.append({
+                "edge": _compact(e),
+                "direction": DIRECTIONS.get(e["predicate"], "?"),
+                "src_is_owner": bool(_same_name(e["src"], owner)),
+                "orientation": orientation_verdict(e["predicate"], e["src"],
+                                                   e["dst"], owner),
+            })
         ownership.append({"thing": thing, "owner": owner,
                           "present": bool(found),
                           "n_edges": len(found),
@@ -338,10 +379,11 @@ def a2_edges() -> dict:
                  if e["predicate"] == "dependsOn"]
         verdicts = []
         for e in found:
-            correct = bool(_same_name(e["dst"], dependency_on))
-            verdicts.append({"edge": _compact(e),
-                             "orientation": ("correct" if correct
-                                             else "INVERTED")})
+            verdicts.append({
+                "edge": _compact(e),
+                "orientation": orientation_verdict(e["predicate"], e["src"],
+                                                   e["dst"], dependency_on),
+            })
         dependency.append({"dependent": dependent,
                            "dependency": dependency_on,
                            "present": bool(found), "n_edges": len(found),
@@ -358,13 +400,15 @@ def a2_edges() -> dict:
             direction = DIRECTIONS.get(pred, "?")
             row = {"edge": _compact(e), "direction": direction}
             if pred == "produces":
-                # `<-`: the TARGET brought the source into existence, so a
-                # correct row has the PRODUCED thing as src and the PRODUCER
-                # as dst. A team→component row therefore reads backwards.
-                src_is_producer = (e["src_kind"] in _ROLE_KINDS["team"]
-                                   | _ROLE_KINDS["person"])
-                row["src_is_producer"] = src_is_producer
-                row["orientation"] = ("INVERTED" if src_is_producer
+                # The declared shape puts the PRODUCED thing first and the
+                # PRODUCER at the dst end (§8: `<-`, "the TARGET brought the
+                # source into existence"). So a row whose SRC is an agent (a
+                # team or a person) reads backwards, whichever component sits
+                # at the other end. Checked on KIND, not on a name, because the
+                # producer is what the kind identifies.
+                agent_kinds = _ROLE_KINDS["team"] | _ROLE_KINDS["person"]
+                row["src_kind_is_an_agent"] = e["src_kind"] in agent_kinds
+                row["orientation"] = ("INVERTED" if row["src_kind_is_an_agent"]
                                       else "correct")
             other.append(row)
 
@@ -382,7 +426,7 @@ def a2_edges() -> dict:
         "ownership": ownership, "dependency": dependency, "other": other,
         "totals": {
             "containment_present": f"{contained}/{len(containment)}",
-            "containment_parent_is_product":
+            "containment_parent_spelled_product_first (observation)":
                 f"{sum(1 for c in containment if c['parent_is_src'])}/{len(containment)}",
             "membership_present": f"{mem}/{len(membership)}",
             "role_links_present": f"{role_links}/{len(roles)}",
@@ -393,9 +437,13 @@ def a2_edges() -> dict:
             "ownership_inverted": own_inv,
             "dependency_present_and_correct": f"{dep_ok}/{len(dependency)}",
         },
+        # PRESENCE is part of the assertion, not just the orientation: a graph
+        # with no ownership edges has no inverted ones either, and "0 inverted"
+        # must never be reached by that route.
         "passes": (contained == len(containment)
-                   and sum(1 for c in containment if c["parent_is_src"])
-                   == len(containment)
+                   and mem == len(membership)
+                   and role_links == len(roles)
+                   and sum(1 for o in ownership if o["present"]) == len(ownership)
                    and own_inv == 0
                    and dep_ok == len(dependency)),
     }
@@ -409,6 +457,17 @@ def a3_hierarchy() -> dict:
     children = {_norm(e["dst"]) for e in has_part}
     products = {_norm(p) for p in DECL["products"]}
     features = {_norm(f) for f in DECL["features"]}
+
+    def _all_match(got: set[str], want: set[str]) -> bool:
+        """Every declared name is matched by some reported name and vice versa.
+
+        Prefix-tolerant on BOTH sides, because the extractor welds a collective
+        noun onto a name (`ingest-gateway component`), and a set-equality check
+        on the raw strings would report the hierarchy as collapsed over a naming
+        variance rather than over a missing parent edge.
+        """
+        return (all(any(_same_name(g, w) for g in got) for w in want)
+                and all(any(_same_name(g, w) for w in want) for g in got))
     return {
         "declared": {"products": len(products), "features": len(features),
                      "edges": len(DECL["containment"])},
@@ -421,7 +480,8 @@ def a3_hierarchy() -> dict:
                      "children_that_are_features": sorted(children & features)},
         "flat_list": len(parents) == 0,
         "passes": (len(distinct) == len(DECL["containment"])
-                   and parents == products and children == features),
+                   and _all_match(parents, products)
+                   and _all_match(children, features)),
         "edges": [_compact(e) for e in has_part],
     }
 
@@ -514,6 +574,33 @@ def a4_invention() -> dict:
     # different question, answered separately so the two are never conflated:
     # 12 quoted spans state things the corpus never says, and that is a finding
     # about extraction quality (the T1–T5 axis), not about the structure tree.
+    # A relation is "stated by the text" when both endpoints are named in the
+    # SAME DOCUMENT. Document scope, not sentence scope, is the right unit here:
+    # a corpus legitimately connects two things across two adjacent sentences
+    # ("Both customers are in the mid-market utilities segment, and Jonas Bauer
+    # owns enterprise renewals for both"), and a sentence-scoped test reports
+    # those as inventions — which is a scoring artifact, not a finding. `strict`
+    # (sentence-scoped) is recorded alongside so the difference is visible.
+    doc_texts = [("\n".join(t["content"] for t in doc["turns"]))
+                 for doc in CORPUS["documents"]]
+    sents = [s for s in re.split(r"(?<=[.!?])\s+|\n", CORPUS_TEXT) if s.strip()]
+    invented_relations = []
+    strict_relations = []
+    for e in EDGES:
+        a, b = _squash(e["src"]), _squash(e["dst"])
+        stated = any(a in _squash(d) and b in _squash(d) for d in doc_texts)
+        if not any(a in _squash(s) and b in _squash(s) for s in sents):
+            strict_relations.append(_compact(e))
+        # A welded name (`ingest-gateway component`) is a NAME variance, not a
+        # missing fact: retry with the shorter of the two forms.
+        if not stated:
+            short_a = _squash(str(e["src"]).split(" ")[0])
+            short_b = _squash(str(e["dst"]).split(" ")[0])
+            stated = any(short_a and short_b and short_a in _squash(d)
+                         and short_b in _squash(d) for d in doc_texts)
+        if not stated:
+            invented_relations.append(_compact(e))
+
     declared_names = set(DECL["products"]) | set(DECL["features"]) \
         | set(DECL["teams"]) | set(DECL["roles"]) | set(DECL["people"]) \
         | set(DECL["components"]) | set(DECL["customers"]) \
@@ -523,7 +610,8 @@ def a4_invention() -> dict:
     return {"untraceable_entities": untraceable,
             "declared_structure_untraceable": structural_misses,
             "entity_names_checked": sum(len(v) for v in structural.values()),
-            "invented_relations": [],
+            "relations_not_co_stated": invented_relations,
+            "relations_not_co_stated_at_SENTENCE_scope": len(strict_relations),
             "quotes": quotes, "warnings": warn,
             "relations_not_written": not_written,
             "passes": not structural_misses}
@@ -561,9 +649,15 @@ def a5_retrieval() -> dict:
             "walk_root": str((root or {}).get("name")
                              or (root or {}).get("content")
                              or (root or {}).get("id") or "")[:120],
-            "walk_root_is_entity": bool(
-                (root or {}).get("objectKind") or (root or {}).get("subjectKind")
-                or str((root or {}).get("id") or "").startswith("1a2165")),
+            # A root counts as an ENTITY only when a KIND says so. Nothing here
+            # may infer it from an id shape: a prefix literal is not a receipt
+            # value, and on a graph whose ids differ it would silently answer.
+            "walk_root_kind": ((root or {}).get("objectKind")
+                               or (root or {}).get("subjectKind")
+                               or (root or {}).get("kind") or ""),
+            "walk_root_is_entity": bool((root or {}).get("objectKind")
+                                        or (root or {}).get("subjectKind")
+                                        or (root or {}).get("kind")),
             "walk_neighbour_count": len(walk_names),
             "top8": [t[:120] for t in top_search],
         })
@@ -582,6 +676,53 @@ def a5_retrieval() -> dict:
         "verdict": ("PASS" if answered == len(probes) and walks_on_entity == len(probes)
                     else "PARTIAL" if answered == len(probes) else "FAIL"),
     }
+
+
+def _door_findings() -> list[dict]:
+    """The door findings, from the readback's own witness rows.
+
+    D4/D5 are derived HERE from `link_witness` rather than asserted: the witness
+    block carries, per node, what each door answered, so a reader can re-derive
+    the verdict without trusting this function's prose.
+    """
+    found = list(READBACK.get("door_findings") or [])
+    witness = READBACK.get("link_witness") or {}
+    if not any(f.get("id") == "D4" and witness for f in found):
+        silent = {name: {"expand_rows": 0,
+                         "explore_neighbours": w.get("explore_neighbour_count")}
+                  for name, w in witness.items()
+                  if not rows((w.get("expand_relationships") or {})
+                              .get("reply"))
+                  and (w.get("explore_neighbour_count") or 0) > 0}
+        if silent:
+            found.append({
+                "id": "D4",
+                "question": "does `expand_relationships` report the STRUCTURAL "
+                            "edges of an entity the way it reports the epistemic "
+                            "ones?",
+                "answer_over_mcp": "NO — it returns [] for a node that has edges, "
+                                   "so a structurally-connected entity reads as "
+                                   "isolated",
+                "evidence": silent,
+            })
+    not_found = {}
+    for name, w in witness.items():
+        reply = (w.get("graph_overview_topics") or {}).get("reply")
+        text = json.dumps(reply, default=str)
+        if "not found" in text:
+            not_found[name] = w.get("id")
+    if not_found:
+        found.append({
+            "id": "D5",
+            "question": "does `graph_overview(section='topics', entity_id=…)` "
+                        "resolve an entity that `get_entity` and "
+                        "`explore_connections` both resolve?",
+            "answer_over_mcp": "NO — it answers 'Entity … not found' for every "
+                               "node asked about, including nodes those two doors "
+                               "return",
+            "evidence": {"reported_not_found": not_found},
+        })
+    return found
 
 
 def _claim_layer() -> dict:
@@ -639,7 +780,7 @@ def main() -> int:
         "A4_no_invention": a4_invention(),
         "claim_layer": _claim_layer(),
         "A5_retrieval": a5_retrieval(),
-        "door_findings": READBACK.get("door_findings") or [],
+        "door_findings": _door_findings(),
         "extraction_tokens": _tokens(),
         "edge_count": len(EDGES),
         "edges_by_predicate": {},
