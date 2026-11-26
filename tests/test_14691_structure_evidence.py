@@ -496,7 +496,14 @@ def test_report_headline_numbers_are_the_artifacts_numbers():
     assert "0/7" in produces and "INVERTED" in produces, produces
     depends = _report_line(r"^\| dependent → dependency \(`dependsOn`\)")
     assert depends, "REPORT.md has no dependsOn row"
-    assert "7/7" in depends, depends
+    # ⛔ BOTH CELLS (#14691, 4th fresh-context review, NEW-1e). The row states the
+    # number TWICE — present, and correctly oriented — and `"7/7" in row` read only
+    # one: `| **7/7** | **9/9** |` was measured GREEN, so the orientation half of
+    # the one predicate A2 passes could be rewritten freely.
+    dep_total = score["A2_edges"]["totals"]["dependency_present_and_correct"]
+    assert depends.count(f"**{dep_total}**") == 2, (
+        f"REPORT.md's dependsOn row no longer states {dep_total!r} in BOTH cells: "
+        f"{depends!r}")
 
     # (b2) the A2 TALLY paragraph — the run's own arithmetic, pinned against the
     # receipt that emits it (#14691 review, 3rd cycle, F2). The paragraph once said

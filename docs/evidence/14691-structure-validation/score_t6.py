@@ -942,24 +942,31 @@ def _door_findings() -> list[dict]:
     # is a re-derivation, not a new claim. (The readback receipt cannot be
     # regenerated: REPORT §8 records that decision, and its sha is the artifact's
     # provenance binding.)
+    # ⛔ A MISSING EVIDENCE SHAPE IS NOT "THE FINDING STANDS" (#14691, 4th
+    # fresh-context review, NEW-2). The first cut guarded the whole re-derivation
+    # with `if isinstance(unresolved, list) and walked:`, so a readback WITHOUT
+    # either field silently kept the producer's prose with no evidence behind it —
+    # the fail-open this block exists to close, one shape-change away. A finding
+    # needs its rows; without them it is WITHDRAWN, exactly as D3 is when its
+    # probes did not answer. (`enumerate`/`next` are computed once so the delete
+    # cannot shift the index it is working on.)
     unresolved = READBACK.get("unresolved_elements")
     walked = READBACK.get("elements") or []
-    if isinstance(unresolved, list) and walked:
-        idx = next((i for i, f in enumerate(found) if f.get("id") == "D2"), None)
-        if idx is not None:
-            if unresolved:
-                found[idx] = {
-                    "id": "D2",
-                    "question": found[idx].get("question"),
-                    "answer_over_mcp": (f"NO for {len(unresolved)} of {len(walked)}"),
-                    "evidence": {"unresolved_elements": list(unresolved),
-                                 "walked": len(walked),
-                                 "elements": [e.get("name") for e in walked]},
-                }
-            else:
-                # nothing unresolved is not the same finding: withdraw it rather
-                # than report a claim its own evidence denies
-                del found[idx]
+    idx = next((i for i, f in enumerate(found) if f.get("id") == "D2"), None)
+    if idx is not None:
+        if isinstance(unresolved, list) and walked and unresolved:
+            found[idx] = {
+                "id": "D2",
+                "question": found[idx].get("question"),
+                "answer_over_mcp": (f"NO for {len(unresolved)} of {len(walked)}"),
+                "evidence": {"unresolved_elements": list(unresolved),
+                             "walked": len(walked),
+                             "elements": [e.get("name") for e in walked]},
+            }
+        else:
+            # either nothing is unresolved (the artifact denies its own claim) or
+            # the rows that would support it are absent (nothing measured it)
+            del found[idx]
 
     if not any(f.get("id") == "D4" and witness for f in found):
         # ⛔ AN ERROR IS NOT SILENCE (#14691 review, 5th cycle, N1). An
