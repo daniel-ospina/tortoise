@@ -1046,7 +1046,7 @@ kept — it is a same-key **concurrent writer**, so waiting for the winner to fi
 the correct client response. The route's OTHER `409` — `Session recording is disabled for this
 team/graph` — carries **no `code`** and no `retry_after`: it is an org policy that no retry clears.
 `detail.code` is what makes that branch decidable; before #14700 **neither `409` carried a code**, so
-no log line said which one it was — the client's `30s` is its own backoff, not the server's.
+the log line (`HTTP 409 retry_after=30s`) named no class — only the header's presence did, implicitly.
 
 ⛔ **The MCP tool `tortoise_session_capture` is NOT that surface and does not carry `code` or
 `retry_after`.** It reports a capacity refusal as `status: 429` plus the `message` sentence: its

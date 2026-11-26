@@ -473,12 +473,12 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
 # #14700: NEITHER of this route's two `409`s carried a `code` — this one, and its
 # SIBLING "Session recording is disabled for this team/graph", an org policy no
-# amount of waiting clears — so no log line said which fault it was. Measured cost
-# (2026-11-25): `reflect-hook` logged `HTTP 409 retry_after=30s`, which names no
-# class — the client re-arms on its own `30 s x 2^(n-1)` backoff and reads no
-# `Retry-After` (the #12992 note below), so WHICH `409` it was is NOT determined.
-# The `code` is the branch key; the message stays byte-identical so a legacy
-# reader that matches prose keeps matching (#12992's rule for the 429).
+# amount of waiting clears — so only the `Retry-After` HEADER told them apart
+# (this sends `30`, the policy one none), and a log reader must KNOW that fact:
+# `reflect-hook` (`retryAfterS = headerRetry ?? bodyRetry`, no default) DOES
+# parse it, so `HTTP 409 retry_after=30s` names the raise site only to someone
+# holding that fact — nothing in the body could. The `code` is the branch key;
+# the message stays byte-identical so a legacy prose matcher keeps matching.
 _CAPTURE_SESSION_IN_FLIGHT_CODE = "capture_session_in_flight"
 _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S = 30
 
