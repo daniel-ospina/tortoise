@@ -327,7 +327,14 @@ test('#14686: the `flagged` badge points at the surface that exists', () => {
   // other assertion here green while re-shipping the claim. Scoped to `title=`
   // ATTRIBUTES, not the whole file: the badge's own comment explains the history
   // in those words, and a comment cannot render.
-  assert.doesNotMatch(main, /title="[^"]*Suspicious activity detected/i,
+  //
+  // The JSX-expression brace is stripped first so the pin sees `title="…"` and
+  // `title={"…"}` as the SAME shape. Without it the plain-attribute regex misses
+  // the braced spelling, and a regression written that way passes this whole
+  // file — the ordinary limit of a source-text pin, closed here for the one
+  // spelling a maintainer would actually reach for (round-review residual).
+  const titled = main.replace(/title=\{\s*/g, 'title=')
+  assert.doesNotMatch(titled, /title=["'`][^"'`]*Suspicious activity detected/i,
     'the badge must not accuse — a `flag` row is a measurement, and nothing '
     + 'punitive has ever followed one (#14687)')
   assert.match(main, /title="Unusual activity measured — see notifications"/,

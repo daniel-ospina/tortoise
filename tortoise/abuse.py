@@ -1659,7 +1659,7 @@ def _customer_details(details: dict) -> dict:
         if key in details and details[key] is not None:
             out[key] = details[key]
     # ⛔ #14694: DERIVE the surface from the rule when the row predates the
-    # plumbing that writes it. `_point_rate_message` below already derives the
+    # plumbing that writes it. `_point_rate_message` above already derives the
     # same name for the MESSAGE through the same fixed map, so an old row reads
     # as precisely as a new one — but the payload was left without it, and the
     # dashboard keys a Dismiss/Snooze decision on `details.surface`. On an old
@@ -1671,6 +1671,15 @@ def _customer_details(details: dict) -> dict:
     # pins the message half), so this is the dominant case, not an edge one.
     # `details.get("rule")` is read here and never emitted: the whitelist above
     # still guarantees the raw token reaches no field.
+    #
+    # The `if not out.get("surface")` guard is the whole contract: this is a
+    # FALLBACK for a row that carries no name, never an override of one it does
+    # carry. Overriding would change `details.surface` and therefore the
+    # dashboard's decision key — the same evaporation this derivation exists to
+    # prevent, just for a different population. Pinned by
+    # `test_a_recorded_surface_wins_over_the_derived_one`: today's only writer
+    # records what the map derives, so an unconditional override is invisible
+    # unless a row whose recorded name DIFFERS is asserted.
     if not out.get("surface"):
         derived = _RULE_SURFACE.get(details.get("rule"), "")
         if derived:
