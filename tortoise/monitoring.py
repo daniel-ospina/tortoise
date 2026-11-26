@@ -734,17 +734,21 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #   ``write_failed``          the record was UNREACHABLE, or the connection or
 #                             its statement failed — not a refusal of this one
 #                             record's CONTENT. A replay heals it;
-#   ``projection_refused``    the store ANSWERED and the PROJECTION refused this
-#                             record BEFORE writing it — an undeclared/refused
-#                             record type, a carrier that carries no snapshot, a
-#                             statement the projector refuses to build, or a
-#                             caller watermark it refuses). ⛔ Unlike
-#                             ``write_failed`` this is not a store fact, so a
-#                             REPLAY re-refuses until the CAUSE is fixed: the
-#                             producer or the schema. Split out because the two
-#                             used to share ``write_failed`` and 182
-#                             shape-refusals therefore read exactly like a
-#                             transport outage while every database probe was
+#   ``plan_refused``          the PROJECTOR could not BUILD a plan for this
+#                             record, so NO statement ran — an undeclared/refused
+#                             record type, a carrier that carries no snapshot, an
+#                             unusable key or endpoint, or a caller watermark it
+#                             refuses. ⛔ Unlike ``write_failed`` this is not a
+#                             store fact, so a REPLAY re-refuses until the CAUSE
+#                             is fixed: the producer or the record shape. ⛔ And
+#                             NOT every ``RecordProjectionError``: a statement
+#                             that EXECUTED and failed stays ``write_failed``, as
+#                             does a refusal raised after the plan was built (the
+#                             tenant-GUC read-back, a role bypassing RLS, the
+#                             cutover guard, a schema not on disk). Split out
+#                             because the two used to share ``write_failed`` and
+#                             182 plan-build refusals therefore read exactly like
+#                             a transport outage while every database probe was
 #                             healthy (#11783);
 #   ``journal_collision``     the position row cannot be indexed by this write —
 #                             a different record type, a different capture time,
@@ -2735,7 +2739,7 @@ def record_record_write_failure(reason: str) -> None:
     restated here because THIS function is the definition site an operator
     reads. EIGHT distinct values: SIX emitted by ``tortoise/record_writer.py::
     write_live_record`` (``malformed_dsn``, ``no_tenant``, ``write_failed``,
-    ``projection_refused``, ``circuit_open``, ``journal_collision``) plus THREE
+    ``plan_refused``, ``circuit_open``, ``journal_collision``) plus THREE
     SDK-only values — ``malformed_dsn`` is shared, which is why the counts
     overlap (6 + 3 − 1 = 8). The split is named because each value names a
     different
@@ -2769,14 +2773,19 @@ def record_record_write_failure(reason: str) -> None:
       neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was UNREACHABLE, or its statement failed;
       ``replay`` heals it from the journal;
-    * ``projection_refused`` — the store ANSWERED and the PROJECTION refused
-      this record before writing it (an undeclared/refused record type, a
-      carrier with no snapshot, a caller watermark the projector refuses; ⛔ a
-      STATEMENT that failed to EXECUTE stays on ``write_failed``, because the
-      store was reached and asked). ⛔ NOT the same remedy as
-      ``write_failed``: a replay re-refuses until the CAUSE is fixed (the
-      producer or the schema), and it is the token a value shape lands on
-      (#11783). Split out of ``write_failed`` because 182 shape-refusals read
+    * ``plan_refused`` — the PROJECTOR could not BUILD a plan for this record,
+      so NO statement ran even though the connection was up: an undeclared or
+      declared-refused record type, a carrier with no snapshot, an unusable key
+      or endpoint, a caller watermark it refuses — and the token a value shape
+      lands on when the shape cannot be projected at all (#11783). ⛔ NOT the
+      same remedy as ``write_failed``: a replay re-refuses until the CAUSE is
+      fixed (the producer or the record shape). ⛔ AND NOT A STORE FACT: a
+      STATEMENT that executed and failed (a CHECK constraint, a driver error, a
+      dropped connection) stays on ``write_failed``, and so does every refusal
+      raised AFTER the plan was built (the tenant-GUC read-back, a role that
+      bypasses RLS, the cutover guard's failed ``SELECT``, a schema that is not
+      on disk) — which is why the classification is the phase, not the exception
+      class. Split out of ``write_failed`` because 182 plan-build refusals read
       exactly like a transport outage while every database probe was healthy;
     * ``journal_collision`` — the record WAS reached and refused to file this
       record under a journal position it cannot index (#9318): a different

@@ -527,14 +527,18 @@ class RecordWrite:
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
     #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``,
-    #: ``projection_refused``, ``journal_collision``), else ``None``.
+    #: ``plan_refused``, ``journal_collision``), else ``None``.
     #: The SAME vocabulary as the counters on purpose (#8447): a caller that
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
     #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
-    #: Every other value is decided before a socket is opened
-    #: (`_live_write_verdict`) or by a failed statement; this one is a VERDICT on
+    #: Every other value is one of three earlier shapes: decided before a socket
+    #: is opened (`_live_write_verdict` — `malformed_dsn`, `no_tenant*`,
+    #: `circuit_open`, `no_durable_journal`), decided by the projection BEFORE a
+    #: statement ran and after the connection was up (`plan_refused`, #11783), or
+    #: decided by a statement that executed and failed (`write_failed`). This one
+    #: is none of those: it is a VERDICT on
     #: a conflict: the position row holds a record this write cannot index —
     #: a different `event_type`, a different capture time, an identity the
     #: surviving row CONTRADICTS, or (with no `ts` for the capture time to be
@@ -567,12 +571,13 @@ class RecordWrite:
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
     #: So the closed list above is the refusal vocabulary, and the counter is a
-    #: DIFFERENT set: it folds `no_tenant_carried` onto `no_tenant`, it counts
-    #: `no_durable_journal` on the skip counter, and it separately carries the
-    #: SDK-only `no_journal`/`seam_unimportable` plus `projection_refused` — one
-    #: label MORE than this list since #11783 split the projection half out of
-    #: `write_failed` (that token is the attempt's own arm here and a counter
-    #: label there, so the two sets overlap without being derivable); deriving
+    #: DIFFERENT set OF THE SAME SIZE — eight labels, not the same eight: it folds
+    #: `no_tenant_carried` onto `no_tenant`, it counts `no_durable_journal` on the
+    #: skip counter, and it separately carries the SDK-only
+    #: `no_journal`/`seam_unimportable`, while `no_tenant_carried` and
+    #: `no_durable_journal` are refusal words the counter never receives
+    #: (`plan_refused` is the one label BOTH sets gained with #11783, replacing
+    #: the `write_failed` half it split out of); deriving
     #: one set from the other is wrong in BOTH directions. Listing only the
     #: counter words here is what made a consumer's closed list miss a value the
     #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
@@ -588,11 +593,11 @@ class RecordWrite:
         supported state); a ``REFUSED`` call was armed and did not write, and
         :attr:`refusal` says WHY, but the EIGHT refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``no_tenant_carried`` /
-        ``circuit_open`` / ``write_failed`` / ``projection_refused`` /
+        ``circuit_open`` / ``write_failed`` / ``plan_refused`` /
         ``journal_collision`` are FAILURES, all SEVEN counted on
         ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
         and the malformed CARRIED pair, which is why the token list is one longer
-        than the counter set, and ``projection_refused`` (``#11783``) counts under
+        than the counter set, and ``plan_refused`` (``#11783``) counts under
         its own label there), while ``no_durable_journal`` is a
         healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
         has no journal by design, so nothing a replay could restore is missing
@@ -619,9 +624,10 @@ class RecordWrite:
             # ARMED and nothing written. Only `circuit_open` is LITERALLY
             # "configured, not reached" ⇒ `degraded`. The other seven are near
             # misses, and NOTHING here has its own term: `write_failed` covers an
-            # unreachable record OR a failed statement; `projection_refused`
-            # (#11783) is a record the store WAS reached for and refused before
-            # writing it (a producer/schema shape, not an outage);
+            # unreachable record OR a failed statement; `plan_refused`
+            # (#11783) is a record the projector could not BUILD a plan for at
+            # all — no statement ran, so the cause is the record's shape or its
+            # producer, never the store;
             # `journal_collision` (#9318) is a record that WAS reached
             # and refused to file itself under a journal position it cannot index
             # (a different `event_type`, a different capture time, an identity the
@@ -3228,37 +3234,50 @@ def _journal_collision_cause(
     return None
 
 
-def _projection_refusal_cause(
+def _plan_refusal_cause(
         exc: BaseException | None,
         depth: int = 4,
 ) -> record_projection.RecordProjectionError | None:
-    """The PROJECTION refusal buried in a wrapped failure, or ``None`` (#11783).
+    """The PLAN-BUILD refusal buried in a wrapped failure, or ``None`` (#11783).
 
     `RecordWriter.write` wraps every projection failure in `RecordWriteError`
     (``from exc``), so this door cannot tell *the record did not answer* from
-    *the record answered and REFUSED this record* by the exception it holds —
-    and it counted both on the same ``write_failed`` label. That is why the
-    production signal for a refused-by-shape write was indistinguishable from a
-    transport outage: 182 of them accumulated on the hosted app while every
-    database probe read healthy (2.5–3.6 ms), and the only thing that could
-    have said which was the log line nobody had a reason to read.
+    *the projector could not build a plan for this record* by the exception it
+    holds — and it counted both on the same ``write_failed`` label. That is why
+    the production signal for a refused-by-shape write was indistinguishable
+    from a transport outage: 182 of them accumulated on the hosted app while
+    every database probe read healthy (2.5–3.6 ms), and the only thing that
+    could have said which was the log line nobody had a reason to read.
 
     A SEPARATE TOKEN, the way ``journal_collision`` is separate (#9318): the
     counter answers *what kind of failure is this* and an operator's next move
-    differs completely — a projection refusal means a RECORD the projector
-    cannot represent (fix the producer or the record shape; a replay of the
+    differs completely — ``plan_refused`` means the RECORD could not be turned
+    into a plan at all (fix the producer or the record shape; a replay of the
     same record re-refuses), while ``write_failed`` means the store could not
     be reached or a STATEMENT failed while executing.
 
-    ⛔ ``RecordStatementError`` IS DELIBERATELY EXCLUDED, and that exclusion is
-    the whole classification: it means one PLAN statement failed to EXECUTE —
-    the store was reached and the write was attempted — which is a STORE
-    failure however it is caused (a constraint the record's own data violates,
-    a driver error, a connection dropped mid-transaction). What this token
-    names is the strictly earlier fact: the plan could not be BUILT, so NO
-    statement ran (an undeclared/refused record type, a carrier that carries no
-    snapshot, a caller watermark the projector refuses). That keeps
-    ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
+    ⛔ THE CLASSIFICATION IS THE PHASE, NOT THE CLASS — and this docstring is the
+    one that had to be corrected, so read the reason rather than the shape. The
+    first version of this function tested
+    ``isinstance(cause, RecordProjectionError)`` minus two subclasses, and that
+    test FOLDED STORE AND CONFIG REFUSALS INTO THE PRODUCER'S BUCKET, because
+    the base class is overloaded: the tenant-GUC read-back, a role that bypasses
+    RLS, the cutover guard's own failed `SELECT`, and a record schema that is
+    not on disk are all plain ``RecordProjectionError`` raised AFTER statements
+    ran — a measured fake-connection run returned ``plan_refused`` for
+    "the record's scope could not be verified — the read-back returned no row",
+    i.e. the operator was told to check the producer about a broken role. So the
+    marker is :data:`record_projection.PLAN_BUILD_PHASE_ATTR`, stamped by
+    :func:`record_projection.replay` at the ONE call that builds the plan; the
+    statement-execution and store/config refusals are raised on the far side of
+    that call and are never stamped.
+
+    ⛔ ``RecordStatementError`` IS EXCLUDED on top of that, and the exclusion is
+    not redundant: it means one PLAN statement failed to EXECUTE — the store was
+    reached and the write was attempted — which is a STORE failure however it is
+    caused (a constraint the record's own data violates, a driver error, a
+    connection dropped mid-transaction). Keeping it on ``write_failed`` is what
+    keeps ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
     reason_is_still_write_failed`` true rather than re-labelling an execution
     failure.
 
@@ -3270,7 +3289,8 @@ def _projection_refusal_cause(
     """
     seen: set[int] = set()
     while exc is not None and depth > 0 and id(exc) not in seen:
-        if (isinstance(exc, record_projection.RecordProjectionError)
+        if (getattr(exc, record_projection.PLAN_BUILD_PHASE_ATTR, False)
+                and isinstance(exc, record_projection.RecordProjectionError)
                 and not isinstance(
                     exc, (record_projection.JournalPositionCollision,
                           record_projection.RecordStatementError))):
@@ -3936,32 +3956,33 @@ def write_live_record(record: Mapping[str, Any], *,
             # cost of the rest of the capture. A totality or statement failure
             # deliberately does NOT trip it — the connection was fine.
             _trip_live_breaker()
-        projection_cause = _projection_refusal_cause(exc)
+        projection_cause = _plan_refusal_cause(exc)
         if projection_cause is not None:
-            # ⛔ THE RECORD WAS REACHED AND REFUSED THIS RECORD (#11783) — not
+            # ⛔ THE PROJECTOR COULD NOT BUILD A PLAN (#11783) — not
             # the same fact as `write_failed`, and counted apart since. Measured
             # on the hosted app (2026-11-26): 182 refusals read as `write_failed`
             # while every database probe was healthy, because a value SHAPE was
-            # taking whole records out of the store — a projection refusal is a
-            # producer/schema fact an operator fixes at its source, while
+            # taking whole records out of the store — the plan build is a
+            # producer/record-shape fact an operator fixes at its source, while
             # `write_failed` is a store fact. Same counter, own label, own
             # remedy; the specific column/statement attribution rides the
-            # exception text below (`RecordStatementError`'s), never this token.
-            _count_write_failure("projection_refused")
+            # exception text below, never this token.
+            _count_write_failure("plan_refused")
             _logger.warning(
-                "the record write did not happen (projection_refused) — the "
-                "journal holds the record; the PROJECTION refused it and NO "
-                "statement ran (a record type it does not declare, a carrier "
-                "with no snapshot, a caller watermark it refuses). ⛔ This is "
-                "NOT `write_failed`: the store was never asked to apply it, so "
-                "there is no outage and no statement fault to look for — check "
+                "the record write did not happen (plan_refused) — the "
+                "journal holds the record; the PROJECTION could not BUILD a plan "
+                "for it, so NO statement ran (a record type it does not declare, "
+                "a carrier with no snapshot, an unusable key or endpoint, a "
+                "caller watermark it refuses). ⛔ This is "
+                "NOT `write_failed`: no statement was executed, so "
+                "there is no statement fault to look for — check "
                 "the cause, which is a producer or a record-shape fact. A "
                 "replay of the same record re-refuses until the cause is fixed: "
                 "record=%s %s: %s",
                 record.get("type"), _record_identity(record),
                 projection_cause,
             )
-            return _refused("projection_refused", seq)
+            return _refused("plan_refused", seq)
         _count_write_failure("write_failed")
         # ⛔ THE REMEDY MUST MATCH THE ARM (#12894 review). On the ALLOCATED arm
         # (`TORTOISE_RECORD_ALLOCATE=1`, which this change makes reachable in

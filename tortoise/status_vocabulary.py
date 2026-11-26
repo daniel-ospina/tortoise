@@ -77,11 +77,17 @@ its ``refusal`` token is one of eight. NONE of the eight is exactly a term here:
   the store is configured and was not reached, which is ``degraded`` exactly;
 * ``write_failed`` is the record being UNREACHABLE, or a connection/statement
   failing — ``degraded`` literally;
-* ``projection_refused`` (#11783) is the record being REACHED and refusing this
-  record BEFORE writing it (an undeclared/refused record type, a carrier with no
-  snapshot, a caller watermark): an impairment of the producer/schema, not an
-  outage — and, unlike the pre-#11783 shape that folded it into
-  ``write_failed``, it names its own remedy (fix the cause; a replay re-refuses);
+* ``plan_refused`` (#11783) is the PROJECTOR being unable to build a plan for
+  this record at all — so NO statement ran, even though the connection was up:
+  an undeclared/refused record type, a carrier with no snapshot, an unusable
+  key/endpoint, a caller watermark it refuses. An impairment of the
+  producer/schema, not an outage — and, unlike the pre-#11783 shape that folded
+  it into ``write_failed``, it names its own remedy (fix the cause; a replay
+  re-refuses). ⛔ It is NOT "the store refused this record": a statement that
+  executed and failed (a CHECK constraint, a driver error, a dropped
+  connection) is ``write_failed``, and so is a refusal raised after the plan
+  was built (the tenant-GUC read-back, a role that bypasses RLS, the cutover
+  guard, a schema that is not on disk) — those are store/config facts;
 * ``malformed_dsn`` is a SET-UP defect, refused before any reach is attempted:
   closer to a policy/set-up gap than to an outage, but ``unconfigured`` is
   defined as *no value is configured*, and here a value IS set and is wrong;
@@ -112,7 +118,7 @@ its ``refusal`` token is one of eight. NONE of the eight is exactly a term here:
 ⛔ THE COUNT AND THIS LIST ARE INDEXED, NOT AUTHORITATIVE. The vocabulary is
 declared in ``record_writer`` — ``LIVE_WRITE_REFUSALS`` for the tokens the seam
 returns before any socket, plus the POST-WRITE tokens ``write_failed``,
-``projection_refused`` (#11783) and ``journal_collision`` (#9318), and
+``plan_refused`` (#11783) and ``journal_collision`` (#9318), and
 ``RecordWrite.refusal``'s own docstring for the closed set a consumer branches
 on. This list said *five* while the door returned six (#10021 review P3): the
 new ``no_tenant_carried`` token was added at the producer and the module that

@@ -8790,13 +8790,16 @@ def _record_health() -> dict:
     #
     #   ``write_failed``      the record was UNREACHABLE, or the connection or
     #                         its statement failed — a REPLAY heals it.
-    #   ``projection_refused`` the store ANSWERED and refused this record before
-    #                         writing it (an undeclared/refused record type, a
-    #                         carrier with no snapshot, a caller watermark) — a
+    #   ``plan_refused``      the PROJECTOR could not BUILD a plan for the record,
+    #                         so no statement ran (an undeclared/refused record
+    #                         type, a carrier with no snapshot, an unusable
+    #                         key/endpoint, a caller watermark it refuses) — a
     #                         REPLAY RE-REFUSES until the cause is fixed, so the
-    #                         remedy is the producer or the schema, never a replay
-    #                         (#11783: 182 of these read as `write_failed` while
-    #                         every database probe was healthy).
+    #                         remedy is the producer or the record shape, never a
+    #                         replay (#11783: 182 of these read as `write_failed`
+    #                         while every database probe was healthy). ⛔ Not a
+    #                         store fact: a statement that RAN and failed (a CHECK
+    #                         constraint) stays `write_failed`.
     #   ``journal_collision`` the position row cannot be indexed by this write —
     #                         a different record type, a different capture time,
     #                         identities this write's payload CONTRADICTS, or (for

@@ -699,7 +699,7 @@ def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
 @pytest.mark.parametrize("reason", [
     "write_failed", "no_tenant", "malformed_dsn", "circuit_open",
     "no_journal", "seam_unimportable", "journal_collision",
-    "projection_refused",
+    "plan_refused",
 ])
 def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
         monkeypatch, reason):
@@ -710,7 +710,7 @@ def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
     the payload cannot name its own fix. `journal_collision` (#9318) is the
     third of that kind and the only POST-write one, so its omission would be
     the same defect for the token where a replay actively re-raises.
-    `projection_refused` (#11783) is the FOURTH non-replay-healable one and the
+    `plan_refused` (#11783) is the FOURTH non-replay-healable one and the
     one whose absence cost the most: while it shared `write_failed`, 182
     shape-refusals in production were indistinguishable from a transport outage.
     Driven through the PUBLIC writer, so an allowlist hidden inside the window
@@ -1134,10 +1134,12 @@ def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
     The old arm raised `RecordProjectionError` here, and that refusal took the
     WHOLE record write with it: measured live (2026-11-26, hosted app) as
     `record.degraded_reasons.write_failed` climbing 0 → 182 while the database
-    was healthy and `record_writes_applied` reached 3190. `_OMIT` is exact
-    parity with the graph, which filters a Mapping before `SET n += $props`
-    (`_is_persistable_prop_value` refuses it), so the node stores no such
-    property while the rest of the record lands.
+    was healthy and `record_writes_applied` reached 3190. `_OMIT` is parity with
+    the graph's CREATE/UPSERT door, which filters a Mapping before
+    `SET n += $props` (`_is_persistable_prop_value` refuses it), so the node
+    stores no such property while the rest of the record lands.
+    ⛔ `patch=True` is the OTHER door and is asserted separately below — the
+    graph CLEARS there, so `_OMIT` would not be parity.
 
     The declaration is asserted too: the WARNING names the COLUMN and the
     value's TYPE, and never the value (a `quote` is the user's own text).
@@ -1151,6 +1153,12 @@ def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
                 f"a Mapping-valued {column} must contribute NO column (the graph "
                 "stores no property for it either) — any OTHER value here is the "
                 "second representation #10620 exists to remove"
+            )
+            assert record_projection._record_column_value(
+                "point", column, {"k": "v"}, patch=True) is None, (
+                f"on the PATCH door the graph degrades the Mapping to null and a "
+                f"null in a map-merge REMOVES the property, so a Mapping-valued "
+                f"{column} must CLEAR the column (None), not keep it"
             )
 
     messages = [r.getMessage() for r in caplog.records
@@ -1200,14 +1208,21 @@ def test_a_mapping_valued_property_cannot_drop_the_rest_of_the_row():
 
 
 def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
-    """#11783, UPDATE direction — where omission must match the NODE's fate.
+    """#11783, UPDATE direction — where the column must CLEAR, not be kept.
 
-    The graph filters the Mapping before `SET n += $props`, so an update leaves
-    the node's EXISTING property untouched (it is not cleared). `_OMIT` writes
-    nothing rather than NULL for exactly that reason (see `_Omit`), and the
-    upsert/patch builders take their `SET` list from `col_values` — so the
-    column is absent from the `SET`, which is the record's version of "kept".
-    A NULL there would CLEAR it instead, which would be the divergence.
+    ⛔ THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is measured, not
+    a preference. `update_point` does NOT go through the create fold that
+    filters a Mapping: it binds the caller's whole props bag into
+    `SET n += $props` (`sdk.py`), and the transport gate `_journal_safe_params`
+    DEGRADES the unwritable value to `null` — which a map-merge reads as
+    "REMOVE the property". Reproduced end-to-end on the lane's FalkorDB
+    (2026-11-26): `_create_point(…, quote="the stored span")` then
+    `_update_point(pid, quote={"a": 1})` logs `#7369: degraded 1 parameter
+    value(s) … (props.quote) to null before dispatch` and the node goes from
+    `quote='the stored span'` to `quote=None` (the key leaves `keys(n)`).
+    So the record's column must be CLEARED to match; omitting it (what this
+    test used to require) left the record holding a value the node no longer
+    had, i.e. the same divergence the other way round.
     """
     record = {"type": "PointRevised", "id": "pt-11783",
               "new_content": "revised",
@@ -1221,13 +1236,20 @@ def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
         f"a Mapping-valued property dropped the point UPDATE (#11783): "
         f"{len(statements)} statement(s) planned"
     )
-    for clause in ("quote =", "search_keys ="):
-        assert clause not in patches[0].sql, (
-            f"the update SETs {clause!r}: a Mapping the graph does not store "
-            f"must leave the column untouched, never clear it: {patches[0].sql}"
+    sql = patches[0].sql
+    bound = dict(zip(patches[0].param_columns, patches[0].params,
+                     strict=True))
+    for column in ("quote", "search_keys"):
+        assert f"{column} = %s" in sql, (
+            f"the update must SET {column} to NULL — the graph's own write "
+            f"removes the property when the transport degrades it: {sql}"
         )
-    assert "content = %s" in patches[0].sql, (
-        f"the rest of the update must still land: {patches[0].sql}"
+        assert bound[column] is None, (
+            f"{column} must bind NULL (clear), the graph's measured outcome — "
+            f"got {bound[column]!r}"
+        )
+    assert "content = %s" in sql, (
+        f"the rest of the update must still land: {sql}"
     )
 
 
@@ -1244,7 +1266,7 @@ class _FakeConn:
         pass
 
 
-def test_a_projection_refusal_is_counted_apart_from_write_failed(monkeypatch):
+def test_a_plan_build_refusal_is_counted_apart_from_write_failed(monkeypatch):
     """#11783 — the counter must say WHICH failure this is.
 
     Both arms used to land on `write_failed`, so the 182 value-shape refusals the
@@ -1270,14 +1292,90 @@ def test_a_projection_refusal_is_counted_apart_from_write_failed(monkeypatch):
     after = dict(monitoring.record_write_failure_counts())
     assert write is not None
     assert write.outcome is record_writer.RecordWriteOutcome.REFUSED
-    assert write.refusal == "projection_refused", (
-        "the door must name the projection refusal as its OWN token — a consumer "
+    assert write.refusal == "plan_refused", (
+        "the door must name the plan-build refusal as its OWN token — a consumer "
         "branching on `write_failed` would replay a record that re-refuses"
     )
-    assert after.get("projection_refused", 0) == before.get("projection_refused", 0) + 1
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
     assert after.get("write_failed", 0) == before.get("write_failed", 0), (
         "a projection refusal must NOT also count as `write_failed`: the whole "
         "point of the split is that the two name different failures"
+    )
+
+
+class _ScopeBlindConn(_FakeConn):
+    """A connection that opens, scopes NOTHING, and says so (#11783 P1).
+
+    `_apply_tenant_scope` runs AFTER the plan is built: it sets the GUC and
+    reads it back in one statement, and refuses when the read-back returns no
+    row — a pooler that dropped the context, an autocommit connection, a
+    renamed GUC. Every one of those is a STORE/CONFIG fact, reached by
+    executing real statements.
+    """
+
+    def cursor(self):
+        return _ScopeBlindCursor()
+
+
+class _ScopeBlindCursor:
+    def __init__(self) -> None:
+        self.statements = 0
+
+    def execute(self, sql, params=None):
+        self.statements += 1
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch):
+    """#11783 review P1 — the classification is the PHASE, not the exception class.
+
+    `RecordProjectionError` is the base of BOTH the plan-build refusals and the
+    refusals raised after statements ran (the tenant-GUC read-back, a role that
+    bypasses RLS, the cutover guard's failed `SELECT`, a schema that is not on
+    disk). The first cut of this token tested the CLASS, so a connection whose
+    scope could not be verified — a broken role or pooler — was counted as
+    `plan_refused`, i.e. the operator was told "check the producer" about a
+    store fact: MEASURED on a fake connection returning no row, whose refusal
+    read `the record's scope could not be verified — the read-back returned no
+    row`. That is the false diagnosis this test exists to prevent.
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _ScopeBlindConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "PointAdded",
+         "point": {"eventId": "pt-11783-scope", "id": "pt-11783-scope",
+                   "content": "a claim", "point_kind": "statement"}},
+        seq=8, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED
+    assert write.refusal == "write_failed", (
+        "a refusal raised AFTER the plan was built — statements already ran — "
+        f"must stay `write_failed`, got {write.refusal!r}"
+    )
+    assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0), (
+        "a store/config refusal must NOT be counted as a plan-build refusal: its "
+        "remedy is the DSN, the role or the migration, never the producer"
     )
 
 
@@ -1481,14 +1579,17 @@ def test_a_mapping_valued_property_LANDS_the_row_on_Postgres(key):
         conn.close()
 
 
-def test_a_mapping_valued_update_keeps_the_stored_value_like_the_node_does():
-    """#11783, the UPDATE arm on Postgres — omission, not a clear.
+def test_a_mapping_valued_update_CLEARS_the_column_like_the_node_does():
+    """#11783, the UPDATE arm on Postgres — a CLEAR, which is what the node does.
 
-    The graph filters the Mapping before `SET n += $props`, so the node KEEPS
-    its existing value; the record must do the same (the upsert's `SET` list is
-    built from the same `col_values`, so an omitted column is not touched).
-    Writing NULL here — `SET quote = NULL` — would clear the record's value while
-    the node keeps its own, which is a divergence in the opposite direction.
+    ⛔ REVERSED, and measured: the create fold filters a Mapping, but
+    `update_point` binds its props into `SET n += $props` and the transport
+    degrades the unwritable value to `null`, which a map-merge reads as "remove
+    the property". Reproduced on the lane's FalkorDB (2026-11-26): the node goes
+    from `search_keys='the stored span'` to no `search_keys` at all. So the
+    record's column must be cleared too. Keeping it (what this test used to
+    require) is the divergence in the opposite direction: a record-sourced
+    rebuild would re-materialise a property the live graph had removed.
     """
     conn = _record_schema_conn()
     tenant = _tenant()
@@ -1512,9 +1613,9 @@ def test_a_mapping_valued_update_keeps_the_stored_value_like_the_node_does():
 
         row = _column_row(conn, tenant, row_key, "search_keys")
         assert row is not None, "the update dropped the point row (#11783)"
-        assert row[0] == "the stored span", (
-            "a Mapping the graph does not store must leave the column as it was, "
-            f"exactly as `SET n += $props` leaves the node's property: {row!r}"
+        assert row[0] is None, (
+            "the update must CLEAR the column: the graph's own write degrades "
+            f"the Mapping to null, which REMOVES the node's property: {row!r}"
         )
         assert row[1] == "revised", f"the rest of the update must land: {row!r}"
     finally:

@@ -3196,8 +3196,11 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
       `record_projection` asserts `set(RECORD_MUTATIONS) ==
       set(JOURNAL_EVENT_TYPES)` at import, so the whole module fails at
       COLLECTION. Only a two-edit deletion (both the dict and the type set)
-      surfaces as `UnknownJournalRecordType`, counted as `write_failed`, and
-      reds at the `lost == 0` delta below;
+      surfaces as `UnknownJournalRecordType` — counted as `plan_refused` since
+      #11783 split the plan-build half out of `write_failed`, so it reds at the
+      row-count assertions BELOW (`subjects`/`points`), NOT at the `write_failed`
+      delta — reading that delta as the witness would be a check that cannot
+      fire;
     * BY CONSTRUCTION — a producer that journals nothing leaves NO journal file
       (the SDK creates `event_log_path` lazily), so the `journal_path.exists()`
       guard reads that as an empty record list and `assert subjects` fires with
