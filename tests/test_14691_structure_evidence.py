@@ -4082,10 +4082,23 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
     # …and the sentence must name the module whose route it is, so a route that
     # exists elsewhere cannot be borrowed
     name, _, _ = matches[0][1], matches[0][2], matches[0][3]
-    assert matches[0][2].removesuffix(".py") in d1["the_read_that_can"] or \
-        "entity_reads" in d1["the_read_that_can"], (
-            f"D1 cites {name} but never names {matches[0][2]}, the module that "
-            "serves it")
+    # ⛔ AND THE MODULE MATCH IS NOT SATISFIED BY A SUBSTRING (#14691 review, round
+    # 14, P3): `… or "entity_reads" in sentence` was a TAUTOLOGY — the sentence
+    # begins `entity_reads.entity_relations` — so the right route and a same-length
+    # packs route both passed. The route's OWN served module must be the one named.
+    # The route must be served where the sentence says it is. A route is MOUNTED in
+    # one module and IMPLEMENTED in another (`hosted_api` mounts, `entity_reads`
+    # reads), so the test is that EVERY module the sentence names — and the one that
+    # serves the route — spells this route. A borrowed route fails at the first hop.
+    named_modules = set(re.findall(r"\b([a-z_][a-z0-9_]*)\.(?=[a-z_]+\b)",
+                                   d1["the_read_that_can"]))
+    assert named_modules, d1["the_read_that_can"]
+    holders = {path.stem for path in (REPO / "tortoise").glob("*.py")
+               if route.group(1) in path.read_text(errors="ignore")}
+    assert named_modules <= holders, (
+        f"D1 names {sorted(named_modules)} but only {sorted(holders)} spell "
+        f"{route.group(1)}")
+    assert matches[0][2].removesuffix(".py") in holders
 
     # ── D3: the namespaced counts are the PROBES' OWN, kind by kind
     probes = readback["bare_kind_probes"]
@@ -4145,17 +4158,44 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
                                     ["graph_overview_topics"]["reply"])}
     reported = evidence.get("reported_not_found") or {}
     assert set(reported) == failed, (sorted(reported), sorted(failed))
-    assert reported == {name: readback["link_witness"][name]["id"]
-                        for name in failed}, (
-        "D5 attributes a 'not found' to the wrong node id")
+    # ⛔ THE ID IS THE ONE THE PROBE USED, IN THE SAME OBJECT (#14691 review, round
+    # 14, P3). Comparing `reported[name]` to `link_witness[name]["id"]` was `X == X`
+    # — both were derived from the same field — so swapping two witnesses' ids
+    # (24 = 24 chars) and re-deriving stayed green while the artifact reported one
+    # node's "not found" under another node's id. The probe's own arguments record
+    # which id it asked about, and THAT is what the evidence must echo.
+    for name, node_id in reported.items():
+        entry = readback["link_witness"][name]
+        assert node_id == entry["id"], (
+            f"D5 attributes a 'not found' to {node_id} under {name!r}, whose "
+            f"witness id is {entry['id']}")
+        probed = {arg for arg in (entry.get("graph_overview_topics") or {})
+                  .get("args", {}).values() if isinstance(arg, str)}
+        assert node_id in probed or entry["id"] in probed, (
+            f"D5 reports id {node_id} for {name!r}, but the probe asked about "
+            f"{sorted(probed)}")
     # the sentence's numerator and denominator must be those two populations
     nums = re.findall(r"(\d+) of the (\d+) nodes asked", d5["answer_over_mcp"])
     assert nums, d5["answer_over_mcp"]
     assert tuple(map(int, nums[0])) == (len(failed), len(asked)), (
         f"D5 says {nums[0]}; the evidence supports ({len(failed)}, {len(asked)})")
-    # …and its clause about the other two doors is a claim about THEM
-    if "two doors return" in d5["answer_over_mcp"]:
-        assert any((w.get("explore_neighbour_count") or 0) > 0
-                   for w in readback["link_witness"].values()), (
-            "D5 says the same nodes ARE returned by the other doors; no witness "
-            "records a single neighbour")
+    # ⛔ THE CLAUSE IS GUARDED BY WHAT IT SAYS, NOT BY ITS OWN WORDING (#14691
+    # review, round 14, P3). The arm was `if "two doors return" in answer`, so
+    # rewriting the clause to "…two doors reject" BOTH changed the claim and
+    # DISARMED the check — a self-gating guard. The clause is now read structurally
+    # (the verb after "two doors"), and the population it quantifies over is the
+    # witnesses' own neighbour counts.
+    clause = re.search(r"two doors (\w+)", d5["answer_over_mcp"])
+    neighbours = {n: (w.get("explore_neighbour_count") or 0)
+                  for n, w in readback["link_witness"].items()}
+    assert clause, d5["answer_over_mcp"]
+    if clause.group(1).lower().startswith("return"):
+        assert all(neighbours[n] > 0 for n in failed), (
+            f"D5 says the other doors RETURN the nodes it failed on; their "
+            f"neighbour counts are {sorted(neighbours.items())}")
+    else:
+        assert clause.group(1).lower().startswith("reject"), (
+            f"D5's clause names an operation nothing measured: {clause.group(1)!r}")
+        assert all(neighbours[n] > 0 for n in failed), (
+            "D5 says the other doors REJECT these nodes, and the witnesses record "
+            "that they DO see them — the clause is false")
