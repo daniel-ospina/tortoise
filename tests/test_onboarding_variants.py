@@ -1735,7 +1735,8 @@ _DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
 # documentation` likewise) while `in the guide` is GREEN — a FALSE RED on real
 # copy, which is the direction that gets a pin deleted (#3429).
 # ⛔ PINNED BY THE TWO GREEN ROWS BELOW (`in your guide`, `in our documentation`):
-# removing the possessives reds BOTH — 2 mismatched of 551 — and no other arm
+# removing the possessives reds BOTH — 2 mismatched of the whole table at
+# `5f1c0cbec6cb` — and no other arm
 # covers the shape, so this one is load-bearing rather than redundant. (An
 # earlier revision of this comment claimed the opposite; it was measured by a
 # probe whose replacement string never matched the source, so it proved nothing.)
@@ -1869,6 +1870,14 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
             r"|now|still)")
 
+# ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
+# THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
+# hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
+# this constant; if a member is added, every arm gains it.
+_PRE_CUE_VERB = (
+    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure"
+    r"|make\s+(?:sure|certain)|be\s+(?:sure|certain)|validate)\w*\b"
+)
 # (f) The same inversion stated one sentence EARLIER — a PRE-CUE imperative the
 #     reader must carry out before restarting:
 #     "Confirm the tools are actually there. Restart your client, …".
@@ -1923,8 +1932,26 @@ _PRE_CUE_ONLY = _inversion_form(
     r"^(?:(?:(?:now|then|next|finally|lastly|immediately|again|simply|still"
     r"|afterwards?|subsequently|additionally|please|kindly"
     r"|and|so|or|plus)\s*,?\s+)+)?"
-    r"(?:(?:" + _ADVERBS + r")\s*,?\s+)?"
-    r"(?:(?:you\s+)?(?:must|should|ought\s+to|need\s+to|have\s+to|can|could|will)\s+"
+    # ⛔ THE ADVERB RUN **REPEATS** AND SITS ON BOTH SIDES OF THE SUBJECT, because
+    # form (a) does both and a single optional slot defeated one word twice over:
+    # `You first must confirm …` (adverb before the subject) and
+    # `You must first carefully confirm …` (two adverbs after it) both measured
+    # GREEN while the form-(a) twin of the second is RED (#14679 review round 6).
+    r"(?:(?:" + _ADVERBS + r")\s*,?\s+)*"
+    # ⛔ A MODAL MAY STAND AT THE HEAD OF A SEMI-MODAL CHAIN. The slot admitted the
+    # two spellings separately, so `You need to confirm …` is a declared-RED row
+    # while `You WILL need to confirm …` measured GREEN — one inserted modal over a
+    # row this file pins (#14679 review round 6). English stacks them (Wikipedia
+    # `English modal verbs` §11 "Modals at the head of chains", §8.7 "Need"), so
+    # the chain is the unit, not the single member.
+    r"(?:(?:you(?:\s+|['\u2019](?:ll|d|re|ve)\s+))?"
+    # …and the adverb run REPEATS AFTER the subject too: `You first must confirm …`
+    # places one between the pronoun and the modal, which the single pre-subject
+    # run could not reach (#14679 review round 6).
+    r"(?:(?:" + _ADVERBS + r")\s*,?\s+)*"
+    r"(?:(?:will|would|should|may|might|could|can|must|shall)\s+)?(?:need\s+to"
+    r"|have\s+to|want\s+to|be\s+able\s+to|be\s+going\s+to|going\s+to|must|should|can"
+    r"|could|will|shall|may|might|ought\s+to|would)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
     # ⛔ THE ADVERB SLOT SITS ON **EITHER SIDE** OF THE MODAL — form (a) already
     # solved this (`(?:_ADVERBS)\s+)*` both sides) and (f) was the outlier, so
@@ -1940,7 +1967,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # (`You must confirm …`). A copy that cites the original is exactly how the
     # confirmation list drifted four times; this slot reuses the constant (#14679
     # review round 5).
-    r"(?:(?:" + _ADVERBS + r")\s*,?\s+)?"
+    r"(?:(?:" + _ADVERBS + r")\s*,?\s+)*"
     r"(?:"
     # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
     # document it could be pointing at and no predicate to require:
@@ -1977,13 +2004,12 @@ _PRE_CUE_ONLY = _inversion_form(
     # so "Please double-check the tools are actually there. Restart …" was GREEN
     # while its `check` twin is a declared RED row — the same lesson form (a)
     # already carries as `(?:\w+-)?` (#14679 review cycle 29, measured).
-    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure"
-    # …and the same three-closure gap in THIS copy: it is a SECOND spelling of
-    # `_CONFIRM_PREDICATE`, so form (f) kept the pre-cue sentence GREEN after the
-    # shared constant was widened (`Make sure the tools are actually there.
-    # Restart your client, then run a query.` — measured, #14679 review at
-    # `1dedd33da07e`).
-    r"|make\s+(?:sure|certain)|be\s+(?:sure|certain)|validate)\w*\b[^\n]*?"
+    + _PRE_CUE_VERB
+    # …it is the SAME constant as (f.1) and `_CONFIRM_PREDICATE`, not a second
+    # spelling: this copy kept the pre-cue sentence GREEN after the shared
+    # constant was widened (`Make sure the tools are actually there. Restart your
+    # client, then run a query.` — measured, #14679 review at `1dedd33da07e`).
+    + r"[^\n]*?"
     + _TOOLS_OBJECT
     # …and a documentation noun immediately after `tools` is not a presence
     # claim even when a copula follows it ("Ensure the tools table is up to
@@ -1995,6 +2021,20 @@ _PRE_CUE_ONLY = _inversion_form(
     r"|available|loaded|enabled|present|running|live|up|there|exist|exists"
     r"|work|works|load|loads|connect|connects|respond|responds|import"
     r"|see|saw|seen|have|has|had)\b"
+    + r"|"
+    # (f.3) AN ELLIPTICAL PRESENCE CLAIM ON THE CLIENT'S OWN LIST. Every arm above
+    # requires a predicate WORD after the object, so the shipped sentence
+    # reordered — `Confirm the tools in the client\u2019s MCP/tool list, then
+    # restart your client.` — was GREEN: `in the client's MCP/tool list` is a
+    # locative with the predicate elided, which is how a real doc writes it
+    # (`docs/quickstart-cloud.md:135` names the object of the check as
+    # "`tortoise_*` in the client's MCP/tool list"). The locative is SESSION-side,
+    # not documentary: `list` is deliberately not a `_DOC_NOUN`, so this arm adds
+    # no doc-reference suppression (#14679 review round 6).
+    + _PRE_CUE_VERB
+    + r"[^\n]*?"
+    + _TOOLS_OBJECT
+    + r"\s+(?:in|on)\s+(?:the\s+|your\s+|our\s+)?client['\u2019]s\b"
     r")"
 )
 
@@ -2071,12 +2111,13 @@ _MODAL_TO_VERB = (
 # of `after`/`once`, so they order nothing and must not defeat the form. They are
 # BARE (non-`-ly`) time adverbs, which is why the `\w+ly` arm never reached them
 # (#14679 review at `fdaaa23d016c`).
-# ⛔ `_ADVERBS` IS DEFINED ABOVE `_INVERSION_FORMS` (see `_ADVERB_DOCTRINE`) so
+# ⛔ `_ADVERBS` IS DEFINED ABOVE THE FIRST FORM THAT USES IT (see the `rather`
+# block just above `_MODAL_TO_VERB`, which describes this constant) so
 # form (f) can REUSE it instead of copying its members — one definition, never a
 # copy. A copy that cites the original is how the confirmation list drifted four
 # times; the adverb slot drifted the same way (#14679 review round 5).
 # ⛔ `rather` IS AN ALLOW-LIST MEMBER, and it is DECLARED here rather than
-# dropped as dead weight: mutating it out flips 0 of 551 rows (measured), but
+# dropped as dead weight: mutating it out flips 0 rows (measured at `5f1c0cbec6cb`), but
 # removing an allow-list adverb does not close a hole — it risks a future FALSE
 # RED on copy this pin has simply never seen (`… after you have rather confirmed`
 # is not a sentence a doc ships). ⛔ IT IS NOT `page`'s STANDING ANY MORE: this
@@ -2453,12 +2494,15 @@ _INVERSION_FORMS = (
         # ⛔ `whenever` AND `as soon as` — see form (a)'s note. They are `when`
         # and `once` for this purpose and were GREEN twins of declared-RED rows
         # (14 rows for `when`→`whenever`, 40 for `once`→`whenever`).
-        # ⛔ `following`/`upon` are deliberately NOT here, and the measurement is
-        # why: mutating them out flips 0 of 551 rows, and the presence shapes they
-        # would cover are FORWARD copy anyway ("Restart your client upon the tools
-        # being listed" = after they are listed). Form (a) is where they load —
-        # that is the CONFIRMATION shape (`upon confirming the tools …`), which is
-        # the inversion (#14679 review at `1dedd33da07e`).
+        # ⛔ `following`/`upon` are deliberately NOT here. Two different facts, and
+        # an earlier revision ran them together: removing them from THIS set flips
+        # 0 rows because they are not members of it, while removing them from FORM
+        # (a)'s connectives reds 3 rows (`upon confirming the tools …`, `following
+        # confirming …`, `upon making sure …`) — so they are load-bearing where
+        # they actually sit (#14679 review round 6). The presence shapes they would
+        # cover HERE are forward copy anyway ("Restart your client upon the tools
+        # being listed" = after they are listed); the arm they load is the
+        # CONFIRMATION shape, which is the inversion.
         r"\b(?:once|when|after|whenever|as\s+soon\s+as)"
         r"(?!\s+(?:which|that)\b)\s+"
         r"(?:[A-Za-z0-9_`*.-]+\s+){0,2}?"
@@ -2478,7 +2522,7 @@ _INVERSION_FORMS = (
         # object widening just closed.
         # ⛔ `visible` is NOT here: after the object, the copula arm `are|is`
         # already grades "the tools ARE visible", and the bare "the tools visible"
-        # is ungrammatical — mutating it out flips 0 of 551 rows and no
+        # is ungrammatical — mutating it out flips 0 rows (measured at `5f1c0cbec6cb`) and no
         # well-formed row can depend on it (#14679 review at `1dedd33da07e`,
         # measured). Declared rather than silently carried as an arm.
         r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
@@ -2885,13 +2929,18 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     # `You oughtn't restart your client until you have confirmed the tools are
     # actually there.` and `You'd better not …` were GREEN while their `shouldn't`
     # twin is a declared-RED row).
-    # ⛔ `ought` goes in the MODAL list, not in its own arm: it takes the same
-    # `not` / `n't` spelling as every other member, so a dedicated alternative
-    # would be an unpinned second arm for one behaviour (measured: removing it
-    # flipped 0 rows while the modal-list entry still matched).
+    # ⛔ `ought` goes in the MODAL list, not in its own arm — but its NEGATION is
+    # NOT the same shape as every other member's, and assuming it was cost a hole:
+    # `ought` is the one member whose positive form carries a `to`-infinitive
+    # (`ought to`), so the spelled-out negative is `ought not TO restart`, and the
+    # `not`-anchored arm below could not reach it — `You ought not to restart your
+    # client until you have confirmed the tools are actually there.` measured GREEN
+    # while its `oughtn't` twin is a declared-RED row (#14679 review round 6).
+    # `\s+to` is therefore optional inside the negation, for every member: the
+    # others never carry it, so the group costs nothing and closes the class.
     r"(?:\bnever"
     r"|\b(?:do|does|did|should|could|would|must|need|can|may|might|ought)"
-    r"(?:\s+not|n['\u2019]t)"
+    r"(?:\s+not(?:\s+to)?|n['\u2019]t)"
     r"|\b(?:had|'d|\u2019d)\s+better\s+not"
     r"|\bcannot)\s*$", re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
@@ -5434,6 +5483,35 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "actually there.", True),
     ("Restart your client after you are done with the config and confirm the "
      "tools are actually there.", False),
+    # (13) round-6 findings: a modal at the head of a semi-modal chain, the adverb
+    #      between subject and modal, `ought not to`, and the elliptical presence
+    #      claim on the client's own list. Declared residual: a DOUBLE chain
+    #      (`You're going to need to confirm …`) is still GREEN — the slot admits
+    #      one pre-modal, and nesting it would be an unbounded grammar.
+    ("You will need to confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("You'll need to confirm the tools are actually there. Restart your client.",
+     True),
+    ("You must be able to confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You first must confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You also must confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You must first carefully confirm the tools are actually there. Restart "
+     "your client.", True),
+    ("First, carefully confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You ought not to restart your client until you have confirmed the tools "
+     "are actually there.", True),
+    ("Confirm the tools in the client's MCP/tool list, then restart your "
+     "client.", True),
+    ("Confirm the tools appear in the client's MCP/tool list, then restart your "
+     "client.", True),
+    ("Restart your client, then confirm the tools in the client's MCP/tool "
+     "list.", False),
+    ("You're going to need to confirm the tools are actually there. Restart "
+     "your client.", False),
     # (8) a LEADING CONJUNCTION introduces a sentence exactly as `Now`/`Then` do.
     ("And confirm the tools are actually there. Restart your client, then run "
      "a query.", True),
