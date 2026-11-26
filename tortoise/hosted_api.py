@@ -519,11 +519,11 @@ def _is_capture_in_flight_refusal(detail: object) -> bool:
 # `code` + `retry_after`. Consequence, measured in #12992: a client that wants to
 # branch on the refusal must prose-match the message, and the only machine-
 # readable form of the retry instruction was the `Retry-After` HEADER — which the
-# capture clients that produced the issue's log lines never read
-# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
-# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
-# (research §5, #11225). So the delay is published in the BODY as well: a JSON
-# client gets it for free; the header stays for HTTP clients that honour it.
+# deployed capture client (`tortoise-capture.ts`) never honours: it re-arms on its
+# own `30 s × 2^(n-1)` (research §5, #11225). ⛔ `reflect-hook` is NOT that client —
+# by #14700's 2026-11-25 measurement it runs a 4-attempt chain AND parses the
+# header (`retryAfterS = headerRetry ?? bodyRetry`, no default; see the #14700
+# block above). So the delay is published in the BODY too, for every client.
 #
 # ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
 # object is a shape change for any reader that did `detail in text`; keeping the
