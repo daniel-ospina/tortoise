@@ -769,29 +769,24 @@ def test_every_row_declares_whether_it_decides_or_merely_observes() -> None:
     for row in rows:
         expected = "decided" if row["recommendation"] in ("merge", "kill", "fix-declaration") else "observed"
         assert row.get("basis") == expected, f"{row['name']}: {row['recommendation']} must be {expected}"
-    decided = [r for r in rows if r["basis"] == "decided"]
-    observed = [r for r in rows if r["basis"] == "observed"]
-    assert len(decided) + len(observed) == len(rows)
-    # ⛔ THE DECIDED POPULATION IS EMPTY AT THIS HEAD, and that is a RESULT, not a lost
-    # assertion. The single row carrying a decision recommendation was
-    # `tortoise_suggest_entry_points` (`fix-declaration`: "declares an SDK method that does
-    # not exist … a false declaration to correct (or a tool to retire — that part is the
-    # owner's call)"). #11609 lane P11 took the second branch of that sentence: the door
-    # retired FORWARD into `search_knowledge(mode="entry_points")`, so the row is gone and
-    # a door that no longer exists cannot carry a false declaration.
+    # ⛔ NO POPULATION FLOOR HERE — and no replacement assertion either (#14645 review,
+    # agent-infra#3442 rule 3). The floor used to be `assert decided`, counting the rows
+    # stamped `decided`; #11609 lane P11 retired the last one (`tortoise_suggest_entry_points`,
+    # `fix-declaration`, retired FORWARD into `search_knowledge(mode="entry_points")`), so at
+    # this head that population is EMPTY: `[] == []`. A floor that lands on an empty population
+    # is a false green (#13599 / #13678) and it also reddened on correct work.
     #
-    # So the guard changes from "at least one row must be decided" to the property that
-    # actually holds it: EVERY row whose recommendation demands a decision must be
-    # classified `decided`, and the two populations must be the same set. That still reds if
-    # a `merge`/`kill`/`fix-declaration` row appears with an `observed` basis (the failure
-    # this pin exists for), and it no longer REDS ON CORRECT WORK — the shape that made an
-    # earlier floor in this file land exactly on its own population (#13599 / #13678).
-    pending_decisions = [r for r in rows if r["recommendation"] in (
-        "merge", "kill", "fix-declaration")]
-    assert decided == pending_decisions, (
-        "the DECIDED population must be exactly the rows whose recommendation demands a "
-        f"decision: decided={[r['name'] for r in decided]}, "
-        f"pending={[r['name'] for r in pending_decisions]}")
+    # A second formulation was tried in its place — "`decided` must be exactly the rows whose
+    # recommendation demands a decision" — and it is ENTAILED by the loop above, so it was just
+    # as vacuous: the loop asserts `basis == ("decided" if recommendation in verdicts else
+    # "observed")` for EVERY row, which makes the two lists the same set by construction. It
+    # could not fail on a mutation that the loop did not already catch. Deleted rather than
+    # commented (a comment explaining why an assertion cannot fail is not a fix).
+    #
+    # THE LOOP ABOVE *IS* the guard, and it is discriminating: flip one live row to
+    # `recommendation: merge` while leaving its `basis: observed`, or stamp a `keep` row
+    # `basis: decided`, and the row reddens. That is the failure this pin exists for — usage
+    # presented as a verdict — and it is the only property here that can fail.
 
 
 def _write(doc: dict, tmp_path) -> str:

@@ -195,11 +195,9 @@ class TestSectionOnlyMembers:
         "door,section",
         sorted(RETIRED_ONCE_THE_CONTAINER_CARRIED_THE_ENVELOPE.items()))
     def test_the_former_member_retired_forward_not_deleted(self, door, section):
-        live = {t.name for t in TOOL_REGISTRY}
-        assert door not in live, (
+        assert door not in {t.name for t in TOOL_REGISTRY}, (
             f"{door} is still advertised — #11609 P11 retired it forward once the "
             "container carried the envelope at the boundary")
-        assert door not in {t.name for t in TOOL_REGISTRY}
         assert RETIRED_USE_INSTEAD[door] == (
             f'{CONTAINER}(section="{section}")'), (
             f"{door} is pointed at {RETIRED_USE_INSTEAD[door]!r}, which is not the "
