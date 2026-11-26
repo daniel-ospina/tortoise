@@ -1021,7 +1021,9 @@
           "dst_kind": "product-strategy:customer",
           "write_path": "structural"
         },
-        "direction": "->"
+        "direction": "->",
+        "dst_kind_is_a_subject": false,
+        "orientation": "INVERTED"
       },
       {
         "edge": {
@@ -1033,7 +1035,9 @@
           "dst_kind": "product-strategy:customer",
           "write_path": "structural"
         },
-        "direction": "->"
+        "direction": "->",
+        "dst_kind_is_a_subject": false,
+        "orientation": "INVERTED"
       },
       {
         "edge": {
@@ -1060,6 +1064,22 @@
         "direction": "?"
       }
     ],
+    "ownership_door": {
+      "door": "tortoise_get_entity(id, type='governance') -> sdk._get_owned_entities -> MATCH (s:Subject)<-[:ownedBy]-(e)",
+      "owners_asked": [
+        "Amara Osei",
+        "Dana Whitlock",
+        "Jonas Bauer",
+        "Tomas Ferreira"
+      ],
+      "rows_returned": {
+        "Amara Osei": 0,
+        "Dana Whitlock": 0,
+        "Tomas Ferreira": 0,
+        "Jonas Bauer": 0
+      },
+      "total_rows": 0
+    },
     "totals": {
       "containment_present": "5/5",
       "containment_parent_spelled_product_first (observation)": "5/5",
@@ -1069,7 +1089,10 @@
       "ownership_present": "4/4",
       "ownership_oriented_correct": 0,
       "ownership_inverted": 4,
-      "dependency_present_and_correct": "7/7"
+      "dependency_present_and_correct": "7/7",
+      "asymmetric_rows_correct": 7,
+      "asymmetric_rows_inverted": 15,
+      "asymmetric_pairs_inverted": 13
     },
     "passes": false
   },
@@ -1606,15 +1629,41 @@
       "evidence": {
         "nodes_read_as_isolated_by_expand": {
           "Amara Osei": 6,
+          "Dana Whitlock": 5,
+          "Tomas Ferreira": 5,
+          "Jonas Bauer": 9,
           "Platform team": 10,
           "event-bus": 10
         },
         "same_nodes_seen_by_explore_connections": {
           "Amara Osei": 6,
+          "Dana Whitlock": 5,
+          "Tomas Ferreira": 5,
+          "Jonas Bauer": 9,
           "Platform team": 10,
           "event-bus": 10
         },
         "code_path": "tortoise/entity_reads.py:551-559 \u2014 the read covers IMPL|NAND|hasPart only"
+      }
+    },
+    {
+      "id": "D6",
+      "question": "does the product's OWNERSHIP door \u2014 `tortoise_get_entity(id, type='governance')` \u2014 return what each person owns?",
+      "answer_over_mcp": "NO \u2014 it returns [] for all 4 owners asked, on a graph holding 6 ownedBy rows",
+      "evidence": {
+        "owners_asked": [
+          "Amara Osei",
+          "Dana Whitlock",
+          "Jonas Bauer",
+          "Tomas Ferreira"
+        ],
+        "rows_returned": {
+          "Amara Osei": 0,
+          "Dana Whitlock": 0,
+          "Jonas Bauer": 0,
+          "Tomas Ferreira": 0
+        },
+        "code_path": "mcp_server.tortoise_get(type='governance') -> sdk._get_owned_entities: MATCH (s:Subject)<-[:ownedBy]-(e) (sdk.py:62739-62758), i.e. the DECLARED orientation \u2014 the edges point the other way"
       }
     },
     {
@@ -1625,6 +1674,9 @@
         "reported_not_found": {
           "Lumen Core": "1a2165c9fd5-bb074a074bd4",
           "Amara Osei": "1a2165cddc0-0f8b3f3ba2e1",
+          "Dana Whitlock": "1a2165cddb0-f1f7a9f097d1",
+          "Tomas Ferreira": "1a2165cddb8-c7c3b9947112",
+          "Jonas Bauer": "1a2165cddc7-67897f705466",
           "Platform team": "1a2165cdd92-a48d8cae4dca",
           "event-bus": "1a2165d1bf1-f6c7fdcb1f99"
         }

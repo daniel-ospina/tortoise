@@ -3,9 +3,9 @@
   "db_uri": "127.0.0.1:16413/xv14691_business_structure",
   "provenance": {
     "probe_path": "docs/evidence/14691-structure-validation/run_readback.py",
-    "probe_sha256": "832701733324e63b39489badf5074c814298ac511b40ad3485eba16a007eb930",
+    "probe_sha256": "5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192",
     "graph": "xv14691_business_structure",
-    "generated_at": "2026-11-26T05:43:56+00:00"
+    "generated_at": "2026-11-26T05:51:16+00:00"
   },
   "door_findings": [
     {
@@ -68,11 +68,17 @@
       "evidence": {
         "nodes_read_as_isolated_by_expand": {
           "Amara Osei": 6,
+          "Dana Whitlock": 5,
+          "Tomas Ferreira": 5,
+          "Jonas Bauer": 9,
           "Platform team": 10,
           "event-bus": 10
         },
         "same_nodes_seen_by_explore_connections": {
           "Amara Osei": 6,
+          "Dana Whitlock": 5,
+          "Tomas Ferreira": 5,
+          "Jonas Bauer": 9,
           "Platform team": 10,
           "event-bus": 10
         },
@@ -214,7 +220,7 @@
           "db": {
             "ok": true,
             "observed": true,
-            "latency_ms": 1.6,
+            "latency_ms": 1.3,
             "error": null
           },
           "falkordb": "connected",
@@ -262,8 +268,8 @@
           "offload_refusals": {},
           "server_code": {
             "stale": false,
-            "process_started_at": "2026-11-26T05:43:57Z",
-            "baseline_at": "2026-11-26T05:43:57Z",
+            "process_started_at": "2026-11-26T05:51:17Z",
+            "baseline_at": "2026-11-26T05:51:17Z",
             "tracked": 96,
             "changed": [],
             "changed_count": 0,
@@ -271,9 +277,9 @@
             "unverified": 0,
             "hint": null
           },
-          "uptime": 0.96,
+          "uptime": 0.93,
           "setup_timeout_clamped": true,
-          "setup_timeout_clamped_s": 2.9973013699927833,
+          "setup_timeout_clamped_s": 2.9934831490099896,
           "quota": {
             "resource": "points",
             "state": "not_applicable",
@@ -17660,6 +17666,15 @@
           "error": "Entity 1a2165c9fd5-bb074a074bd4 not found"
         }
       },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165c9fd5-bb074a074bd4",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
+      },
       "explore_neighbour_count": 19
     },
     "Amara Osei": {
@@ -17686,7 +17701,121 @@
           "error": "Entity 1a2165cddc0-0f8b3f3ba2e1 not found"
         }
       },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165cddc0-0f8b3f3ba2e1",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
+      },
       "explore_neighbour_count": 6
+    },
+    "Dana Whitlock": {
+      "id": "1a2165cddb0-f1f7a9f097d1",
+      "kind": "core:naturalPerson",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165cddb0-f1f7a9f097d1"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165cddb0-f1f7a9f097d1"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165cddb0-f1f7a9f097d1 not found"
+        }
+      },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165cddb0-f1f7a9f097d1",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
+      },
+      "explore_neighbour_count": 5
+    },
+    "Tomas Ferreira": {
+      "id": "1a2165cddb8-c7c3b9947112",
+      "kind": "core:naturalPerson",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165cddb8-c7c3b9947112"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165cddb8-c7c3b9947112"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165cddb8-c7c3b9947112 not found"
+        }
+      },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165cddb8-c7c3b9947112",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
+      },
+      "explore_neighbour_count": 5
+    },
+    "Jonas Bauer": {
+      "id": "1a2165cddc7-67897f705466",
+      "kind": "core:naturalPerson",
+      "expand_relationships": {
+        "tool": "tortoise_expand_relationships",
+        "args": {
+          "point_id": "1a2165cddc7-67897f705466"
+        },
+        "ok": true,
+        "reply": {
+          "result": []
+        }
+      },
+      "graph_overview_topics": {
+        "tool": "tortoise_graph_overview",
+        "args": {
+          "section": "topics",
+          "entity_id": "1a2165cddc7-67897f705466"
+        },
+        "ok": true,
+        "reply": {
+          "error": "Entity 1a2165cddc7-67897f705466 not found"
+        }
+      },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165cddc7-67897f705466",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
+      },
+      "explore_neighbour_count": 9
     },
     "Platform team": {
       "id": "1a2165cdd92-a48d8cae4dca",
@@ -17711,6 +17840,15 @@
         "reply": {
           "error": "Entity 1a2165cdd92-a48d8cae4dca not found"
         }
+      },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165cdd92-a48d8cae4dca",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
       },
       "explore_neighbour_count": 10
     },
@@ -17737,6 +17875,15 @@
         "reply": {
           "error": "Entity 1a2165d1bf1-f6c7fdcb1f99 not found"
         }
+      },
+      "governance_owned_by": {
+        "tool": "tortoise_get_entity",
+        "args": {
+          "id": "1a2165d1bf1-f6c7fdcb1f99",
+          "type": "governance"
+        },
+        "ok": true,
+        "reply": []
       },
       "explore_neighbour_count": 10
     }

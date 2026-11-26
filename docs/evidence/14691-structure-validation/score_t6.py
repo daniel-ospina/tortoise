@@ -410,7 +410,26 @@ def a2_edges() -> dict:
                 row["src_kind_is_an_agent"] = e["src_kind"] in agent_kinds
                 row["orientation"] = ("INVERTED" if row["src_kind_is_an_agent"]
                                       else "correct")
+            elif pred == "managedBy":
+                # §3.6 types `managedBy` as `Entity → Subject`: the RESPONSIBLE
+                # PARTY is the dst. Checked on KIND (a Subject end), because the
+                # declaration constrains the kinds, not a particular name.
+                subject_kinds = (_ROLE_KINDS["person"] | _ROLE_KINDS["team"]
+                                 | _ROLE_KINDS["role"] | {"core:organization"})
+                row["dst_kind_is_a_subject"] = e["dst_kind"] in subject_kinds
+                row["orientation"] = ("correct" if row["dst_kind_is_a_subject"]
+                                      else "INVERTED")
             other.append(row)
+
+    # (e2) the OWNERSHIP DOOR's own answer — the one product read that can
+    # witness the inversion from the graph side: `type="governance"` reads
+    # `(s:Subject)<-[:ownedBy]-(e)`, the declared orientation.
+    owners = {_norm(o) for _t, o in DECL["ownership"]}
+    ownership_door = {}
+    for name, w in (READBACK.get("link_witness") or {}).items():
+        if _norm(name) in owners:
+            ownership_door[name] = rows((w.get("governance_owned_by") or {})
+                                        .get("reply"))
 
     contained = sum(1 for c in containment if c["present"])
     mem = sum(1 for m in membership if m["present"])
@@ -420,10 +439,43 @@ def a2_edges() -> dict:
     own_inv = sum(1 for o in ownership if "INVERTED" in o["orientation"])
     dep_ok = sum(1 for d in dependency
                  if d["present"] and d["orientation"] == ["correct"])
+
+    # One line a reader can quote: over every ASYMMETRIC structural row this run
+    # wrote (hasPart is symmetric, `related` has no direction), how many assert
+    # what the corpus says? Rows and distinct pairs are different units — 6
+    # `ownedBy` rows are 4 distinct pairs — so both are stated.
+    asymmetric_correct = asymmetric_inverted = 0
+    inverted_pairs: set[tuple[str, str, str]] = set()
+    for group in (ownership, dependency):
+        for item in group:
+            for v in item["verdicts"]:
+                if v["orientation"] == "correct":
+                    asymmetric_correct += 1
+                elif v["orientation"] == "INVERTED":
+                    asymmetric_inverted += 1
+                    inverted_pairs.add((v["edge"]["predicate"],
+                                        _norm(v["edge"]["src"]),
+                                        _norm(v["edge"]["dst"])))
+    for row in other:
+        if row.get("orientation") == "correct":
+            asymmetric_correct += 1
+        elif row.get("orientation") == "INVERTED":
+            asymmetric_inverted += 1
+            inverted_pairs.add((row["edge"]["predicate"],
+                                _norm(row["edge"]["src"]),
+                                _norm(row["edge"]["dst"])))
+    asymmetric = (asymmetric_correct, asymmetric_inverted)
     return {
         "containment": containment, "membership": membership,
         "role_links": roles, "team_role_containment": team_role,
         "ownership": ownership, "dependency": dependency, "other": other,
+        "ownership_door": {
+            "door": "tortoise_get_entity(id, type='governance') -> "
+                    "sdk._get_owned_entities -> MATCH (s:Subject)<-[:ownedBy]-(e)",
+            "owners_asked": sorted(ownership_door),
+            "rows_returned": {k: len(v) for k, v in ownership_door.items()},
+            "total_rows": sum(len(v) for v in ownership_door.values()),
+        },
         "totals": {
             "containment_present": f"{contained}/{len(containment)}",
             "containment_parent_spelled_product_first (observation)":
@@ -436,6 +488,9 @@ def a2_edges() -> dict:
             "ownership_oriented_correct": own_ok,
             "ownership_inverted": own_inv,
             "dependency_present_and_correct": f"{dep_ok}/{len(dependency)}",
+            "asymmetric_rows_correct": asymmetric[0],
+            "asymmetric_rows_inverted": asymmetric[1],
+            "asymmetric_pairs_inverted": len(inverted_pairs),
         },
         # PRESENCE is part of the assertion, not just the orientation: a graph
         # with no ownership edges has no inverted ones either, and "0 inverted"
@@ -705,6 +760,29 @@ def _door_findings() -> list[dict]:
                                    "isolated",
                 "evidence": silent,
             })
+    owned = {n: w for n, w in witness.items()
+             if (w.get("governance_owned_by") or {}).get("reply") in ([], None)}
+    asked_owners = [n for n in owned
+                    if n in {"Amara Osei", "Dana Whitlock", "Tomas Ferreira",
+                             "Jonas Bauer"}]
+    if len(asked_owners) >= 2:
+        found.append({
+            "id": "D6",
+            "question": "does the product's OWNERSHIP door — "
+                        "`tortoise_get_entity(id, type='governance')` — return "
+                        "what each person owns?",
+            "answer_over_mcp": f"NO — it returns [] for all "
+                               f"{len(asked_owners)} owners asked, on a graph "
+                               f"holding 6 ownedBy rows",
+            "evidence": {"owners_asked": sorted(asked_owners),
+                         "rows_returned": {n: 0 for n in sorted(asked_owners)},
+                         "code_path": "mcp_server.tortoise_get(type='governance') "
+                                      "-> sdk._get_owned_entities: "
+                                      "MATCH (s:Subject)<-[:ownedBy]-(e) "
+                                      "(sdk.py:62739-62758), i.e. the DECLARED "
+                                      "orientation — the edges point the other way"},
+        })
+
     not_found = {}
     for name, w in witness.items():
         reply = (w.get("graph_overview_topics") or {}).get("reply")
