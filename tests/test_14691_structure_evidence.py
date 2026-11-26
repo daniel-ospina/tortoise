@@ -78,6 +78,36 @@ def _rows(reply):
     return []
 
 
+def _measured(reply, what: str):
+    """Rows from a reply that was actually ANSWERED — reds on an error envelope.
+
+    ⛔ AN ERROR IS NOT AN EMPTY ANSWER, on the ARTIFACT too (#14691 review, 5th
+    cycle, N1). `_rows()` maps every unrecognised shape to `[]`, which is right
+    for unwrapping and wrong for a verdict: an MCP error payload inside a call's
+    `reply` then reads exactly like a door that answered "nothing here".
+
+    `test_an_ERROR_reply_is_not_an_EMPTY_answer` pins the SCORER's arm for D4 by
+    replacing the whole call dict in-process. That leaves the committed artifact
+    open, measured on this head: rewriting both `bare_kind_probes` replies (and
+    all seven witness `expand_relationships[*].reply` values) with
+    `{"error": …, "ok": false}` — the exact shape the review used — kept **27
+    passed**, because nothing read those replies through this distinction.
+    """
+    payload = reply
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = None
+    if isinstance(payload, dict) and (payload.get("ok") is False
+                                      or "error" in payload):
+        raise AssertionError(
+            f"{what} is an error envelope, not a measured answer: {reply!r} — a "
+            "door that FAILED must never grade the same as a door that answered "
+            "nothing")
+    return _rows(reply)
+
+
 def _text(doc: dict) -> str:
     return " ".join(t["content"] for t in doc["turns"]).lower()
 
@@ -346,7 +376,8 @@ def test_expand_relationships_reads_a_connected_entity_as_isolated():
     """
     witness = _readback()["link_witness"]
     silent = {name: w for name, w in witness.items()
-              if not _rows(w["expand_relationships"]["reply"])
+              if not _measured(w["expand_relationships"]["reply"],
+                               f"{name}'s expand_relationships reply")
               and w["explore_neighbour_count"] > 0}
     # The witness list legitimately GROWS (every owner was added to it), so this
     # pins containment, not equality: the three nodes whose gap the finding was
@@ -354,15 +385,31 @@ def test_expand_relationships_reads_a_connected_entity_as_isolated():
     assert {"Amara Osei", "Platform team", "event-bus"} <= set(silent)
     for name, w in silent.items():
         assert w["explore_neighbour_count"] >= 5, name
+    # ...and no witness may carry a FAILED call in place of an empty answer: the
+    # silence above has to be a measured silence.
+    for name, w in witness.items():
+        assert "expand_relationships" in w, name
+        _measured(w["expand_relationships"].get("reply"),
+                  f"{name}'s expand_relationships reply")
 
 
 def test_bare_kind_full_scan_returns_nothing_while_namespaced_returns_rows():
-    """D3: the silent zero a caller gets for the spelling the packs declare."""
+    """D3: the silent zero a caller gets for the spelling the packs declare.
+
+    Every reply read here must be a MEASURED answer (#14691 review, 5th cycle,
+    N1): rewriting both probes with `{"error": …, "ok": false}` kept this suite
+    green while D3 read an identical `[]`.
+    """
     rb = _readback()
-    bare = {k: _rows(v["reply"]) for k, v in rb["bare_kind_probes"].items()}
+    probes = rb["bare_kind_probes"]
+    assert sorted(probes) == ["object:product", "subject:team"], sorted(probes)
+    bare = {k: _measured(v["reply"], f"bare-kind probe {k}")
+            for k, v in probes.items()}
     assert all(len(v) == 0 for v in bare.values()), bare
-    assert len(_rows(rb["object_kinds"]["product-strategy:product"]["reply"])) == 2
-    assert len(_rows(rb["subject_kinds"]["core:team"]["reply"])) == 3
+    assert len(_measured(rb["object_kinds"]["product-strategy:product"]["reply"],
+                         "the namespaced product scan")) == 2
+    assert len(_measured(rb["subject_kinds"]["core:team"]["reply"],
+                         "the namespaced team scan")) == 3
 
 
 def _report_line(pattern: str) -> str:
@@ -937,3 +984,75 @@ def test_an_UNREADABLE_kind_is_not_graded_correct():
         "instead of being reported UNCLASSIFIABLE")
     assert mutated["asymmetric_rows_correct"] == baseline["asymmetric_rows_correct"], (
         "an unreadable row was counted into asymmetric_rows_correct")
+
+
+def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
+    """Reds if the quote counts drift in either place §7's sentence does not cover.
+
+    ⛔ #14691 review, 5th cycle, (b) — the residual half. `test_the_quote_breakdown
+    _in_the_report_is_the_claim_layer` pins §7's flat sentence, and it holds. It
+    does NOT reach the two places the same three numbers appear as a TABLE, and
+    both were measured green on this head:
+
+      * §3's A4 table — `verbatim **11**`, `paraphrase **27**`, `invented **12**`
+        rewritten to `**50** / **0** / **0**` → **27 passed**;
+      * §8's artifact table — `its quote-fidelity audit (11 verbatim / 27
+        paraphrase / 12 not in corpus)` rewritten to `(50 / 0 / 0)` → **27
+        passed**.
+
+    A claim stated three times and guarded once is guarded in one place out of
+    three. Each row is now pinned to the claim layer it quotes.
+    """
+    claim = _score()["claim_layer"]
+    rows = {
+        "verbatim": _report_line(r"^\| verbatim \(a real substring of the corpus\)"),
+        "paraphrase": _report_line(r"^\| paraphrase \(≥60% of the quote"),
+        "invented": _report_line(r"^\| \*\*invented\*\* \(<60% overlap"),
+    }
+    for bucket, row in rows.items():
+        assert row, f"REPORT.md has no A4 count row for {bucket!r}"
+        assert f"**{claim[bucket]}**" in row, (
+            f"the A4 table's {bucket} row is not the claim layer's "
+            f"({claim[bucket]}): {row!r}")
+
+    # TWO rows name that artifact (§7's source list and §8's artifact table);
+    # the one that STATES the figures is the one pinned here, and the other
+    # stating a DIFFERENT figure would be caught by the sentence pin above.
+    audit_row = _report_line(r"^\| `out/t6-quote-audit\.json` \|.*verbatim")
+    assert audit_row, "REPORT.md §8 has no row for out/t6-quote-audit.json"
+    want = (f"({claim['verbatim']} verbatim / {claim['paraphrase']} paraphrase / "
+            f"{claim['not_in_corpus']} not in corpus)")
+    assert want in audit_row, (
+        f"§8's quote-audit row is not the claim layer's: expected {want!r} in "
+        f"{audit_row!r}")
+
+
+def test_the_isolation_refusal_is_WIRED_into_the_ingest_runner():
+    """Reds if `main()` stops CALLING the occupancy refuse it defines.
+
+    ⛔ A guard function is not a guard while nothing calls it. The review's
+    demonstrated mutant was this shape — replace the check with `if False:` and
+    the suite stays green — and it is STILL green on this head, measured: flipping
+    `if contamination:` to `if False:` in `run_ingest.main()` left **27 passed**,
+    because `test_the_isolation_refusal_is_enforced_on_the_whole_overview` drives
+    `occupancy()` directly and never reaches the call site.
+
+    The run path is pinned as source, so deleting the call reds even though the
+    function still works.
+    """
+    import inspect
+
+    spec = importlib.util.spec_from_file_location(
+        "t6_run_ingest", BUNDLE / "run_ingest.py")
+    ingest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ingest)
+    source = inspect.getsource(ingest.main)
+    assert "contamination = occupancy(before)" in source, (
+        "run_ingest.main() no longer computes the occupancy of the overview, so "
+        "the isolation premise would be recorded and never enforced")
+    assert "if contamination:" in source, (
+        "run_ingest.main() computes a contamination verdict and does not branch "
+        "on it — the refusal cannot fire on the run path")
+    assert "raise SystemExit(" in source.split("if contamination:")[1][:400], (
+        "run_ingest.main() branches on the contamination verdict without raising "
+        "it, so a populated graph would be measured anyway")
