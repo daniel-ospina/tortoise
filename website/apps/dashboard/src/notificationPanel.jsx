@@ -482,7 +482,9 @@ export function NotificationBell({
   // That is exactly the unactionable outcome this change exists to remove, so
   // the ledger branch states it too — the message outlives the row it is about
   // (review finding F1).
-  const ackNote = ackError && !detailAlert ? ackError.message : ''
+  const ackNote = ackError && !detailAlert && ackError.orgId === orgId
+    ? ackError
+    : null
 
   // The badge counts UNRESOLVED notifications (not unread ones), and the label says
   // so. This is a deliberate departure from the usual "unread" bell: nothing here
@@ -569,7 +571,10 @@ export function NotificationBell({
                   this sentence used to render — unmounts under the reader. Stated
                   here it is still on screen after the read that caused it. */}
               {ackNote ? (
-                <p className="error small notif-note" role="alert">{ackNote}</p>
+                <p className="error small notif-note" role="alert">
+                  {ackNote.label ? <><strong>{ackNote.label}</strong> — </> : null}
+                  {ackNote.message}
+                </p>
               ) : null}
               {/* The three "we cannot see everything" facts, stated where the
                   reader is, never as "no notifications" (which is a claim about

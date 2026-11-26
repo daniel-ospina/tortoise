@@ -829,7 +829,12 @@ test('#14686: a refused acknowledgement renders in the detail view, not silently
     alerts: [row],
     canAcknowledge: true,
     onAcknowledge: () => {},
-    ackError: { episode: row.episode, message: 'Only an owner or admin can acknowledge an alert.' },
+    ackError: {
+      episode: row.episode,
+      orgId: ORG,
+      label: row.label,
+      message: 'Only an owner or admin can acknowledge an alert.',
+    },
   })
   fireEvent.click(bell(container))
   fireEvent.click(container.querySelector('.notif-open'))
@@ -857,6 +862,8 @@ test('#14686: a refusal stays readable after the feed re-read drops its row', ()
         onAcknowledge={() => {
           setAckError({
             episode: row.episode,
+            orgId: ORG,
+            label: row.label,
             message: 'That alert is no longer in the feed — reload to refresh.',
           })
           setAlerts([]) // the re-read: the episode is no longer in the feed
@@ -878,6 +885,45 @@ test('#14686: a refusal stays readable after the feed re-read drops its row', ()
     .find((p) => /no longer in the feed/.test(p.textContent))
   assert.ok(note, 'the refusal must survive the read that made its row unresolvable')
   assert.equal(note.getAttribute('role'), 'alert', 'and it must be announced, not just drawn')
+  // …and it NAMES the alert, because in the ledger there is no row to attach it
+  // to: a sentence starting "That alert …" above a list of many names nothing.
+  assert.match(note.textContent, /Suspicious activity/)
+})
+
+test('#14686: a refusal does not follow the reader into another Organization', () => {
+  // `switchTeam` clears `ackError`, but a refusal still IN FLIGHT when the switch
+  // lands arrives after that clear — and the ledger branch has no row to scope it
+  // by. Unscoped, it would announce org A's sentence over org B's list, which is
+  // the same cross-Organization contamination the alerts reset exists to prevent
+  // (review finding, P3).
+  const foreign = renderBell({
+    alerts: [alert({ message: 'org b row' })],
+    orgId: 'org-2',
+    ackError: {
+      episode: 'flag||other',
+      orgId: 'org-1',
+      label: 'Suspicious activity',
+      message: 'That alert is no longer in the feed — reload to refresh.',
+    },
+  })
+  fireEvent.click(bell(foreign.container))
+  assert.ok(!foreign.container.textContent.includes('no longer in the feed'),
+    'another Organization\'s refusal must not render here')
+
+  // Non-vacuity: the SAME refusal DOES render for the Organization it names.
+  const own = renderBell({
+    alerts: [],
+    orgId: 'org-1',
+    ackError: {
+      episode: 'flag||other',
+      orgId: 'org-1',
+      label: 'Suspicious activity',
+      message: 'That alert is no longer in the feed — reload to refresh.',
+    },
+  })
+  fireEvent.click(bell(own.container))
+  assert.ok(own.container.textContent.includes('no longer in the feed'),
+    'the same refusal must render on the Organization it belongs to')
 })
 
 // ── 6. The feed's "we could not look" facts survive the move ────────────────

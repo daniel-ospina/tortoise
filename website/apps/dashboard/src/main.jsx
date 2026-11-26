@@ -5537,6 +5537,14 @@ function claimIntentInFlight() {
         }[res.status]
         setAckError({
           episode: alert.episode,
+          // #14686 (review finding, P3): the ledger branch now STATES this
+          // refusal, and it has no row to attach it to — so it must carry the
+          // Organization it belongs to and the alert it is about. `switchTeam`
+          // clears it, but a refusal still IN FLIGHT when the switch lands would
+          // otherwise announce org A's sentence inside org B's panel, and say
+          // "that alert" above a list of many.
+          orgId: tid,
+          label: alert.label || '',
           message: refusal
             || 'Could not save that acknowledgement — try again.',
         })
@@ -5545,7 +5553,12 @@ function claimIntentInFlight() {
       }
       await loadAlerts(tid)
     } catch {
-      setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+      setAckError({
+        episode: alert.episode,
+        orgId: tid,
+        label: alert.label || '',
+        message: 'Could not save that acknowledgement — try again.',
+      })
     } finally {
       setAckPending(null)
     }

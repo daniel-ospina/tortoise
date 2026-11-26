@@ -515,6 +515,24 @@ test('#10156: the ack write path posts to the real route, with org scope', () =>
   assertNoOptimisticHide(body, 'acknowledgeAlert')
 })
 
+test('#14686: every acknowledgement refusal carries its Organization and its alert', () => {
+  // The ledger branch states the refusal with no row to scope it by, so the
+  // PAYLOAD is what keeps it honest: without `orgId`, a refusal raised in
+  // Organization A renders over Organization B's list (and a still-in-flight one
+  // arrives AFTER `switchTeam`'s clear); without `label`, it says "that alert"
+  // above a list of many. Both are asserted, and asserted TWICE → the refusal
+  // path and the network-throw path each write one.
+  const body = ackPath()
+  assert.equal((body.match(/orgId: tid,/g) || []).length, 2,
+    'both refusal sites (non-2xx and the network throw) must name the Organization')
+  assert.equal((body.match(/label: alert\.label \|\| ''/g) || []).length, 2,
+    'both refusal sites must name the alert the sentence is about')
+  // …and the panel must SCOPE on it, or the payload buys nothing.
+  assert.match(readFileSync(join(here, 'notificationPanel.jsx'), 'utf8'),
+    /ackError\.orgId === orgId/,
+    'the ledger note must render only for the Organization it belongs to')
+})
+
 test('#10156: the ack slice is the whole function and nothing after it', () => {
   const body = ackPath()
   assert.ok(body.trimEnd().endsWith('}'), 'the slice must end on a closing brace')
