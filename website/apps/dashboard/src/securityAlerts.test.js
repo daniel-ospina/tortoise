@@ -314,11 +314,13 @@ test('#10156: the panel source never reintroduces the blanket imperative', () =>
 })
 
 test('#14686: the `flagged` badge points at the surface that exists', () => {
-  // The badge used to read "Suspicious activity detected — see security alerts",
-  // naming the heading of the block #14686 removed. A pointer to a surface that no
-  // longer exists is how a reader learns the dashboard is stale.
+  // The badge used to read "Unusual activity measured — see recent activity",
+  // naming the heading of the activity block #14686 removed. (It was never "see
+  // security alerts" — that wording existed only in an intermediate commit on
+  // this branch, so pinning THAT string absent proved nothing.) A pointer to a
+  // surface that no longer exists is how a reader learns the dashboard is stale.
   const main = readFileSync(join(here, 'main.jsx'), 'utf8')
-  assert.doesNotMatch(main, /see security alerts/i)
+  assert.doesNotMatch(main, /see recent activity/i)
   assert.match(main, /see notifications/i)
   // ⛔ The other half of the requirement, and the one that can regress silently:
   // #14687/#14702 retired "Suspicious activity detected" because the measurement

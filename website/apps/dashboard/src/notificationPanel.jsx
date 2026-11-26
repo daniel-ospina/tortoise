@@ -160,8 +160,9 @@ function Badge({ count, warn }) {
 function actionName(action, entry) {
   if (!entry) return action
   const label = entry.label || ''
-  // The message is rendered by the row and can differ where the label does not
-  // (two `flag` rows of different rules share `label` 'Suspicious activity').
+  // The message is rendered by the row and can differ where the label does not:
+  // `labels` in `abuse.py` maps one label per TYPE, while the message embeds the
+  // per-row measurement (`EVENT_FLAG` reads "High activity rate" for every rule).
   const message = entry.message && entry.message !== label ? ` — ${entry.message}` : ''
   const count = entry.countLabel ? ` ${entry.countLabel}` : ''
   // The episode WINDOW is rendered on the row too (and two bouts can share a newest
@@ -1000,8 +1001,10 @@ export function NotificationBell({
                   onClick={() => setShowOlder(!showOlder)}
                   // The region this controls is the MAIN list: `showOlder` pushes
                   // `ledgerView.older` into `entries`, it does not mount a second
-                  // list. `aria-controls` only while that list is rendered (see
-                  // `listId`'s own note above).
+                  // list. Unlike the other three triggers, that list stays mounted
+                  // whenever there is a current row, so `aria-controls` here tracks
+                  // the EXPANDED state rather than mount state (`listId`'s note
+                  // above is the mount rule the other three follow).
                   aria-expanded={showOlder}
                   aria-controls={showOlder ? listId : undefined}
                 >

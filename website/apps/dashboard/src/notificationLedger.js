@@ -60,8 +60,9 @@
 //     It is what React keys on and what the detail view resolves, because a
 //     row that opens a DIFFERENT episode than the one clicked is a bug a
 //     security list cannot have.
-//   * `entryKeyOf` — WHICH DECISION covers it: the client-visible identity
-//     (`type|message`), which must NOT move when the server re-keys a bout.
+//   * `entryKeyOf` — WHICH DECISION covers it: the client-visible identity —
+//     `type|surface:<details.surface>` when the payload carries a surface, else
+//     `type|message` — which must NOT move when the server re-keys a bout.
 //
 // The two are not interchangeable. Using the decision key as the render key made
 // two distinct episodes the same React child (one silently dropped); using the
@@ -841,9 +842,11 @@ function firstMsOf(alert) {
  * (`EVENT_FLAG: REGISTER_ACTIVITY`, `abuse.py`), and its message is no longer a
  * constant (it embeds surface/count/threshold/window_s), so it never shared a key
  * with a `suspend` row in the first place. The COLLISION the gate bounds still
- * exists — `entryKeyOf` is still `type|message`, so two rows that render the same
- * sentence still share one decision key (`read_velocity` rows name only the
- * scope) — which is why the window test stays load-bearing.
+ * exists — a row that carries NO surface still keys on `type|message`
+ * (`entryKeyOf` returns `type|surface:<surface>` when the payload carries one),
+ * so two such rows that render the same sentence still share one decision key
+ * (`read_velocity` rows name only the scope) — which is why the window test
+ * stays load-bearing.
  *
  * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — the same two
  * rules `_episode_acknowledged` applies, mirrored exactly:
@@ -1251,11 +1254,12 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   //
   // ⛔ THIS REPLACES THE IDENTITY COLLAPSE, and the reason is the failure the
   // collapse could not survive. The server's identity is type + RULE
-  // (`_alert_subject`) while this key is `type|message` (`_alert_dict`), so
-  // whenever two episodes render the SAME SENTENCE two genuinely different
-  // episodes collide on the client key — which is what `flag` rows did until
-  // #14702 put the measured numbers into their message, and what `read_velocity`
-  // rows still do by naming only the scope. Collapsing to one row per identity
+  // (`_alert_subject`); the client key is `type|surface:<surface>` when the
+  // payload carries a surface, else `type|message` (`entryKeyOf`, `_alert_dict`).
+  // So a row with NO surface still collides whenever two episodes render the
+  // SAME SENTENCE — `read_velocity` rows still do, by naming only the scope (and
+  // `flag` rows did until #14702 put the measured numbers into their message).
+  // Collapsing to one row per identity
   // meant that once today's bout was acknowledged, an OLDER unacknowledged one
   // was neither listed nor counted — an alert made invisible and uncountable on
   // the security surface
