@@ -2055,7 +2055,34 @@ def _pi_retirement_unverifiable(path: Path) -> bool:
     return bool(unreadable)
 
 
-def _duplication_consequence(*, dry_run: bool, unverified: bool = False) -> str:
+def _pi_loadability_is_guessed(path: Path) -> bool:
+    """Did :func:`_pi_entry_is_loadable` answer from its UNREADABLE branch?
+
+    That predicate fails CLOSED — "a path this reader cannot read may register
+    anything" — so a ``True`` from it is a MEASUREMENT only when the shape could
+    be READ. When it could not, a receipt that says "is still an extension Pi
+    loads" (and names a cause) states a registration AND a reason the code never
+    established (#14342 round 17, finding 1).
+
+    The read FOLLOWS a symlink, because ``_pi_entry_is_loadable`` does: asking
+    about the link itself answers about a different object than the predicate
+    did, and a link to a directory with an unreadable ``package.json`` is
+    exactly the shape that was measured.
+    """
+    try:
+        if not path.exists():  # follows the link; False for a dangling one
+            return False
+        target = Path(os.path.realpath(path))
+        if not target.is_dir():
+            return False
+    except OSError:
+        return False
+    _entries, unreadable = _pi_manifest_entries(target)
+    return bool(unreadable)
+
+
+def _duplication_consequence(*, dry_run: bool, unverified: bool = False,
+                             subject: str = "the second producer") -> str:
     """What is (or may be) REGISTERED — stated only as far as it was MEASURED.
 
     ⛔ ONE helper, so a new call site cannot reintroduce the assertion. The two
@@ -2065,18 +2092,23 @@ def _duplication_consequence(*, dry_run: bool, unverified: bool = False) -> str:
     fail-closed guess as a fact — the same class as the byte comparison this
     PR's parent commit removed (#14342 round 16, finding 1).
 
-    The verified arms keep their original sentence (a refusal that measured
-    ``_pi_entry_is_loadable(active) is True`` really does leave two registered),
-    and the unverified arm says what is true: it does not know.
+    ⛔ ``subject`` is a PARAMETER, not a constant (#14342 round 17, finding 2):
+    the legacy arms reach their refusal BEFORE the second producer is read at
+    all, so naming it there attributes an unverified state to a path the run
+    never touched — and on a legacy-only box, one that does not exist.
+
+    A COMPLETE sentence (capitalised, terminal period), so a call site cannot
+    splice a lowercase fragment onto an interpolated message and leave a
+    consequence whose antecedent was deleted.
     """
     if unverified:
-        return ("the second producer could not be VERIFIED, so it may still "
-                "register and every session could be captured twice")
+        return (f"{subject} could not be VERIFIED, so it may still register and "
+                "every session could be captured twice.")
     if dry_run:
-        return ("both producers would stay registered and every session would "
-                "be captured twice")
-    return ("both producers are registered and every session is captured "
-            "twice")
+        return ("Both producers would stay registered and every session would "
+                "be captured twice.")
+    return ("Both producers are registered and every session is captured "
+            "twice.")
 
 
 def _sentence(text: str) -> str:
@@ -2175,6 +2207,19 @@ def _disable_pi_second_producer(
     # So `retired` is re-read on EVERY run, exactly as the legacy arm re-reads
     # its own disabled name (#14342 review, final round finding 1).
     if _pi_entry_is_loadable(retired):
+        # ⛔ A GUESS IS NOT A MEASUREMENT, and the two branches must not share
+        # one sentence (#14342 round 17, finding 1). `_pi_entry_is_loadable`
+        # answers True for an UNREADABLE entry by design, so the measured branch
+        # below may name a cause and the guessed one may not: on a directory
+        # whose package.json cannot be read, Pi's own reader throws and falls
+        # through to a missing index — it registers NOTHING, while "resolved
+        # through `resolveExtensionEntries` under ANY name" claims otherwise.
+        if _pi_loadability_is_guessed(retired):
+            return False, [], (
+                f"cannot disable the second capture producer: {retired} could "
+                f"not be VERIFIED — it may still register, so every session "
+                f"could be captured twice. {seam_state}. Move it out of the "
+                "extensions directory by hand and re-run.")
         return False, [], (
             f"cannot disable the second capture producer: {retired} is still "
             "an extension Pi loads — a suffixed DIRECTORY, or a link to one, "
@@ -2266,8 +2311,7 @@ def _disable_pi_second_producer(
                 f"disabled ({active}): {_sentence(planned)} "
                 f"{_duplication_consequence(
                     dry_run=True,
-                    unverified=_pi_retirement_unverifiable(active))} until "
-                f"one of them is removed.")
+                    unverified=_pi_retirement_unverifiable(active))}")
         if active.is_symlink() and active.is_dir():
             # The real run renames the LINK to `retired` and THEN asserts on
             # it; a suffixed link to a directory is still resolved through
@@ -2301,8 +2345,7 @@ def _disable_pi_second_producer(
             f"could not be disabled ({active}): {_sentence(error)} "
             f"{_duplication_consequence(
                 dry_run=False,
-                unverified=_pi_retirement_unverifiable(active))} until one of "
-            f"them is removed.")
+                unverified=_pi_retirement_unverifiable(active))}")
     # ⛔ ASSERT ON THE PATH THE LOADER CONSULTS, NOT ON THE PATH THE FILE SHAPE
     # HAPPENS TO PRODUCE. ``retired`` is NEVER CREATED for the directory shape
     # (the directory keeps its name), so asserting on it alone was INERT on
@@ -2601,27 +2644,62 @@ def _install_pi(
             # Refused, not converged: unlinking would destroy a link the
             # installer did not create, and the sibling arm above already
             # documents the one link it does unlink.
+            # ⛔ THE LOADABILITY HALF OF THIS SENTENCE IS ALSO A GUESS SOMETIMES
+            # (#14342 round 17, finding 1). The SYMLINK-to-a-directory half is
+            # measured, but "Pi resolves a symlinked subdirectory through its
+            # index file" presumes the target could be READ: a target whose
+            # `package.json` is unreadable makes Pi's reader throw and fall
+            # through to a missing index, registering nothing. One sentence for
+            # both would name a cause the code never established.
+            _guessed = _pi_loadability_is_guessed(legacy_disabled)
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions),
                                  changed_artifacts=_written(), error=(
                                      f"the legacy capture extension "
                                      f"{legacy_disabled} is a SYMLINK to a "
-                                     f"directory, and Pi resolves a symlinked "
-                                     f"subdirectory through its index file "
-                                     f"under ANY suffixed name — renaming it "
-                                     f"retires nothing, "
-                                     f"{_both_producers_clause(dry_run=dry_run)}. "
+                                     f"directory, and "
+                                     + ("its package.json cannot be read, so "
+                                        "whether Pi still registers it COULD "
+                                        "NOT be verified — it may still load, "
+                                        "so every session could be captured "
+                                        "twice"
+                                        if _guessed else
+                                        f"Pi resolves a symlinked "
+                                        f"subdirectory through its index "
+                                        f"file under ANY suffixed name — "
+                                        f"renaming it retires nothing, "
+                                        f"{_both_producers_clause(dry_run=dry_run)}")
+                                     + ". "
+                                     # ⛔ "THIS BOX NOW RUNS BOTH PRODUCERS" is
+                                     # the SAME claim one clause later: it presumes
+                                     # the retired name registers, which is exactly
+                                     # what the guessed branch above could not
+                                     # establish. A refusal that says "could not be
+                                     # verified" and then asserts the count has
+                                     # re-broken its own sentence.
                                      + (f"The capture seam at {dst} WOULD be "
-                                        f"installed, so this box would run "
-                                        f"BOTH producers; nothing was written."
-                                        if dry_run else
-                                        (f"The capture seam at {dst} WAS "
-                                         f"installed, so this box now runs "
-                                         f"BOTH producers."
-                                         if capture_written else
-                                         f"The capture seam at {dst} was "
-                                         f"ALREADY in place, so this box now "
-                                         f"runs BOTH producers."))
+                                        f"installed, so this box may run both "
+                                        f"producers; nothing was written."
+                                        if _guessed and dry_run else
+                                        (f"The capture seam at {dst} WOULD be "
+                                         f"installed, so this box would run "
+                                         f"BOTH producers; nothing was written."
+                                         if dry_run else
+                                         (f"The capture seam at {dst} WAS "
+                                          f"installed, so this box may run "
+                                          f"both producers."
+                                          if _guessed and capture_written else
+                                          (f"The capture seam at {dst} WAS "
+                                           f"installed, so this box now runs "
+                                           f"BOTH producers."
+                                           if capture_written else
+                                           f"The capture seam at {dst} was "
+                                           f"ALREADY in place, so this box may "
+                                           f"run both producers."
+                                           if _guessed else
+                                           f"The capture seam at {dst} was "
+                                           f"ALREADY in place, so this box now "
+                                           f"runs BOTH producers."))))
                                      + f" The link was not renamed and the "
                                        f"checkout it points at is untouched. "
                                        f"Move {legacy_disabled} out of the "
@@ -2659,11 +2737,13 @@ def _install_pi(
                                      changed_artifacts=_written(), error=(
                                          f"the legacy capture extension at "
                                          f"{plan_path} could not be retired "
-                                         f"({_sentence(planned)}), "
+                                         f"({_sentence(planned)}). "
                                          f"{_duplication_consequence(
                                              dry_run=True,
                                              unverified=_pi_retirement_unverifiable(
-                                                 plan_path))} and a real run "
+                                                 plan_path),
+                                             subject="the legacy capture "
+                                                     "extension")} A real run "
                                          f"would refuse the same way. Nothing was "
                                          f"written (a dry run). Move "
                                          f"{plan_path} out of the extensions "
@@ -2703,10 +2783,12 @@ def _install_pi(
                                      changed_artifacts=_written(), error=(
                                          f"the legacy capture extension at "
                                          f"{legacy_disabled} could not be "
-                                         f"retired ({_sentence(legacy_error)}), "
+                                         f"retired ({_sentence(legacy_error)}). "
                                          f"{_duplication_consequence(
                                              dry_run=False,
-                                             unverified=_unverified)}. Move "
+                                             unverified=_unverified,
+                                             subject="the legacy capture "
+                                                     "extension")} Move "
                                          f"{legacy_disabled} out of the "
                                          f"extensions directory by hand and "
                                          f"re-run."))

@@ -1284,10 +1284,32 @@ def _registered_producers(ext_dir: Path) -> list[str]:
     The RULE, not the exact path, and not a name-prefix guess: a
     ``.bak.ts`` / ``.disabled.js`` / ``.dot-dir/index.ts`` variant is loaded
     one level down from the name an exact-path test looks at (agent-infra
-    tracked a version of that as #2147 for a different stem)."""
+    tracked a version of that as #2147 for a different stem).
+
+    ⛔ THE MANIFEST BRANCH IS PART OF THE RULE (#14342 round 17, finding 3).
+    This helper used to check only ``index.ts`` / ``index.js`` while its own
+    docstring stated the full rule, so a directory declaring
+    ``pi.extensions`` (with the named file present) read as ``[]`` here and
+    ``True`` in ``capture_install._pi_entry_is_loadable`` — two oracles that
+    disagree, which is exactly how a one-producer assertion over such a shape
+    becomes a silent false PASS. The reader is the MODULE's, not a third
+    transcription: ``_pi_manifest_entries`` is the same function the refusal
+    used, so a rule change reaches both.
+
+    Modelling matches ``_pi_entry_is_loadable`` exactly, including the
+    fall-through: an UNREADABLE manifest is Pi's `catch { return null }`, so it
+    is NOT a registration and the index files are consulted instead.
+    """
     found: list[str] = []
     for entry in ext_dir.iterdir():
         if entry.is_dir():
+            entries, unreadable = capture_install._pi_manifest_entries(entry)
+            if not unreadable and entries:
+                resolved = [name for name in entries
+                            if (entry / name).exists()]
+                if resolved:
+                    found.extend(f"{entry.name}/{name}" for name in resolved)
+                    continue
             for index in ("index.ts", "index.js"):
                 if (entry / index).is_file():
                     found.append(f"{entry.name}/{index}")
@@ -1453,16 +1475,23 @@ def test_pi_install_does_not_claim_two_producers_it_could_not_verify(home):
         # The dry run must not claim a measurement either, and must not claim a
         # write: same predicate, subjunctive mood.
         dry = install_capture("pi", home=home, dry_run=True)
+        # ⛔ MEASURE THE DISK WHILE THE MANIFEST IS STILL UNREADABLE — that is the
+        # state the receipt describes. Restoring the mode first would let the
+        # oracle see a READABLE manifest naming an existing `main.ts`, which real
+        # Pi DOES register (a stronger, different shape — and one where the
+        # receipt's "could not be VERIFIED" would no longer be the right
+        # sentence either).
+        registered = _registered_producers(ext_dir)
     finally:
         os.chmod(manifest, 0o644)
 
     error = res.error or ""
     assert not res.ok, res.actions
     assert "could not be VERIFIED" in error, error
-    # ⛔ THE FALSE CLAIM: neither measured sentence may appear anywhere.
-    assert "both producers are registered" not in error, error
-    assert "TWO producers are registered" not in error, error
-    assert "TWO producers would stay registered" not in error, error
+    # ⛔ THE FALSE CLAIM: neither measured sentence may appear anywhere, in
+    # either mood (case-insensitive — the clause is capitalised now).
+    assert "producers are registered" not in error.lower(), error
+    assert "producers would stay registered" not in error.lower(), error
     # The remedy and the consequence survive, so saying LESS is not less useful.
     assert "captured twice" in error, error
     assert "by hand" in error, error
@@ -1470,17 +1499,17 @@ def test_pi_install_does_not_claim_two_producers_it_could_not_verify(home):
     assert "hand.. " not in error, error
 
     # The disk agrees with the weaker sentence: ONE producer is registered.
-    assert _registered_producers(ext_dir) == [
-        capture_install.PI_EXTENSION_NAME], (
-        "the shape must carry exactly one registered producer — that is the "
-        "premise of the assertion above")
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"the shape must carry exactly one registered producer while its "
+        f"manifest is unreadable — that is the premise of the assertion "
+        f"above; got {registered}")
     # Non-destructive: the unreadable producer is untouched.
     assert (active / "main.ts").read_text() == "// declared by the manifest\n"
 
     dry_error = dry.error or ""
     assert not dry.ok, dry.actions
     assert "could not be VERIFIED" in dry_error, dry_error
-    assert "TWO producers are registered" not in dry_error, dry_error
+    assert "producers are registered" not in dry_error.lower(), dry_error
     assert dry.changed_artifacts == (), dry.changed_artifacts
 
 
@@ -1505,6 +1534,8 @@ def test_legacy_install_does_not_claim_two_producers_it_could_not_verify(home):
     os.chmod(manifest, 0o000)
     try:
         res = install_capture("pi", home=home)
+        # Measured while unreadable, for the same reason as the sibling row.
+        registered = _registered_producers(ext_dir)
     finally:
         # ⛔ THE REAL RUN RENAMES THE DIRECTORY FIRST, then retires inside it, so
         # the unreadable manifest is no longer at the source path afterwards.
@@ -1519,15 +1550,140 @@ def test_legacy_install_does_not_claim_two_producers_it_could_not_verify(home):
     error = res.error or ""
     assert not res.ok, res.actions
     assert "could not be VERIFIED" in error, error
-    assert "both producers are registered" not in error, error
-    assert "both producers stay registered" not in error, error
+    assert "producers are registered" not in error.lower(), error
+    assert "producers stay registered" not in error.lower(), error
+    # ⛔ IT MUST NOT NAME A PRODUCER THIS RUN NEVER READ (#14342 round 17,
+    # finding 2): the legacy block returns before `_disable_pi_second_producer`
+    # runs, so on a legacy-only box `reflect-hook.ts` does not even exist.
+    assert "second producer" not in error.lower(), error
+    assert "legacy capture extension" in error.lower(), error
     # The legacy remedy is the one that was already there.
     assert "by hand" in error, error
     assert "hand.. " not in error, error
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"no index.ts and an unreadable manifest ⇒ the legacy directory "
+        f"registers nothing, so the assertion above must match the disk; "
+        f"got {registered}")
+
+
+def test_a_guessed_loadability_is_not_reported_as_a_measured_one(home):
+    """A RETIRED name that Pi's reader cannot read: `_pi_entry_is_loadable`
+    answers True for it because it fails CLOSED, and the refusal used to report
+    that guess as a measurement — "is still an extension Pi loads" plus an
+    invented cause ("resolved through `resolveExtensionEntries` under ANY
+    name") — over a shape where real Pi registers nothing (#14342 round 17,
+    finding 1).
+
+    Mutation: drop the `_pi_loadability_is_guessed` branch so both shapes share
+    the measured sentence — this row REDs on the false claim.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.mkdir(parents=True)
+    (retired / "main.ts").write_text("// declared by the manifest\n")
+    manifest = retired / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        registered = _registered_producers(ext_dir)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    # ⛔ The measured sentence AND its invented cause must both be gone.
+    assert "still an extension Pi loads" not in error, error
+    assert "resolveExtensionEntries" not in error, error
+    # The remedy and the consequence survive.
+    assert "captured twice" in error, error
+    assert "by hand" in error, error
+    # …and the disk is what the weaker sentence describes: one producer.
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"an unreadable manifest with no index registers nothing, so this "
+        f"shape must carry exactly one producer; got {registered}")
+
+
+def test_a_guessed_loadability_behind_a_symlink_is_not_reported_as_measured(home):
+    """The legacy arm's sibling (#14342 round 17, finding 1): the SYMLINK-to-a-
+    directory half of its sentence is measured, but "Pi resolves a symlinked
+    subdirectory through its index file" presumes the target could be READ.
+    With an unreadable `package.json` in the target, Pi's reader throws and
+    falls through to a missing index — nothing registers — while the receipt
+    named a cause and claimed two producers.
+
+    `_pi_retirement_unverifiable` cannot answer this (it excludes symlinks), so
+    the read must FOLLOW the link. Mutation: drop the `_guessed` branch — REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        registered = _registered_producers(ext_dir)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "COULD NOT be verified" in error, error
+    # ⛔ The invented cause, and the measured two-producer claim, are gone.
+    assert "index file under ANY suffixed name" not in error, error
+    assert "producers stay registered" not in error.lower(), error
+    assert "producers are registered" not in error.lower(), error
+    # ⛔ AND SO IS THE COUNT ONE CLAUSE LATER: "this box now runs BOTH
+    # producers" presumes exactly what the sentence just said it could not
+    # verify, so the guessed branch must not assert it either.
+    assert "runs BOTH producers" not in error, error
+    assert "may run both producers" in error, error
+    # The link is untouched and the checkout it points at survives.
+    assert disabled.is_symlink(), "the symlink was renamed or removed"
+    assert (target / "main.ts").exists()
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"the link's target registers nothing while its manifest is "
+        f"unreadable; got {registered}")
+
+
+def test_registered_producers_helper_models_the_manifest_branch(home):
+    """The TEST ORACLE must model the same rule the module does, including
+    ``resolveExtensionEntries``' manifest branch (#14342 round 17, finding 3).
+
+    It used to read only ``index.ts`` / ``index.js`` while its own docstring
+    stated the full rule, so a directory declaring ``pi.extensions`` read as
+    ``[]`` here and ``True`` in ``_pi_entry_is_loadable`` — two oracles that
+    disagree, which is exactly how a future one-producer assertion over such a
+    shape becomes a silent false PASS.
+
+    Mutation: drop the manifest branch from the helper (back to index files
+    only) — this row REDs on the disagreement.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "main.ts").write_text("// declared by the manifest\n")
+    (producer / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+
+    assert capture_install._pi_entry_is_loadable(producer) is True, (
+        "the module's predicate must register a manifest-declared entry")
     assert _registered_producers(ext_dir) == [
-        capture_install.PI_EXTENSION_NAME], (
-        "no index.ts and an unreadable manifest ⇒ the legacy directory "
-        "registers nothing; the assertion above must match the disk")
+        f"{capture_install.PI_SECOND_PRODUCER_NAME}/main.ts"], (
+        "the test oracle must agree with the module's predicate — a manifest "
+        "declaring an existing entry IS a registration")
 
 
 def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
@@ -1580,9 +1736,17 @@ def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
     assert not (producer / "index.ts.disabled").exists()
     assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
         "a directory was renamed to a name Pi still loads as a subdirectory")
-    assert "reflect-hook.ts/index.ts" in _registered_producers(ext_dir), (
-        f"the producer is no longer loaded, so the box may have stopped "
-        f"capturing: {_registered_producers(ext_dir)}")
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME,
+        f"{capture_install.PI_SECOND_PRODUCER_NAME}/a.ts",
+    }, (
+        f"the producer must still be LOADED after the refusal — the box would "
+        f"otherwise have stopped capturing: {_registered_producers(ext_dir)}")
+    # ⛔ NOT `index.ts`: Pi's `resolveExtensionEntries` takes the MANIFEST branch
+    # when it resolves and never falls back to the index, so `a.ts` is what
+    # registers here. Asserting `index.ts` asserted a rule Pi does not implement
+    # — and the oracle only agreed with it because it did not model the manifest
+    # branch either (#14342 round 17, finding 3).
 
 
 def test_pi_entry_is_loadable_mirrors_resolve_extension_entries(tmp_path):
