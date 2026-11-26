@@ -121,6 +121,26 @@ def occupancy(before) -> dict:
 _OVERVIEW_KEYS = ("taxonomy", "structure", "status")
 
 
+def _unmeasured_sections(before) -> list:
+    """The required sections `before` does not MEASURE — absent, null, or empty.
+
+    ⛔ A SECTION THAT IS PRESENT BUT EMPTY IS NOT A MEASUREMENT (#14691 review,
+    8th cycle, P3). The guard in `refuse_if_not_fresh` used to test the KEYS
+    alone — `set(_OVERVIEW_KEYS) <= set(before)` — so
+    `{"taxonomy": {}, "structure": {"total": 0}, "status": None}` and the same
+    with `"status": {}` were ACCEPTED: the reply carried the section and measured
+    nothing, which is "absent is not empty" one level down. The real reply's
+    `status` is `{"connected": true, "counts": {...}, "total_entities": 0}`
+    (`out/ingest-receipt.json` → `empty_before.status`), so a null or empty
+    section is never a legitimate shape — it is a carried-but-unmeasured field,
+    and the freshness premise cannot rest on a field nobody read.
+    """
+    if not isinstance(before, dict):
+        return list(_OVERVIEW_KEYS)
+    return [key for key in _OVERVIEW_KEYS
+            if not isinstance(before.get(key), dict) or not before.get(key)]
+
+
 def refuse_if_not_fresh(before, graph: str = GRAPH) -> None:
     """Raise SystemExit unless `before` describes an EMPTY graph.
 
@@ -135,13 +155,17 @@ def refuse_if_not_fresh(before, graph: str = GRAPH) -> None:
     # P3-7). `(before or {})` made `None` and `{}` walk to "no contamination" and
     # the run proceeded — a premise established by a measurement that never
     # happened. A refusal needs the measurement, so an unreadable overview is a
-    # REFUSAL, not a pass.
-    if not isinstance(before, dict) or not set(_OVERVIEW_KEYS) <= set(before):
+    # REFUSAL, not a pass. And CARRIED is not MEASURED: a present-but-null or
+    # present-but-empty section is a field nobody read (#14691 review, 8th cycle,
+    # P3 — `{"taxonomy": {}, "structure": {"total": 0}, "status": None}` was
+    # ACCEPTED by the key-presence guard).
+    if unmeasured := _unmeasured_sections(before):
         raise SystemExit(
             "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
-            f"{graph} returned an overview with no {sorted(set(_OVERVIEW_KEYS) - set(before or {}))} "
-            "section, so the emptiness of the graph could not be established at "
-            "all. The isolation premise is a MEASUREMENT, not an assumption.")
+            f"{graph} returned no measurement for {unmeasured} — a section that is "
+            "absent, null or empty is CARRIED, not measured, so the emptiness of "
+            "the graph could not be established at all. The isolation premise is a "
+            "MEASUREMENT, not an assumption.")
     occupied = {k: v for k, v in ((before or {}).get("taxonomy") or {}).items() if v}
     structure_total = ((before or {}).get("structure") or {}).get("total") or 0
     contamination = occupancy(before)

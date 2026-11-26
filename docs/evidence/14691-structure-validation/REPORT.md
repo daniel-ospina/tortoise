@@ -608,6 +608,22 @@ sweep cannot type, so the restores are spelled `readback |= saved` — `dict.__i
 and returns self, so the module's dict is restored exactly as before, and `--check` is exit 0 at
 `11912`.
 
+### 8.5 What the 9th cycle closed (a section that was CARRIED, not measured)
+
+The 8th cycle's remaining P3 sat one level below the "absent is not empty" class this bundle exists
+to close: `refuse_if_not_fresh` required the three `_OVERVIEW_KEYS` to be *present*, not *measured*,
+so an overview carrying `"status": None` — or `"status": {}` — beside an empty `taxonomy` and a
+`structure` whose only field is `total: 0` was **ACCEPTED**. The real reply's `status` is
+`{"connected": true, "counts": {...}, "total_entities": 0}` (`out/ingest-receipt.json` →
+`empty_before.status`), so neither shape is legitimate: the section was carried and nobody read it,
+and the freshness premise would rest on a field that measured nothing.
+
+`_unmeasured_sections()` now names every required section that is absent, null or empty, and the
+refusal acts on that list. The arm `test_a_CARRIED_but_empty_overview_section_is_not_a_MEASUREMENT`
+reds on the pre-fix guard — measured, reverting the guard to key-presence fails it while the rest of
+the suite stays green — and it still ACCEPTS the receipt's own `empty_before`, so a carried section
+is refused without refusing a real run on a fresh graph.
+
 ## 9. Mandate-preflight disclosure
 
 The dispatch brief carried a `[mandate-preflight]` block naming two files this lane was ordered to
