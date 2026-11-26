@@ -925,12 +925,17 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
 
     ⛔ NOT "a state-change class": two of ``ABUSE_INCIDENT_KINDS``' three members
     (``abuse_flag``, ``abuse_review_needed``) are re-derived rate MEASUREMENTS, and
-    only ``abuse_suspended`` records an operator/enforcement action. ⚠️ Do NOT
-    promote that into "the flag changes nothing" — ``abuse_flag`` is emitted right
-    after ``store.flag_org``, which writes ``organizations.flagged_at`` (a MARKER,
-    which ``/v1/team`` renders as ``status: "flagged"``). What the flag does not do
-    is ENFORCE: nothing punitive follows it. See ``abuse.py``'s register note and
-    the ``else`` arm of the ``what`` expression below.
+    only ``abuse_suspended`` records a SUSPENSION — a human DECISION. ⚠️ Two traps,
+    in opposite directions, and this note has fallen into both:
+    * do NOT say "the flag changes nothing" — ``abuse_flag`` is emitted right after
+      ``store.flag_org``, which writes ``organizations.flagged_at``, a MARKER that
+      ``/v1/team`` renders as ``status: "flagged"``;
+    * do NOT say the flag is not an enforcement ACTION either — ``flag_org`` IS
+      ``KIND_ABUSE_ENFORCEMENT_FAULT``'s one lane (``abuse.py``'s
+      ``DECISION_FAULT_LANES``, and ``docs/ops/registry-backup-dr.md``).
+    What is true, and all that is true: it sets a marker and imposes nothing —
+    no disable, no throttle, no lock. See ``abuse.py``'s register note and the
+    ``else`` arm of the ``what`` expression below.
 
     One decision point for both channels — the store's create-once object files
     the issue AND emits the single Telegram push for the lifecycle, so the human

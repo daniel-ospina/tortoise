@@ -1754,9 +1754,11 @@ def _alert_dict(row: dict) -> dict:
         # Round 14 (review finding): this was the only one of the three RATE
         # detectors whose string carried no informational clause and no next
         # step — it read as an incident, the exact framing this issue removes.
-        # It now uses the same shape as its siblings, and the shared shape is
-        # what the test pins (every ACTIVITY message must say nothing changed),
-        # rather than one type's phrase.
+        # It now uses the same shape as its siblings, and the shared SHAPE is
+        # what the test pins (an ACTIVITY message must state that nothing was
+        # DISABLED: "did not disable anything" is required for the two rules that
+        # write ``flagged_at``, either wording passes for the rest), rather than
+        # one type's phrase.
         EVENT_RECOVERY_VELOCITY: ("Unusual account-recovery activity on this "
                                   "Organization. This is informational; it did "
                                   "not change anything. If you don't recognise "
