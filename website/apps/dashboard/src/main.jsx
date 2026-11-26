@@ -11111,7 +11111,7 @@ function claimIntentInFlight() {
           </span>
         ) : null}
         {team && team.status === 'flagged' && (
-          <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
+          <span className="tier-badge" title="Unusual activity measured — see recent activity">⚠ flagged</span>
         )}
       </header>
 
