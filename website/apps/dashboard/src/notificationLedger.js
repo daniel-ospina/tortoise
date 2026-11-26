@@ -901,12 +901,23 @@ export const DISMISSED_LOCAL_NOTE = 'dismissed for you'
 export const ACK_FOR_EVERYONE = 'Acknowledge for everyone'
 export const ACKED_NOTE = 'acknowledged for the Organization'
 //: The ACKNOWLEDGED group is READ-ONLY on purpose: the server has no
-//: un-acknowledge route, so a row states the fact (and when it was accepted)
-//: rather than offering a Restore it cannot honour. It exists so an ORG-WIDE
-//: decision — the one that is cross-device and irreversible — is reviewable; the
-//: local, reversible decisions already have their own groups.
+//: un-acknowledge route, so a row states the fact rather than offering a Restore
+//: it cannot honour. It exists so an ORG-WIDE decision — the one that is
+//: cross-device and irreversible — is reviewable; the local, reversible decisions
+//: already have their own groups.
+//:
+//: ⛔ IT DOES NOT SHOW WHEN THE DECISION WAS MADE, and cannot: `_alert_feed` in
+//: tortoise/abuse.py stamps `acked` as a BOOLEAN and ships no acknowledgement
+//: timestamp, so the only instant an acked row holds is when the episode last
+//: FIRED. That is why the row's stamp goes through `ACKED_DETECTED` — an
+//: unlabelled timestamp sitting after "acknowledged for the Organization" reads as
+//: the time of the decision, which is the one fact a reader auditing a mis-click
+//: needs and the one this payload cannot supply (#14694 review finding).
 export const ACKED_TOGGLE = (n) => `Acknowledged for everyone (${n})`
 export const ACKED_HIDE = 'Hide acknowledged'
+//: Says WHAT the stamp below it is: the episode's last DETECTION, not the
+//: acknowledgement. `ACKED_INSTEAD_OF` names the missing field without claiming it.
+export const ACKED_DETECTED = (stamp) => `detected ${stamp}`
 export const SAVE_FAILED =
   'Your browser did not save that — it will be forgotten when this page '
   + 'reloads.'

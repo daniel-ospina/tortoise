@@ -43,6 +43,7 @@
 import React from 'react'
 
 import {
+  ACKED_DETECTED,
   ACKED_HIDE,
   ACKED_NOTE,
   ACKED_TOGGLE,
@@ -877,8 +878,12 @@ export function NotificationBell({
                   while the detail stays open, which is not a record.
 
                   READ-ONLY by design: the server has no un-acknowledge route, so
-                  there is no Restore here — the row states the fact and when it
-                  was accepted. (#14694 review finding.) */}
+                  there is no Restore here — the row states the fact and when the
+                  episode last FIRED. It does NOT show when the decision was made:
+                  `_alert_feed` stamps `acked` as a boolean and ships no
+                  acknowledgement time, and an unlabelled timestamp after
+                  "acknowledged for the Organization" would read as the decision
+                  time to the reader auditing a mis-click. (#14694 review finding.) */}
               {ledgerView.acked.length ? (
                 <div className="notif-group">
                   <button
@@ -896,7 +901,9 @@ export function NotificationBell({
                             <strong>{entry.label}</strong>
                             <span className="dim small"> · {ACKED_NOTE}</span>
                             {entry.stamp ? (
-                              <span className="dim small"> · {entry.stamp}</span>
+                              <span className="dim small">
+                                {' · '}{ACKED_DETECTED(entry.stamp)}
+                              </span>
                             ) : null}
                           </span>
                         </li>

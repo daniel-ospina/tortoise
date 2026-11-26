@@ -623,6 +623,16 @@ test('#14694: an ACKNOWLEDGED episode stays REVIEWABLE after the detail closes',
   // READ-ONLY on purpose: the server has no un-acknowledge route, so offering a
   // Restore here would be a control that cannot honour itself.
   assert.doesNotMatch(group.textContent, /Restore/)
+  // ⛔ THE STAMP SAYS WHAT IT IS. `_alert_feed` in tortoise/abuse.py stamps `acked`
+  // as a BOOLEAN and ships no acknowledgement time, so the only instant this row
+  // holds is when the episode last FIRED. An unlabelled timestamp placed after
+  // "acknowledged for the Organization" reads as the time the DECISION was made —
+  // the one fact a reader auditing a mis-click needs, and the one thing this
+  // payload cannot supply (#14694 review finding).
+  assert.match(group.textContent, /detected /,
+    'the stamp must say it is the detection time, not the decision time')
+  assert.doesNotMatch(group.textContent, /accepted/,
+    'and must not claim the acknowledgement time the feed does not carry')
 })
 
 test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
