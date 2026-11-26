@@ -1532,6 +1532,29 @@ def test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository(
         "the same repository's UNTRACKED path is a legitimate destination — the guard "
         "must not become a wall on the other checkout")
     assert fresh.is_file()
+    # ⛔ AND A TRACKED PATH WHOSE PARENT DIRECTORIES ARE GONE (#14625 review, round 5,
+    # P3). The probe walks up to the nearest EXISTING ancestor, so asking about the
+    # destination's BASENAME in that directory answered "untracked" for
+    # `peer/sub/deep/x.md` once `sub/` was removed — and the render landed a generated
+    # document on a TRACKED path at rc 0. `git ls-files` matches an index entry whose
+    # work-tree file is absent, so the probe must name the whole remainder.
+    deep = peer / "sub" / "deep" / "x.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("# tracked deep\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(peer), "add", "-A"], check=True)
+    shutil.rmtree(peer / "sub")
+    tracked_deep = subprocess.run(
+        ["git", "-C", str(peer), "ls-files", "--", "sub/deep/x.md"],
+        capture_output=True, text=True)
+    assert tracked_deep.stdout.strip() == "sub/deep/x.md", (
+        "the premise: the path is still in the index while its work-tree copy is gone")
+    rc = census.main(["--render", str(deep)])
+    assert rc == 2, (
+        f"a tracked path stays tracked after its parent directories are removed — got "
+        f"{rc}")
+    assert not deep.exists(), (
+        "a generated document landed on a TRACKED path because the probe named only "
+        "the basename in an ancestor directory")
 
 
 def test_an_UPPERCASE_dot_GIT_component_is_refused_too(tmp_path, monkeypatch, capsys):
