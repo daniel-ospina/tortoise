@@ -196,19 +196,85 @@ def test_a3_hierarchy_has_two_parents_and_five_children():
     assert a3["passes"] is True
 
 
+def test_a3_reds_when_the_two_products_collapse_into_one_node():
+    """F1 (#14691 review): A3 must FAIL on the collapse it exists to catch.
+
+    THE MUTANT: every declared product becomes ONE node named `Lumen` — the
+    exact failure A3 names. It PASSED before the fix, because `_same_name`
+    matched in EITHER direction, so `Lumen` matched both `Lumen Core` and
+    `Lumen Field`; `distinct` still equalled `len(DECL["containment"])` because
+    the five features kept their single (collapsed) parent. A check that cannot
+    red on its own subject is not a check.
+
+    The scorer is driven IN PROCESS with its `EDGES` rewritten, so this pins the
+    verdict function itself rather than the committed artifact — a future reader
+    changing `_same_name` back to two-directional reds here instead of silently
+    restoring the fail-open.
+    """
+    module = _load_score_module()
+    assert module.a3_hierarchy()["passes"] is True, "baseline is not clean"
+    products = {module._norm(p) for p in module.DECL["products"]}
+    for edge in module.EDGES:
+        if edge["predicate"] == "hasPart" and module._norm(edge["src"]) in products:
+            edge["src"] = "Lumen"
+    collapsed = module.a3_hierarchy()
+    assert collapsed["reported"]["distinct_parents"] == 1, collapsed["reported"]
+    assert collapsed["passes"] is False, (
+        "A3 still PASSES on a graph holding the two declared products as one "
+        "node — the prefix arm is tolerating a collapse again")
+
+
 def test_a4_declared_structure_is_traceable_and_relations_are_co_stated():
     """Reds if an entity name, or a relation's two endpoints, stops appearing in
     the corpus the extractor is scored against."""
     a4 = _score()["A4_no_invention"]
     assert a4["declared_structure_untraceable"] == []
+    assert a4["structural_kind_untraceable"] == []
     assert a4["relations_not_co_stated"] == []
     assert a4["passes"] is True
+    # the two untraceable names the bundle carries are KNOWLEDGE-LAYER objects,
+    # not structure elements — A4's scope is stated by its own counts, so a
+    # reader never has to guess which population the PASS covers.
+    assert a4["untraceable_counts"]["all_entity_names"] >= 0
+    assert a4["untraceable_counts"]["structural_kinds"] == 0
     # the CLAIM layer is reported separately and is NOT clean — pinning it keeps
     # a future reader from reading A4's PASS as covering the quotes.
     claim = _score()["claim_layer"]
     assert claim["quotes_total"] == 50
     assert claim["invented"] > 0
     assert claim["passes"] is False
+
+
+def test_a4_reds_for_an_invented_entity_the_declared_list_does_not_name():
+    """F5 (#14691 review): A4 must FAIL on an invention, not only on drift.
+
+    THE MUTANT: a fabricated `Lumen Cloud` is added to the readback as a real
+    `product-strategy:product` node. It PASSED before the fix, and structurally
+    so: the pre-fix verdict was `not structural_misses`, where
+    `structural_misses` was filtered to names matching a DECLARED element — and
+    an invented name is by definition not one, so the list stayed empty and the
+    "nothing invented" verdict could not fail on an invention.
+
+    The fix scopes the population by KIND (the structure kinds A1 already scores
+    against), so an invented product reds while a knowledge-layer object does not.
+    """
+    module = _load_score_module()
+    assert module.a4_invention()["passes"] is True, "baseline is not clean"
+    block = module.READBACK["object_kinds"]["product-strategy:product"]
+    inner = json.loads(block["reply"][0])
+    inner.append({"id": "1a2165fake000-c49e1db3abb3", "content": "Lumen Cloud",
+                  "point_kind": "product-strategy:product",
+                  "match_source": "structural", "relationships": [],
+                  "topics": [], "summary": "", "sessionId": "", "eventId": "",
+                  "sourcePath": "", "similarity": 1.0, "snippet": "Lumen Cloud"})
+    block["reply"][0] = json.dumps(inner)
+    mutated = module.a4_invention()
+    assert [u["name"] for u in mutated["structural_kind_untraceable"]] == ["Lumen Cloud"]
+    # it is NOT in the declared list — that is the whole point of this mutant
+    assert mutated["declared_structure_untraceable"] == []
+    assert mutated["passes"] is False, (
+        "A4 still PASSES on an invented product the declared list does not "
+        "name — the verdict is scoped to declared names again")
 
 
 def test_a5_reports_the_text_leg_and_the_structure_leg_separately():

@@ -11,7 +11,7 @@ did not come from the scoring script that produced it.
 |---|---|
 | Graph under test | `xv14691_business_structure` (the lane's private FalkorDB, `fdb-lane-2a55a53650`, `127.0.0.1:16413`) |
 | Corpus | `corpus/structure-corpus.json` — 4,295 characters, 5 documents, 30 turns |
-| Probe | depth-2 `tortoise_recall(mode="subgraph")` from each of the 32 declared names; endpoint-type + edge direction read from the returned `{nodes, edges:[{source,type,target}]}`; every id the ingest receipt claims it wrote resolved with `tortoise_get_entity` |
+| Probe | depth-2 `tortoise_recall(mode="subgraph")` from each of the 32 declared names; endpoint-type + edge direction read from the returned `{nodes, edges:[{source,type,target}]}`; every id the ingest receipt claims it wrote resolved with `tortoise_get_entity`. ⚠️ Both named tools EXECUTE and return data (measured: `node_count: 38, edge_count: 44` for `Lumen Core`, `get_governance` → `{result: []}`) while the bundle's own `out/tool-surface.json` lists **39 tools and neither name** — so the calls worked against a catalogue that does not advertise them. Recorded because a reader checking this row against `tool-surface.json` would otherwise read it as a fabricated claim. That divergence is a product finding of its own (an executable tool missing from the advertised surface), not a defect in this measurement. |
 | Raw data | `out/t6-independent-verification.json` |
 | Wrote nothing | no graph write, no extractor change (recorded decision (a)); the only store touch was reading |
 
@@ -29,8 +29,8 @@ The primary record's verdicts are `A1 PASS · A2 FAIL · A3 PASS · A4 PASS · A
 | **A2** production (`produces`) | **FAIL** — 0/7 inverted | 7 rows, all `team --produces--> component`; `produces` is `<-` (*the target brought the source into existence*), so each row asserts **the component produced the team** — same mechanism, opposite predicate | ✅ agree, W5 |
 | **A2** `managedBy` | **FAIL** — 0/2 inverted | `Jonas Bauer --managedBy--> Northwind Logistics` / `Helio Health`; `managedBy` is `Entity → Subject`, so the row says **the customer manages the person** | ✅ agree, W5 |
 | **A3** hierarchy | PASS — 5 pairs under 2 products, not a flat list; 8 write rows for 5 pairs (3 rewritten by a later doc) | 5 distinct parent→child pairs under 2 product parents; the receipt's 8 rows confirm the 3 rewrites | ✅ — see W3 |
-| **A4** invention | PASS — 0 invented structure elements of 35 | all 24 objects and 11 subjects trace to corpus text | ✅ for **structure**; ❌ for **claims** — see W4 |
-| **A5** retrieval | PARTIAL — search text answers 5/5, the structural walk resolves to an entity 0/5 | all four T6 questions answer correctly from `tortoise_search`; `explore_connections("Lumen Core")` returns **one** row and it is an epistemic `IMPL`, not one of its three `hasPart` children | ✅ agree, and W2 names the mechanism |
+| **A4** invention | PASS — 0 invented structure elements of 35 | the probe's `A1.objects` (24) and `A1.subjects` (11) are **lists of name+kind pairs**, and it ran no traceability check — so it does **not** independently corroborate A4's pass. The primary artifact alone carries that number (0 of 28 declared elements untraceable, 0 of 46 relations unstated), and it is the same artifact that names the **two** untraceable names (both knowledge-layer objects, not structure). Scored as: **names listed, traceability NOT re-measured here** | ⚠️ **not independent** — see F4 note below |
+| **A5** retrieval | PARTIAL — search text answers 5/5, the structural walk resolves to an entity 0/5 | `tortoise_search` answered all four questions the probe asked (`search_ok: true` ×4, no walk rows at all); `explore_connections("Lumen Core")` returns **one** row and it is an epistemic `IMPL`, not one of its three `hasPart` children. The **0/5 walk figure is the primary scorer's**, over five questions; the probe measured four, and they are not the same four (`who-owns` here vs `product-of-customer` / `what-team-builds` there) | ✅ on what it measured — **the 0/5 is not corroborated by this probe**, only the text leg is |
 
 ## What this measurement adds
 
@@ -94,20 +94,32 @@ growth on a *re-worded* statement inside one ingest; this is the same defect in
 the structural layer — a second document that **confirms** a fact adds a second
 edge instead of corroborating the first.
 
-### W4 — the structure is traceable; a tenth of the *claims* are not
+### W4 — the structure is traceable; a fifth of the *claims* are not
 
-A4 is written about structure, and on structure it holds: every entity name
-traces to corpus text. The point layer does not. Audit of the 50 `quote` fields
-the extractor attached (`out/t6-quote-audit.json`):
+A4 is written about structure, and on structure it holds: every declared
+structure element traces to corpus text. The point layer does not. Audit of the
+50 `quote` fields the extractor attached (`out/t6-quote-audit.json`):
 
 | quote fidelity | count |
 |---|---|
 | verbatim substring of the corpus | 11 |
-| faithful paraphrase (every token present, re-punctuated) | 27 |
-| **best corpus-sentence overlap < 0.5 — the corpus does not say it** | **10** |
+| faithful paraphrase (≥60% of the quote's words in one corpus sentence) | 27 |
+| **best corpus-sentence overlap < 60% — the corpus does not say it** | **12** |
+
+⛔ The `12` is the artifact's own count at the scorer's `<60%` threshold
+(`out/t6-quote-audit.json` `not_in_corpus: 12`; `out/t6-score.json`
+`claim_layer.invented: 12`), and it is the number that governs. An earlier
+revision of this section said **"10 … overlap < 0.5"**, which was wrong twice:
+os overlaps are `0.636, 0.875, 0.958, 1.0, 1.0, 1.0, 0.941, 1.0, 1.0, 1.0`, so
+**no** audited row falls below 0.5, and `10` is the length of a **capped example
+array**, not a count under any threshold. Corrected rather than dropped, because
+a number a reader can check against the artifact it cites must be the artifact's
+own number.
 
 The strongest example is a point the corpus never makes, attached to a ``quote``
-that is not in the corpus at all:
+that is not in the corpus at all — taken from `out/t6-score.json`
+`claim_layer.invented_examples` (which is where `score_t6.py` derives it), **not**
+from the audit's capped `audited` array, where it does not appear:
 
 > "Any future proposal to share or duplicate a feature across the Lumen Core /
 > Lumen Field boundary would be a change to this baseline, not a continuation

@@ -1,11 +1,31 @@
 #!/usr/bin/env python
 """#14691 T6 — the SECOND measurement: an independent read-only probe.
 
-Committed with `VERIFICATION-independent.md` so the second measurement is
-reproducible (`run.sh` supplies TORTOISE_DB_URI, exactly as for the other
-phases). Writes nothing to the graph and nothing to this directory: its output
-lands in /tmp, and the numbers it produced are frozen in
-`out/t6-independent-verification.json`.
+⛔ THIS SCRIPT IS NOT THE PRODUCER OF `out/t6-independent-verification.json`.
+That file's own `measured_by` field states where it came from — "second lane,
+independent probe (`/tmp/t6_probe2.py` + `/tmp/t6_probe4.py`)" — two scripts the
+peer lane ran from scratch and did not commit. The report shapes are disjoint
+beyond the `graph` key (this script emits
+`graph, tools, tool_count, probes{taxonomy,retrieval,list_by_kind},
+subgraph_stats, nodes, edges, resolved_ids, claimed_edges, governance`;
+the artifact carries
+`graph, measured_by, declared, A1, A2, A2_edge_row_counts_from_receipt, A3, A5,
+witness_governance_door_returns_empty, witness_neighbourhood_doors,
+tool_surface`), so a run of this script can never regenerate that artifact and
+must not be read as regenerating it. `REPORT.md` §8 records the same split.
+
+What it IS: a RE-RUNNABLE independent read of the same graph, over the product's
+own MCP door only, kept so the second measurement's shape can be re-measured
+without waiting for a peer lane. It writes nothing to the graph and nothing
+inside this bundle: its report lands on stdout-adjacent scratch (`T6_PROBE_OUT`,
+default `/tmp/t6-probe2.json`) and is a measurement in its OWN format.
+
+The worktree it probes is resolved from THIS file (`parents[3]`), exactly as
+`run_readback.py` does — an earlier revision hard-coded
+`/home/cmux/tortoise/.worktrees/t6-structure`, which made the script unrunnable on
+any other checkout (or after this lane's worktree was reaped) while its docstring
+claimed the second measurement was reproducible. `TORTOISE_DB_URI` is supplied by
+the caller exactly as for the other phases; `run.sh` supplies it.
 
 Revision 2 (depth 2):
 
@@ -27,10 +47,13 @@ import os
 import sys
 from pathlib import Path
 
-WT = Path("/home/cmux/tortoise/.worktrees/t6-structure")
+WT = Path(__file__).resolve().parents[3]
 EVID = WT / "docs/evidence/14691-structure-validation"
 GRAPH = "xv14691_business_structure"
-OUT = Path("/tmp/t6-probe2.json")  # scratch: not committed
+#: Scratch destination, OVERRIDABLE: the committed artifact was produced by a
+#: peer lane's `/tmp` probes, not by this script, so this path must never read as
+#: "where the bundle's evidence lives" (`T6_PROBE_OUT` names it explicitly).
+OUT = Path(os.environ.get("T6_PROBE_OUT", "/tmp/t6-probe2.json"))
 
 PRODUCTS = ["Lumen Core", "Lumen Field"]
 FEATURES = ["Grid Map", "Outage Alerts", "Load Forecast", "Crew Dispatch",
