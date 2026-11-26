@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 105 |
-| non-Cypher door calls (excluded from every shape total) | 267 |
-| **AST door calls** = census + non-Cypher | **1599** |
+| non-Cypher door calls (excluded from every shape total) | 269 |
+| **AST door calls** = census + non-Cypher | **1601** |
 
 > **The finding, with its count: 594 of 1332 product statements (44.6 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,654 occurrences of the door predicate across 113 files
+1,657 occurrences of the door predicate across 113 files
 2,414 occurrences of the verb predicate across 153 files   (upper-bound shape, see below)
 
-1,654  regex door-pattern occurrences
-  −55  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,599  occurrences on a line carrying a door CALL          [measured]
+1,657  regex door-pattern occurrences
+  −56  occurrences on a line carrying NO door call (comments and docstrings)
+= 1,601  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,599  AST door calls
-= 1332  classified Cypher statements + 267 non-Cypher door calls
+= 1,601  AST door calls
+= 1332  classified Cypher statements + 269 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 318 files>` → **1,654** across **113** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,660 / 114**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,654 / 113 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 318 files>` → **1,657** across **113** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,663 / 114**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,657 / 113 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
@@ -152,8 +152,8 @@ exclusion dropped they read **2,126** and **2,404**. The 87-occurrence 2,404→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−55** and
-the **= 1,599 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−56** and
+the **= 1,601 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
