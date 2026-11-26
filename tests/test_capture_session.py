@@ -6821,6 +6821,71 @@ def test_mcp_capture_renders_a_typed_detail_as_its_message(tmp_path, monkeypatch
         f"got {stored!r}")
 
 
+def test_the_in_flight_409_is_NOT_written_to_the_org_last_error_on_the_mcp_surface(
+        tmp_path, monkeypatch):
+    """#14700: the MCP twin of #3129's carve-out SKIPS the write for the in-flight 409.
+
+    ⛔ WHY THIS ROW EXISTS. `test_both_surfaces_use_the_one_predicate`
+    (`tests/test_14700_capture_in_flight_typed_refusal.py`) asserts the MCP call
+    site MENTIONS `_is_capture_in_flight_refusal(` and does not carry the old
+    equality compare — both assertions SURVIVE the mutant that keeps the call
+    and deletes its `not`. Inverting it (`and not …` -> `and …` at
+    `mcp_server.py:10879`) makes the in-flight refusal satisfy the guard, so a
+    server concurrency condition is painted on the dashboard as an org capture
+    failure and — the worse half — every GENUINE failure stops being written
+    (the predicate is False for the policy 409, the 403/402/503 details,
+    everything): a silent blackout.
+
+    The sibling row above catches that inversion from the OTHER direction (a
+    real 402 must still be recorded), which is why the mutant is not invisible
+    in this suite. THIS row pins the direction the carve-out exists for, so the
+    MCP arm carries the same both-ways behavioural pair as REST
+    (`tests/test_14700_capture_in_flight_typed_refusal.py`), and the polarity is
+    no longer graded only by a sibling's opposite assertion.
+
+    MUTATION THAT REDS THIS: delete the `not` at `mcp_server.py:10879`. The
+    in-flight body then satisfies the guard, `_record_capture_last_error` is
+    called, and a `session_capture_last_error_*` key appears where there must be
+    none.
+    """
+    from tortoise.mcp_server import tortoise_session_capture
+
+    body = _ha._capture_session_in_flight_body()
+
+    def _refuse(*_a, **_k):
+        raise _ha.HTTPException(
+            status_code=409, detail=body,
+            headers={"Retry-After": str(
+                _ha._CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S)})
+
+    # The reservation is a FUNCTION-LOCAL import inside the tool, so the
+    # `hosted_api` attribute is the seam (the same seam `_capture_session_impl`
+    # uses above).
+    monkeypatch.setattr(_ha, "_reserve_capture_slot", _refuse)
+
+    with _mcp_team_context(tmp_path, monkeypatch):
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-14700-inflight")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+
+    # Precondition: this IS the in-flight refusal, not some other refusal — a row
+    # that skipped the write for the wrong exception would prove nothing.
+    assert result.get("status") == 409, result
+    assert result.get("error") == body["message"], result
+    assert _ha._is_capture_in_flight_refusal(body)
+    leaked = {k: v for k, v in st.items()
+              if k.startswith("session_capture_last_error_") and v is not None}
+    assert leaked == {}, (
+        "the in-flight 409 was written to the org-visible last-error state on the "
+        "MCP surface — a server concurrency condition is being painted on the "
+        "dashboard as a capture failure (#3129's carve-out, #14700): "
+        f"{leaked}")
+    # The state seeds every harness key to None at onboarding, so the filter above
+    # is what discriminates; this names the harness this row drove, so a future
+    # seed change cannot make the row pass by addressing nothing.
+    assert st.get("session_capture_last_error_claude") is None
+
+
 def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
     """#4010: the capture bridge carries `max_sessions` only when it is
     actually PRESENT, so a keyless limits dict reaches the sessions gate and
