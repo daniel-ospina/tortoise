@@ -1762,9 +1762,11 @@ _INVERSION_FORMS = (
     #     complement
     #     on purpose ("… once the tools are ready" is still a tool-state the
     #     reader must reach BEFORE restarting), so the claim here is that
-    #     predicate SET, not "a presence sense". (`is` and `listed` are gone: after
-    #     `tools\s+` a singular `is` is unreachable, and `listed` was shadowed by
-    #     `are` — both measured as arms no row could depend on.)
+    #     predicate SET, not "a presence sense". (`is` is gone: after `tools\s+` a
+    #     singular `is` is unreachable — measured as an arm no row could depend on.
+    #     `listed` STAYS: it is shadowed by `are` on "the tools are listed", but it
+    #     is the only member that grades "the tools listed above appear", so
+    #     dropping it lost a shape rather than shedding a dead arm.)
     #     A determiner/modifier other than a bare `the` is the same shape:
     #     "once your tools appear" / "once all the tools appear" were GREEN
     #     (measured) while "once the tools appear" was RED — the modifier is
@@ -1778,7 +1780,7 @@ _INVERSION_FORMS = (
     #     is dead weight, and it was).
     _inversion_form(
         r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
-        r"(?:are|appear|show|exist|load|visible)\b"
+        r"(?:are|appear|show|exist|load|listed|visible)\b"
     ),
     _PRE_CUE_ONLY,
 )
@@ -1820,9 +1822,11 @@ _CONFIG_PREP_RE = re.compile(
 # DECLARED-GREEN row and were all RED (measured), and the unspaced pre-cue twin
 # ("Delete the old entry—but first confirm the tools …") was a false PASS. A
 # single hyphen inside a word is still not a break ("well-known").
-# A double hyphen needs no arm of its own: after the `lstrip` the only place a
-# `--` separator can sit is the start of the window, which the `^` alternative
-# already covers (measured — `client--once` stays GREEN without a mid-word arm).
+# The hyphen arms are three cases, and only one of them is redundant: a LEADING
+# `--` is covered by `^-\s*`; an unspaced mid-word `client--once` is only
+# reachable at the window start, so it needs no arm of its own (both measured);
+# and a SPACED mid-string ` -- ` needs the `(?<=\s)--\s+` arm — deleting it reds
+# the `re-run the bootstrap -- once …` row (measured), so it is load-bearing.
 # ⛔ A SPACED `--flag` IS NOT A BREAK. `-{1,2}\s*` did break at " --cask", so
 # "Restart your client, run `brew install --cask x`, once the tools appear." was
 # GREEN while its `--` -free twin was RED — a false PASS that truncated the window
@@ -2002,6 +2006,14 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
             continue
+        # ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS
+        # FORWARD: "Check the tools after restarting. Restart your client, then
+        # confirm the tools appear." is self-consistent copy and was RED
+        # (measured) — form (f) cannot tell it from "Confirm the tools are
+        # actually there. Restart your client …".
+        if re.search(r"\bafter\s+(?:the\s+)?restart(?:ing|s)?\b", clause,
+                     re.IGNORECASE):
+            continue
         for pattern in _INVERSION_FORMS:
             if pattern.search(clause):
                 return clause
@@ -2172,6 +2184,10 @@ def test_3232_generic_restart_lines_are_exact():
      "there beforehand.", True),
     ("Restart your client only once the tools are actually there.", True),
     ("Restart your client, after confirming the tools are actually there.", True),
+    # a pre-cue imperative that defers its OWN check past the restart is forward
+    # copy, not a deferral of the restart (measured RED before the exemption):
+    ("Check the tools after restarting. Restart your client, then confirm the "
+     "tools appear.", False),
     # ── inversions that were GREEN on the first closed set ──────────────────
     # ⛔ OUT OF SCOPE BY DESIGN, recorded so it is not silently re-added: an
     # inversion stated in the sentence AFTER the cue ("Restart your client.
@@ -2354,11 +2370,13 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after you saw the tools are actually there.", True),
     ("Restart your client, having seen the tools are actually there.", True),
     ("Restart your client, look at the tools beforehand.", True),
+    ("Restart your client, list the tools beforehand.", True),
     # `settings` as the config noun, and the (e) predicates beyond `are`:
     ("Restart your client after checking the settings list the tools.", False),
     ("Restart your client once the tools exist.", True),
     ("Restart your client once the tools show up.", True),
     ("Restart your client once the tools are listed.", True),
+    ("Restart your client once the tools listed above appear.", True),
     # the merge loop's `lstrip`, without which a bracketed `and`-clause is not
     # recognised as continuing the previous one:
     ("Restart your client after confirming the config is right, (and the tools "
@@ -2381,8 +2399,8 @@ def test_3232_generic_restart_lines_are_exact():
     # pronoun/synonym/preposition alternatives (form (e)'s `visible|load`, form
     # (a)'s `when`, form (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and
     # `from|inside|per|under`, `_CONFIG_NOUN_RE`'s plural `configs?`), and a handful that are REDUNDANT rather than
-    # untested (a `--` is caught by `^-\s*`, form (a)'s `having` by form (b), the
-    # predicate's `list` by form (f)'s own verb list). The comments claim the
+    # untested (form (a)'s `having` by form (b), the
+    # predicate's `list`). The comments claim the
     # behaviour, not a row for every alternative ───────────────────────────────────
     ("Restart your client, and once the tools are listed run `tortoise "
      "mcp-status`.", False),
