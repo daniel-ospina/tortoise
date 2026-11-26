@@ -2053,13 +2053,9 @@ test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so
     'it is not the same thing as "no detail was recorded"')
 })
 
-test('#14694: an acknowledgement landing while the reader is on another control does not STEAL focus', () => {
-  // The reclaim is gated on "focus was actually dropped", and that gate is what keeps
-  // the receipt from yanking a keyboard user off whatever they moved to during the
-  // round trip. Deleting the gate left every suite green (review finding), so the
-  // gate needs its own assertion: hold the write pending, move focus to Dismiss, then
-  // let the acknowledgement land.
-  const row = alert({ label: 'deferred ack' })
+// A harness whose acknowledgement write is held OPEN, so a test can decide what the
+// reader is doing at the instant the receipt lands.
+function ackInFlight(row) {
   let confirm
   function Harness() {
     const [acked, setAcked] = React.useState(false)
@@ -2076,36 +2072,111 @@ test('#14694: an acknowledgement landing while the reader is on another control 
       />
     )
   }
-  const { container } = render(<Harness />)
-  fireEvent.click(bell(container))
-  fireEvent.click(container.querySelector('.notif-open'))
-  const ackBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+  const view = render(<Harness />)
+  fireEvent.click(bell(view.container))
+  fireEvent.click(view.container.querySelector('.notif-open'))
+  const ackBtn = [...view.container.querySelectorAll('.notif-detail-actions button')]
     .find((b) => /Acknowledge for everyone/.test(b.textContent))
   assert.ok(ackBtn, 'precondition: the acknowledge control exists')
   fireEvent.click(ackBtn) // the write is now in flight; state has not moved
   assert.ok(confirm, 'precondition: the harness holds the write')
+  return { ...view, confirm: () => confirm() }
+}
 
-  // The reader moves to another control while the write is in flight.
-  const dismissBtn = [...container.querySelectorAll('.notif-detail-actions button')]
-    .find((b) => /Dismiss/.test(b.textContent))
-  assert.ok(dismissBtn, 'precondition: the Dismiss control is present')
-  dismissBtn.focus()
-  assert.ok(document.activeElement === dismissBtn, 'precondition: focus is where the reader put it')
+test('#14694: an acknowledgement landing while the reader is on another control does not STEAL focus', () => {
+  // The reclaim is gated on "focus was actually dropped", and that gate is what keeps
+  // the receipt from yanking a keyboard user off whatever they moved to during the
+  // round trip. Deleting the gate left every suite green (review finding), so the
+  // gate needs its own assertion: hold the write pending, move focus to a control the
+  // receipt does NOT remove, then let the acknowledgement land.
+  //
+  // ⛔ The BELL, not the detail's Dismiss: an acknowledged row no longer offers a
+  // dismissal (that button could not honour itself — see the row below), so a control
+  // that survives the receipt is the only one that can test the GATE. This is also
+  // why the assertion is `assert.ok(a === b, msg)` and not `assert.equal`: on failure
+  // `strictEqual` formats both operands, and a DOM element expands to tens of
+  // megabytes through its React-fiber expandos, which exhausts the vitest worker's
+  // heap instead of reporting a row (MEASURED: the crash left the child's JSON report
+  // saying `numFailedTests: 0` over 62 collected and `node --test src/domSuite.test.js`
+  // — the command CI runs — stayed GREEN on a deleted gate).
+  const { container, confirm } = ackInFlight(alert({ label: 'deferred ack' }))
+  const chosen = bell(container)
+  chosen.focus()
+  assert.ok(document.activeElement === chosen, 'precondition: focus is where the reader put it')
 
   act(() => { confirm() })
   assert.doesNotMatch(container.textContent, /Acknowledge for everyone/,
     'precondition: the control was replaced by its receipt')
-  // ⛔ `assert.ok(a === b, msg)` and NOT `assert.equal(a, b, msg)`. On FAILURE,
-  // `strictEqual` formats both operands, and a DOM element here expands to tens of
-  // megabytes through its React-fiber expandos — which exhausts the vitest worker's
-  // heap instead of reporting a row. The crash then leaves the child's JSON report
-  // saying `success: true, numPassedTests: 57, numFailedTests: 0` over 62 collected,
-  // and `domSuite.test.js` (the command CI actually runs) passed on exactly that:
-  // MEASURED by deleting the reclaim gate — the regression the test exists to catch
-  // — and watching `node --test src/domSuite.test.js` stay GREEN. The assertion form
-  // was the whole difference; with `assert.ok` the same mutant reds this row by name.
-  assert.ok(document.activeElement === dismissBtn,
+  assert.ok(document.activeElement === chosen,
     'the reclaim must not STEAL focus from a control the reader chose')
+})
+
+test('#14694: an acknowledgement landing must not STRAND the reader when the control they chose is GONE', () => {
+  // The other half, and the half the previous row cannot cover: the receipt REMOVES
+  // the dismissal control an acknowledged row no longer offers, so a reader focused
+  // on it loses their active element — which drops focus to `<body>` and restarts a
+  // keyboard user's Tab at the top of the document. That is the same lost-tab-position
+  // defect the open/back pair and the pending-ack receipt each had (review findings).
+  const { container, confirm } = ackInFlight(alert({ label: 'deferred ack' }))
+  const dismissBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent))
+  assert.ok(dismissBtn, 'precondition: the dismissal control is present while unacknowledged')
+  dismissBtn.focus()
+
+  act(() => { confirm() })
+  // ⛔ `assert.ok(!node, …)` and NEVER `assert.equal(node, null, …)`: on FAILURE
+  // `strictEqual` formats both operands and a DOM element expands to tens of
+  // megabytes through its React-fiber expandos, which OOM-kills the vitest worker
+  // and takes the whole file's report with it (measured here: 70 passed of 75 and
+  // `Worker exited unexpectedly`, not a named failure).
+  assert.ok(!container.querySelector('.notif-detail-actions button'),
+    'the receipt leaves no action the acknowledged row cannot honour')
+  const active = document.activeElement
+  assert.ok(active && active !== document.body,
+    'a removed control must not strand focus on <body>')
+  assert.ok(container.contains(active),
+    'and focus must land INSIDE the panel, not somewhere else in the document')
+})
+
+test('#14694: a MUTED row carries the payload\'s identifying half, not only the label', () => {
+  // ⛔ THE LABEL CANNOT IDENTIFY THE EPISODE. Labels are per-RULE and generic by
+  // design — `tortoise/abuse.py:1820` composes `"Access from a new location: " +
+  // country`, and a `flag` row's label is `High activity rate` whatever the rate
+  // was — so the three muted lists, each rendering `label · note`, showed two
+  // snoozed episodes from different COUNTRIES identically. For the acknowledged
+  // group that defeats the reason the group exists: it was added so an org-wide,
+  // irreversible decision stays reviewable, and a mis-click could not be
+  // inspected afterwards (#14694 review P2). Same payload, three lists, one fix.
+  const at = (h) => new Date(NOW.getTime() - h * 60 * MIN).toISOString()
+  const { container } = renderBell({
+    alerts: [
+      alert({ label: 'New location', message: 'Access from a new location: ES',
+        episode: 'auth_ip||snoozed', at: at(1) }),
+      alert({ label: 'New location', message: 'Access from a new location: US',
+        episode: 'auth_ip||dismissed', at: at(2) }),
+      alert({ label: 'New location', message: 'Access from a new location: MX',
+        episode: 'auth_ip||acked', at: at(3), acked: true }),
+    ],
+  })
+  fireEvent.click(bell(container))
+  const byText = (text) => [...container.querySelectorAll('.notif-list .notif-row')]
+    .find((r) => r.textContent.includes(text))
+  fireEvent.change(byText('ES').querySelector('.notif-snooze'), { target: { value: '1h' } })
+  const toDismiss = byText('US')
+  fireEvent.click([...toDismiss.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  for (const re of [/Snoozed \(/, /Dismissed \(/, /Acknowledged for everyone/]) {
+    const trigger = [...container.querySelectorAll('.notif-more')]
+      .find((b) => re.test(b.textContent))
+    assert.ok(trigger, `precondition: the ${re} group exists`)
+    fireEvent.click(trigger)
+  }
+  const muted = [...container.querySelectorAll('.notif-list-muted')]
+  assert.equal(muted.length, 3, 'precondition: all three muted lists are open')
+  for (const [country, label] of [['ES', 'snoozed'], ['US', 'dismissed'], ['MX', 'acknowledged']]) {
+    assert.match(muted.map((m) => m.textContent).join(' | '), new RegExp(country),
+      `the ${label} row must name its COUNTRY — the label alone is shared by all three`)
+  }
 })
 
 // ── 12. What the row RENDERS but the name dropped (#14694 review P2) ────────

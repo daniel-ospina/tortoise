@@ -192,6 +192,28 @@ function actionName(action, entry) {
   return `${action}: ${kind} — ${label}${message}${count}${range}${stamp}${truncated}`
 }
 
+/**
+ * The identifying half of a MUTED row's payload.
+ *
+ * The three muted lists (snoozed, dismissed, acknowledged) each rendered
+ * `label · note`, and only the label: the message was painted nowhere. Labels
+ * are per-RULE and generic by design — `abuse.py:1820` composes
+ * `"Access from a new location: " + country`, and a `flag` row's label is
+ * `High activity rate` whatever the rate was — so two snoozed `auth_ip`
+ * episodes from different countries, or two acknowledged rate episodes, were
+ * identical on screen except for their timestamp. For the acknowledged group
+ * that is the failure the group exists to fix: it was added so an org-wide,
+ * irreversible decision stays REVIEWABLE, and a mis-click could not be
+ * inspected afterwards (#14694 review P2).
+ *
+ * Same message as the main list renders, and the same guard: a message equal to
+ * the label is not repeated (the row already says it).
+ */
+function mutedMessageOf(entry) {
+  if (!entry || !entry.message || entry.message === entry.label) return null
+  return <span className="notif-message">{entry.message}</span>
+}
+
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
   return (
     <li className={`notif-row${entry.isIncident ? ' notif-row-incident' : ''}`}>
@@ -391,14 +413,29 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
         {/* Only the dismissal is offered here. A snoozed row has no detail entry
             (the snoozed list offers Unsnooze directly), so an Unsnooze branch was
             unreachable code wearing a test-shaped disguise — review finding. */}
-        <button
-          type="button"
-          className="ghost small"
-          aria-label={actionName(DISMISS, detail.entry)}
-          onClick={() => onDismiss(detail.entry)}
-        >
-          {DISMISS}
-        </button>
+        {/* ⛔ NOT FOR AN ACKNOWLEDGED ROW. `buildLedger` files an episode under
+            `acked` BEFORE it consults the dismissal store
+            (`notificationLedger.js:1279`), so `dismiss()` can write a real
+            window that no screen can ever reflect: the reader clicks, the panel
+            closes, the row is still under "Acknowledged for everyone", the
+            badge is unchanged — and a live local suppression is now in the
+            store that only surfaces if the org-wide ack lapses. The detail
+            deliberately SURVIVES an acknowledgement landing (that is why
+            `detailKey` resolves through `ledgerView.acked`), so this button was
+            reachable in exactly the state where it cannot honour itself — the
+            same class as the Unsnooze branch this comment block replaced
+            (#14694 review P2). The acknowledged group is read-only on purpose:
+            the server has no un-acknowledge route. */}
+        {alert && alert.acked ? null : (
+          <button
+            type="button"
+            className="ghost small"
+            aria-label={actionName(DISMISS, detail.entry)}
+            onClick={() => onDismiss(detail.entry)}
+          >
+            {DISMISS}
+          </button>
+        )}
         {/* Org-wide dismissal — owner/admin only, because the route 403s everyone
             else. Offered here rather than in the list so its refusal (403/404/
             409/503) renders where the reader is looking. */}
@@ -1032,6 +1069,7 @@ export function NotificationBell({
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
+                            {mutedMessageOf(entry)}
                             <span className="dim small"> · snoozed {entry.untilLabel}</span>
                           </span>
                           <button
@@ -1072,6 +1110,7 @@ export function NotificationBell({
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
+                            {mutedMessageOf(entry)}
                             <span className="dim small"> · {DISMISSED_LOCAL_NOTE}</span>
                           </span>
                           <button
@@ -1120,6 +1159,7 @@ export function NotificationBell({
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
+                            {mutedMessageOf(entry)}
                             <span className="dim small"> · {ACKED_NOTE}</span>
                             {entry.stamp ? (
                               <span className="dim small">
