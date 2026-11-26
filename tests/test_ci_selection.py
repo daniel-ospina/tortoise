@@ -9253,7 +9253,12 @@ _DERIVATION_LOOKAHEAD = 60
 #: **ROW** (`…`)" left `missing == []` and the arm GREEN, over exactly the false claim it exists to
 #: catch. Markdown emphasis around the word (`**ROW**`) is admitted for the same reason.
 _ROW_CLAIM_AFTER_FILE_RE = re.compile(
-    r"`tests/(?P<file>[\w/.-]+\.py)`(?:\s*'s\s*(?:`[^`]+`)?)?[\s*_]+rows?\b", re.IGNORECASE)
+    r"`tests/(?P<file>[\w/.-]+\.py)`(?:\s*'s\s*(?:`[^`]+`)?)?[\s*_]+"
+    #: `entry`/`entries` is the block's OWN definitional synonym ("A ROW is an entry in
+    #: `durations`"), and `_ROW_CLAIM_CARRY_RE` already accepts it. Reading only `row` here made
+    #: a truth-preserving rewrite of one enumeration item unread, and the reach arm told the
+    #: editor to undo it.
+    r"(?:rows?\b|entr(?:y|ies)(?:\s+in\s+`?durations`?)?)", re.IGNORECASE)
 #: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
 #: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
 #: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
@@ -9286,7 +9291,11 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
     r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
     r"\s+carry\s+"
-    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)`?\s+`?durations`?\s+"
+    #: The unit is optional and INSIDE the value, because the block states this weight with a
+    #: unit in its own prose and the row's note does too. Requiring the bare number made a
+    #: unit-preserving TRUE rewrite empty `positive`, and the arm then reported the block as
+    #: naming no file at all — a false block, reproduced on `2.0` -> `2.0 s`.
+    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
     r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
@@ -11102,6 +11111,20 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             f"the `carry` matcher does not read the noun-inserted absence ({spelling!r}), so a TRUE "
             "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
             f"asymmetry the round-23 review measured: {noun_negative!r}")
+    # ⛔ THE UNIT-SPELLED VALUE, the positive half's mirror of the noun-inserted absence above.
+    # The block states this weight WITH a unit in its own prose ("the flat `2.0 s`
+    # `DEFAULT_FAST_WEIGHT`") and the row's note does too, while the matcher's value group read a
+    # bare number — so a unit-preserving TRUE rewrite of the one clause emptied `positive`, and the
+    # non-vacuity assertion above then reported that the block named NO file at all. False block on
+    # true prose, same class and same regex as the `no … row` asymmetry (MEASURED: `2.0` -> `2.0 s`
+    # red, `1 failed`).
+    for spelling in ("`2.0 s`", "2.0 s", "`2 s`"):
+        unit_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` carry an explicit {spelling} `durations` row")
+        assert unit_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read the unit-spelled value ({spelling!r}), so a TRUE "
+            "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
+            f"positive-side twin of the round-23 finding: {unit_positive!r}")
     # All three directions in one map: `second` carries the row at the wrong value, `subdir` has
     # no row at all, and `absent` DOES carry one while the sentence says it does not.
     planted_rows = {
@@ -11346,6 +11369,16 @@ def test_the_row_list_alone_reaches_every_item_it_names():
         f"the row list names {ungraded} but `_row_claims` does not return it FROM THE LIST — the "
         "item is only reachable through prose above, which is the issue-only spelling the block "
         "says it no longer uses. Put the word `row` beside the path inside the list")
+    # ⛔ AND THE SYNONYM THE BLOCK ITSELF DEFINES: "A ROW is an entry in `durations`". The matcher
+    # read only the word `row`, while `_ROW_CLAIM_CARRY_RE` already accepted `entr(?:y|ies)` — so a
+    # truth-preserving rewrite of ONE item into the block's own definitional synonym went unread and
+    # the REACH assertion above told the editor to undo a correct edit (MEASURED: the
+    # `test_14560_operator_vectors.py` item rewritten as `entry in `durations`` red, `1 failed`).
+    for spelling in ("entry in `durations`", "entries in `durations`"):
+        synonym = _row_claims(f"`tests/test_row_claim_synonym.py` {spelling},")
+        assert synonym == ["test_row_claim_synonym.py"], (
+            f"the row-claim matcher does not read the block's own synonym ({spelling!r}), so a TRUE "
+            f"rewrite of one list item reds the reach arm: {synonym!r}")
     rowless = sorted(named - rows)
     assert not rowless, (
         f"the row list calls {rowless} a `durations` row, but the map carries none: the weight "
