@@ -1043,9 +1043,10 @@ def _site_fact_text(rel: str, line: int) -> str:
 
     The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the TWELVE entries keep their Cypher in a
-    query CONSTANT their statement executes (`session_source_migration._DEGREE`
-    behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
+    was measured, not assumed: two of the TWELVE entries keep their Cypher in a query
+    CONSTANT their statement executes — three constants between them
+    (`session_source_migration._DEGREE` behind `_degree`, `_OUT_TYPES`/`_IN_TYPES`
+    behind `_rel_types`), and the
     derived SITE for those is the constant's own line. Without it the arm would
     have had to weaken those facts to the constant's NAME — a check that the
     entry still mentions a symbol, which is the unread claim it replaces.
@@ -3586,8 +3587,10 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # this comment said so: its cell refused `MCP tortoise_search` ("naming it would be
     # a FALSE door … existence is not attribution") while the predicate attributed it
     # anyway. That reading was REFUTED by measurement (`#14592`, and the door arm's note
-    # below records it): `ended_scope` is not a parameter EITHER door accepts — the
-    # scope is set INSIDE the shared `_tortoise_fts_query` by
+    # below records it): neither door FORWARDS an `ended_scope` the caller can set — the
+    # SDK door's `**filters` BINDS it and answers the wrong population silently, and the
+    # MCP door rejects it loudly, so "no surface accepts it" is wrong about the SDK half —
+    # and the scope is set INSIDE the shared `_tortoise_fts_query` by
     # `state_intent.detect_state_question` — so `handler -> tortoise_fts_query ->
     # enumerate_ended -> build_cypher` runs for either handler and the flag need not be
     # passed at all. §13's row 45 therefore names BOTH doors, the row agrees with the
@@ -3725,7 +3728,9 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
     # (`ended.py::build_cypher`) with ONE door, the SDK's (28 -> 29).
     # ⛔ The "its MCP twin cannot pass `ended_scope`, so it is not a door" reading of
-    # that row was refuted by measurement: NEITHER door accepts `ended_scope` — the
+    # that row was refuted by measurement: NEITHER door FORWARDS `ended_scope` (the SDK
+    # door's `**filters` binds it and answers the wrong population silently; the MCP door
+    # rejects it loudly) — the
     # scope is set INSIDE the shared `_tortoise_fts_query` when the query is a plain
     # ending question (`state_intent.detect_state_question`), and both handlers forward
     # the plain query with default knobs, so the router fires for either and the chain
