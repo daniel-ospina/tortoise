@@ -10207,6 +10207,13 @@ _H_14544_CHANGE_VERB = (
 #: the paragraph's TRUE `NOT exclude` into the next clause's `re-read` and refused the live block. A
 #: plain comma stays legal, because the claim's own adverbial carries them — "never, in that commit
 #: or any other, touched".
+#: …and a SUBORDINATOR ends one when no punctuation does: "`#14544`'s cut does not move a bin since
+#: the bin is held by the `durations` row" joins its subordinate clause with no punctuation, so a
+#: punctuation-only bound reached the object 38 characters later and refused the paragraph's own true
+#: claim (#14623 review round 8, P2). Both lists are read together wherever a gap must stay in one
+#: clause.
+_H_14544_SUBORDINATOR = (
+    r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
 _H_14544_SAME_CLAUSE = (
     r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
@@ -10216,7 +10223,8 @@ _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     # measured at #14623 review round 7, "`#14544`'s cut does not move a bin, and the row in
     # `durations` is that edit" reached `row` at 35 characters ACROSS the comma, so a negated change
     # of a BIN — the paragraph's own true claim — was refused whenever the next clause named the row.
-    + _H_14544_SAME_CLAUSE + r"{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
+    + r"(?:(?!\b" + _H_14544_SUBORDINATOR + r"\b)" + _H_14544_SAME_CLAUSE + r"){0,40}?"
+    + r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10294,6 +10302,12 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     r"(?!\s*\w)"
     r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
     r"left\s+alone\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
+    # ⛔ …AND THE ATTRIBUTION FORM, where the agent arrives after a comma as an ascription rather than
+    # as the `by`-agent: "the `durations` row is unchanged, as that cut's own note records" states the
+    # claim, while the temporal "unchanged since" does not. Measured GREEN at #14623 review round 8.
+    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
+    r"(?:untouched|unchanged|left\s+alone)\s*,\s*(?:as|per|according\s+to)\b"
+    r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
     # neither … nor, in EITHER conjunct order: the round-8 reviewer swapped the two nouns of this
     # very fixture and the claim shipped GREEN.
     r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither[^,;.!?]{0,80}?\bnor\b",
@@ -10616,6 +10630,8 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544` touched neither its weight nor that row.",
             "That row was not touched by the commit that took the file off `core`, `#14544`.",
             "Nothing about that row changed in `#14544`.",
+            "The `durations` row's weight is unchanged, as that cut's own note records.",
+            "The `durations` row was left alone, according to `#14544`'s cut.",
             "the `durations` entries were not touched by `#14544`",
             # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it — the shape an
             # actor-anywhere rule read as foreign and shipped CLEAN (#14623 review round 7, P1).
@@ -10656,6 +10672,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "which moved.",
             "The `durations` row is `#14544`'s own edit, and the `eval` registration was left alone "
             "by that cut.",
+            "`#14544`'s cut does not move a bin since the bin is held by the `durations` row.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
