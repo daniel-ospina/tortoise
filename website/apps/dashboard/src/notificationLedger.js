@@ -469,7 +469,9 @@ export function entryOf(alert, now = new Date()) {
     alert,
     label: (alert && (alert.label || alert.type)) || 'Alert',
     message: (alert && alert.message) || '',
-    register: registerOf(alert),
+    // `rowKey`/`key` carry identity; the register reaches the render as the
+    // three-valued pair below. A raw `register` copy was CARRIED and never read
+    // (review finding, mutant survived) — one field, one reader.
     isIncident: registerOf(alert) === REGISTER_ALERT,
     countLabel: episodeCountLabel(alert),
     rangeLabel: episodeRangeLabel(alert),
@@ -479,8 +481,10 @@ export function entryOf(alert, now = new Date()) {
     truncated: Boolean(alert && alert.truncated),
     atMs: at && !Number.isNaN(at.getTime()) ? at.getTime() : 0,
     stamp: at && !Number.isNaN(at.getTime()) ? at.toLocaleString() : '',
+    // `buildLedger` re-derives the ageing predicate itself (`isOld(alert, now,
+    // days)`), so an `old` field here was a SECOND `Date.parse` per row per render
+    // that nothing read (review finding, mutant survived).
     ageLabel: ageLabel(alert && alert.at, now),
-    old: isOld(alert, now, OLD_AFTER_DAYS),
   }
 }
 

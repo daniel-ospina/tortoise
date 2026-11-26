@@ -42,6 +42,7 @@ import {
   ACKED_NOTE,
   DETAIL_NO_DETAIL,
   DETAIL_TITLE,
+  DETAIL_UNDISPLAYABLE,
   DISMISSED_LOCAL_NOTE,
   LEDGER_ALL_CLEAR,
   OLDER_HIDE,
@@ -1051,3 +1052,125 @@ test('#14686: a ledger row and its badge are VISIBLE with the real stylesheet', 
   assert.notEqual(badge.display, 'none', 'the count must be VISIBLE (it is the notification)')
   assert.notEqual(badge.visibility, 'hidden')
 })
+
+// ── 8. Renders and signals that had no assertion at all (review round 6) ────
+//
+// Each of these reached a real behaviour that every suite left green under its own
+// mutant: the closed-bell badge clock, the cross-Organization ledger reset, the
+// per-row accessible name, and the customer-safe detail payload render.
+
+test('#14686: a snooze that expires while the panel is CLOSED returns on the BADGE', () => {
+  // The badge is the always-visible signal. Gating the 30 s tick on `open` froze it
+  // at the last interaction, so a snooze that expired with the panel shut left the
+  // closed bell reading zero resolved-count while opening the panel immediately
+  // showed the row: the badge disagreed with the ledger it summarises, and the alert
+  // that came back was invisible until the reader happened to open the panel (review
+  // finding). Measured with fake timers: 1 h snooze, panel closed, 2 h pass.
+  vi.useFakeTimers()
+  try {
+    vi.setSystemTime(NOW)
+    const { container } = renderBell({ alerts: [alert({ message: 'expire while shut' })], now: null })
+    fireEvent.click(bell(container))
+    fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+    fireEvent.click(bell(container)) // CLOSE the panel
+    assert.equal(panel(container), null)
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+    // Two hours pass with the panel shut. No click, no reopen, no reload.
+    act(() => { vi.advanceTimersByTime(120 * MIN) })
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved',
+      'a closed bell must count the alert that came back while it was closed')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('#14686: a team switch on a MOUNTED bell drops the previous Organization\'s decisions', () => {
+  // The ledger reset on a key change is the whole reason the store is org-scoped:
+  // without it the bell keeps Organization A's dismissals while the key is B's, so
+  // A's decisions hide B's rows and the next write lands A's decision identities
+  // under B's key. That block could be replaced by `setLastKey(key)` alone with every
+  // suite green (review mutant) — this is the assertion that reaches it.
+  const storage = fakeStorage()
+  const row = alert({ message: 'org scoped' })
+  const propsFor = (orgId) => ({
+    alerts: [row],
+    scanSaturated: false,
+    unavailable: false,
+    userId: USER,
+    orgId,
+    canAcknowledge: false,
+    onAcknowledge: null,
+    ackPending: null,
+    ackError: null,
+    now: NOW,
+    storage,
+  })
+  const { container, rerender } = render(<NotificationBell {...propsFor('org-1')} />)
+  fireEvent.click(bell(container))
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+  // The SAME mounted bell, now showing another Organization.
+  rerender(<NotificationBell {...propsFor('org-2')} />)
+  assert.equal(rows(container).length, 1,
+    'Organization A\'s dismissal must not hide Organization B\'s row')
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
+
+  // …and the next decision is written under the NEW Organization's key.
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  const saved = JSON.parse(storage.map.get(storageKey({ userId: USER, orgId: 'org-2' })))
+  assert.equal(Object.keys(saved.dismissed).length, 1,
+    'the write belongs to the Organization on screen')
+})
+
+test('#14686: two same-identity rows have DISTINCT accessible names', () => {
+  // `Details: <label>` alone named every episode of one identity identically —
+  // measured on two same-identity rows, both announced "Details: Suspicious
+  // activity" while their content differed (`×9 … 1 min ago` vs `×3 … 9 min ago`).
+  // An AT user could not tell which episode they were opening (review finding).
+  const { newer, older } = sameWording()
+  const { container } = renderBell({ alerts: [newer, older] })
+  fireEvent.click(bell(container))
+  const names = [...container.querySelectorAll('.notif-open')]
+    .map((b) => b.getAttribute('aria-label'))
+  assert.equal(names.length, 2)
+  assert.notEqual(names[0], names[1], 'the discriminators must reach the accessible name')
+  assert.equal(new Set(names).size, 2)
+})
+
+test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so', () => {
+  // `detailOf` has three states and the ledger suite covers all three — but the
+  // RENDER of `shown`/`undisplayable` had no test at all, so both branches could be
+  // deleted with the suite green. The feed carries no `details` today (#14692 is
+  // where shipping one is decided), which is exactly why the render that will show
+  // it must not be silently removable (review finding).
+  const shown = renderBell({
+    alerts: [alert({ message: 'with payload', details: { country: 'ES', ip: '203.0.113.9', key_name: 'prod' } })],
+  })
+  fireEvent.click(bell(shown.container))
+  fireEvent.click(shown.container.querySelector('.notif-open'))
+  const shownDetail = shown.container.querySelector('.notif-detail')
+  assert.match(shownDetail.textContent, /From/)
+  assert.match(shownDetail.textContent, /ES/)
+  assert.match(shownDetail.textContent, /203\.0\.113\.9/)
+  assert.ok(!shownDetail.textContent.includes(DETAIL_NO_DETAIL),
+    'a row WITH detail must not claim none was recorded')
+  shown.unmount()
+
+  // A payload whose only values we cannot display must SAY that, not show an empty
+  // block and not claim there was no detail at all.
+  const hidden = renderBell({
+    alerts: [alert({ message: 'unusable payload', details: { rule: 'point_create' } })],
+  })
+  fireEvent.click(bell(hidden.container))
+  fireEvent.click(hidden.container.querySelector('.notif-open'))
+  const hiddenDetail = hidden.container.querySelector('.notif-detail')
+  assert.ok(hiddenDetail.textContent.includes(DETAIL_UNDISPLAYABLE),
+    'an unusable payload must be stated')
+  assert.ok(!hiddenDetail.textContent.includes(DETAIL_NO_DETAIL),
+    'it is not the same thing as "no detail was recorded"')
+})
+

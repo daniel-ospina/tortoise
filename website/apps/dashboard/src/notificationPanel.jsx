@@ -135,7 +135,13 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
         type="button"
         className="notif-open"
         onClick={() => onOpen(entry.rowKey)}
-        aria-label={`${DETAIL_ACTION}: ${entry.label}`}
+        // ⛔ THE DISCRIMINATORS ARE PART OF THE NAME. `Details: ${label}` alone
+        // gave every episode of one identity the SAME accessible name — measured on
+        // two same-identity rows (`×9 … 1 min ago` vs `×3 … 9 min ago`), both read
+        // "Details: Suspicious activity". An AT user could not tell which episode
+        // they were opening, which is the failure this row key exists to prevent
+        // for sighted readers (review finding). The count and the age are what differ.
+        aria-label={`${DETAIL_ACTION}: ${entry.label}${entry.countLabel ? ` ${entry.countLabel}` : ''}${entry.ageLabel ? ` — ${entry.ageLabel}` : ''}`}
       >
         <span className="notif-line">
           <strong>{entry.label}</strong>
@@ -361,13 +367,18 @@ export function NotificationBell({
   // A snooze that runs out while the panel sits OPEN must expire. `clock` is frozen
   // at the last interaction, so without a tick a row snoozed at 09:00 was still
   // hidden at 14:00 in the same tab, and "snoozed in 5 min" stayed 5 min forever
-  // (review finding). One coarse tick, only while the panel is open: no timer runs
-  // when nobody is looking, and a test that injects `now` gets no timer at all.
+  // (review finding). ⛔ The tick runs while the BELL IS MOUNTED, not only while the
+  // panel is open: the BADGE is the always-visible signal, and gating the tick on
+  // `open` froze it at the last interaction — measured, a snooze that expired with
+  // the panel CLOSED left the closed bell reading zero unresolved while opening the
+  // panel immediately showed the row. A badge that disagrees with the ledger it
+  // summarises is the silent undercount this surface exists to avoid. One coarse
+  // 30 s tick while mounted is free, and a test that injects `now` gets no timer.
   React.useEffect(() => {
-    if (!open || nowProp) return undefined
+    if (nowProp) return undefined
     const id = setInterval(() => setOpenedAt(new Date()), 30_000)
     return () => clearInterval(id)
-  }, [open, nowProp])
+  }, [nowProp])
 
   const persist = (next) => {
     const ok = writeState(storage, key, next)
