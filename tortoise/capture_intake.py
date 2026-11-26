@@ -91,9 +91,10 @@ import json
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from typing import Any, Protocol
 
 __all__ = [
     "CAPTURE_INTAKE_LABEL",
@@ -447,7 +448,7 @@ class GraphIntakeStore:
     def _run(self, cypher: str, params: Mapping[str, Any]) -> list:
         try:
             result = self._query(cypher, params=dict(params))
-        except Exception as exc:  # noqa: BLE001 - normalised to ONE fault class
+        except Exception as exc:  # noqa: BLE001, RUF100 - normalised to ONE fault class
             raise IntakeStoreUnavailable(
                 f"capture intake store query failed: {type(exc).__name__}: {exc}"
             ) from exc
@@ -558,7 +559,7 @@ def _row_dict(row: Any) -> dict:
         return dict(row)
     order = ("item_id", "org_id", "graph", "session_id", "payload",
              "enqueued_at", "attempts", "state", "last_error")
-    return dict(zip(order, list(row)))
+    return dict(zip(order, list(row), strict=False))
 
 
 @dataclass
@@ -669,7 +670,7 @@ class CaptureIntake:
         """
         try:
             return int(self.store.reclaim_stale(float(self.now())))
-        except Exception:  # noqa: BLE001 - a reclaim failure must not stop a drain
+        except Exception:  # noqa: BLE001, RUF100 - a reclaim failure must not stop a drain
             return 0
 
     def next_item(self) -> CaptureIntakeItem | None:
@@ -743,7 +744,7 @@ class CaptureIntake:
     def _safe_depth(self) -> int | None:
         try:
             return int(self.store.depth())
-        except Exception:  # noqa: BLE001 - a count must never fail an accept
+        except Exception:  # noqa: BLE001, RUF100 - a count must never fail an accept
             return None
 
     def stats(self) -> dict:

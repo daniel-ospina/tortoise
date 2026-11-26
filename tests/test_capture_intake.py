@@ -56,7 +56,7 @@ def test_accept_returns_after_the_row_exists_and_never_swallows_a_write_failure(
     so an accepted-but-unwritten row is a destroyed conversation.
     """
     class _BrokenStore(MemoryIntakeStore):
-        def put(self, item):  # noqa: ANN001 - protocol shape
+        def put(self, item: CaptureIntakeItem) -> None:
             raise IntakeStoreUnavailable("disk full")
 
     q = CaptureIntake(store=_BrokenStore(), now=_Clock())
@@ -155,7 +155,7 @@ def test_a_claimed_item_is_not_handed_to_a_second_drain():
 
 def test_release_requeues_with_backoff_and_the_item_is_not_reclaimable_early():
     """A failed pass must not spin the drain: the retry is spaced out."""
-    q, store, clock = _queue()
+    q, _store, clock = _queue()
     q.accept(org_id="o1", graph=None, session_id="s1", payload={})
     item = q.next_item()
     state = q.fail(item, "graph hiccup")
@@ -176,7 +176,7 @@ def test_reclaim_stale_returns_a_dead_workers_item_to_the_queue():
     rows: list = []
     seen: list[dict] = []
 
-    def query(cypher: str, params=None):  # noqa: ANN001 - fake graph
+    def query(cypher: str, params: dict | None = None) -> list:
         seen.append({"cypher": cypher, **dict(params or {})})
         if "DETACH DELETE" in cypher:
             rows[:] = [r for r in rows if r[0] != params["item_id"]]
@@ -317,7 +317,7 @@ def test_defer_requeues_without_charging_an_attempt():
 
 def test_park_fails_immediately_on_a_verdict_that_cannot_change():
     """A 402/409/400 verdict does not become answerable by waiting."""
-    q, store, clock = _queue()
+    q, store, _clock = _queue()
     q.accept(org_id="o1", graph=None, session_id="s1", payload={})
     item = q.next_item()
     assert q.park(item, "402 quota") == IntakeState.FAILED.value
@@ -331,7 +331,7 @@ def test_park_fails_immediately_on_a_verdict_that_cannot_change():
 # ── #14707 review P2: the 202's status address reads the queue ─────────────
 
 def test_queued_for_session_answers_the_live_row_and_ignores_a_parked_one():
-    q, store, clock = _queue()
+    q, store, _clock = _queue()
     q.accept(org_id="o1", graph=None, session_id="s1", payload={})
     q.accept(org_id="o1", graph=None, session_id="s2", payload={})
     found = store.queued_for_session("s1")

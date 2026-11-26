@@ -366,7 +366,7 @@ class _Slot:
     def worker_done(self) -> None:
         return None
 
-    def hold_until(self, _fut) -> None:  # noqa: ANN001 - test double
+    def hold_until(self, _fut: object) -> None:
         return None
 
 

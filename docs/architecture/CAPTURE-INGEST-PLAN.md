@@ -87,7 +87,7 @@ graph holds as memory. **Nothing in this plan writes derived claims at ingest.**
 
 ### 1.5 Where a turn is actually lost today — the one path this plan removes
 
-```
+```text
 client: turn → spool entry (durable)
 client: drain POST /v1/sessions
 server: _reserve_capture_slot  ── in_flight >= 8 ──► 429 capture_capacity_saturated
@@ -222,7 +222,7 @@ extraction tokens).
 
 ## 4. The shape, in one picture
 
-```
+```text
 POST /v1/sessions
   ├─ gates that are about the ENTRY (403 scope, 409 recording/off, 400 turn cap, 402 quota,
   │  402 cohort, 429 per-org ingest window) — unchanged, and they run BEFORE the accept
@@ -277,6 +277,7 @@ already makes for a cancelled request, extended to a queued one.
 | the intake survives a rebuild | **NOT DELIVERED — `#14712`.** The row lives in the graph (the derived cache), so a rebuild drops it while the client has pruned its copy |
 
 ## 7. What this plan explicitly does NOT do
+
 - It does **not** drain the 17 894 parked records (gated on `#14691`, D4).
 - It does **not** change the MCP or SDK surface (D5).
 - It does **not** change extraction quality, the extractor lane, or the token meter.

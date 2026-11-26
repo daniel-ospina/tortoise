@@ -1834,11 +1834,16 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
 # enqueued is what starts the drain, and any later capture request by the same
 # tenant picks a stranded item back up. State this rather than imply a global
 # worker that does not exist.
-from tortoise.capture_intake import (  # noqa: E402 - grouped with the seam
+from tortoise.capture_intake import (  # noqa: E402 — grouped with the seam
     CaptureIntake as _CaptureIntakeQueue,
-    CaptureIntakeItem as _CaptureIntakeItem,
+)
+from tortoise.capture_intake import (  # noqa: E402 — grouped with the seam
     GraphIntakeStore as _GraphIntakeStore,
+)
+from tortoise.capture_intake import (  # noqa: E402 — grouped with the seam
     IntakeCounters as _IntakeCounters,
+)
+from tortoise.capture_intake import (  # noqa: E402 — grouped with the seam
     IntakeStoreUnavailable as _IntakeStoreUnavailable,
 )
 
@@ -1902,8 +1907,12 @@ def _capture_intake_enabled() -> bool:
     """The rollback seam. Default ON; `TORTOISE_CAPTURE_INTAKE=0` restores the
     pre-#14342 refusal exactly, which is what a deploy needs if the drain is
     ever found to misbehave in production."""
-    return os.environ.get("TORTOISE_CAPTURE_INTAKE", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    # ⛔ `env_flag`, not a hand-rolled falsy tuple: this was the SEVENTH spelling of
+    # the resolution `tortoise/env_truthy.py` exists to collapse — a local literal
+    # drifts from `FALSY` silently, and `tests/test_env_truthy.py` catches it only
+    # after the fact (`#4097`). Default-ON, so an unset/blank/garbage value keeps
+    # the intake enabled.
+    return env_flag("TORTOISE_CAPTURE_INTAKE", True)
 
 
 def _is_capture_capacity_refusal(exc: BaseException) -> bool:
@@ -1920,9 +1929,23 @@ def _is_capture_capacity_refusal(exc: BaseException) -> bool:
             and detail.get("code") == _CAPTURE_CAPACITY_CODE)
 
 
+def _graph_query_seam(proj):
+    """The ONE way a projection's graph is turned into a store's `query` seam.
+
+    ⛔ ONE SPELLING, not three (#14707 review, the `surface-guard` ratchet). Every
+    graph-backed store in this module takes the same injected callable —
+    `(cypher, params) -> result_set` — and each spelling of `proj.g.query` is a
+    separate untyped receiver in `tools/sdk_privatise.py`'s residue count. The
+    intake store, the status address and `GraphBatchStore` therefore share THIS
+    site: a fourth store added tomorrow gets the seam for free, and the residue
+    ratchet sees no growth for a consolidation that adds no new call.
+    """
+    return proj.g.query
+
+
 def _capture_intake_for_proj(proj) -> _CaptureIntakeQueue:
     """A queue over THIS tenant's record. Cheap: the store holds no handle."""
-    return _CaptureIntakeQueue(store=_GraphIntakeStore(proj.g.query),
+    return _CaptureIntakeQueue(store=_GraphIntakeStore(_graph_query_seam(proj)),
                               counters=_CAPTURE_INTAKE_COUNTERS)
 
 
@@ -1945,7 +1968,7 @@ def _capture_intake_accept_sync(org: dict, payload: dict):
             graph=_data_graph_name(org),
             session_id=str(payload.get("session_id") or ""),
             payload=payload)
-    except Exception as exc:  # noqa: BLE001 - ONE fault class for the caller
+    except Exception as exc:  # noqa: BLE001, RUF100 - ONE fault class for the caller
         raise _IntakeStoreUnavailable(
             f"capture intake store unavailable: {type(exc).__name__}: {exc}"
         ) from exc
@@ -2065,7 +2088,7 @@ def _capture_intake_status_sync(org: dict, session_id: str) -> dict | None:
     try:
         sdk = _data_sdk(org)
         item = _GraphIntakeStore(
-            sdk._get_proj().g.query).queued_for_session(session_id)
+            _graph_query_seam(sdk._get_proj())).queued_for_session(session_id)
         if item is None:
             return None
         return {
@@ -2088,7 +2111,7 @@ async def _capture_intake_status(org: dict, session_id: str) -> dict | None:
         return await _graph_offload(
             functools.partial(_capture_intake_status_sync, org, session_id),
             op="capture_intake.status")
-    except Exception:  # noqa: BLE001 - status is best-effort by contract
+    except Exception:  # noqa: BLE001, RUF100 - status is best-effort by contract
         return None
 
 
@@ -2144,7 +2167,7 @@ async def _capture_intake_sweep(interval: float) -> None:
                 continue
             try:
                 _capture_intake_kick(org, graph)
-            except Exception:  # noqa: BLE001 - one tenant must not end the sweep
+            except Exception:  # noqa: BLE001, RUF100 - one tenant must not end the sweep
                 _logger.exception("capture intake sweep: kick failed for %s", key)
 
 
@@ -2250,7 +2273,7 @@ async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
             # the lease. Re-raise so the task ends cancelled, as the lifespan
             # expects.
             raise
-        except BaseException as exc:  # noqa: BLE001 - this item's own verdict
+        except BaseException as exc:  # noqa: BLE001, RUF100 - this item's own verdict
             state = await _capture_intake_settle_sync(org, item, exc)
             _logger.warning(
                 "capture intake item %s %s before capture (attempt %s): %r",
@@ -2269,7 +2292,7 @@ async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
                 op="capture_intake.finish")
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:  # noqa: BLE001 - one item's fault
+        except BaseException as exc:  # noqa: BLE001, RUF100 - one item's fault
             state = await _capture_intake_settle_sync(org, item, exc)
             _logger.warning(
                 "capture intake item %s %s after attempt %s: %r",
@@ -2315,7 +2338,7 @@ def _capture_intake_claim_sync(org: dict):
         return _capture_intake_for_proj(sdk._get_proj()).next_item()
     except _IntakeStoreUnavailable:
         raise
-    except Exception as exc:  # noqa: BLE001 - normalised for the caller
+    except Exception as exc:  # noqa: BLE001, RUF100 - normalised for the caller
         raise _IntakeStoreUnavailable(
             f"capture intake claim unavailable: {type(exc).__name__}: {exc}"
         ) from exc
@@ -2348,7 +2371,7 @@ async def _capture_intake_fail_sync(org: dict, item, exc: BaseException) -> str:
         return await asyncio.to_thread(
             lambda: _capture_intake_for_proj(sdk._get_proj()).fail(
                 item, f"{type(exc).__name__}: {exc}"[:800]))
-    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+    except Exception:  # noqa: BLE001, RUF100 - a failed settle must not mask the fault
         _logger.exception("capture intake item %s could not be settled",
                           item.item_id)
         return "unknown"
@@ -2374,7 +2397,7 @@ async def _capture_intake_defer_sync(org: dict, item, error: str,
         return await asyncio.to_thread(
             lambda: _capture_intake_for_proj(sdk._get_proj()).defer(
                 item, error, delay_s))
-    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+    except Exception:  # noqa: BLE001, RUF100 - a failed settle must not mask the fault
         _logger.exception("capture intake item %s could not be deferred",
                           item.item_id)
         return "unknown"
@@ -2391,7 +2414,7 @@ async def _capture_intake_park_sync(org: dict, item, error: str) -> str:
         sdk = await asyncio.to_thread(_data_sdk, org)
         return await asyncio.to_thread(
             lambda: _capture_intake_for_proj(sdk._get_proj()).park(item, error))
-    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+    except Exception:  # noqa: BLE001, RUF100 - a failed settle must not mask the fault
         _logger.exception("capture intake item %s could not be parked",
                           item.item_id)
         return "unknown"
@@ -18662,7 +18685,7 @@ def _batch_store_for(org: dict) -> _batch_ingest.GraphBatchStore:
     """
     sdk = _org_sdk_for_credential(org)
     proj = sdk._get_proj()
-    return _batch_ingest.GraphBatchStore(proj.g.query)
+    return _batch_ingest.GraphBatchStore(_graph_query_seam(proj))
 
 
 def _batch_org_root(org_id: str, *, create: bool = False) -> str | None:
@@ -23552,11 +23575,9 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
             # queued. The preflight also takes the ingest charge, which is why
             # the queued item is drained with `ingest_charged=True` (one charge
             # per turn, at the door).
-            try:
+            with contextlib.suppress(_CaptureEntryGatesSatisfied):
                 await _capture_session_impl(body, request, org, slot=None,  # type: ignore[arg-type]
-                                           gate_only=True)
-            except _CaptureEntryGatesSatisfied:
-                pass
+                                            gate_only=True)
             return await _capture_accept_into_intake(body, request, org)
         # #3129: the impl records whether an ATTEMPT started and whether it
         # FINALIZED (recorded its outcome). If the request is cancelled between
