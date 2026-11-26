@@ -76,6 +76,7 @@ import {
   STORAGE_UNAVAILABLE,
   TRUNCATED_NOTE,
   UNSNOOZE,
+  EPISODE_GAP_MS,
   buildLedger,
   detailOf,
   dismiss,
@@ -189,9 +190,23 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
           }}
         >
           <option value="">{SNOOZE_PLACEHOLDER}</option>
-          {SNOOZE_PERIODS.map((p) => (
-            <option key={p.id} value={p.id}>{p.label}</option>
-          ))}
+          {SNOOZE_PERIODS
+            // ⛔ #14694 review P1: an INCIDENT may not be snoozed past the
+            // server's episode gap (`EPISODE_GAP_MS`, mirrored from
+            // `abuse.py::EPISODE_GAP_S`). Snooze is identity-wide by design —
+            // the reader chose the period and it is listed under "Snoozed (N)"
+            // — but an incident's customer message is a CONSTANT, so every
+            // `suspend` row shares one decision key: a one-week snooze on a
+            // suspension hid a genuinely NEW suspension behind a collapsed
+            // group with the badge reading ZERO. That is the failure
+            // `_episode_acknowledged` names, and the dismissal path already
+            // refuses it with the same window test. An ACTIVITY row keeps the
+            // full list: its identity is a stable measurement, so a long snooze
+            // cannot swallow a new one.
+            .filter((p) => !entry.isIncident || p.ms <= EPISODE_GAP_MS)
+            .map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
         </select>
         <button type="button" className="ghost small" onClick={() => onDismiss(entry)}>
           {DISMISS}

@@ -60,7 +60,9 @@ import {
   STORAGE_UNAVAILABLE,
   TRUNCATED_NOTE,
   UNSNOOZE,
+  EPISODE_GAP_MS,
   entryKeyOf,
+  periodMs,
   storageKey,
 } from './notificationLedger.js'
 import { ALERTS_UNAVAILABLE, OLD_AFTER_DAYS, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
@@ -290,7 +292,11 @@ test('#14686 + #10156: an aged row is COUNTED by the badge and REACHABLE behind 
 
 test('#14686: snoozing for 1 h hides the row, and the row is back once the hour passes', () => {
   const storage = fakeStorage()
-  const row = alert({ message: 'snooze me' })
+  // An ACTIVITY row: the three periods the owner asked for are all offered here.
+  // An INCIDENT row is capped to the episode gap — its own test below, because a
+  // one-week snooze on a `suspend` hid a genuinely NEW suspension behind a
+  // collapsed group (#14694 review P1).
+  const row = alert({ message: 'snooze me', register: 'activity' })
   const first = renderBell({ alerts: [row], storage })
   fireEvent.click(bell(first.container))
   const select = first.container.querySelector('.notif-snooze')
@@ -323,6 +329,36 @@ test('#14686: snoozing for 1 h hides the row, and the row is back once the hour 
 })
 
 // ── 3b. A snooze is suppression, not a resolution ──────────────────────
+
+test('#14694: an INCIDENT cannot be snoozed past the episode gap', () => {
+  // Snooze is identity-wide by design (the reader chose the period, and it is
+  // listed under "Snoozed (N)"). That reasoning holds for an ACTIVITY row, whose
+  // identity is a stable measurement. It does NOT hold for an incident: a
+  // `suspend`'s customer message is a CONSTANT, so every suspension shares one
+  // decision key, and a one-week snooze on one hid a genuinely NEW suspension
+  // behind a collapsed group with the badge reading ZERO. The dismissal path
+  // already refuses this through the same window test; the snooze control did
+  // not. Measured before the fix: a 1w snooze left the new suspension uncounted.
+  const incident = alert({ type: 'suspend', register: 'alert', message: 'Organization suspended by an operator' })
+  const { container } = renderBell({ alerts: [incident] })
+  fireEvent.click(bell(container))
+  const select = container.querySelector('.notif-snooze')
+  const offered = [...select.options].map((o) => o.value).filter(Boolean)
+  assert.ok(offered.length > 0, 'an incident must still be snoozable')
+  for (const id of offered) {
+    assert.ok(periodMs(id) <= EPISODE_GAP_MS,
+      `an incident may not be snoozed past the ${EPISODE_GAP_MS / 3600000} h episode gap `
+      + `(offered ${id}); a longer snooze can hide the next, genuinely new incident`)
+  }
+  // Non-vacuity: the SAME component still offers the owner's full set on an
+  // activity row, so the cap is scoped to incidents and not a blanket removal.
+  const activity = renderBell({ alerts: [alert({ message: 'measurement', register: 'activity' })] })
+  fireEvent.click(bell(activity.container))
+  assert.deepEqual(
+    [...activity.container.querySelector('.notif-snooze').options].map((o) => o.value).filter(Boolean),
+    SNOOZE_PERIODS.map((p) => p.id),
+  )
+})
 
 test('#14686: a snooze that runs out while the panel sits OPEN comes back on its own', () => {
   // The render clock was frozen at the last interaction and there was no timer, so

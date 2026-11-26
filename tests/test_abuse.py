@@ -1210,6 +1210,17 @@ class TestR1Calibration:
             row["message"])
         assert "rule" not in row["details"]
         assert "point_create" not in row["message"]
+        # #14694 review P2: the SURFACE must travel in `details` too, derived
+        # through the same fixed map. The dashboard keys a Dismiss/Snooze
+        # decision on `details.surface`; without it the key falls back to the
+        # MESSAGE, which now embeds the measured count (#14702) and changes every
+        # window — so on a pre-plumbing row a dismissal stopped matching and the
+        # alert came back with no explanation. Deriving it here fixes the ~4 500
+        # historical rows as well as the message was already fixed.
+        assert row["details"]["surface"] == "Memory writes", row["details"]
+        # …and the derivation must not become a leak of the internal rule token.
+        assert "rule" not in row["details"]
+        assert "point_create" not in str(row["details"])
 
     def test_the_allowance_read_is_cached_per_org(self, notified):
         """The read sits on the capture path, so it is cached; the cache is what

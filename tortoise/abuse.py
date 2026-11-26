@@ -1658,6 +1658,23 @@ def _customer_details(details: dict) -> dict:
     for key in _CUSTOMER_DETAIL_KEYS:
         if key in details and details[key] is not None:
             out[key] = details[key]
+    # ⛔ #14694: DERIVE the surface from the rule when the row predates the
+    # plumbing that writes it. `_point_rate_message` below already derives the
+    # same name for the MESSAGE through the same fixed map, so an old row reads
+    # as precisely as a new one — but the payload was left without it, and the
+    # dashboard keys a Dismiss/Snooze decision on `details.surface`. On an old
+    # row that key fell back to the MESSAGE, which now carries the measured
+    # count (#14702) and therefore changes every window: the decision stopped
+    # matching, the dismissal silently evaporated, and the reader was shown the
+    # alert again with no explanation. There are ~4 500 such rows in production
+    # (`tests/test_abuse.py::test_a_historical_row_still_names_what_was_measured`
+    # pins the message half), so this is the dominant case, not an edge one.
+    # `details.get("rule")` is read here and never emitted: the whitelist above
+    # still guarantees the raw token reaches no field.
+    if not out.get("surface"):
+        derived = _RULE_SURFACE.get(details.get("rule"), "")
+        if derived:
+            out["surface"] = derived
     return out
 
 

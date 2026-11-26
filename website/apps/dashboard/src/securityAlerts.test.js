@@ -320,6 +320,18 @@ test('#14686: the `flagged` badge points at the surface that exists', () => {
   const main = readFileSync(join(here, 'main.jsx'), 'utf8')
   assert.doesNotMatch(main, /see security alerts/i)
   assert.match(main, /see notifications/i)
+  // ⛔ The other half of the requirement, and the one that can regress silently:
+  // #14687/#14702 retired "Suspicious activity detected" because the measurement
+  // never supported the accusation. A future edit restoring
+  // `title="Suspicious activity detected — see notifications"` would keep every
+  // other assertion here green while re-shipping the claim. Scoped to `title=`
+  // ATTRIBUTES, not the whole file: the badge's own comment explains the history
+  // in those words, and a comment cannot render.
+  assert.doesNotMatch(main, /title="[^"]*Suspicious activity detected/i,
+    'the badge must not accuse — a `flag` row is a measurement, and nothing '
+    + 'punitive has ever followed one (#14687)')
+  assert.match(main, /title="Unusual activity measured — see notifications"/,
+    'the badge names the MEASUREMENT and points at the surface that exists')
 })
 
 test('#14686: the alerts no longer render as blocks inside the dashboard content', () => {
