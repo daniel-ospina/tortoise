@@ -738,6 +738,18 @@ test('an activity row is flagged as a measurement, an incident row is not', () =
       .current[0].isIncident,
     false,
   )
+  // ⛔ AND THE ROW CARRIES `registerKnown`, because the CHIP makes a claim from it:
+  // `isIncident` alone cannot tell a stamped activity row from a row we could not
+  // read (both are `false`), so a chip keyed on it labelled a real activity row
+  // "unclassified" — the render said the opposite of the detail view, which asks
+  // `registerKnownOf`. The field must travel on the entry, from one definition.
+  assert.equal(activity.registerKnown, true)
+  assert.equal(incident.registerKnown, true)
+  assert.equal(
+    buildLedger({ alerts: [alert({ register: undefined, type: 'mystery' })], state: emptyState(), now: NOW })
+      .current[0].registerKnown,
+    false,
+  )
 })
 
 test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect a dismissal', () => {
@@ -790,12 +802,19 @@ test('an alert with no recorded detail says so, in words, instead of showing an 
   assert.match(DETAIL_NO_DETAIL, /No further detail was recorded for this alert\./)
 })
 
-test('an activity row explains in the detail view that nothing was changed', () => {
+test('an activity row explains in the detail view that nothing was DISABLED, not that nothing changed', () => {
+  // ⛔ "changed nothing" is a FALSE claim on this surface since #14687/#14702
+  // reclassified `flag`/`review_needed` as activity rows: a `flag` row writes
+  // `organizations.flagged_at`, which the header renders as the "⚠ flagged" badge
+  // beside this ledger. The claim the sentence may make is the narrower one main's
+  // `ACTIVITY_LEAD` makes — nothing was disabled — and that is what keeps it true
+  // beside a flag row that did change something.
   const detail = detailOf(
     alert({ register: 'activity', type: 'read_velocity', message: 'Unusual read volume.' }),
     NOW,
   )
-  assert.match(detail.fields[1].value, /changed nothing/)
+  assert.match(detail.fields[1].value, /disabled, throttled or locked/)
+  assert.doesNotMatch(detail.fields[1].value, /changed nothing/)
 })
 
 test('a detail payload is shown only through the customer-safe allow-list', () => {
@@ -817,12 +836,13 @@ test('an EMPTY detail payload carries nothing, and is not reported as carrying d
 
 test('an unclassified row does not claim that nothing was changed', () => {
   // `registerOf` FAIL-QUIETS an unknown row into the activity register, so the
-  // activity sentence ("It changed nothing.") would be an affirmative claim about a
-  // row this client cannot read. Only a server-stamped register earns it.
+  // activity sentence ("Nothing was disabled, throttled or locked by it.") would be
+  // an affirmative claim about a row this client cannot read. Only a server-stamped
+  // register earns it.
   const unclassified = detailOf(alert({ type: 'brand_new', register: undefined }), NOW)
   const kind = unclassified.fields.find((f) => f.label === 'Kind').value
   assert.equal(kind, KIND_UNCLASSIFIED)
-  assert.doesNotMatch(kind, /changed nothing/)
+  assert.doesNotMatch(kind, /disabled, throttled or locked/)
   // A stamped activity row still gets its own sentence.
   const activity = detailOf(
     alert({ type: 'read_velocity', register: 'activity', message: 'x' }), NOW,

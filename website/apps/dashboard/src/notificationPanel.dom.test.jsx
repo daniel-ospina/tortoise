@@ -638,7 +638,7 @@ test('#14694: an ACKNOWLEDGED episode stays REVIEWABLE after the detail closes',
 test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
   // `registerOf` fail-quiets an unknown register into the activity register, so a
   // two-valued chip labelled an unclassified row "activity" — a measurement that
-  // "changed nothing" — while the same row's detail view said we could not classify
+  // disabled nothing — while the same row's detail view said we could not classify
   // it (review finding). Reachable whenever the API ships a new type first.
   const { container } = renderBell({
     alerts: [alert({ type: 'brand_new', register: undefined, message: 'unknown kind' })],

@@ -647,6 +647,22 @@ export const TRUNCATED_NOTE = 'older than the window we can identify'
  *  `range` is its window — the same derivations the previous panel used, so the
  *  "×7, 17:19 → 00:08" reading is not lost by moving the surface.
  */
+/** Whether the SERVER stamped a register this bundle knows.
+ *
+ * `registerOf` FAIL-QUIETS an unrecognised row into the activity register (so the
+ * list still renders), which means "the register is activity" and "we could not read
+ * the register" are the same value there. Everything that makes a CLAIM from the
+ * register — the row chip and the detail view's `Kind` line — must ask this instead,
+ * and must ask it in ONE place: two copies of this predicate is how the chip labelled
+ * a stamped activity row "unclassified" while the detail view called it an activity
+ * (a third value for `undefined` is what makes the divergence visible at all).
+ */
+export function registerKnownOf(alert) {
+  return Boolean(
+    alert && (alert.register === REGISTER_ALERT || alert.register === REGISTER_ACTIVITY),
+  )
+}
+
 export function entryOf(alert, now = new Date()) {
   const key = entryKeyOf(alert)
   const rowKey = rowKeyOf(alert)
@@ -664,6 +680,9 @@ export function entryOf(alert, now = new Date()) {
     // three-valued pair below. A raw `register` copy was CARRIED and never read
     // (review finding, mutant survived) — one field, one reader.
     isIncident: registerOf(alert) === REGISTER_ALERT,
+    // Carried to the render: the chip says `activity` only for a register the
+    // server actually stamped, and `unclassified` otherwise.
+    registerKnown: registerKnownOf(alert),
     countLabel: episodeCountLabel(alert),
     rangeLabel: episodeRangeLabel(alert),
     // The `×N+` floor is a COUNT THAT STOPPED, and the row must say why — see
@@ -771,10 +790,20 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
 
 //: The detail view's `Kind` line, one sentence per register. `KIND_UNCLASSIFIED`
 //: exists because `registerOf` fail-quiets an unrecognised row: asserting that an
-//: unclassified event "changed nothing" is a claim about a row we cannot read.
+//: unclassified event disabled nothing is a claim about a row we cannot read.
 export const KIND_INCIDENT = 'Something happened on this Organization.'
+//: ⛔ NOT "changed nothing". #14687/#14702 reclassified `flag` and `review_needed`
+//: as ACTIVITY rows, and a `flag` row DOES write `organizations.flagged_at`
+//: (`abuse.py::flag_org`) — `/v1/team` renders it as `status: "flagged"` and the
+//: header draws the "⚠ flagged" badge beside this ledger. "It changed nothing"
+//: would deny a state the same screen displays, which `securityAlerts.js`
+//: (`ACTIVITY_LEAD`) names verbatim as the false-claim class that lane removed.
+//: The true, narrower claim is the one main's lead makes, and it is scoped to
+//: ENFORCEMENT: nothing was disabled, throttled or locked. "by it" is what makes
+//: the clause true — the measurement is the agent, not the whole Organization.
 export const KIND_ACTIVITY =
-  'A rate measurement from an abuse detector. It changed nothing.'
+  'A rate measurement from an abuse detector. Nothing was disabled, throttled '
+  + 'or locked by it.'
 export const KIND_UNCLASSIFIED =
   'We could not classify this alert. Treat it as needing review.'
 
@@ -794,12 +823,13 @@ export function detailOf(alert, now = new Date()) {
   const extra = isPlainObject(alert && alert.details) ? alert.details : null
   // ⛔ `registerOf` FAIL-QUIETS an unrecognised row into the activity register, so
   // the activity sentence below must not be printed for one. "A rate measurement
-  // from an abuse detector. It changed nothing." is an affirmative claim about a
-  // row we did not classify — stronger than the data, and the exact class of copy
-  // defect this surface exists to avoid. The register is only KNOWN when the
-  // server stamped it (a type this client does not know can still arrive stamped).
-  const registerKnown = alert
-    && (alert.register === REGISTER_ALERT || alert.register === REGISTER_ACTIVITY)
+  // from an abuse detector. Nothing was disabled, throttled or locked by it." is an
+  // affirmative claim about a row we did not classify — stronger than the data, and
+  // the exact class of copy defect this surface exists to avoid. The register is
+  // only KNOWN when the server stamped it (a type this client does not know can
+  // still arrive stamped). Same predicate as the row chip's, from the same
+  // definition.
+  const registerKnown = registerKnownOf(alert)
   const fields = [
     { label: 'What', value: entry.message || entry.label },
     {

@@ -11271,11 +11271,14 @@ function claimIntentInFlight() {
                 — a `flag` row is a rate MEASUREMENT, and accusing a customer of
                 suspicious activity for one is the false-incident framing that
                 lane removed. Its verb is "measured", not "detected".
-              * #14686 retires "see security alerts", the heading of the block
-                this PR deletes. A pointer to a surface that no longer exists is
-                how a reader learns the dashboard is stale.
+              * #14686 retires the old pointer to the heading of the block this PR
+                deletes. A pointer to a surface that no longer exists is how a
+                reader learns the dashboard is stale.
               So: main's verb, this PR's destination. Neither half is optional —
-              reverting either one re-introduces a defect the other fixed. */}
+              reverting either one re-introduces a defect the other fixed.
+              ⛔ Do not spell the RETIRED pointer out in this file: the pin in
+              `securityAlerts.test.js` asserts its absence from this source, so a
+              comment that quotes it fails the very test it is explaining. */}
           <span className="tier-badge" title="Unusual activity measured — see notifications">⚠ flagged</span>
         )}
       </header>
