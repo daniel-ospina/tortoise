@@ -27,6 +27,7 @@ import {
   emptyState,
   entryKeyOf,
   entryOf,
+  effectiveSnoozedUntil,
   isDismissed,
   periodMs,
   probeStorage,
@@ -183,15 +184,104 @@ test('the three offered periods are the three the owner asked for', () => {
 })
 
 test('a snoozed row is LISTED (with its deadline) so it can be un-snoozed', () => {
-  const episode = entryKeyOf(alert())
-  const state = snooze(emptyState(), episode, periodMs('1w'), NOW)
-  const ledger = buildLedger({ alerts: [alert()], state, now: NOW })
+  // An ACTIVITY row: the week is a period the control actually offers on it. An
+  // INCIDENT is capped to the episode gap (#14694 review P1), which is pinned by
+  // its own test below — this one is about the LIST being reversible, and moving
+  // it to activity keeps both facts tested instead of weakening this one.
+  const activity = alert({ register: 'activity', message: 'a rate measurement' })
+  const episode = entryKeyOf(activity)
+  const state = snooze(emptyState(), episode, periodMs('1w'), NOW, activity)
+  const ledger = buildLedger({ alerts: [activity], state, now: NOW })
   assert.equal(ledger.snoozed.length, 1)
   assert.equal(ledger.snoozed[0].untilLabel, 'in 7 days')
   assert.equal(ledger.unresolved, 0)
   // …and undo brings it back immediately.
   const undone = unsnooze(state, episode)
-  assert.equal(buildLedger({ alerts: [alert()], state: undone, now: NOW }).unresolved, 1)
+  assert.equal(buildLedger({ alerts: [activity], state: undone, now: NOW }).unresolved, 1)
+  // The anchor travels with the entry and is dropped with it — a leftover
+  // `snoozedAt` under a released key would outlive the snooze it describes.
+  assert.equal(state.snoozedAt[episode], new Date(activity.at).getTime())
+  assert.equal(undone.snoozedAt[episode], undefined)
+})
+
+test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
+  // `suspend`'s customer message is a CONSTANT, so every suspension shares one
+  // decision key — a bare deadline on that key hid a genuinely new suspension for
+  // as long as the deadline ran. Measured on the pre-fix tree: after a 1w SNOOZE
+  // the new suspension was unresolved 0, i.e. the bell read ZERO with an
+  // unacknowledged suspension live.
+  const take = (over) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    ...over,
+  })
+  // The same constant sentence → the same decision identity, asserted so this
+  // test cannot silently stop exercising the collision.
+  const before = take({ at: new Date(NOW.getTime() - 25 * HOUR).toISOString() })
+  const after = take({ at: NOW.toISOString(), episode: 'suspend||later' })
+  assert.equal(entryKeyOf(before), entryKeyOf(after), 'the collision is the premise')
+
+  // The reader snoozes the OLD suspension for a week (the pre-fix control
+  // offered 1d/1w on an incident row, so this is a store that can already exist).
+  const state = snooze(emptyState(), entryKeyOf(before), periodMs('1w'), NOW, before)
+  const ledger = buildLedger({ alerts: [after], state, now: NOW })
+  assert.equal(ledger.unresolved, 1, 'a NEW suspension must not be hidden by an old snooze')
+  assert.equal(ledger.snoozed.length, 0)
+
+  // Non-vacuity, the other direction: the row the reader ACTUALLY snoozed is
+  // still suppressed, so this is a bound and not a blanket removal of snooze.
+  assert.equal(buildLedger({ alerts: [before], state, now: NOW }).unresolved, 0)
+  assert.equal(buildLedger({ alerts: [before], state, now: NOW }).snoozed.length, 1)
+  // …and a measurement within the server's gap OF THE SNOOZED ROW is the SAME
+  // bout, so it stays covered (the rule `_episode_acknowledged` applies).
+  const sameBout = take({
+    at: new Date(NOW.getTime() - 24 * HOUR).toISOString(),
+    episode: 'suspend||next',
+  })
+  assert.equal(buildLedger({ alerts: [sameBout], state, now: NOW }).unresolved, 0)
+})
+
+test('#14694 P1: a store written BEFORE the anchor existed is bounded, not trusted', () => {
+  // A blob from the pre-fix client has `snoozed` and no `snoozedAt`, so nothing
+  // says which row was snoozed. The safe bound is the gap after THIS row's own
+  // newest measurement: a week of hiding becomes at most one episode window, and
+  // the cap can only let a row come BACK, never hide one.
+  const take = (at) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    episode: `suspend||${at}`,
+  })
+  const residue = {
+    ...emptyState(),
+    snoozed: { 'suspend|Organization suspended by an operator': NOW.getTime() + 7 * DAY },
+  }
+  const fresh = take(NOW.toISOString())
+  // Inside the gap the row is still suppressed — the snooze is honoured, just
+  // bounded.
+  assert.equal(
+    buildLedger({ alerts: [fresh], state: residue, now: NOW }).snoozed.length,
+    1,
+  )
+  // One gap later the same leftover deadline suppresses nothing: a week of
+  // hiding is gone, with no migration step.
+  const later = new Date(NOW.getTime() + 4 * HOUR)
+  const after = buildLedger({ alerts: [fresh], state: residue, now: later })
+  assert.equal(after.snoozed.length, 0)
+  assert.equal(after.unresolved, 1)
+  // An ACTIVITY row keeps the whole period it was given — the recorded decision,
+  // unchanged.
+  const activity = alert({ register: 'activity', message: 'a rate measurement', at: NOW.toISOString() })
+  const activityState = {
+    ...emptyState(),
+    snoozed: { [entryKeyOf(activity)]: NOW.getTime() + 7 * DAY },
+  }
+  assert.equal(
+    buildLedger({ alerts: [activity], state: activityState, now: later }).snoozed.length,
+    1,
+  )
 })
 
 test('untilLabel reads forward in the coarsest useful unit', () => {
