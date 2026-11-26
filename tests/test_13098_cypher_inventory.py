@@ -1274,6 +1274,18 @@ def test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless(
                 args=cmd, returncode=1, stdout="",
                 stderr="error: pathspec 'doc.md' did not match any file(s) known to git\n",
             )
+        # ⛔ AND SINCE #14625's ROUND-6 REVIEW THERE IS A SECOND PROBE: an `ls-files`
+        # rc 1 is an answer about the INDEX, so `_path_in_HEAD` asks HEAD before it
+        # permits (an absent index says "not tracked" about a path a commit still names).
+        # This fake answered every other call at 128, so that second probe came back
+        # unreadable and the guard refused ONE SCREEN EARLIER — the arm then graded the
+        # TRACKING refusal instead of the metadata one, which is exactly the "caught one
+        # guard earlier" failure its own comment below names. Answering this probe
+        # honestly (an empty HEAD, so the path is not committed) keeps this the only
+        # executable assertion for the METADATA guard's could-not-answer path.
+        if list(cmd[:2]) == ["git", "ls-tree"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr="")
         return subprocess.CompletedProcess(
             args=cmd, returncode=128, stdout="",
             stderr="fatal: unable to read repository\n",
@@ -4230,7 +4242,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 44` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 47` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file

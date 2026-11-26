@@ -491,7 +491,16 @@ def _plainly_outside_any_repository(target: Path, stderr_text: str) -> bool:
     if "not a git repository" not in stderr_text:
         return False
     ancestors = (target.parent, *target.parent.parents)
-    if any((parent / ".git").exists() for parent in ancestors):
+    # ⛔ `lexists`, NOT `exists` — a `.git` that EXISTS and cannot be RESOLVED is the
+    # whole point of the structural half, and `exists()` follows the link and answers
+    # False for a dangling one. Measured (#14625 review): a peer checkout whose `.git`
+    # is a symlink to an unmounted gitdir, with `.git-real` holding an intact index
+    # that TRACKS the destination, answers `fatal: not a git repository` at 128 — the
+    # stderr half of this permit — while `(parent / ".git").exists()` reads False, so
+    # `--render` exited 0 and overwrote the tracked file. A gitdir on another volume
+    # that is not mounted is exactly how a `.git` comes to dangle, so the dangling
+    # case is a damage state, never a plain directory.
+    if any(os.path.lexists(parent / ".git") for parent in ancestors):
         return False
     return not any(_looks_like_git_metadata(parent) for parent in ancestors)
 
@@ -1143,6 +1152,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
+    """Is `probe_path` named by HEAD? `None` means the probe could not answer.
+
+    ⛔ `git ls-files --error-unmatch` ANSWERS ABOUT THE INDEX, and rc 1 is its documented
+    non-match — but an ABSENT or dangling index answers 1 too, with an error line
+    byte-identical to the honest one, while HEAD still tracks the path (#14625 review,
+    measured: `git ls-files --error-unmatch -- docs-keep.md` → rc 1 in a checkout whose
+    `.git/index` was deleted, and `git ls-tree -r --name-only HEAD` still lists it).
+    Reading that 1 as "untracked" let `--render` overwrite a COMMITTED file at rc 0, so
+    the second honest question is asked before the permit.
+
+    `False` is reserved for the two answers that really mean "nothing committed here":
+    no name in HEAD, and a repository with NO commit yet (which git answers at 128 with
+    `Not a valid object name`). Every other exit is `None` — a refusal, because an
+    unreadable HEAD is a could-not-answer, not a negative.
+    """
+    try:
+        listing = subprocess.run(
+            ["git", "ls-tree", "--name-only", "-z", "HEAD", "--", probe_path],
+            cwd=probe_cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",
+            env=_git_env(),
+            timeout=_GIT_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if listing.returncode == 0:
+        return bool(listing.stdout.strip("\0\n "))
+    if listing.returncode == 128 and "Not a valid object name" in (listing.stderr or ""):
+        return False
+    return None
+
+
 def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     """Refuse a destination that git TRACKS; `None` means the path is free.
 
@@ -1240,7 +1282,33 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     # other exit — the three measured could-not-answer states at 128, a git that exits
     # with anything else — is a refusal, never a write.
     stderr_text = tracked.stderr or ""
-    if tracked.returncode == 1 or _plainly_outside_any_repository(target, stderr_text):
+    if tracked.returncode == 1:
+        # ⛔ rc 1 IS AN ANSWER ABOUT THE INDEX, NOT ABOUT COMMITTED CONTENT (#14625
+        # review, measured): a checkout whose `.git/index` is absent or dangling
+        # answers 1 with the documented non-match line while HEAD still tracks the
+        # path, so the permit asks the second honest question before it fires.
+        committed = _path_in_HEAD(probe_cwd, probe_path)
+        if committed is None:
+            print(
+                f"render: could not probe {label} for tracking: `git ls-files` answered "
+                "\"not tracked\" but HEAD cannot be read, and an unreadable HEAD is a\n"
+                "could-not-answer rather than a permit. Pick another path (the default\n"
+                "is gitignored).",
+                file=sys.stderr,
+            )
+            return 2
+        if committed:
+            print(
+                f"refusing to render over a TRACKED path ({label}): the document is\n"
+                "`--render`'s output, which is never committed — and this path IS in\n"
+                "HEAD even though the index does not list it (an absent or damaged\n"
+                "index answers `not tracked` while the commit still names the file).\n"
+                "Pick an untracked path (the default is gitignored).",
+                file=sys.stderr,
+            )
+            return 2
+        return None
+    if _plainly_outside_any_repository(target, stderr_text):
         return None
     first = stderr_text.strip().splitlines()
     print(
@@ -1349,9 +1417,14 @@ def main(argv: list[str] | None = None) -> int:
     # neither grade nor repair the tree it just corrupted. A mistyped path is the
     # plausible route here — §7 tells every lane to run this verb — and the same
     # clobber applies to any other tracked doc. Refused before the census runs, so the
-    # refusal costs nothing. `git ls-files` answers "is this path in the index", which
-    # is exactly the invariant (`--render`'s output is never committed); outside a git
-    # work tree (exit 128) it simply does not fire.
+    # refusal costs nothing. `git ls-files` answers "is this path in the index" — and,
+    # since #14625's review, a `not tracked` answer is confirmed against HEAD, because an
+    # absent index says the same thing about a path a commit still names. ⛔ ONLY GIT'S
+    # TWO HONEST ANSWERS FIRE ANYTHING HERE: `0` refuses, and `1` permits only when HEAD
+    # agrees the path is not committed. Every other exit REFUSES — the one 128 that is a
+    # permit is git's own `not a git repository` about a path with no repository above
+    # it (and no dangling `.git` either), so "outside a work tree ⇒ does not fire" is the
+    # sentence that was true before that review and is false now.
     if args.render is not None:
         # ⛔ AND A DESTINATION THAT CANNOT BE RESOLVED IS "COULD NOT RUN" (2) TOO.
         # `Path.resolve()` raises `RuntimeError("Symlink loop …")` on ELOOP — NOT an
