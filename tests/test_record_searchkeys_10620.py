@@ -1375,8 +1375,12 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
 
     `RecordProjectionError` is the base of BOTH the plan-build refusals and the
     refusals raised after statements ran (the tenant-GUC read-back, a role that
-    bypasses RLS, the cutover guard's failed `SELECT`, a schema that is not on
-    disk). The first cut of this token tested the CLASS, so a connection whose
+    bypasses RLS, the cutover guard's failed `SELECT`). ⚠️ A schema that is NOT
+    on disk is the one such refusal on the OTHER side of the boundary — it
+    raises inside the plan build, so it counts `plan_refused` and its remedy is
+    a redeploy (see the sibling test below) — which is why the rule is the
+    PHASE and not a hand-maintained list of classes. The first cut of this token
+    tested the CLASS, so a connection whose
     scope could not be verified — a broken role or pooler — was counted as
     `plan_refused`, i.e. the operator was told "check the producer" about a
     store fact: MEASURED on a fake connection returning no row, whose refusal
@@ -1408,7 +1412,7 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
     assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1
     assert after.get("plan_refused", 0) == before.get("plan_refused", 0), (
         "a store/config refusal must NOT be counted as a plan-build refusal: its "
-        "remedy is the DSN, the role or the migration, never the producer"
+        "remedy is the DSN or the role, never the producer"
     )
 
 

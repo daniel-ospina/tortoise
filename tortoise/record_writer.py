@@ -4659,7 +4659,8 @@ def write_live_record(record: Mapping[str, Any], *,
                 "by a REDEPLOY, not by the producer). ⛔ This is "
                 "NOT `write_failed`: no statement was executed, so "
                 "there is no statement fault to look for — check "
-                "the cause, which is a producer or a record-shape fact. A "
+                "the cause: a producer or record-shape fact, or (for a schema "
+                "that is not on disk) a DEPLOYMENT fact. A "
                 "replay of the same record re-refuses until the cause is fixed: "
                 "record=%s %s: %s",
                 record.get("type"), _record_identity(record),
