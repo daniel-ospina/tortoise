@@ -24,49 +24,32 @@ thirteen required pieces, the four exclusions and the two-part verification — 
 
 ## Install (done by the product, not by hand)
 
-`HARNESS_INSTALL.pi` (and `HARNESS_CAPTURE_INSTALL.pi`) copy this file into
-Pi's global extension directory:
+`HARNESS_INSTALL.pi` (and `HARNESS_CAPTURE_INSTALL.pi`) name the install
+command — the product's own path, which copies this file into Pi's global
+extension directory:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-# #3713 collision guard (see below): disable a pre-existing tortoise-capture/
-if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
-  rm ~/.pi/agent/extensions/tortoise-capture
-elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
-  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
-fi
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
-   ~/.pi/agent/extensions/tortoise-capture.ts
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
-   ~/.pi/agent/extensions/tortoise-volunteer.ts
-# ⛔ THE RENAME RETIRED NOTHING, and it is deliberately after the copies: Pi's
-# loader has NO dotfile filter, so `.tortoise-capture.disabled/index.ts` is
-# still LOADED. Retire the entry point itself — and refuse rather than let `mv`
-# overwrite a retired copy. (Retiring before the copies would leave a box with
-# no producer at all if a copy failed.)
-if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts ]; then
-  if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled ]; then
-    echo "refusing: both .tortoise-capture.disabled/index.ts and its .disabled copy exist — move one aside" >&2
-    exit 1
-  fi
-  mv ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts \
-     ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled
-fi
-# #3512: the agent-infra farm also installs a SECOND producer, reflect-hook.ts;
-# retire it too (a `.disabled` suffix is a name the loader does not load).
-if [ -e ~/.pi/agent/extensions/reflect-hook.ts ]; then
-  if [ -e ~/.pi/agent/extensions/reflect-hook.ts.disabled ]; then
-    echo "refusing: both reflect-hook.ts and reflect-hook.ts.disabled exist — move one aside" >&2
-    exit 1
-  fi
-  mv ~/.pi/agent/extensions/reflect-hook.ts \
-     ~/.pi/agent/extensions/reflect-hook.ts.disabled
-fi
+# The SUPPORTED install, and the only one this record ships: the product's own
+# seam installer, which VERIFIES the end state and refuses — naming what it
+# found — rather than reporting success while two producers stay registered.
+# Its order is the safety property: the copies, then the legacy entry-point
+# retirement, then the second producer's, so no failure can leave the box with
+# no producer at all.
+tortoise install pi
 ```
 
-This is the hand equivalent of what `tortoise install pi` does — and the
-installer is the one to prefer, because it VERIFIES the end state and fails
-rather than reporting success while two producers stay registered.
+⛔ **A hand-copied duplicate of this procedure used to ship here, and it was
+REMOVED rather than patched (#14342 round 9).** It re-implemented the
+installer's shape analysis in shell, so it silently diverged from it on three
+shapes a user can actually have: it renamed a `reflect-hook.ts` DIRECTORY to
+`reflect-hook.ts.disabled` (which Pi still loads through the directory's
+`index.ts`), it edited THROUGH a symlinked `.tortoise-capture.disabled` and so
+renamed `index.ts` inside a foreign checkout, and it unlinked the legacy
+producer symlink *before* the copies — the zero-producer window the installer
+defers for a measured reason (`ENOSPC` on a fresh home). Each was a silent
+non-fix, reported by nothing. A snippet that must reproduce six refusal
+conditions will drift again; the installer is the surface with the tests, so it
+is the one that ships.
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
 the extensions *is* the opt-in — there is deliberately no `autoCapture`-style
@@ -288,11 +271,17 @@ from this section is the false claim, not a stale measurement.
   `tortoise install pi` stays red until a human moves one aside, once per farm
   cycle. The measured reference box's farm denies that stem by name and
   converges green.
-- **`legacy_extension_obstacle` mirrors two of the installer's four refusal
-  conditions**, so `hooks status`/`doctor` can still name a refusing verb for
-  the newer ones (a symlinked preservation target, a manifest-declared
-  directory). The mirror is the one thing that drifts — that is its documented
-  hazard, not a new one.
+- **`legacy_extension_obstacle` mirrors the three COLLISION refusals** (the
+  legacy rename collision, a symlinked `.tortoise-capture.disabled` that Pi
+  still loads, and the second producer's taken-name collision). Every OTHER
+  refusal the installer has is UNMIRRORED, so `hooks status`/`doctor` can still
+  name a verb that refuses for them: a symlinked preservation target, a
+  manifest-declared or unreadable-`package.json` directory, and an existing
+  `index.ts.disabled`/`index.js.disabled`. The list is deliberately not
+  counted — a count is what drifted before. The mirror is the one thing that
+  drifts; that is its documented hazard, not a new one, and
+  `test_pi_legacy_obstacle_matches_the_installers_own_refusal` pins the shape it
+  covers.
 - **A TOCTOU window** remains between the digest comparison and the
   `unlink()` in the re-assert arm; the farm never writes the retired path, so
   the window needs a concurrent writer on the same box.

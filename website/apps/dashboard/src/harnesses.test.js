@@ -577,35 +577,37 @@ test('#3819: the Cursor capture install is home-scoped, flat, and discloses the 
 // a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
 // pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
 // alongside the seam. The install step must disable the legacy entry, and it
-// must do so non-destructively. Structure-only: this pins the guard text, not
-// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// must do so non-destructively. Structure-only: this pins the record's text,
+// not the shell's behaviour (the guard is a copy-paste snippet, not an executed
 // unit). Removing any leg REDs this test.
-test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+//
+// ⛔ #14342 round 9: the hand-copied snippet this test used to pin SHIPPED A
+// SILENT NON-FIX on three shapes a user can have — it renamed a `reflect-hook.ts`
+// DIRECTORY to `reflect-hook.ts.disabled` (still loaded through its `index.ts`),
+// it edited THROUGH a symlinked `.tortoise-capture.disabled` into a foreign
+// checkout, and it unlinked the legacy producer symlink BEFORE the copies (the
+// zero-producer window the installer defers). Every leg was green here because
+// the assertions pinned STRINGS, never that the step retires anything. So the
+// record now names the installer, and this test pins that it does not grow a
+// second implementation of the installer's shape analysis.
+test('#3713/#3512: the Pi install record delegates to the verifying installer', () => {
   const pi = HARNESS_INSTALL.pi(KEY)
-  // the colliding legacy path is named...
-  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
-    'the guard must name the legacy entry Pi loads as a second extension')
-  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
-  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
-    'the symlink leg must be guarded by -L (unlink the link, never the target)')
-  // ...and a real directory is moved aside AND its entry point retired: the
-  // dot prefix alone retires NOTHING, because Pi's loader applies no dotfile
-  // filter (#14342). The old copy here said the loader SKIPS dotfiles — the
-  // disproven rule this guarded snippet used to teach.
-  assert.match(pi, /\.tortoise-capture\.disabled/,
-    'a real directory must be moved aside to the dot-prefixed name')
-  assert.match(pi, /\.tortoise-capture\.disabled\/index\.ts\.disabled/,
-    'the entry point must be retired inside the dot directory — Pi loads a dot-prefixed directory by its index file')
-  // ...and the SECOND producer agent-infra's farm installs is retired too (#3512).
-  assert.match(pi, /reflect-hook\.ts\.disabled/,
-    'the snippet must retire reflect-hook.ts — the other capture producer')
-  // The snippet must refuse rather than overwrite a retired copy: `mv`
-  // overwrites on POSIX, which would destroy preserved bytes silently.
-  assert.match(pi, /refusing:/,
-    'a rename over an existing retired copy must be refused, never performed')
-  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.match(pi, /^tortoise install pi$/m,
+    'the record must name the supported install command')
+  // non-negotiable: no hand rollback of the legacy producer. Both legs below
+  // are exactly how the removed snippet failed.
+  assert.doesNotMatch(pi, /mv ~\/\.pi\/agent\/extensions/,
+    'no hand rename: a suffixed DIRECTORY is still LOADED, so only the installer may retire shapes')
+  assert.doesNotMatch(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'no hand unlink: it runs before the copies and can leave the box with no producer')
+  assert.doesNotMatch(pi, /reflect-hook\.ts\.disabled/,
+    'no hand retirement of the second producer — the installer asserts the end state instead')
+  // the disproven dotfile rule must never come back (#14342).
+  assert.doesNotMatch(pi, /ignores? dotfiles|dot-prefixed name Pi[’']s loader skips/i,
+    'Pi applies no dotfile filter — the rule this snippet used to teach was disproven')
+  // non-negotiable: never recursively delete user files from the install record.
   assert.doesNotMatch(pi, /rm\s+-/,
-    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
+    'the record must never `rm` with flags — its one unlink was a bare rm of a symlink')
 })
 
 // #3615 made every in-repo hook fail closed on an explicit per-machine opt-in,

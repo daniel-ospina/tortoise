@@ -1349,7 +1349,8 @@ def legacy_extension_obstacle(harness: str,
     ``test_pi_legacy_obstacle_matches_the_installers_own_refusal`` drives both
     over the shape space (no legacy entry / a renameable one / its backup name
     taken / a regular FILE at its name with the backup taken / a symlinked
-    entry, with and without the backup name taken) and pins them together.
+    entry, with and without the backup name taken / a SYMLINK at the backup
+    name that Pi still loads) and pins them together.
 
     A symlinked legacy entry is deliberately NOT a collision: the installer
     unlinks it (the checkout it points at is untouched) and never reaches the
@@ -1364,6 +1365,17 @@ def legacy_extension_obstacle(harness: str,
             and (legacy_disabled.exists() or legacy_disabled.is_symlink())):
         return (f"a legacy capture extension is already disabled at "
                 f"{PI_DISABLED_DIRNAME} — move one aside")
+    # #14342 round 9, finding 4: the STICKIEST refusal the installer has — a
+    # SYMLINK at the disabled name that still resolves to a directory with an
+    # entry point. `_retire_pi_entry` renames the LINK, and a suffixed link to a
+    # directory is still loaded, so the installer refuses before mutating and
+    # refuses again on EVERY re-run. An unmirrored refusal is a hint that names
+    # a command which refuses forever, which is what this predicate exists to
+    # prevent (`:1339-1341`).
+    if legacy_disabled.is_symlink() and _pi_entry_is_loadable(legacy_disabled):
+        return (f"the disabled capture extension at {PI_DISABLED_DIRNAME} is a "
+                f"SYMLINK Pi still loads — move it out of the extensions "
+                f"directory")
     # #14342: the SECOND producer has its own collision, and the install refuses
     # it on the same condition the installer does — both names present with
     # DIFFERENT bytes. A re-created copy with identical bytes is re-asserted by
@@ -1933,7 +1945,7 @@ def _pi_entry_is_loadable(path: Path) -> bool:
         return True
 
 
-def _retire_pi_entry(path: Path) -> str | None:
+def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
     """Make ``path`` unloadable WITHOUT destroying it. Returns an error or None.
 
     Retires in place, by the loader's own rule, so the file bytes never leave
@@ -1946,6 +1958,11 @@ def _retire_pi_entry(path: Path) -> str | None:
     * a directory declaring ``pi.extensions`` in ``package.json`` is REFUSED —
       retiring that shape means editing the manifest, which is the user's file,
       not this installer's.
+
+    ``dry_run=True`` answers "what WOULD this do" without mutating: every
+    refusal condition below is evaluated by the same code that performs the
+    retirement, so a preview cannot claim a plan the real run refuses, and
+    cannot omit a step the real run performs (#14342 round 9, finding 3).
     """
     try:
         # ⛔ A SYMLINK IS RETIRED BY RENAMING THE LINK, NEVER BY EDITING THROUGH
@@ -1962,7 +1979,8 @@ def _retire_pi_entry(path: Path) -> str | None:
                 # symlink branch must not be the one that deletes.
                 return (f"{produced} already exists — retiring {path} would "
                         f"overwrite preserved bytes")
-            path.rename(produced)
+            if not dry_run:
+                path.rename(produced)
             return None
         if path.is_dir():
             entries, unreadable = _pi_manifest_entries(path)
@@ -1996,9 +2014,11 @@ def _retire_pi_entry(path: Path) -> str | None:
                         # already has.
                         return (f"{preserved} already exists — retiring "
                                 f"{entry} would overwrite preserved bytes")
-                    entry.rename(preserved)
+                    if not dry_run:
+                        entry.rename(preserved)
             return None
-        path.rename(path.with_name(f"{path.name}.disabled"))
+        if not dry_run:
+            path.rename(path.with_name(f"{path.name}.disabled"))
         return None
     except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
         return f"{path}: {e.__class__.__name__}: {e}"
@@ -2093,6 +2113,25 @@ def _disable_pi_second_producer(
             f"re-created copy of {active} (identical bytes preserved at "
             f"{retired})"], None
     if dry_run:
+        # ⛔ THE PREVIEW IS DERIVED FROM THE CODE THAT DOES IT. Round 8 added the
+        # missing line but not the SHAPE: this arm reported "retire {active} →
+        # {retired}" for a DIRECTORY producer, which the real run retires in
+        # place and never renames, and it reported success for shapes the real
+        # run REFUSES (a manifest-declared directory) — a dry-run false PASS on
+        # the plane whose whole job is previewing the real run (#14342 round 9,
+        # finding 3).
+        planned = _retire_pi_entry(active, dry_run=True)
+        if planned:
+            return False, [], (
+                f"the capture seam is installed, but the second capture producer "
+                f"could not be disabled ({active}): {planned}. TWO producers are "
+                "registered, so every session is captured twice until one of them "
+                "is removed.")
+        if active.is_dir() and not active.is_symlink():
+            return True, [f"[dry-run] would retire the entry point inside "
+                          f"{active} (index.ts/index.js → *.disabled; the "
+                          f"directory stays in place — a suffixed directory is "
+                          f"still LOADED)"], None
         return True, [f"[dry-run] would retire {active} → {retired}"], None
     # ⛔ WHICH PATH THE RETIREMENT ACTUALLY PRODUCES DEPENDS ON THE SHAPE, so
     # read it BEFORE the mutation: a FILE is renamed to ``retired``, while a
@@ -2394,9 +2433,14 @@ def _install_pi(
             # after the rename, so "not loadable" — and the install reported
             # "retired the legacy extension's entry point" while Pi kept
             # loading the renamed link (`.disabled.disabled` is still resolved
-            # through `resolveExtensionEntries`). Refuse BEFORE any mutation:
-            # nothing is touched, so every re-run reads the same shape and
-            # refuses again instead of going green (#14342 round 8 finding 1).
+            # through `resolveExtensionEntries`). Refuse BEFORE any mutation OF
+            # THIS ENTRY: the link is never renamed, so every re-run reads the
+            # same shape and refuses again instead of going green (#14342 round
+            # 8 finding 1). The SEAM was already written above — that ordering
+            # is the PR's safety property — so the receipt must say what
+            # landed: a refusal claiming "nothing was touched" while its own
+            # `actions` name an install is the report shape #10241 exists to
+            # prevent (#14342 round 9, finding 2).
             # Refused, not converged: unlinking would destroy a link the
             # installer did not create, and the sibling arm above already
             # documents the one link it does unlink.
@@ -2409,12 +2453,30 @@ def _install_pi(
                                      f"subdirectory through its index file "
                                      f"under ANY suffixed name — renaming it "
                                      f"retires nothing, so both producers "
-                                     f"would stay registered. Nothing was "
-                                     f"touched. Move {legacy_disabled} out of "
-                                     f"the extensions directory by hand (the "
-                                     f"checkout it points at is untouched) "
-                                     f"and re-run."))
+                                     f"stay registered. The capture seam at "
+                                     f"{dst} WAS installed, so this box now "
+                                     f"runs BOTH producers; the link was not "
+                                     f"renamed and the checkout it points at "
+                                     f"is untouched. Move {legacy_disabled} "
+                                     f"out of the extensions directory by "
+                                     f"hand and re-run."))
         if dry_run:
+            # Preview the REAL run's refusal, from the same predicate: a
+            # plan that says "ok" for a shape the real run refuses is a
+            # dry-run false PASS on the one shape the operator is previewing
+            # BECAUSE it looks broken (#14342 round 9, finding 3).
+            planned = _retire_pi_entry(legacy_disabled, dry_run=True)
+            if planned:
+                return InstallResult(harness, changed=changed,
+                                     actions=tuple(actions),
+                                     changed_artifacts=_written(), error=(
+                                         f"the legacy capture extension at "
+                                         f"{legacy_disabled} could not be "
+                                         f"retired ({planned}), so both "
+                                         f"producers stay registered. Move "
+                                         f"{legacy_disabled} out of the "
+                                         f"extensions directory by hand and "
+                                         f"re-run."))
             actions.append(
                 f"[dry-run] would retire the entry point inside "
                 f"{legacy_disabled} (Pi still loads it)")

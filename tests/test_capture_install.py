@@ -6831,7 +6831,8 @@ def _stale_pi_seam(home: Path) -> Path:
 
 
 @pytest.mark.parametrize("shape", ["absent", "renameable", "taken", "file_taken",
-                                   "symlink", "symlink_taken"])
+                                   "symlink", "symlink_taken",
+                                   "disabled_symlink_loaded"])
 def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
     """The hint predicate is a MIRROR of the installer's own refusal, so pin
     the mirror to the thing it mirrors.
@@ -6845,6 +6846,9 @@ def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
     then block a repair the installer performs), or widen `is_dir()` to
     `exists()` (a regular FILE at the legacy name — `file_taken` — is IGNORED
     by the installer, but `exists()` would call it a collision); either REDs.
+    Dropping the `disabled_symlink_loaded` clause REDs the new shape: the hint
+    goes quiet while the installer refuses, repeatedly (#14342 round 9,
+    finding 4).
     """
     ext = home / ".pi" / "agent" / "extensions"
     ext.mkdir(parents=True)
@@ -6862,6 +6866,15 @@ def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
         legacy.symlink_to(target, target_is_directory=True)
     if shape in ("taken", "file_taken", "symlink_taken"):
         disabled.mkdir()
+    if shape == "disabled_symlink_loaded":
+        # #14342 round 9, finding 4: the STICKIEST refusal the installer has.
+        # `_retire_pi_entry` renames the LINK, and a suffixed link to a
+        # directory is still resolved through `resolveExtensionEntries`, so the
+        # installer refuses before mutating — and refuses again on every re-run.
+        # The mirror used to answer "no obstacle" here, so `hooks status`
+        # recommended a verb that could never succeed.
+        (target / "index.ts").write_text("// legacy producer\n")
+        disabled.symlink_to(target, target_is_directory=True)
 
     obstacle = capture_install.legacy_extension_obstacle("pi", ext)
     # The installer's REAL verdict, write-free: `--dry-run` runs every guard
@@ -7201,3 +7214,115 @@ def test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why():
         "generation 33 must NOT carry this branch's bytes — that is the re-cut that "
         "reads as modified-artifact for an install made from main")
     assert _READ_SEAM_GENERATION_DIGESTS[33] != _READ_SEAM_GENERATION_DIGESTS[34]
+
+
+def test_pi_symlink_refusal_receipt_states_the_seam_it_installed(home):
+    """A refusal that is CORRECT must still report what landed.
+
+    The symlinked-``.tortoise-capture.disabled`` refusal fires *after* the seam
+    write — that ordering is the PR's safety property — so by the moment it
+    returns, the box has gone from ONE producer to TWO. A receipt claiming
+    "Nothing was touched" contradicts its own ``actions``/``changed_artifacts``
+    in the same object (the report shape #10241 exists to prevent) and hides
+    from the operator that capture just doubled (#14342 round 9, finding 2).
+
+    Mutation: restore the "Nothing was touched" sentence, or return before the
+    seam write — either REDs (the first on the claim, the second on the actions).
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer, checked out elsewhere\n")
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    error = res.error or ""
+    assert "SYMLINK" in error, error
+    # It says what LANDED: the seam write is in the same receipt...
+    assert any("installed" in a for a in res.actions), res.actions
+    assert capture_install.PI_EXTENSION_NAME in res.changed_artifacts, (
+        f"the seam WAS written, so the receipt must name it: {res.changed_artifacts}")
+    assert "WAS installed" in error, (
+        f"the refusal must state that the seam landed: {error!r}")
+    # ...and it must NOT claim the disk is untouched.
+    assert "Nothing was touched" not in error, (
+        "the receipt says nothing was touched while its own actions name an install")
+    # The one producer it actually made worse is named too, not implied.
+    assert "BOTH producers" in error, error
+    # And the link it refused to rename is still there, pointing where it did.
+    assert disabled.is_symlink(), "the refused retirement still mutated the link"
+    assert (target / "index.ts").exists(), "the foreign checkout was edited through the link"
+
+
+def test_pi_dry_run_refuses_where_the_real_run_refuses(home):
+    """A preview must never report a plan the real run REFUSES.
+
+    Shape: the disabled legacy directory declares ``pi.extensions``, which
+    ``_retire_pi_entry`` refuses by design (retiring it would mean editing the
+    user's manifest). The real run fails; the dry run used to answer ``ok`` with
+    a "would retire" line — a dry-run false PASS on precisely the broken-looking
+    shape an operator previews *because* it looks broken (#14342 round 9,
+    finding 3a).
+
+    Mutation: report the dry-run line without asking ``_retire_pi_entry`` — the
+    preview goes green over a run that refuses.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.mkdir(parents=True)
+    (disabled / "index.ts").write_text("// legacy producer\n")
+    (disabled / "package.json").write_text(
+        '{"pi": {"extensions": ["index.ts"]}}\n', encoding="utf-8")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        "the dry run previewed success for a shape the real run refuses: "
+        f"{dry.actions}")
+    assert "package.json" in (dry.error or ""), dry.error
+    # A refused preview still touches nothing.
+    assert (disabled / "index.ts").exists()
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
+
+    real = install_capture("pi", home=home)
+    assert not real.ok
+    assert "package.json" in (real.error or ""), real.error
+
+
+def test_pi_dry_run_names_the_second_producer_entry_point_when_it_is_a_directory(
+        home):
+    """For a DIRECTORY producer the real run retires the entry point IN PLACE and
+    never creates ``reflect-hook.ts.disabled``.
+
+    The dry run named that rename anyway, and omitted the step that actually
+    stops the producer — the mirror image of round 8's finding, still wrong in
+    both directions (#14342 round 9, finding 3b).
+
+    Mutation: word the dry-run line as a bare rename for every shape — the plan
+    then names a path the real run never creates.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// live producer\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert dry.ok, dry.error
+    line = " ".join(dry.actions)
+    assert "entry point inside" in line, (
+        f"the plan must name the in-place retirement: {dry.actions}")
+    assert "reflect-hook.ts →" not in line, (
+        f"the plan named a rename the real run never performs: {dry.actions}")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "the real run created the name the directory shape never uses")
+    assert (producer / "index.ts.disabled").exists()
