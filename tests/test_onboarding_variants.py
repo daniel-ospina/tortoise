@@ -1743,6 +1743,13 @@ _CONFIRM_PREDICATE = (
 # second branch exists only for the singular head, and `list` is deliberately
 # not a `_DOC_NOUN` ("the tools list" is the session's own list, not a page).
 _TOOLS_OBJECT = r"(?:\btools\b|\btool\s+list\b)"
+# …and the compiled form, for the ONE site that must LOCATE the object rather
+# than match it in sequence: `_confirmation_scopes_the_config` needs its offset
+# to decide which side of the object a config noun sits on. Built from the same
+# fragment so a third spelling cannot reach one site and miss the other (that is
+# how the singular `tool list` was graded by the forms while a config-scoped
+# clause naming it was still refused — measured).
+_TOOLS_OBJECT_RE = re.compile(_TOOLS_OBJECT, re.IGNORECASE)
 
 
 def _inversion_form(pattern: str) -> re.Pattern[str]:
@@ -2230,13 +2237,25 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     session's tools too and is an inversion — it was GREEN (measured) before a
     coordinating `and` between the two was treated as breaking the exclusion.
     """
-    # `lower()` is length-preserving, so `tools_at` indexes the ORIGINAL clause:
-    # a capitalised object ("… the config lists the Tools") must route through
-    # the same exclusion, and was a FALSE RED while this lookup was
+    # ⛔ THE OBJECT IS LOCATED WITH THE FILE'S OWN TOKEN, not with a bare
+    # `find("tools")`: the literal lookup cannot see the SINGULAR `tool list`
+    # that `_TOOLS_OBJECT` grades, so a config-scoped clause naming it fell
+    # through this exclusion and was graded as an inversion (measured on the head
+    # that widened the object):
+    #
+    #   GREEN  Restart your client after verifying the config lists the tools.
+    #   RED    Restart your client after verifying the config lists the tool list.
+    #
+    # The config is a FILE and readable without a restart, so both are forward
+    # copy and the RED one is the false red #3429 records as the shape that gets a
+    # pin deleted. The search is case-insensitive and indexes the ORIGINAL
+    # clause: a capitalised object ("… the config lists the Tools") must route
+    # through the same exclusion, and was a FALSE RED while this lookup was
     # case-sensitive (measured).
-    tools_at = clause.lower().find("tools")
-    if tools_at < 0:
+    object_at = _TOOLS_OBJECT_RE.search(clause)
+    if object_at is None:
         return False
+    tools_at = object_at.start()
     # An installation/config STATE is file-side — but it is an ANCHOR, not a
     # short-circuit. Returning True here BYPASSED the conjunction rule below, so
     # `… confirming the tools are installed AND the tools are actually there` was
@@ -3395,6 +3414,31 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # …nor is a POST-cue confirmation of the tool list (the pin's required order):
     ("Restart your client after changing the config, then confirm the tool "
      "list is complete.", False),
+    # ── THE CONFIG EXCLUSION NAMES THE SAME OBJECT, and did not: its lookup was a
+    # literal `find("tools")`, so a config-scoped clause that names the SINGULAR
+    # spelling fell through the exclusion and was graded as an inversion. Both
+    # rows below were RED on the head that widened the object while their `tools`
+    # twins are declared-GREEN rows — a false red on copy the file itself calls
+    # forward (the config is readable without a restart), which is the failure
+    # mode #3429 records as the one that gets a pin deleted:
+    ("Restart your client after verifying the config lists the tool list.",
+     False),
+    ("Restart your client after confirming the config file lists the tool "
+     "list.", False),
+    # ── …and form (a)'s OBSERVATION GUARD carries the singular arm too, which no
+    # row exercised (measured: reverting it to a bare `tools` left all 322 rows
+    # GREEN — an arm nothing could depend on). The guard exists so an observation
+    # verb does not blind a clause that ALSO confirms the tools; on the singular
+    # spelling it reopened exactly that hole:
+    #
+    #   GREEN  Restart your client if you looked in the panel and confirmed the
+    #          tool list is complete.
+    #
+    # The `if`-led clause is the one that pins it: the `after you …` twin is
+    # caught by form (a)'s first alternative, which carries no guard at all
+    # (measured, and that is why this row is the `if` one).
+    ("Restart your client if you looked in the panel and confirmed the tool "
+     "list is complete.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
