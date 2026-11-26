@@ -122,15 +122,24 @@ def call_failed(call) -> bool:
     """True when a witness CALL — or the `reply` it carries — is an error.
 
     ⛔ THE ENVELOPE IS THE CALL, NOT THE `reply` INSIDE IT (#14691 review, 5th
-    cycle, N1, second pass). The first cut of this guard asked `is_error_reply`
-    about `call.get("reply")` ALONE, so a failed call spelled
-    `{"ok": false, "error": …}` — which has no `reply` key at all — read as
-    `None`, `rows(None)` as `[]`, and manufactured D4 anyway (measured: the arm
-    asserting it cannot still redded). Both shapes are errors.
+    cycle, N1, second pass). A failure spelled `{"ok": false, "error": …}` may
+    carry NO `reply` key at all — and a failure may equally carry
+    `"reply": []`, which satisfies both the "the door was asked" arm and
+    `rows(...) == []`. Both shapes are errors.
     """
     if not isinstance(call, dict):
         return False
     return is_error_reply(call) or is_error_reply(call.get("reply"))
+
+
+def measured_empty(call) -> bool:
+    """True only when a door ANSWERED and the answer was EMPTY.
+
+    The third state this bundle turns on, beside "content" and "not asked": a
+    FAILED call is not a measured empty, and every finding here depends on the
+    difference (#14691 review, 5th cycle, N1).
+    """
+    return isinstance(call, dict) and not call_failed(call) and not rows(call.get("reply"))
 
 
 # ── the entity map: id → {name, kind} ─────────────────────────────────────
@@ -685,7 +694,11 @@ def a4_invention() -> dict:
               # number it promises.
               "not_in_corpus": 0,
               "paraphrase_examples": [], "invented_examples": [],
-              "examples_truncated": False}
+              # ONE FLAG PER LIST (#14691 review, 5th cycle, NEW-4): a single
+              # shared boolean cannot say WHICH list's cap bit, so a consumer
+              # still cannot tell which of the two samples is complete.
+              "paraphrase_examples_truncated": False,
+              "invented_examples_truncated": False}
     for doc in RECEIPT.get("documents") or []:
         for point in (doc.get("result") or {}).get("points") or []:
             props = point.get("props") or {}
@@ -705,14 +718,14 @@ def a4_invention() -> dict:
                 if len(quotes["paraphrase_examples"]) < CAP:
                     quotes["paraphrase_examples"].append(entry)
                 else:
-                    quotes["examples_truncated"] = True
+                    quotes["paraphrase_examples_truncated"] = True
             else:
                 quotes["invented"] += 1
                 quotes["not_in_corpus"] += 1
                 if len(quotes["invented_examples"]) < CAP:
                     quotes["invented_examples"].append(entry)
                 else:
-                    quotes["examples_truncated"] = True
+                    quotes["invented_examples_truncated"] = True
 
     # (c) the product's own compliance warnings
     warn = {"total": 0, "no_source_turn": 0, "token_overlap_band": 0,
@@ -892,6 +905,30 @@ def _door_findings() -> list[dict]:
     """
     found = list(READBACK.get("door_findings") or [])
     witness = READBACK.get("link_witness") or {}
+
+    # ⛔ D3 RESTS ON `bare_kind_probes`, SO IT MAY NOT OUTLIVE THEM (#14691
+    # review, 5th cycle, N1 — the D3 leg). D1/D2/D3/D5 arrive from
+    # `readback.json` as prose, and until now nothing re-read the probes they cite:
+    # with BOTH probes rewritten to `{"ok": false, "error": …}` the suite stayed
+    # green and D3 — "a bare kind returns an EMPTY list" — was still reported, a
+    # claim about the product made from two calls that never answered. A finding
+    # needs at least one MEASURED empty behind it; a failed call is not one.
+    probes = READBACK.get("bare_kind_probes") or {}
+    measured_empties = [name for name, call in probes.items()
+                        if measured_empty(call)]
+    if probes and len(measured_empties) < len(probes):
+        found = [f for f in found if f.get("id") != "D3"]
+        if measured_empties:
+            found.append({
+                "id": "D3",
+                "question": "does the full-scan door accept the **bare** kind the "
+                            "packs declare?",
+                "answer_over_mcp": "NO for the probes that ANSWERED an empty list; "
+                                   "the rest never answered, so they are not counted",
+                "evidence": {"measured_empty": measured_empties,
+                             "not_measured": sorted(set(probes) - set(measured_empties))},
+            })
+
     if not any(f.get("id") == "D4" and witness for f in found):
         # ⛔ AN ERROR IS NOT SILENCE (#14691 review, 5th cycle, N1). An
         # `{"error": …}` reply satisfied `not rows(...)` and MANUFACTURED D4 —
