@@ -737,7 +737,8 @@ def _parse_iso(value) -> datetime | None:
 # ontology §4.3), so point signals are the CORRECT signals for it.
 
 
-def _superseded_below_successor(ann: list[dict]) -> list[dict]:
+def _superseded_below_successor(ann: list[dict], *,
+                                page_limit: int | None = None) -> list[dict]:
     """Keep a REPLACED claim below the claim that replaced it (#14721).
 
     THE DEFECT THIS CLOSES. A score is a statement about *relevance*, and a
@@ -753,15 +754,14 @@ def _superseded_below_successor(ann: list[dict]) -> list[dict]:
 
     WHY A PAIRWISE CONSTRAINT AND NOT A GLOBAL "ended sorts last" TIER. A tier
     was built first and MEASURED: it does fix the order, and it also pushes every
-    ended row past the page edge — on this corpus the superseded claim fell out
-    of a ``limit=20`` page entirely. That trades one silent omission for
-    another, and it breaks the read the history question is FOR ("what did we
-    originally decide, and what superseded it?"), where the replaced claim is
-    the thing the caller asked for. The issue's requirement is precisely the
-    pairwise one — *a superseded claim must not outrank the claim that
-    superseded it* — so that is the constraint applied, and nothing else moves:
-    every row keeps the position the score gave it relative to every row that is
-    not its successor.
+    ended row to the bottom — on this corpus the superseded claim fell out of a
+    ``limit=20`` page entirely. That trades one silent omission for another, and
+    it breaks the read the history question is FOR ("what did we originally
+    decide, and what superseded it?"), where the replaced claim is the thing the
+    caller asked for. The issue's requirement is precisely the pairwise one —
+    *a superseded claim must not outrank the claim that superseded it* — so that
+    is the constraint applied, and nothing else moves: every row keeps the
+    position the score gave it relative to every row that is not its successor.
 
     WHAT DECIDES "SUPERSEDED". Nothing new, and nothing this module invents: the
     row's own ``superseded_by`` carrier — ``{id, content_snippet, created_at,
@@ -772,35 +772,76 @@ def _superseded_below_successor(ann: list[dict]) -> list[dict]:
     for it to outrank). Retracted-correcting points are already excluded as
     superseding authority at that source, so this does not re-decide it.
 
-    CHAINS AND DETERMINISM. ``A <- B <- C`` (A replaced by B, B by C) is
-    resolved by repeating the pass until no violation remains, bounded by
-    ``len(ann)`` — each pass strictly moves at least one row later, so the bound
-    is a proof of termination, not a guess. Rows are moved by STABLE insertion
-    after their successor, so rows that were never in violation keep their
-    relative order, and equal-scoring rows cannot reorder between runs.
+    ⛔ THE INVARIANT IS "BELOW", NOT "IMMEDIATELY BELOW". A row is inserted
+    directly after its successor at the moment it moves, but a LATER move can
+    land rows in between — in the corpus evidence the replaced decision sits at
+    rank 7 below its successor at rank 3. That is the contract: order, not
+    adjacency. Do not read "immediately" into it and do not add a pass that
+    forces pairs together.
+
+    ⛔ IT CAN INVERT THE #11702 BELIEF TIER, DELIBERATELY. The score sort places
+    an absent-belief row below every belief-carrying one; this constraint runs
+    afterwards, so a superseded row that HAS a belief can end up below its
+    successor that has none. That is the point — R1 is about epistemic currency
+    (which claim is current), and a replaced claim must not lead with its belief
+    while doing so. The trade is stated here rather than hidden, because the
+    alternative (refusing to cross the belief tier) would leave the defect open
+    for exactly the claims that carry the most evidence.
+
+    CHAINS, CYCLES AND THE MOVE BUDGET. ``A <- B <- C <- D`` (A replaced by B,
+    …) must resolve to ``D, C, B, A``. The bound that is a PROOF is a budget on
+    MOVES, not on passes: every move strictly increases a row's index, so one
+    row can move at most ``n-1`` times and the whole list at most ``n·(n-1)``.
+    The first version counted PASSES (``n`` of them, one move each) and was
+    measured wrong at four links — a ``k``-link chain needs ``k·(k-1)/2`` moves,
+    so it came out ``B, A, D, C``, leaving B above C. A CYCLE in the data (X
+    replaced by Y and Y by X) has no valid order at all; the budget simply runs
+    out and a deterministic order is returned rather than looping.
+
+    ``page_limit`` — the caller's page size, when it knows it. A replacement
+    that will NOT be served must not drag the replaced row out of the page
+    behind it, which would hide BOTH; on this corpus that is the difference
+    between a ``limit=8`` history read returning the labelled stale claim and
+    returning nothing. So a pair whose successor falls at or beyond the page
+    edge is left alone. ``None`` (the default) means "no page is being cut".
     """
-    if len(ann) < 2:
+    n = len(ann)
+    if n < 2:
         return ann
     order = list(ann)
-    for _ in range(len(order)):          # bounded: one strict move per pass
-        index = {_row_id(r): i for i, r in enumerate(order)}
+    budget = n * (n - 1) or 1
+    while budget > 0:
+        # An id-to-index map is only usable when it is INJECTIVE. Every row with
+        # no ``id``/``node_id`` collapses onto ``""``, and two rows can share an
+        # id; in either case ``order.pop(index[id])`` would remove a DIFFERENT
+        # row than the one just inspected — duplicating one and silently
+        # dropping another (measured: three rows in, one of two id-less rows
+        # lost and the other doubled). Such rows are therefore not indexable and
+        # the constraint simply does not apply to them.
+        ids = [_row_id(r) for r in order]
+        index = {rid: i for i, rid in enumerate(ids)
+                 if rid and ids.count(rid) == 1}
         moved = False
-        for row in list(order):
-            succ = (row.get("superseded_by") or {})
+        for row in order:
+            succ = row.get("superseded_by")
             succ_id = succ.get("id") if isinstance(succ, dict) else None
             if not succ_id or succ_id == _row_id(row):
                 continue
             here = index.get(_row_id(row))
-            there = index.get(succ_id)
+            there = index.get(str(succ_id))
             if here is None or there is None or here > there:
                 continue                     # absent, or already correctly ranked
-            # Re-locate the successor by ID (the pop above shifted indices), and
-            # insert by POSITION — never by `list.index(row)`, which compares
-            # dicts by value and would land on a twin row with identical content.
+            if page_limit is not None and there >= page_limit:
+                continue                     # the successor is not served: see above
+            # Re-locate the successor by ID after the pop (indices shifted), and
+            # insert by POSITION — never `list.index(row)`, which compares dicts
+            # by value and would land on a twin row with identical content.
             order.pop(here)
-            target = next(i for i, r in enumerate(order) if _row_id(r) == succ_id)
+            target = next(i for i, r in enumerate(order)
+                          if _row_id(r) == str(succ_id))
             order.insert(target + 1, row)
             moved = True
+            budget -= 1
             break                            # indices are stale; re-index
         if not moved:
             break
@@ -1710,6 +1751,7 @@ class StateRanker:
         *,
         entity_type: str = "point",
         query: str | None = None,
+        page_limit: int | None = None,
     ) -> list[dict]:
         """Re-rank results with the multiplicative gate.
 
@@ -1748,7 +1790,13 @@ class StateRanker:
         3. drafts sort AFTER every live row. Ordering is
            ``(is_draft, belief_informed_order, -final_score)`` — an EXPLICIT
            status tiebreaker (plus, since #11702, the absent-belief tier;
-           neither is a side effect of the numbers). Pre-#2598 the question
+           neither is a side effect of the numbers).
+           ⛔ #14721 adds ONE constraint applied AFTER that sort — a replaced
+           claim is moved below the claim that replaced it
+           (:func:`_superseded_below_successor`) — which can land a
+           belief-carrying row below an absent-belief successor. That inversion
+           of the #11702 tier is deliberate and stated at that function; the
+           score keys above are unchanged. Pre-#2598 the question
            was answered by whichever fabricated 0.5 happened to win: a draft's
            neutral 0.5 and a contested live claim's measured 0.5 are the SAME
            number, and at equal relevance a draft OUTRANKED a measured live
@@ -1986,7 +2034,7 @@ class StateRanker:
         # cold-chain certificate" landed at rank 1 on FTS similarity alone
         # (5.0 vs every current row) while its successor was not in the top 8.
         # `_superseded_below_successor` applies that one constraint.
-        ann = _superseded_below_successor(ann)
+        ann = _superseded_below_successor(ann, page_limit=page_limit)
         return ann
 
     # ── Signal computation ────────────────────────────────────────────

@@ -50767,7 +50767,8 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point", query=query)
+        ranked = ranker.rerank(merged, entity_type="point", query=query,
+                               page_limit=limit)
         # #10137 (review round 3, P1): the POOL was read at order_by="relevance"
         # and is therefore labelled "not_consulted" — but THIS ranker's score is
         # `relevance ** a × confidence ** b` over the EP belief mean, so the

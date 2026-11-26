@@ -143,6 +143,80 @@ def test_a_supersession_chain_resolves_to_the_newest_claim():
     assert out == [c, b, a], out
 
 
+def test_a_four_link_chain_resolves_too():
+    """A ``k``-link chain needs ``k(k-1)/2`` moves, not ``k``.
+
+    REGRESSION PIN (review P1). The first version bounded the loop by the PASS
+    count with one move per pass, so three links resolved and four did not:
+    ``A<-B<-C<-D`` came out ``B, A, D, C`` — B left ABOVE the claim that replaced
+    it, i.e. the defect this module exists to remove, on a longer chain.
+    ``supersede_point`` called three times produces exactly this shape, because
+    ``CORRECTS`` is not in the structural rels a supersede transfers.
+    """
+    ids = ["pt_a", "pt_b", "pt_c", "pt_d"]
+    a, b, c, d = ids
+    rows = [
+        _row(a, 9.0, status="superseded", outdated=True,
+             superseded_by={"id": b, "content_snippet": "…", "created_at": "t1"}),
+        _row(b, 8.0, status="superseded", outdated=True,
+             superseded_by={"id": c, "content_snippet": "…", "created_at": "t2"}),
+        _row(c, 7.0, status="superseded", outdated=True,
+             superseded_by={"id": d, "content_snippet": "…", "created_at": "t3"}),
+        _row(d, 1.0),
+    ]
+    out = _ids(StateRanker().rerank(rows))
+    assert out == [d, c, b, a], out
+
+
+def test_two_unidentifiable_rows_are_never_reordered_by_each_other():
+    """REGRESSION PIN (review P2): a non-injective id map drops a row.
+
+    An id-to-index map built from ids that are EMPTY (or shared) points at the
+    wrong row, so ``pop(index[id])`` removed a different row than the one
+    inspected — one row duplicated, another silently lost (measured: three rows
+    in, one of two id-less rows gone, the other doubled). Rows without a unique
+    id must be left alone, and the row count must never change.
+    """
+    rows = [
+        {"content": "no id at all", "scores": {"rrf": 5.0},
+         "superseded_by": {"id": "pt_s", "content_snippet": "…",
+                           "created_at": "t1"}},
+        {"id": "", "content": "empty id", "scores": {"rrf": 3.0}},
+        _row("pt_s", 1.0),
+    ]
+    out = StateRanker().rerank(rows)
+    assert len(out) == 3, [r.get("content") for r in out]
+    # Same three rows, none lost, none duplicated — the order may change, the
+    # population may not.
+    assert sorted(r.get("content", "") for r in out) == [
+        "empty id", "no id at all", "pt_s"], [r.get("content") for r in out]
+
+
+def test_a_successor_beyond_the_page_does_not_drag_the_pair_out_of_it():
+    """REGRESSION PIN (review P2): the page edge is a bound, not a detail.
+
+    Moving the replaced row to its successor's position is only safe when THAT
+    position is inside the served page. When the successor sits at or past the
+    page edge, the move would push the replaced row out too and hide BOTH — the
+    silent omission this design rejects the global tier for. On the corpus that
+    is the difference between a ``limit=8`` history read returning the labelled
+    stale claim and returning nothing.
+    """
+    rows = [_row(STALE, 100.0, status="superseded", outdated=True,
+                 superseded_by={"id": SUCCESSOR, "content_snippet": "…",
+                                "created_at": "t1"})]
+    rows += [_row(f"pt_filler{i}", 50.0 - i) for i in range(6)]
+    rows.append(_row(SUCCESSOR, 1.0))          # rank 8 — outside a page of 4
+    out = StateRanker().rerank(rows, page_limit=4)
+    page = _ids(out)[:4]
+    assert STALE in page, page               # still served, still labelled
+    assert SUCCESSOR not in page
+    # With a page that DOES hold the successor, the constraint applies again.
+    out2 = _ids(StateRanker().rerank(rows, page_limit=9))
+    assert out2.index(SUCCESSOR) < out2.index(STALE), out2
+
+
+
 def test_the_order_is_deterministic_for_rows_that_are_not_in_violation():
     """Same input, same output — the constraint must not leak plan order.
 

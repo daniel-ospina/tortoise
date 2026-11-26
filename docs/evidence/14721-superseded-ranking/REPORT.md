@@ -132,9 +132,17 @@ replaced it (`test_a_history_read_keeps_the_replaced_claim`).
 
 | file | change |
 |---|---|
-| `tortoise/ranking.py` | `_superseded_below_successor()` — the pairwise constraint, applied after `StateRanker`'s score sort. Bounded by `len(rows)` (each pass strictly moves one row later ⇒ termination is proved, not assumed); stable insertion ⇒ rows not in violation keep their order and repeats are identical; chains (`A←B←C`) resolve to the newest claim. |
+| `tortoise/ranking.py` | `_superseded_below_successor()` — the pairwise constraint, applied after `StateRanker`'s score sort. The move budget is `n·(n-1)` MOVES (not passes): every move strictly increases a row's index, so that is a proof of termination, and it is what a `k`-link chain actually needs (`k(k-1)/2` moves). Rows whose id is empty or shared are not indexable and are left alone. A cycle in the data has no valid order; the budget runs out and a deterministic order is returned rather than looping. |
+| `tortoise/ranking.py` (signature) | `rerank(..., page_limit=None)` — a pair whose successor falls at or beyond the page edge is left alone, because moving the replaced row there would push it out of the page too and hide **both**. |
+| `tortoise/sdk.py` | `_recall_state` passes `page_limit=limit`. |
 | `tortoise/search_engine.py` | `superseded_by` gains `superseded_at` (the `validTo` bound the supersede closes) and `source` (`coalesce(new.sessionId, new.session_id)` — both spellings, the rule `ended._SUCCESSOR_PROPS` states). Present-only, so legacy decorations stay byte-identical. |
 | `config/surface-manifest.yml` | the two additive label keys recorded as `response_fields` rows (the "must still be recorded" rule in `CONTRIBUTING.md`). |
+
+⛔ **One deliberate inversion, stated rather than hidden**: applying this constraint after the score
+sort can place a belief-carrying row below an absent-belief successor, which inverts the `#11702`
+tier for that one pair. That is intended — a replaced claim must not lead with its belief while
+leading — and it is documented at the function and in `StateRanker.rerank`'s contract. Refusing to
+cross the belief tier would leave the defect open for exactly the claims carrying the most evidence.
 
 ## 5. Before → after, verbatim
 
@@ -159,8 +167,7 @@ BEFORE (pre-fix ranker, marker present)          AFTER (same query, same graph, 
                                                     source:         "doc-05" }
 ```
 
-Every replaced claim sits immediately below the claim that replaced it, and carries the three label
-elements the issue asks for. Both rival pairs behave identically.
+Every replaced claim sits **below** the claim that replaced it — *below*, not adjacent: the replaced decision is at rank 7 while its successor is at rank 3, with three rows between them. The constraint guarantees ORDER, never adjacency, and a future change that forced pairs together would be re-introducing the global-tier shape §3 rejects. Both rival pairs behave identically.
 
 **On the currency read the refuted claim is no longer served at all** (`out/after.json`):
 `tortoise_search` rank 1 is a current claim and the stale certificate claim does not appear in the
@@ -173,16 +180,34 @@ second.**
 
 ```
 uv run python tools/test_lane.py run -- tests/test_14721_superseded_never_outranks.py -q
-    → 5 passed
+    → 8 passed
 uv run python tools/test_lane.py run -- tests/test_recall_state.py tests/test_belief_order_10137.py \
-    tests/test_11702_absent_belief_state.py tests/test_ranking.py -q
-    → 192 passed
+    tests/test_11702_absent_belief_state.py tests/test_ranking.py \
+    tests/test_2952_write_path_determinism.py tests/test_retrieval_determinism_2952.py -q
+    → 207 passed
 uv run python tools/test_lane.py run -- tests/test_search_engine.py tests/test_pointsuperseded_rebuild.py \
-    tests/test_13557_13558_reachable_reads.py -q
-    → 214 passed, 3 skipped
+    tests/test_13557_13558_reachable_reads.py tests/test_14033_state_cue_gap.py -q
+    → 404 passed, 3 skipped
 uv run python tools/surface_manifest.py check
     → OK — 39 tool rows, 73 retired, thirteen properties hold
 ```
+
+## 5.2 Independent review — what it found, and what was fixed
+
+A fresh-context reviewer (no memory of writing the change) found five issues. Every one was verified
+against the primary source before being applied; all five were real.
+
+| # | finding | verification | disposition |
+|---|---|---|---|
+| P1 | the chain bound counted PASSES, not moves, so a 4-link chain still left a claim above its successor (`k` links need `k(k-1)/2` moves) | reproduced: `A←B←C←D` returned `B, A, D, C` | **fixed** — move budget `n·(n-1)`; `chain4` → `D,C,B,A`, `chain5` → `E,D,C,B,A`; regression test added |
+| P2 | a non-injective id map (`""` for id-less rows, or a shared id) made `pop(index[id])` remove a different row — one duplicated, one dropped | reproduced: three rows in, one id-less row lost and the other doubled | **fixed** — only unique non-empty ids are indexable; regression test added |
+| P2 | moving the replaced row to a successor beyond the page edge pushes both out of the page | reproduced: successor at index 15, replaced at 1, page 8 ⇒ neither served | **fixed** — `page_limit`; a pair whose successor is not served is left alone; regression test added |
+| P2 | the constraint runs after the documented tiers, so it can invert the `#11702` belief tier while the docstring still claimed the old order | reproduced: a belief-carrying superseded row landed below an absent-belief successor | **accepted and documented** at the function and in the `rerank` contract — the inversion is the intended trade, not an accident |
+| P2 | this report said replaced claims sit "immediately below" their successor, contradicted by its own artifact (rank 7 vs rank 3) | confirmed against `out/after.json` | **fixed** — the invariant is *below*, never adjacency |
+
+One further defect was found by the suites rather than the reviewer: passing `page_limit` broke a
+test double whose `rerank` dropped caller kwargs. The double was wrong (a decorating wrapper must
+forward), and it now forwards `**kwargs`.
 
 ## 6. Proof the tests fail on the pre-fix code
 
