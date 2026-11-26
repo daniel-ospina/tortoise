@@ -11555,12 +11555,16 @@ _DERIVATION_END = "⛔ EVERY file named above"
 #: BITES is one item over: an item that carries a path and NO row noun absorbs the row claim after
 #: it, so an unpathed row claim is read as reached — measured on the fixture below, `([], 1)` GREEN.
 #: The row NOUN is the block's own definitional synonym, the same one `_ROW_CLAIM_AFTER_FILE_RE`
-#: carries — a matcher bound to `row` alone would read a TRUE rewrite into `entry in `durations`` as
-#: no item at all, the one-spelling class `#14730` files — and only an item that carries the noun
-#: makes a ROW claim, which is why an item naming a registration (`` `#14574`'s drift-reporter
-#: registration ``) is not refused for the path it does not owe.
+#: carries — the SAME ALTERNATION and the SAME `re.IGNORECASE`, both load-bearing for the reason
+#: that sibling's own comment records: a matcher bound to `row` alone would read a TRUE rewrite into
+#: `entry in `durations`` as no item at all, the one-spelling class `#14730` files, and this block
+#: spells its vocabulary in CAPS too, so a lowercase-bound noun drops a CAPS row claim out of the
+#: scan — measured before the flag was carried: `\`#14415\`'s batch ROWS` returned `([], 0)`, GREEN
+#: over an unpathed row claim, against `([‘14415’], 1)` for the lowercase spelling. Only an item that
+#: carries the noun makes a ROW claim, which is why an item naming a registration (`` `#14574`'s
+#: drift-reporter registration ``) is not refused for the path it does not owe.
 _DERIVATION_LABEL_RE = re.compile(r"`#(?P<issue>\d+)`'s")
-_DERIVATION_ROW_NOUN_RE = re.compile(r"rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b")
+_DERIVATION_ROW_NOUN_RE = re.compile(r"rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b", re.IGNORECASE)
 _DERIVATION_PATH_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`")
 
 
@@ -11583,7 +11587,7 @@ def _derivation_items(derivation: str) -> list[tuple[str, str]]:
 
     An item is bounded by the NEXT label, never by the next row noun: a noun-anchored span swallows
     the neighbouring item's path and reports an item that names no path as reached (`ea6876a918ce`,
-    the measurement on `_DERIVATION_LABEL_RE`).
+    measured on the BETWEEN-TEXT matcher this arm carried there, `_DERIVATION_ROW_ITEM_RE`).
     """
     marks = list(_DERIVATION_LABEL_RE.finditer(derivation))
     items: list[tuple[str, str]] = []
@@ -11625,11 +11629,12 @@ def test_the_derivation_list_spells_a_path_beside_every_row_label():
 
     So the derivation's spelling is graded here, and a fold that drops a path from an item reds it
     directly. ⛔ NOT a second lock on the same words: each item is read PER LABEL — its own text,
-    bounded by the NEXT label, so a label whose own item names no path is refused even when the
-    item AFTER it names one — and the noun set is the block's own `entry in `durations`` synonym so
-    a TRUE rewrite does not red as an item that vanished.
+    bounded by the NEXT label, so a ROW label whose own item names no path is refused even when the
+    item AFTER it names one (a label that makes no row claim — a RATCHET, a registration — owes no
+    path and is not refused; see the two-direction fixtures below) — and the noun set is the block's
+    own `entry in `durations`` synonym so a TRUE rewrite does not red as an item that vanished.
 
-    ⛔ AND THE BOUND IS THE GRADED PROPERTY, which is why this arm was rewritten at `ea6876a918ce`:
+    ⛔ AND THE BOUND IS THE GRADED PROPERTY, which is why this arm was rewritten at `d874b73f37f0`:
     the span it read was "this label up to the next row NOUN", so it awarded every item the next
     item's path. On THIS block that shows up as a mis-attributed reading rather than a missed
     finding — `#14548`'s item (`` `#14548`'s residue RATCHET ``) names no path, its neighbour
@@ -11673,6 +11678,16 @@ def test_the_derivation_list_spells_a_path_beside_every_row_label():
     assert _derivation_row_labels_without_path(_derivation_list(synonym)) == (["14560"], 1), (
         "the derivation checker reads only the noun `row`, so the block's own `entry in `durations` "
         "synonym walks past it — a TRUE rewrite would be graded by nothing")
+    # ⛔ …AND THE NOUN'S CASE TOLERANCE, which is the same one `_ROW_CLAIM_AFTER_FILE_RE` carries: this
+    # block states its vocabulary in CAPS, and a noun bound to lowercase drops a CAPS row claim OUT OF
+    # THE SCAN rather than refusing it — measured before the flag: `([], 0)`, ZERO items read, GREEN.
+    caps_synonym = ("On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+                    "`#14415`'s batch ROWS. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(caps_synonym)) == (["14415"], 1), (
+        "the derivation checker reads only a LOWERCASE row noun, so a CAPS spelling of the block's "
+        "own vocabulary — the spelling this very block uses elsewhere — drops the item out of the "
+        "scan entirely: "
+        f"{_derivation_row_labels_without_path(_derivation_list(caps_synonym))!r}")
     # ⛔ THE FALSE NEGATIVE the between-text span admits, with the measured pre-fix answer beside it:
     # `#14574`'s item carries a path and no row noun, so the old span ran on to `#14560`'s noun and
     # called `#14560` reached off a path that is not its own — `([], 1)`, GREEN over an unpathed row
