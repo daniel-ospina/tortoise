@@ -182,7 +182,8 @@ def test_the_carve_out_recognises_the_typed_body_and_the_legacy_string() -> None
 
     assert ha._is_capture_in_flight_refusal(body), (
         "the typed in-flight body is no longer exempt from the last-error carve-out")
-    # A replay/older client can still hand the legacy bare string through.
+    # The legacy arm guards a REVERT of the raise site (not a client or a
+    # replay — no value but a server-raised detail reaches the predicate).
     assert ha._is_capture_in_flight_refusal(ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL)
     # …and it must not swallow anything else: the policy 409 is a REAL org
     # failure and has to keep reaching the dashboard.

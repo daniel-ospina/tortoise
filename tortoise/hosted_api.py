@@ -504,8 +504,8 @@ def _is_capture_in_flight_refusal(detail: object) -> bool:
     typing the body would have silently stopped the REST wrapper's org-visible
     last-error exemption AND `mcp_server`'s twin from matching — repainting a
     server concurrency condition as an org capture failure on the dashboard.
-    Code-based for the typed body, and it still accepts the legacy bare string,
-    so a replay (or a client) carrying the pre-#14700 shape keeps the exemption.
+    Code-based for the typed body, and it still accepts the legacy bare string so
+    that reverting the raise site cannot silently re-break either carve-out.
     ONE function imported by both surfaces: a second copy is the drift this
     exists to prevent.
     """
