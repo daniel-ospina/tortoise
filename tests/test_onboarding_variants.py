@@ -1706,13 +1706,6 @@ _RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|
 # actually there") failed the "must keep its restart cue" assert (measured) and
 # silently stopped the paragraph being graded at all.
 _RESTART_CUE_RE = re.compile(_RESTART_CUE_TEXT, re.IGNORECASE)
-#: The restart as a PASSIVE, for the prose anchor only — `After the client is
-#: restarted, confirm the tools are actually there.` is the same instruction with
-#: the client first, and it is not an imperative so it is not a cue (see the note
-#: on `_RESTART_CUE_TEXT`: a passive arm THERE steals the cue position from a
-#: pre-cue clause). The anchor asks only "is a restart instruction still in prose".
-_RESTART_PASSIVE_RE = re.compile(
-    r"\b(?:is|are|was|were|has been|have been)\s+restarted\b", re.IGNORECASE)
 
 
 def _cue_start(text: str) -> int:
@@ -4022,11 +4015,15 @@ _PAST_TIME_ADVERBIAL = (
     #     … before YOUR FIRST client restart,…  RED
     # — the verdict turned on inserting the very noun the instruction names, the
     # "synonym decides the verdict" class this file forbids (#14679 review at
-    # `724d094bd1`). The noun set is the closed one `_RESTART_CUE_TEXT` uses.
+    # `724d094bd1`). The noun set is `_RESTART_CUE_TEXT`'s, `(?:MCP\s+)?` included:
+    # without that modifier the SAME fix was one token short, and
+    # `before the last MCP client restart` stayed RED while its `client` twin was
+    # GREEN — the identical one-inserted-word flip one word deeper (measured at
+    # `e50f6cdef`, #14679 review).
     r"|(?:before|prior)(?:(?!\s+(?:\w+\s+){0,4}restart(?:ing|s|ed)?\b)"
     r"|\s+(?:the|a|an|this|that|your|my|its|their|our)\s+"
     r"(?:last|previous|earlier|first)\s+"
-    r"(?:(?:client|app|IDE|editor|application|session|server|connector)\s+)?"
+    r"(?:(?:MCP\s+)?(?:client|app|IDE|editor|application)\s+)?"
     r"restart(?:ing|s|ed)?\b)"
     # ⛔ AND THE PREPOSITION+ARTICLE ARE OPTIONAL: `last session` / `last run` are
     # ordinary past-time prose, and requiring `in the` made the verdict turn on an
@@ -4703,61 +4700,29 @@ def test_3232_generic_restart_lines_are_exact():
         "restart cue — 'restart' alone never tells the user what to look for, "
         "and a clause placed before the cue points them at tools the running "
         "session cannot have yet (#3232)")
-    # ⛔ AND THE PIN MUST BIND A PROSE INSTRUCTION, NOT MERELY "SOME PARAGRAPH".
-    # `_tools_appear_after_cue` grades EVERY cue paragraph (the fix above), which
-    # means the `--harness pi` blockquote at ~:80 — "restart the client and look
-    # for the `tortoise_*` tools" — satisfies it on its own. Measured at
-    # `a46a2b21`: DELETING the pinned paragraph outright left the whole suite
-    # GREEN (780 passed), because the blockquote alone satisfied both positive
-    # asserts. On `main` the same deletion REDded, because the cue was then the
-    # literal `"Restart your client"`, which occurs exactly once in the doc (:135)
-    # — so the widening of the cue to `your|the|its` + `client|app|IDE|…` moved
-    # the pin from line-bound to document-wide, and this assertion puts it back.
-    # The property is STRUCTURAL, not a wording (#3429): at least one cue
-    # paragraph that is not a blockquote must carry the tools bound. A blockquote
-    # is a caveat about one harness variant; the instruction a user follows is
-    # prose. Renaming or moving that prose stays GREEN; deleting it does not.
-    # ⛔ DECORATION IS NOT A DIFFERENT INSTRUCTION, BUT IT IS STILL A HOLE IN THE
-    # ORDER HALF (#14679 review at `d2b9f1f4`, measured). The ANCHOR searched RAW
-    # text, so `**Restart** your client, …` stopped the paragraph counting as cue
-    # PROSE and this assertion reported a DELETED instruction — a false red on a
-    # line that is still there, which is the class #14676 exists to stop. The
-    # SEARCH therefore strips `_DECORATION_RE` (the blockquote test stays on the
-    # raw text: a `>` is structure, not decoration).
-    # ⛔ WHAT THIS DOES *NOT* FIX, stated so nobody reads the anchor as covering it:
-    # `_restart_cue_order_violation` still windows CUE PARAGRAPHS by
-    # `_RESTART_CUE_RE`, so a DECORATED cue is still not a cue and its ORDER is
-    # still ungraded — `**Restart** your client after confirming the tools are
-    # actually there.` is GREEN, measured at `a46a2b21` (parent) and here, i.e.
-    # PRE-EXISTING, not introduced by this commit. Filed as #14750; fixing it moves
-    # the cue set the seven `_INVERSION_FORMS` position against and needs its own
-    # mutation matrix, so it is declared rather than slipped into this commit.
-    # ⛔ AND THIS ANCHOR CARRIES NO SECOND GUARD. An earlier revision of this fix
-    # also asserted `all(_tools_appear_after_cue_in(p) for p in prose_cues)`; since
-    # `prose_cues ⊆ cue_paras`, it was strictly implied by the document-wide assert
-    # above and could never fail — an unpinned second mechanism for one behaviour,
-    # which is precisely what this file refuses elsewhere. Removed rather than
-    # left in: a reader who believed it load-bearing would believe the wrong arm
-    # was protecting the bound.
-    # ⛔ AND THE ANCHOR MUST TEST AN INSTRUCTION, NOT THE WORD. The first spelling of
-    # this fix used `_RESTART_WORD_RE` (`\brestart`) and was TOO WEAK, measured at
-    # `724d094bd1e`: `Confirm the tools are actually there first — the restart of the
-    # client comes after that, …` is a NOUN-PHRASED INVERSION and the suite stayed
-    # at 841 passed, as did `The restart happens after you confirm the tools …` and
-    # `A restart is needed after provisioning.` with `:135` deleted. Trading the
-    # false reds of cycle 61 for this false PASS is not a fix. The anchor therefore
-    # accepts an IMPERATIVE/gerund cue or a PASSIVE restart, both decoration-stripped:
-    # that keeps `**Restart** your client, …` and `After the client is restarted, …`
-    # GREEN while every noun phrasing above returns to RED.
-    stripped = {p: _DECORATION_RE.sub(" ", p) for p in quick.split("\n\n")}
-    prose_cues = [p for p, s in stripped.items()
-                  if (_RESTART_CUE_RE.search(s) or _RESTART_PASSIVE_RE.search(s))
-                  and not p.lstrip().startswith(">")]
-    assert prose_cues, (
-        "docs/quickstart-cloud.md must keep a NON-blockquote paragraph that "
-        "restarts the client and then sends the user to the tools — the "
-        "`--harness pi` blockquote is a caveat, not the instruction (measured: "
-        "deleting the instruction left this suite green, 780 passed)")
+    # ⛔ THE PIN STILL DOES NOT BIND *WHICH* PARAGRAPH CARRIES THE INSTRUCTION, AND
+    # THAT IS DECLARED, NOT OVERLOOKED (#14751). `_tools_appear_after_cue` grades
+    # EVERY cue paragraph, so the `--harness pi` blockquote at ~:80 — "restart the
+    # client and look for the `tortoise_*` tools" — satisfies it on its own, and
+    # deleting the pinned `:135` paragraph outright leaves the suite GREEN (measured:
+    # 780 passed at `a46a2b21`). On `main` the same deletion REDded, because the cue
+    # was then the literal `"Restart your client"`, unique to `:135`; widening the
+    # cue moved the pin from line-bound to document-wide.
+    # ⛔ AN ANCHOR ASSERTION WAS TRIED AND REMOVED, deliberately. Three rounds of it
+    # (an "at least one non-blockquote cue paragraph" anchor, then a decoration
+    # stripped `\brestart` one, then imperative-or-passive) each closed one hole and
+    # opened the next: it false-REDded legitimate rewords (`**Restart** your client`,
+    # `After the client is restarted`, `Once your client has restarted`,
+    # `must be restarted`), then accepted noun phrasings (`the restart of the
+    # client`) and negations (`You do not need to restart your client`), and left
+    # the passive INVERSION anchored but order-ungraded. An enumerated English
+    # spelling set cannot converge — every widening trades a false PASS for a false
+    # RED, and this file calls a false RED a defect because it trains the next author
+    # to delete the pin. A guard that needs a new spelling per review round is the
+    # defect. The design decision (structural/rendered grading vs a closed declared
+    # vocabulary) is #14751; the members are #14750 (decorated cue ungraded) and
+    # #14738. Until one of those is chosen, this file keeps the DECLARED gap rather
+    # than a guard that has been wrong in three consecutive rounds.
     # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
     # Measured on the landed pin: "Restart your client after confirming the
     # tools are actually there" places `tools` after the cue and is GREEN, while
@@ -7439,6 +7404,11 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "client, then confirm the tools are actually there.", False),
     ("If you confirmed the tools before your first app restart, restart your "
      "client, then confirm the tools are actually there.", False),
+    #    …and `(?:MCP\s+)?` is part of that noun set: omitting it left the same flip
+    #    one word deeper (`before the last MCP client restart` RED while
+    #    `before the last client restart` GREEN) — measured at `e50f6cdef`.
+    ("If you confirmed the tools before the last MCP client restart, restart "
+     "your client, then confirm the tools are actually there.", False),
     #    (b) the would-a-form-grade-it gate is no longer nested inside the frame
     #    test, so a remainder with no recognised frame word reaches it too.
     ("Confirm the tools are actually there, then after saving the config verify "
