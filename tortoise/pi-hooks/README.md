@@ -247,6 +247,23 @@ extension VARIANTS (`denied_extension_stem`) — and its deny list is
 `reflect-hook*` variant either. Nothing currently refuses those: the hole is
 named here so it is not mistaken for coverage.
 
+⛔ **ONE MEASURED INSTANCE IS LIVE, AND IT IS WORSE THAN UNTOUCHED — IT
+EXECUTES.** The reference box carries `extensions/reflect-hook.test.ts` beside
+the `reflect-hook.ts` this guard retires (the provenance table in this README
+already lists it as a real file, not a symlink). It is a loadable `*.ts` with
+the producer stem, so Pi's `discoverExtensionsInDir` pushes it and the loader
+**runs the module at startup**, then drops it for having no default export —
+agent-infra's whole recorder suite executing inside every Pi start, whose tail
+is `if (failed > 0) process.exit(1)`: a Pi that exits during extension load.
+It does **not** file a duplicate session (its `fetch` is stubbed out and its
+fallback directory is a temp dir), so the one-producer claim is not falsified
+and the install is not wrong to report green — the box is simply not quiet, and
+nothing here names it. It is deliberately NOT added to
+`PI_SECOND_PRODUCER_OTHER_NAMES`: refusing on it would make `tortoise install pi`
+red on that box for a file that cannot double-capture. The durable fix belongs
+in **agent-infra: do not ship `extensions/*.test.ts` into the live extensions
+directory** — not a wider guard here.
+
 #### Other records still describe the pre-install state
 
 `docs/architecture/PI-CAPTURE-ARCHITECTURE.md` and the onboarding skills
@@ -276,18 +293,26 @@ from this section is the false claim, not a stale measurement.
   `tortoise install pi` stays red until a human moves one aside, once per farm
   cycle. The measured reference box's farm denies that stem by name and
   converges green.
-- **`legacy_extension_obstacle` mirrors the three COLLISION refusals** (the
-  legacy rename collision, a symlinked `.tortoise-capture.disabled` that Pi
-  still loads, and the second producer's taken-name collision). Every OTHER
-  refusal the installer has is UNMIRRORED, so `hooks status`/`doctor` can still
-  name a verb that refuses for them: a symlinked preservation target, a
-  manifest-declared or unreadable-`package.json` directory, an existing
-  `index.ts.disabled`/`index.js.disabled`, a still-loadable RETIRED name for the
-  second producer (a suffixed link to a directory, which refuses on every
-  re-run), and a manifest-declared directory at the second producer's name. The
-  list is deliberately not counted — a count is what drifted before — and it is
-  the full set, so a reader does not mistake it for coverage. The mirror is the one thing that
-  drifts; that is its documented hazard, not a new one, and
+- **`legacy_extension_obstacle` mirrors every refusal it can EXPRESS, and the
+  arms it cannot are named here.** It covers: the legacy rename collision, a
+  symlinked `.tortoise-capture.disabled` that Pi still loads, the second
+  producer's taken-name collision, a **symlinked or non-regular preservation
+  target** at the second producer's retired name, a **still-loadable RETIRED
+  name** for the second producer (a suffixed link to a directory, which refuses
+  on every re-run), and a loadable **`reflect-hook.js`** — the same producer
+  under the other extension Pi accepts (`PI_SECOND_PRODUCER_OTHER_NAMES`).
+  NOT mirrored, so `hooks status`/`doctor` can still name a verb that refuses
+  for them: a manifest-declared or unreadable-`package.json` directory (at
+  either producer's name), and an existing
+  `index.ts.disabled`/`index.js.disabled` inside a directory producer.
+  ⛔ **DERIVE THIS LIST FROM THE ARMS — DO NOT TRUST IT, AND DO NOT COUNT IT.**
+  A count is what drifted before, and hand-maintenance drifted it again: an
+  earlier revision of this bullet called two arms UNMIRRORED that the predicate
+  had already gained (the still-loadable retired name, round 24; the symlinked
+  preservation target, round 25) while omitting the `reflect-hook.js` arm
+  entirely — and still closed with "it is the full set". Re-read
+  :func:`legacy_extension_obstacle` before quoting it. The mirror is the one
+  thing that drifts; that is its documented hazard, not a new one, and
   `test_pi_legacy_obstacle_matches_the_installers_own_refusal` pins the shape it
   covers.
 - **A TOCTOU window** remains between the digest comparison and the
