@@ -1035,36 +1035,23 @@ def test_the_derivation_covers_the_operations_harness_home():
         assert name in names, f"{name} is not derived — {_SCRIPT_GLOBS} does not reach it"
 
 
-def test_every_gh_subcommand_is_recognised():
-    """`_GH_CMD`'s closed list must not be narrower than the installed `gh`.
+def _parse_published_gh_subcommands(help_text: str) -> set[str]:
+    """The subcommands a `gh --help` render publishes — the ALIAS section excluded.
 
-    This is the pin that keeps the list honest: the enumeration named 12 of the **33**
-    subcommands `gh --help` publishes (`gh 2.102.0`, measured: CORE 12 + GITHUB ACTIONS 3 +
-    ADDITIONAL 18, alias section excluded — the sentence said 28, which was wrong twice: the
-    installed count is 33 and its own arithmetic, 12 named + 8 newly-real, closes only to 20),
-    so eight real invocations (`gh cache delete`,
-    `gh gist create`, `gh attestation verify`, `gh ruleset list`, `gh alias set`,
-    `gh extension install`, `gh org list`, `gh ssh-key list`) were all really executed and
-    all read CLEAN. Each was confirmed real by `gh <name> --help` exiting 0.
+    ⛔ ONLY THE `… COMMANDS` SECTIONS ARE SUBCOMMANDS. A flat `^  ([a-z-]+)` scan also
+    harvests HELP TOPICS (`accessibility`, `environment`, `exit-codes`, `reference`,
+    `mintty`, …) and FLAGS, which are not commands — and `gh` itself. The sections are
+    CORE / GITHUB ACTIONS / ALIAS / ADDITIONAL COMMANDS, each an all-caps header.
 
-    ⛔ AND THAT PIN IS WHY `event` IS IN THE LIST. GitHub CLI **2.105.0** added the preview
-    `gh event` command group (`gh event listen`, `gh event subscription …`), so a runner
-    whose `gh` is newer than the `2.102.0` measured above publishes **34** subcommands and
-    this row redded in CI with `['event']` missing — the re-derivation working exactly as
-    intended, not a flake. The entry is added and the tuple now carries 34 names, so
-    `gh event listen` is a recognised invocation rather than a silent CLEAN read. Widen
-    when a later `gh` adds one; never narrow.
+    Extracted from the test body so the PARSE can be exercised against a fixed render: the
+    test that owns it can only compare against whichever `gh` this box happens to have
+    installed, and a box one minor version behind cannot show that the parser handles a
+    command the owner's `gh` does not publish yet (`#14621`'s red: CI's `gh` was 2.105.0 and
+    the author box's was 2.102.0, so the NEW command was visible only on CI).
     """
-    live = subprocess.run(["gh", "--help"], capture_output=True, text=True)
-    if live.returncode != 0:
-        pytest.skip("`gh` is not on PATH, so the installed command set cannot be read")
-    # ⛔ ONLY THE `… COMMANDS` SECTIONS ARE SUBCOMMANDS. A flat `^  ([a-z-]+)` scan also
-    # harvests HELP TOPICS (`accessibility`, `environment`, `exit-codes`, `reference`,
-    # `mintty`, …) and FLAGS, which are not commands — and `gh` itself. The sections are
-    # CORE / GITHUB ACTIONS / ALIAS / ADDITIONAL COMMANDS, each an all-caps header.
     published: set[str] = set()
     in_commands = False
-    for line in live.stdout.splitlines():
+    for line in help_text.splitlines():
         header = line.strip()
         if re.fullmatch(r"[A-Z][A-Z ]*COMMANDS", header):
             # ⛔ ALIAS COMMANDS ARE THIS MACHINE'S, NOT `gh`'s. The section lists whatever
@@ -1073,13 +1060,41 @@ def test_every_gh_subcommand_is_recognised():
             # entry that no other box has.
             in_commands = "ALIAS" not in header
             continue
-        if re.fullmatch(r"[A-Z][A-Z ]+", line.strip()):
+        if re.fullmatch(r"[A-Z][A-Z ]+", header):
             in_commands = False
             continue
         if in_commands:
             m = re.match(r"^  ([a-z][a-z-]+)\b", line)
             if m:
                 published.add(m.group(1))
+    return published
+
+
+def test_every_gh_subcommand_is_recognised():
+    """`_GH_CMD`'s closed list must not be narrower than the installed `gh`.
+
+    This is the pin that keeps the list honest: the enumeration named 12 of the **33**
+    subcommands `gh --help` publishes (`gh 2.102.0`: CORE 12 + GITHUB ACTIONS 3 +
+    ADDITIONAL 18, alias section excluded — the sentence said 28, which was wrong twice: the
+    installed count was 33 and its own arithmetic, 12 named + 8 newly-real, closes only to
+    20), so eight real invocations (`gh cache delete`,
+    `gh gist create`, `gh attestation verify`, `gh ruleset list`, `gh alias set`,
+    `gh extension install`, `gh org list`, `gh ssh-key list`) were all really executed and
+    all read CLEAN. Each was confirmed real by `gh <name> --help` exiting 0.
+
+    ⚠️ THE COUNT IS A MOVING TARGET AND THIS PIN IS SUPPOSED TO RED WHEN IT MOVES — that is
+    what "a NEW subcommand cannot silently join the blind spot" means. `2.105.0` added the
+    Event Streams preview `event` command set (`gh event listen`,
+    `gh event subscription …`), which took the published total 33 → 34; CI's `gh` was ahead of
+    the author's box, so the red landed on every PR rather than on the release that caused it
+    (`#14621`). The remedy is the one line it asks for — name it in `_GH_SUBCOMMANDS` — and
+    `test_the_published_help_parser_reads_the_event_command` is the version-independent half,
+    so a box behind CI can still prove the parse reaches it.
+    """
+    live = subprocess.run(["gh", "--help"], capture_output=True, text=True)
+    if live.returncode != 0:
+        pytest.skip("`gh` is not on PATH, so the installed command set cannot be read")
+    published = _parse_published_gh_subcommands(live.stdout)
     assert published, "could not parse `gh --help`; this pin would otherwise pass vacuously"
     missing = sorted(published - set(_GH_SUBCOMMANDS))
     assert not missing, (
@@ -1088,6 +1103,73 @@ def test_every_gh_subcommand_is_recognised():
     )
     for name in _GH_SUBCOMMANDS:
         assert _gh_hazards(["        run: gh " + name + " x"], _gh_executing_scripts()), name
+
+
+#: A SYNTHESISED `gh --help` render, NOT a capture — the section layout and the two-space
+#: `name: description` rows are the documented shape, and the point of the fixture is that it
+#: is INDEPENDENT of whichever `gh` is installed here. `test_every_gh_subcommand_is_recognised`
+#: is the capture-based arm and runs against the installed binary.
+_GH_HELP_FIXTURE = """ \
+Work seamlessly with GitHub from the command line.
+
+USAGE
+  gh <command> <subcommand> [flags]
+
+CORE COMMANDS
+  auth:          Authenticate gh and git with GitHub
+  pr:            Manage pull requests
+  repo:          Manage repositories
+
+GITHUB ACTIONS COMMANDS
+  run:           View details about workflow runs
+
+ALIAS COMMANDS
+  co:            Alias for "pr checkout"
+
+ADDITIONAL COMMANDS
+  api:           Make an authenticated GitHub API request
+  event:         Listen for events on GitHub resources (preview)
+  org:           Manage organizations
+
+HELP TOPICS
+  accessibility: Learn about GitHub CLI's accessibility experiences
+  environment:   Environment variables that can be used with gh
+  mintty:        Information about using gh with MinTTY
+
+FLAGS
+  --help      Show help for command
+  --version   Show gh version
+"""
+
+
+def test_the_published_help_parser_reads_the_event_command():
+    """The `… COMMANDS` parse must reach a command only a NEWER `gh` publishes.
+
+    `#14621`'s carve-out red was `gh` publishes ['event'] and `_GH_SUBCOMMANDS` does not list
+    it — a real blind spot, but one the fixed-version test could only see on a box whose `gh`
+    was at 2.105.0. Both halves are asserted here, so the fix is proved where the installed
+    binary cannot prove it: the PARSE harvests `event` out of ADDITIONAL COMMANDS, and the
+    closed list plus the hazard regex actually CARRY it (an invocation must not read CLEAN).
+
+    Every other section in the fixture exists to keep the parse honest in the same breath:
+    `co` is this machine's alias, `accessibility`/`environment`/`mintty` are HELP TOPICS and
+    `--help`/`--version` are FLAGS, so a parser that regressed to a flat `^  ([a-z-]+)` scan
+    fails here instead of quietly widening the list.
+
+    ⛔ The ALIAS exclusion has no assertion of its own ON PURPOSE: the equality above already
+    grades it, because the fixture carries an ALIAS section, so `co` in `parsed` fails that
+    line. A second `"co" not in parsed` line is unreachable — measured: every mutant that
+    harvests `co` reds the equality FIRST — and an assertion that can never fire is dead
+    weight that reads as coverage (agent-infra#3442 rule 3).
+    """
+    parsed = _parse_published_gh_subcommands(_GH_HELP_FIXTURE)
+    assert parsed == {"auth", "pr", "repo", "run", "api", "event", "org"}, sorted(parsed)
+    assert "event" in _GH_SUBCOMMANDS, (
+        "`gh event` (2.105.0's Event Streams preview) is not in the closed list, so "
+        "`gh event listen` reads CLEAN in a workflow scan"
+    )
+    for shape in ("        run: gh event listen --repo owner/repo", "        run: gh event x"):
+        assert _gh_hazards([shape], _gh_executing_scripts()), shape
 
 
 @pytest.mark.parametrize(
@@ -1117,6 +1199,19 @@ def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
 #: (execution proven by a stub `gh` on PATH, and each name confirmed real by
 #: `gh <name> --help` exiting 0). `test_every_gh_subcommand_is_recognised` re-derives the
 #: set from the installed `gh` so a NEW subcommand cannot silently join the blind spot.
+#:
+#: ⚠️ THE LIST CARRIES EVERY COMMAND THE INSTALLED `gh` PUBLISHES, INCLUDING PREVIEW SETS
+#: ADDED AFTER 2.102.0 — `event` (2.105.0, the Event Streams preview: `gh event listen` and
+#: `gh event subscription create|list|view|delete`) is here for that reason. It is NOT in
+#: `_GH_EXEC`, which enumerates a narrower idiom subset used only to DERIVE which helper
+#: scripts shell out to `gh` — the same partial list that omits `cache`/`gist` and
+#: is deliberately scoped in its own comment.
+#:
+#: ⚠️ A RELEASE THAT ADDS A COMMAND REDS `test_every_gh_subcommand_is_recognised` ON EVERY PR
+#: UNTIL THE NAME IS ADDED HERE. That is the pin working, not a flake — measured on `#14621`,
+#: where CI's `gh` (2.105.0) was ahead of the author box's (2.102.0) and the red arrived on a
+#: PR that touches no `gh` invocation at all. The remedy is one line, and it is never to widen
+#: the derivation instead.
 #:
 #: ⛔ AND THE TRAILING BOUNDARY IS A WIDENING, NOT A NARROWING. The old pattern had none,
 #: so `gh project` matched on `pr` and `gh organization` would have matched on `org`. Adding

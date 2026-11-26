@@ -24,8 +24,13 @@
 //                        the account's state changed, a human acted, or an
 //                        authenticated credential event (a new-country sign-in)
 //                        occurred. Only this register carries incident framing.
-//   * REGISTER_ACTIVITY — a detector MEASURED a rate and changed nothing.
-//                        Muted, no verb, no instruction.
+//   * REGISTER_ACTIVITY — a detector MEASURED a rate and DISABLED nothing.
+//                        It may still MARK what it measured (`flagged_at`,
+//                        which `/v1/team` renders as status "flagged") — #14687
+//                        moved `flag`/`review_needed` here, and a `flag` row
+//                        DOES write that column, so "changed nothing" is the
+//                        one claim this register cannot make. Muted, no verb,
+//                        no instruction.
 //
 // An entry with no (or an unknown) `register` is treated as ACTIVITY. That
 // default is fail-quiet on purpose: incident framing is a claim that something
@@ -57,9 +62,21 @@ export const ACTIVITY_HEADING = 'Recent activity'
 // `suspend` row on an Organization that IS suspended — telling that customer
 // nothing was locked is the one thing the appeal flow exists to contradict
 // (round-23 review finding). "by them" is what makes the clause true.
+//
+// ⛔ #14687 removed "not actions taken on your account" and the clause is scoped
+// to ENFORCEMENT instead. That clause was TRUE while `flag`/`review_needed` were
+// rescued into the incident register (`INCIDENT_BY_DEFINITION` below) — no
+// state-writing row ever reached this one. The register split is what makes them
+// activity rows, and a `flag` row DOES write `organizations.flagged_at`
+// (`abuse.py::flag_org`), which `/v1/team` renders as `status: "flagged"` and
+// `main.jsx` draws as the "⚠ flagged" badge — on THIS screen. "Not actions taken
+// on your account" beside that badge denies a state the header displays, which is
+// the same false-claim class as "nothing was changed". What is true is narrower
+// and is what this says: nothing was disabled, throttled or locked.
 export const ACTIVITY_LEAD =
-  'Rate signals from our abuse detectors. These are measurements, not actions ' +
-  'taken on your account — nothing was disabled, changed or locked by them.'
+  'Rate signals from our abuse detectors. These are measurements, not ' +
+  'enforcement on your account — nothing was disabled, throttled or locked ' +
+  'by them.'
 
 export const ALERTS_HEADING = 'Security alerts'
 export const ALERTS_LEAD =
@@ -121,17 +138,27 @@ export const ALERTS_UNAVAILABLE = "Could not read this Organization's alert "
 //: BOTH lands in the quiet register, so a type added later is never
 //: incident-framed by accident. This list only rescues the types where the
 //: incident reading is certain.
+//:
+//: #14687 removed `flag` and `review_needed` from it, because the product's own
+//: definition of those two changed: they are re-derived rate MEASUREMENTS (see
+//: `ALERT_REGISTER_OF` in `tortoise/abuse.py`), nothing punitive has ever followed
+//: them, and the server now stamps them `activity`. Keeping the rescue here would
+//: have made the mixed-deploy window render a rate as an incident — the exact
+//: framing the register split exists to remove — and the quiet reading is TRUE for
+//: them in either version: nothing is DISABLED by them (`flagged_at` is set, which
+//: is why the lead below says "disabled, throttled or locked" and not "changed").
+//: `suspend` and `auth_ip` stay:
+//: an older API emitted those only for real state changes, and mis-framing one of
+//: those is the direction that must never happen.
 const INCIDENT_BY_DEFINITION = new Set([
   'suspend',
-  'flag',
-  'review_needed',
   'auth_ip',
 ])
 
 //: The reverse race is NOT covered and cannot be: when the API deploys first,
 //: the OLD dashboard reads the new feed and still renders its own heading and
-//: lead, so a row saying "This is informational; nothing was changed" can sit
-//: under "Revoke any key you don't recognize" until Pages catches up. Stated
+//: lead, so a row saying "This is informational; it did not change anything"
+//: can sit under "Revoke any key you don't recognize" until Pages catches up. Stated
 //: rather than hidden — the server copy is the half that can be fixed by
 //: shipping, and the window is self-healing (same merge, minutes).
 
