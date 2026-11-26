@@ -166,7 +166,7 @@ def test_the_in_flight_code_is_not_the_policy_409() -> None:
     # read off the shape rather than off an invented literal — it carries no
     # `code` at all, so a client cannot branch on one. ⛔ (No PRODUCTION raise
     # site emits `capture_recording_disabled` — the only occurrence in the tree
-    # is the rejection INPUT asserted BELOW — so asserting it as though
+    # other than THIS comment is the rejection INPUT asserted below — so asserting it as though
     # the route could emit it proved nothing about the production refusal,
     # #14700 review.)
     policy = _POLICY_409_DETAIL
