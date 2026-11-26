@@ -20,9 +20,26 @@ must never happen: the agent has already moved past the turn and cannot retry it
 ## What replaces it
 
 Accept, then queue. A capture over the ceiling gets a durable `:CaptureIntake`
-row holding its exact payload, and an answer. The row lives in the RECORD — the
-system of record per `docs/architecture/STORAGE-ARCHITECTURE.md` §2.0 — so the
-hand-off survives the accepting process, and the drain re-enters the SAME capture
+row holding its exact payload, and an answer. The row lands in the TENANT'S
+GRAPH — the same substrate `batch_ingest.GraphBatchStore` uses — and it is
+written through the projection's own handle.
+
+⛔ **WHAT THAT DOES *NOT* BUY, SAID PLAINLY (#14707 review P1).** The record is
+the system of record and the graph is its derived hot cache
+(`docs/architecture/STORAGE-ARCHITECTURE.md` §2.0), and a journal-backed graph
+replay rebuilds `:CaptureIntake` from NOTHING: no journal record describes this
+node, so `tortoise-rebuild` (a documented recovery path) DROPS every queued row
+while the client has already pruned its spool entry on our 2xx. That is real
+loss, and it is the same residual `:Batch` rows carry today — it is stated here,
+in the plan's D1, and tracked as its own issue (`#14734`) rather than described
+as "durable by the same rule that makes a capture durable", which was FALSE:
+a capture is durable because the RECORD holds it.
+
+What the row does buy, and what the door relies on: it survives the ACCEPTING
+PROCESS (a restart, a deploy, a drain task that dies), which is the failure the
+client's in-line retry could not survive. Nothing here claims more.
+
+The drain re-enters the SAME capture
 path (`_capture_session_impl`) rather than growing a second extraction
 implementation (EXTRACTOR-V4-ARCHITECTURE's "extraction is the only producer of
 the logical model").
@@ -38,10 +55,13 @@ The full map, the alternatives and the recorded decisions this obeys are in
    client treats any 2xx as filed and may prune its spool entry, so a row that
    did not land is a destroyed turn (#10479).
 2. ⛔ **NO DEPTH CEILING EVER DROPS WORK.** `CAPTURE_QUEUE_MAX_DEPTH` is a
-   *pacing* threshold, not a refusal: at or above it the queue still accepts and
-   the condition is published (`stats()["depth"]`, `["over_depth"]`). The ceiling
-   exists so an operator can SEE a stuck drain instead of discovering it from a
-   978 MB folder.
+   **PUBLISHING** threshold, not a refusal and not a pacer: at or above it the
+   queue still accepts and the condition is published (`stats()["depth"]`,
+   `["over_depth"]`). What bounds intake GROWTH is the door's per-org ingest
+   window (`commit_ingest_admit`, charged before the accept — see
+   `hosted_api._capture_accept_into_intake`'s caller), not this number. The
+   ceiling exists so an operator can SEE a stuck drain instead of discovering
+   it from a 978 MB folder.
 3. ⛔ **A CLAIMED ITEM IS NEVER LOST BY THE CLAIM.** Claiming is a state
    transition inside one statement (`queued` → `extracting`); an item whose
    worker died is reclaimed by `reclaim_stale()` after
@@ -112,7 +132,9 @@ CAPTURE_INTAKE_MAX_ATTEMPTS = 5
 #: drain's own item would be stolen mid-flight.
 CAPTURE_INTAKE_RECLAIM_AFTER_S = 900.0
 
-#: The PACING threshold (see invariant 2). Not a refusal, not a drop.
+#: The OVER-DEPTH publishing threshold (see invariant 2). Not a refusal, not a
+#: drop, and NOT a pacer: intake growth is bounded by the door's per-org ingest
+#: window, which is charged before an accept is written.
 CAPTURE_QUEUE_MAX_DEPTH = 512
 
 #: Attempts are stored per item; this backoff spaces a retry out so a
@@ -215,7 +237,7 @@ class IntakeStore(Protocol):
 
     def release(self, item_id: str, *, error: str, now: float,
                 next_attempt_at: float | None,
-                terminal: bool) -> None: ...
+                terminal: bool, refund_attempt: bool = False) -> None: ...
 
     def depth(self) -> int: ...
 
@@ -226,6 +248,9 @@ class IntakeStore(Protocol):
 
     def rows(self, *, state: str | None = None,
              limit: int = 100) -> list[CaptureIntakeItem]: ...
+
+    def queued_for_session(self,
+                           session_id: str) -> CaptureIntakeItem | None: ...
 
 
 class MemoryIntakeStore:
@@ -263,7 +288,8 @@ class MemoryIntakeStore:
             self._rows.pop(item_id, None)
 
     def release(self, item_id: str, *, error: str, now: float,
-                next_attempt_at: float | None, terminal: bool) -> None:
+                next_attempt_at: float | None, terminal: bool,
+                refund_attempt: bool = False) -> None:
         with self._lock:
             row = self._rows.get(item_id)
             if row is None:
@@ -273,6 +299,8 @@ class MemoryIntakeStore:
             row["last_error"] = error
             row["claimed_at"] = None
             row["next_attempt_at"] = next_attempt_at
+            if refund_attempt:
+                row["attempts"] = max(0, int(row.get("attempts") or 0) - 1)
 
     def depth(self) -> int:
         with self._lock:
@@ -318,6 +346,17 @@ class MemoryIntakeStore:
             ]
             return out[:limit]
 
+    def queued_for_session(
+            self, session_id: str) -> CaptureIntakeItem | None:
+        with self._lock:
+            for _, row in sorted(self._rows.items()):
+                if row["session_id"] != session_id:
+                    continue
+                if row["state"] == IntakeState.FAILED.value:
+                    continue
+                return _item_from_row(row)
+            return None
+
 
 #: One statement does the claim, so two workers cannot both win it. FalkorDB
 #: (and Neo4j) execute a single `MATCH … SET … RETURN` atomically per row;
@@ -348,7 +387,10 @@ _COMPLETE_CYPHER = (
 _RELEASE_CYPHER = (
     f"MATCH (i:{CAPTURE_INTAKE_LABEL} {{item_id: $item_id}}) "
     "SET i.state = $state, i.last_error = $error, i.claimed_at = null, "
-    "    i.next_attempt_at = $next_attempt_at "
+    "    i.next_attempt_at = $next_attempt_at, "
+    "    i.attempts = CASE WHEN $refund AND coalesce(i.attempts, 0) > 0 "
+    "                      THEN coalesce(i.attempts, 0) - 1 "
+    "                      ELSE coalesce(i.attempts, 0) END "
     "RETURN i.item_id"
 )
 
@@ -430,13 +472,15 @@ class GraphIntakeStore:
         self._run(_COMPLETE_CYPHER, {"item_id": item_id})
 
     def release(self, item_id: str, *, error: str, now: float,
-                next_attempt_at: float | None, terminal: bool) -> None:
+                next_attempt_at: float | None, terminal: bool,
+                refund_attempt: bool = False) -> None:
         self._run(_RELEASE_CYPHER, {
             "item_id": item_id,
             "state": (IntakeState.FAILED.value if terminal
                       else IntakeState.QUEUED.value),
             "error": error,
             "next_attempt_at": next_attempt_at,
+            "refund": bool(refund_attempt),
         })
 
     def depth(self) -> int:
@@ -454,6 +498,22 @@ class GraphIntakeStore:
         return [_item_from_row(_row_dict(r))
                 for r in self._run(_ROWS_CYPHER,
                                    {"state": state, "limit": int(limit)})]
+
+    def queued_for_session(
+            self, session_id: str) -> CaptureIntakeItem | None:
+        """The live (not parked) row for one session, oldest first.
+
+        Keyed on `session_id` — the 202's `status_url` addresses the SESSION, and
+        a session can be queued many times (a TRUE retry), so the OLDEST live row
+        is the one the caller's address is about.
+        """
+        rows = self._run(_SESSION_CYPHER, {
+            "session_id": session_id,
+            "failed": IntakeState.FAILED.value,
+        })
+        if not rows:
+            return None
+        return _item_from_row(_row_dict(rows[0]))
 
     def reclaim_stale(self, now: float,
                       after_s: float = CAPTURE_INTAKE_RECLAIM_AFTER_S) -> int:
@@ -473,6 +533,17 @@ class GraphIntakeStore:
                       "(claim reclaimed)"),
         })
         return int(rows[0][0]) if rows and rows[0] else 0
+
+
+#: `queued_for_session`: what the 202's `status_url` reads. Bounded by the
+#: session, not by the queue — `_ROWS_CYPHER` scans the whole queue.
+_SESSION_CYPHER = (
+    f"MATCH (i:{CAPTURE_INTAKE_LABEL} {{session_id: $session_id}}) "
+    "WHERE i.state <> $failed "
+    "RETURN i.item_id, i.org_id, i.graph, i.session_id, i.payload, "
+    "       i.enqueued_at, i.attempts, i.state, i.last_error "
+    "ORDER BY i.item_id ASC LIMIT 1"
+)
 
 
 def _row_dict(row: Any) -> dict:
@@ -570,16 +641,23 @@ class CaptureIntake:
             attempts=0,
             state=IntakeState.QUEUED.value,
         )
+        # ⛔ DEPTH IS READ BEFORE THE PUT (#14707 review P3): the item itself is
+        # not ahead of itself. `position` is the depth the item found when it
+        # arrived (D2's "the queue depth ahead of it"); reading after `put()`
+        # made every position one too high, and the first item in an empty queue
+        # report `position: 1`.
+        depth_before = self._safe_depth()
         self.store.put(item)
         self.counters.accepted += 1
-        depth = self._safe_depth()
+        depth_after = None if depth_before is None else depth_before + 1
         return IntakeAcceptance(
             item_id=item.item_id,
             session_id=item.session_id,
             enqueued_at=now,
-            position=depth,
-            depth=depth,
-            over_depth=(depth is not None and depth >= self.depth_ceiling),
+            position=depth_before,
+            depth=depth_after,
+            over_depth=(depth_after is not None
+                        and depth_after >= self.depth_ceiling),
         )
 
     # ── the drain ──────────────────────────────────────────────────────────
@@ -627,7 +705,41 @@ class CaptureIntake:
             return IntakeState.FAILED.value
         return IntakeState.QUEUED.value
 
+    def defer(self, item: CaptureIntakeItem, error: str,
+              delay_s: float = _RETRY_BASE_S) -> str:
+        """Put an item back WITHOUT charging it an attempt.
+
+        ⛔ The distinction this exists for (#14707 review P1/P2): a TRANSIENT
+        condition — capacity, a same-session capture already in flight, a store
+        that answered 503 — is not the item's fault, so counting it against
+        `CAPTURE_INTAKE_MAX_ATTEMPTS` would convert a busy box into a `failed`
+        row, i.e. a lost turn. `fail()` is for the item's own faults and for
+        refusals the item can never pass (a 402 the org does not fit, a payload
+        over the turn cap); `defer()` for conditions that pass.
+        """
+        now = float(self.now())
+        self.store.release(item.item_id, error=error, now=now,
+                           next_attempt_at=now + max(0.0, float(delay_s)),
+                           terminal=False, refund_attempt=True)
+        return IntakeState.QUEUED.value
+
     # ── observability ──────────────────────────────────────────────────────
+    def park(self, item: CaptureIntakeItem, error: str) -> str:
+        """Park an item as `failed` NOW, on a verdict that cannot change.
+
+        ⛔ `fail()` exists for the ATTEMPT BOUND; this exists for a refusal that
+        is about the ITEM or the ENTRY (the org does not fit its quota, recording
+        is off, the payload is over the turn cap). Retrying those five times over
+        four minutes cannot change the answer, and while it waits the row is the
+        queue's head. Parking keeps it VISIBLE (`failed`, with the refusal as
+        `last_error`) — the design's "exhaustion is not deletion" rule, applied
+        one step earlier than the bound.
+        """
+        self.store.release(item.item_id, error=error, now=float(self.now()),
+                           next_attempt_at=None, terminal=True)
+        self.counters.failed += 1
+        return IntakeState.FAILED.value
+
     def _safe_depth(self) -> int | None:
         try:
             return int(self.store.depth())

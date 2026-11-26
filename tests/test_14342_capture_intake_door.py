@@ -25,6 +25,26 @@ import pytest
 import tortoise.hosted_api as ha
 from tortoise import capture_intake as ci
 
+#: The REAL capture pipeline, captured at import time — the gate-order test below
+#: needs it while the shared fixture stubs the impl for the door/drain tests.
+_REAL_IMPL = ha._capture_session_impl
+
+
+async def _gates_pass_impl(body, request, org, slot=None, state=None,
+                           deferred_resume=False, gate_only=False,
+                           ingest_charged=False):
+    """Stand in for the capture path's GATES: pass, then stop.
+
+    ⛔ The door runs the entry gates BEFORE it converts a capacity refusal into
+    an acceptance (#14707 review P1), through
+    `_capture_session_impl(gate_only=True)`. This stub answers that preflight
+    with the sentinel the real implementation raises at the first-write
+    boundary, so these door/drain tests stay graph-free. The gates THEMSELVES are
+    exercised against the REAL implementation by
+    `test_the_entry_gates_run_before_the_acceptance` below.
+    """
+    raise ha._CaptureEntryGatesSatisfied()
+
 
 @pytest.fixture()
 def intake(monkeypatch: pytest.MonkeyPatch):
@@ -57,6 +77,10 @@ def intake(monkeypatch: pytest.MonkeyPatch):
                         lambda org, item: _queue_for().finish(item))
     monkeypatch.setattr(ha, "_CAPTURE_INTAKE_DRAINERS", set())
     monkeypatch.setattr(ha, "_CAPTURE_INTAKE_TASKS", set())
+    monkeypatch.setattr(ha, "_CAPTURE_INTAKE_TENANTS", {})
+    monkeypatch.setattr(ha, "_CAPTURE_INTAKE_LAST_DRAIN", {})
+    # the entry-gate PREFLIGHT the door runs before accepting (see the stub).
+    monkeypatch.setattr(ha, "_capture_session_impl", _gates_pass_impl)
     return store
 
 
@@ -122,24 +146,65 @@ def test_a_minted_session_id_is_stored_so_the_status_address_resolves(
     assert intake.rows()[0].payload["session_id"] == sid
 
 
-def test_only_the_capacity_refusal_is_converted(
+def test_a_non_capacity_refusal_keeps_its_meaning(
     monkeypatch: pytest.MonkeyPatch, intake,
 ) -> None:
-    """⛔ Every other refusal keeps its meaning. `ingest_rate_limited` is a verdict
-    about the CALLER's rate; 402/409 are verdicts about the ENTRY. Turning them
-    into "accepted" would be the false-PASS class this family keeps paying for.
+    """⛔ Every other refusal keeps its meaning (#14707 review P2).
+
+    The PREVIOUS revision of this test stubbed `_reserve_capture_slot` to raise
+    `ingest_rate_limited` — an exception that function cannot raise — so it was
+    green while the property in its docstring was false in production. The real
+    per-org ingest 429 comes from the entry gates, which the door now runs before
+    it accepts; this test drives it from there.
     """
-    def _rate_limited(_key=None):
+    _saturated(monkeypatch)
+
+    async def _rate_limited(body, request, org, slot=None, state=None,
+                           deferred_resume=False, gate_only=False,
+                           ingest_charged=False):
         raise ha.HTTPException(
             status_code=429,
             detail={"code": "ingest_rate_limited", "retry_after": 30})
 
-    monkeypatch.setattr(ha, "_reserve_capture_slot", _rate_limited)
+    monkeypatch.setattr(ha, "_capture_session_impl", _rate_limited)
     with pytest.raises(ha.HTTPException) as excinfo:
         asyncio.run(ha.capture_session(_body(9), None, _org()))
     assert excinfo.value.status_code == 429
     assert excinfo.value.detail["code"] == "ingest_rate_limited"
     assert intake.rows() == [], "a non-capacity refusal must not queue anything"
+
+
+def test_the_entry_gates_run_before_the_acceptance(
+    monkeypatch: pytest.MonkeyPatch, intake,
+) -> None:
+    """⛔ THE GATE ORDER, against the REAL capture implementation.
+
+    Pre-fix, `_reserve_capture_slot` was the FIRST thing the handler did, so a
+    saturated box answered `202 accepted` to an org whose recording is switched
+    OFF: the client pruned its spool entry on the 2xx, the drain re-discovered
+    the 409, and a permanently refused turn was lost. Post-fix the capacity
+    refusal only ROUTES to the gate preflight: the gates answer 409 first and
+    nothing is queued.
+
+    Non-vacuity: with the pre-fix ordering this test gets 202 (asserted below as
+    "must not"), not 409 — it is the reviewer's exact scenario, at the one gate
+    that needs no graph to reach (`_session_recording_allowed_off_loop`).
+    """
+    _saturated(monkeypatch)
+
+    async def _recording_off(_org):
+        return (False, "team", {})
+
+    monkeypatch.setattr(ha, "_session_recording_allowed_off_loop",
+                        _recording_off)
+    monkeypatch.setattr(ha, "_capture_session_impl", _REAL_IMPL)
+    with pytest.raises(ha.HTTPException) as excinfo:
+        asyncio.run(ha.capture_session(_body(11), None, _org()))
+    assert excinfo.value.status_code == 409, (
+        "a saturated box must not turn the recording-off 409 into a 202 — the "
+        "client prunes its spool entry on any 2xx")
+    assert intake.rows() == [], (
+        "a turn refused by an ENTRY gate must not be queued either")
 
 
 def test_the_rollback_switch_restores_the_refusal(
@@ -199,15 +264,21 @@ def test_a_burst_far_past_the_ceiling_is_accepted_and_all_of_it_is_processed(
     processed: list[str] = []
 
     async def _fake_impl(body, request, org, slot=None, state=None,
-                         deferred_resume=False):
+                         deferred_resume=False, gate_only=False,
+                         ingest_charged=False):
         processed.append(body.session_id)
         assert deferred_resume is True, (
             "a drained item must take the resume lane, or a recorded-then-"
             "abandoned capture replays with 0 extracted (#1727)")
+        assert ingest_charged is True, (
+            "the door already charged this org's ingest window — charging it "
+            "again would spend it twice for one turn (#14707 review P1)")
         return {}
 
     monkeypatch.setattr(ha, "_capture_session_impl", _fake_impl)
-    monkeypatch.setattr(ha, "_reserve_capture_slot", lambda _k=None: _Slot())
+    keys: list[str | None] = []
+    monkeypatch.setattr(ha, "_reserve_capture_slot",
+                        lambda _k=None: (keys.append(_k), _Slot())[1])
 
     asyncio.run(ha._capture_intake_drain(_org(), None, "org_1:None"))
 
@@ -215,6 +286,13 @@ def test_a_burst_far_past_the_ceiling_is_accepted_and_all_of_it_is_processed(
         "N in, N out — a turn accepted by the door must reach the capture path")
     assert intake.rows() == [], "a completed item must not linger in the queue"
     assert ha._CAPTURE_INTAKE_COUNTERS.completed == n
+    # ⛔ #14707 review P2: the drain reserves with the SESSION KEY, so
+    # `_CAPTURE_SESSIONS` (the #3129 duplicate-session admission guard) is armed
+    # for drained work — `None` left it open to a concurrent same-session POST.
+    assert keys and all(k and k.endswith(tuple(f":s{i}" for i in range(n)))
+                        for k in keys), (
+        "the drain must reserve with `_capture_session_key(org, session_id)`, "
+        f"not None (got {keys[:3]})")
 
 
 def test_a_drain_killed_mid_item_leaves_it_recoverable_and_it_is_processed(
@@ -233,7 +311,8 @@ def test_a_drain_killed_mid_item_leaves_it_recoverable_and_it_is_processed(
     seen: list[str] = []
 
     async def _killed_impl(body, request, org, slot=None, state=None,
-                           deferred_resume=False):
+                           deferred_resume=False, gate_only=False,
+                           ingest_charged=False):
         seen.append(body.session_id)
         raise asyncio.CancelledError()
 
@@ -247,7 +326,8 @@ def test_a_drain_killed_mid_item_leaves_it_recoverable_and_it_is_processed(
 
     # The lease expires; the next drain reclaims and finishes the work.
     async def _fine_impl(body, request, org, slot=None, state=None,
-                         deferred_resume=False):
+                         deferred_resume=False, gate_only=False,
+                         ingest_charged=False):
         seen.append(body.session_id)
         return {}
 

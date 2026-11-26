@@ -1795,11 +1795,51 @@ _CAPTURE_INTAKE_COUNTERS = _IntakeCounters()
 #: drainers of one queue compete for the same slots and neither converges.
 _CAPTURE_INTAKE_DRAINERS: set[str] = set()
 _CAPTURE_INTAKE_TASKS: set = set()
+#: Tenants this process has SERVED, and when each was last drained. The intake
+#: row is tenant-scoped, so there is nothing to scan globally — this registry is
+#: what lets a sweep resume work for a tenant whose queue stranded (#14707 review
+#: P2). Admission to the set is a plain `set.add` on the request path (no I/O);
+#: the sweep is what turns it into a drain.
+_CAPTURE_INTAKE_TENANTS: dict[str, tuple[dict, str | None]] = {}
+_CAPTURE_INTAKE_LAST_DRAIN: dict[str, float] = {}
+#: How often the sweep re-visits a served tenant with no activity. Short enough
+#: that a queue stranded by a restart resumes within a minute of any tenant
+#: request; long enough that an idle process is not polling a graph.
+_CAPTURE_INTAKE_SWEEP_S = 60.0
 #: How long a drain waits for a capture slot before yielding its turn. Short:
 #: the drainer is a queue consumer, and the next tick costs nothing.
 _CAPTURE_INTAKE_SLOT_WAIT_S = 5.0
+#: How many slot waits before the drain puts the item BACK and ends its turn.
+#: ⛔ Bounded on purpose: an unbounded wait holds a claimed item (and the queue
+#: head) for as long as the box stays saturated, and a drainer that never returns
+#: is indistinguishable from a wedged one.
+_CAPTURE_INTAKE_SLOT_WAIT_TRIES = 6
 #: How long a drain sleeps when the store itself is unavailable.
 _CAPTURE_INTAKE_STORE_BACKOFF_S = 30.0
+#: Drain faults that are TRANSIENT — the item is not at fault, so it goes back
+#: with NO attempt charged (`CaptureIntake.defer`). Everything else is a verdict
+#: about the ITEM or the ENTRY and parks the row `failed` immediately, visible,
+#: rather than burning five attempts to re-learn an answer that cannot change.
+_CAPTURE_INTAKE_TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+_CAPTURE_INTAKE_TRANSIENT_CODES = frozenset({
+    _CAPTURE_CAPACITY_CODE,
+    "ingest_rate_limited",
+    "capture_intake_unavailable",
+})
+
+
+class _CaptureEntryGatesSatisfied(BaseException):
+    """Private sentinel: `_capture_session_impl(gate_only=True)` ran EVERY entry
+    gate and stopped at the first-write boundary.
+
+    ⛔ `BaseException`, not `Exception`, and that is load-bearing: the capture
+    pipeline is full of `except Exception` arms that are FAULT handlers (a quota
+    read that failed, a graph handle that died). This sentinel is not a fault —
+    it is an instruction to stop — and a `Exception` subclass could be swallowed
+    by any of them, which would run the rest of the write path on a capture the
+    door is about to QUEUE. Only the wrapper that asked for the preflight catches
+    it, and it never escapes `capture_session`.
+    """
 
 
 def _capture_intake_enabled() -> bool:
@@ -1911,12 +1951,23 @@ async def _capture_accept_into_intake(body, request, org: dict) -> JSONResponse:
     payload = body.model_dump(mode="json")
     payload["session_id"] = session_id
     try:
-        acceptance = await _run_off_loop(
-            _CAPTURE_EXECUTOR, _capture_intake_accept_sync, org, payload)
-    except _IntakeStoreUnavailable as exc:
+        # ⛔ NOT THE CAPTURE POOL (`_CAPTURE_EXECUTOR`): that is the pool that runs
+        # the ~19 s extractions, and this path fires exactly when it is full or
+        # over-subscribed — while the Python leg's POST bound is 30 s
+        # (`tortoise/__main__.py`). Queued behind four extractions the door would
+        # time out, the client would keep its entry and retry, and every retry
+        # would write another duplicate row: the door slowest exactly when it
+        # exists to answer fast (#14707 review P2). The intake store IS FalkorDB
+        # work, so it rides the graph pool through the seam that owns that lane.
+        acceptance = await _graph_offload(
+            functools.partial(_capture_intake_accept_sync, org, payload),
+            op="capture_intake.accept")
+    except (_IntakeStoreUnavailable, HTTPException) as exc:
         # ⛔ THE ONE REFUSAL THIS DESIGN MAY PRODUCE, and it is the safe
         # direction: we could not store the turn, so the caller must keep it.
         # 503 is retryable for both client legs (neither unlinks on 5xx).
+        # A `graph_unavailable` from the pool's own bound collapses into the same
+        # code on purpose — from the caller's side both mean "not stored, retry".
         _logger.warning("capture intake accept failed org=%r: %s",
                         org.get("org_id"), exc)
         raise HTTPException(
@@ -1931,11 +1982,111 @@ async def _capture_accept_into_intake(body, request, org: dict) -> JSONResponse:
     return _capture_intake_ack(body, org, acceptance, session_id)
 
 
+def _capture_intake_note_tenant(org: dict, graph: str | None) -> str:
+    """Record that this process has SERVED a tenant (an `org_id` set insert).
+
+    Called on the capture request path, so it must stay allocation-cheap: no
+    I/O, no graph handle. The sweep is what turns the registry into drains.
+    """
+    key = f"{org.get('org_id')}:{graph}"
+    _CAPTURE_INTAKE_TENANTS[key] = (org, graph)
+    return key
+
+
+def _capture_intake_status_sync(org: dict, session_id: str) -> dict | None:
+    """The QUEUED-phase answer for the 202's `status_url` (#14707 review P2)."""
+    sdk = None
+    try:
+        sdk = _data_sdk(org)
+        item = _GraphIntakeStore(
+            sdk._get_proj().g.query).queued_for_session(session_id)
+        if item is None:
+            return None
+        return {
+            "item_id": item.item_id,
+            "state": item.state,
+            "accepted_at": item.enqueued_at,
+            "attempts": item.attempts,
+            "last_error": item.last_error,
+        }
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+async def _capture_intake_status(org: dict, session_id: str) -> dict | None:
+    """Read the tenant's queue for one session. Never raises: an unreadable
+    store must not turn the session 404 into a 500."""
+    try:
+        return await _graph_offload(
+            functools.partial(_capture_intake_status_sync, org, session_id),
+            op="capture_intake.status")
+    except Exception:  # noqa: BLE001 - status is best-effort by contract
+        return None
+
+
+def _capture_intake_fault_is_transient(exc: BaseException) -> bool:
+    """Is this drain fault a CONDITION (retry) or a VERDICT (park)?
+
+    ⛔ The split is the difference between a busy box and a lost turn (#14707
+    review P1/P2). Capacity, a same-session capture already in flight, our own
+    store answering 503 — all pass. A 402 the org does not fit, recording
+    switched off, a payload over the turn cap — none of those change by being
+    retried five times over four minutes, and `CAPTURE_INTAKE_MAX_ATTEMPTS`
+    would then convert the wait into a `failed` row.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        # Not an HTTP verdict at all (a store fault, a payload that no longer
+        # models): unclassifiable, so it is retried rather than parked on a
+        # guess. `fail()`'s attempt bound still ends it.
+        return True
+    detail = getattr(exc, "detail", None)
+    if status == 409 and detail == _CAPTURE_SESSION_IN_FLIGHT_DETAIL:
+        return True
+    code = detail.get("code") if isinstance(detail, dict) else None
+    if code in _CAPTURE_INTAKE_TRANSIENT_CODES:
+        return True
+    return status in _CAPTURE_INTAKE_TRANSIENT_HTTP
+
+
+async def _capture_intake_sweep(interval: float) -> None:
+    """Resume stranded queues for tenants this process has served.
+
+    ⛔ THE HOLE THIS CLOSES (#14707 review P2): the drain used to be kicked ONLY
+    from the accept path, so a queue stranded by a restart/deploy resumed only if
+    a NEW over-capacity capture for the same tenant happened to arrive, and
+    `reclaim()` — which is what returns a dead drain's claimed item — never ran
+    at all. Now any tenant this process SERVED is re-drained at least once per
+    interval, so the tenant's next ordinary capture (which need not be over
+    capacity) resumes its queue.
+
+    ⚠️ STATED RESIDUAL: a tenant with queued rows and NO traffic at all after a
+    restart is still not resumed by this process, because the rows are
+    tenant-scoped (there is no global scan) and enumerating every tenant needs an
+    org-dict builder this lane does not have. Tracked in `#14734`.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        now = time.monotonic()
+        for key, (org, graph) in list(_CAPTURE_INTAKE_TENANTS.items()):
+            last = _CAPTURE_INTAKE_LAST_DRAIN.get(key)
+            if last is not None and (now - last) < interval:
+                continue
+            if key in _CAPTURE_INTAKE_DRAINERS:
+                continue
+            try:
+                _capture_intake_kick(org, graph)
+            except Exception:  # noqa: BLE001 - one tenant must not end the sweep
+                _logger.exception("capture intake sweep: kick failed for %s", key)
+
+
 def _capture_intake_kick(org: dict, graph: str | None) -> None:
     """Start this tenant's drain if one is not already running.
 
-    ⛔ ONE driver per tenant, and it is THIS accept — the row is tenant-scoped,
-    so there is nothing global to scan. Two drains of one queue compete for the
+    ⛔ ONE driver per tenant, and it is THIS kick — the row is tenant-scoped, so
+    there is nothing global to scan. Two drains of one queue compete for the
     same slots; the client's spool solved the same problem with a claim file.
     """
     key = f"{org.get('org_id')}:{graph}"
@@ -1947,6 +2098,7 @@ def _capture_intake_kick(org: dict, graph: str | None) -> None:
         return
     _CAPTURE_INTAKE_DRAINERS.add(key)
     _CAPTURE_INTAKE_TASKS.add(task)
+    _CAPTURE_INTAKE_LAST_DRAIN[key] = time.monotonic()
 
     def _done(t):
         _CAPTURE_INTAKE_DRAINERS.discard(key)
@@ -1966,19 +2118,29 @@ async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
     is unavailable, or when the drain is cancelled at shutdown. An item whose
     worker dies is reclaimed by the queue's own lease (`reclaim_stale`) on the
     next drain of that tenant — never silently dropped.
+
+    ⛔ FAULT CLASSES ARE NOT ONE CLASS (#14707 review P1/P2). A TRANSIENT
+    condition (capacity, a same-session capture already in flight, a store that
+    answered 503) goes back with NO attempt charged (`defer`), because it is not
+    the item's fault and five of them would park a turn that was only waiting. A
+    VERDICT about the item or the entry (402/409/400/422) parks it `failed`
+    IMMEDIATELY — retrying cannot change the answer, and a parked row is visible,
+    which is the design's whole alternative to deletion.
     """
     # ⛔ RECLAIM FIRST: a drain task that died mid-item left its row `extracting`
     # (no query for `queued` can ever see it again). The lease reclaim is what
     # makes a mid-flight kill survivable, and the start of a drain is the only
     # moment it can be acted on.
     with contextlib.suppress(Exception):
-        await _run_off_loop(_CAPTURE_EXECUTOR,
-                           _capture_intake_reclaim_sync, org)
+        await _graph_offload(
+            functools.partial(_capture_intake_reclaim_sync, org),
+            op="capture_intake.reclaim")
     while True:
         try:
-            item = await _run_off_loop(
-                _CAPTURE_EXECUTOR, _capture_intake_claim_sync, org)
-        except _IntakeStoreUnavailable as exc:
+            item = await _graph_offload(
+                functools.partial(_capture_intake_claim_sync, org),
+                op="capture_intake.claim")
+        except (_IntakeStoreUnavailable, HTTPException) as exc:
             _logger.warning("capture intake claim failed (%s): %s", key, exc)
             await asyncio.sleep(_CAPTURE_INTAKE_STORE_BACKOFF_S)
             continue
@@ -1989,34 +2151,84 @@ async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
             # ⛔ THE DRAIN OBEYS THE SAME CEILING AS A LIVE CAPTURE. It is a
             # consumer of the 8 slots, not a bypass of them — a queue that
             # ignored the ceiling would just move the overload into the pool.
-            while slot is None:
+            # ⛔ AND IT RESERVES WITH THE SESSION KEY, not `None` (#14707 review
+            # P2): `None` left `_CAPTURE_SESSIONS` unarmed, so a live
+            # `POST /v1/sessions` for the session the drain was capturing could
+            # be admitted beside it — exactly the concurrent same-session race
+            # `_CAPTURE_SESSIONS` (and #3129's 409) exists to close. A same-session
+            # 409 is TRANSIENT (the other capture is finishing), so it waits like
+            # capacity does rather than failing the item.
+            waits = 0
+            while slot is None and waits < _CAPTURE_INTAKE_SLOT_WAIT_TRIES:
                 try:
-                    slot = _reserve_capture_slot(None)
+                    slot = _reserve_capture_slot(
+                        _capture_session_key(org, item.session_id))
                 except HTTPException as exc:
-                    if not _is_capture_capacity_refusal(exc):
+                    if not _capture_intake_fault_is_transient(exc):
                         raise
+                    waits += 1
                     await asyncio.sleep(_CAPTURE_INTAKE_SLOT_WAIT_S)
+            if slot is None:
+                # ⛔ BOUNDED, and the item goes BACK with no attempt charged: a
+                # drain that waits forever holds the queue head, and a drainer
+                # that never returns is indistinguishable from a wedged one. The
+                # next kick resumes it.
+                await _capture_intake_defer_sync(
+                    org, item,
+                    f"no capture slot after {waits} waits "
+                    f"({_CAPTURE_INTAKE_SLOT_WAIT_S}s each)",
+                    delay_s=_CAPTURE_INTAKE_SLOT_WAIT_S)
+                return
         except asyncio.CancelledError:
             # Shutdown mid-item: the row stays `extracting` and is reclaimed by
             # the lease. Re-raise so the task ends cancelled, as the lifespan
             # expects.
             raise
+        except BaseException as exc:  # noqa: BLE001 - this item's own verdict
+            state = await _capture_intake_settle_sync(org, item, exc)
+            _logger.warning(
+                "capture intake item %s %s before capture (attempt %s): %r",
+                item.item_id, state, item.attempts, exc)
+            continue
         try:
             queued_body = SessionRequest(**item.payload)
+            # ⛔ `ingest_charged=True`: the door charged this org's ingest window
+            # BEFORE it accepted the turn, so the drain must not charge it again
+            # (#14707 review P1).
             await _capture_session_impl(queued_body, None, org, slot=slot,
-                                        state={}, deferred_resume=True)
-            await _run_off_loop(_CAPTURE_EXECUTOR,
-                                _capture_intake_finish_sync, org, item)
+                                        state={}, deferred_resume=True,
+                                        ingest_charged=True)
+            await _graph_offload(
+                functools.partial(_capture_intake_finish_sync, org, item),
+                op="capture_intake.finish")
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 - one item's fault
-            state = await _capture_intake_fail_sync(org, item, exc)
+            state = await _capture_intake_settle_sync(org, item, exc)
             _logger.warning(
                 "capture intake item %s %s after attempt %s: %r",
                 item.item_id, state, item.attempts, exc)
         finally:
             if slot is not None:
                 slot.release()
+
+
+async def _capture_intake_settle_sync(org: dict, item, exc: BaseException) -> str:
+    """Settle a failed pass by FAULT CLASS (#14707 review P1/P2).
+
+    Transient → `defer` (requeue, no attempt charged). Permanent → `park`
+    (visible `failed` row, immediately). Unclassifiable → `fail` (the attempt
+    bound, which is what it is for). Never raises: the item's own record is at
+    stake and a raise here would also skip this function's own reporting.
+    """
+    if _capture_intake_fault_is_transient(exc):
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            return await _capture_intake_fail_sync(org, item, exc)
+        return await _capture_intake_defer_sync(
+            org, item, f"{type(exc).__name__}: {exc}"[:800])
+    return await _capture_intake_park_sync(org, item,
+                                          f"{type(exc).__name__}: {exc}"[:800])
 
 
 def _capture_intake_reclaim_sync(org: dict) -> int:
@@ -2059,8 +2271,11 @@ def _capture_intake_finish_sync(org: dict, item) -> None:
 
 
 async def _capture_intake_fail_sync(org: dict, item, exc: BaseException) -> str:
-    """Settle a failed pass. Never raises: the item's own record is at stake and
-    a raise here would also skip this function's own reporting."""
+    """Settle a failed pass on the ATTEMPT BOUND. Never raises.
+
+    The caller picks the class (`_capture_intake_settle_sync`): this is the
+    unclassifiable arm, where the only honest bound is the attempt count.
+    """
     sdk = None
     try:
         sdk = await asyncio.to_thread(_data_sdk, org)
@@ -2069,6 +2284,43 @@ async def _capture_intake_fail_sync(org: dict, item, exc: BaseException) -> str:
                 item, f"{type(exc).__name__}: {exc}"[:800]))
     except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
         _logger.exception("capture intake item %s could not be settled",
+                          item.item_id)
+        return "unknown"
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+async def _capture_intake_defer_sync(org: dict, item, error: str,
+                                     delay_s: float | None = None) -> str:
+    """Requeue a TRANSIENT failure WITHOUT charging an attempt. Never raises."""
+    sdk = None
+    try:
+        sdk = await asyncio.to_thread(_data_sdk, org)
+        queue = _capture_intake_for_proj(sdk._get_proj())
+        if delay_s is None:
+            return await asyncio.to_thread(queue.defer, item, error)
+        return await asyncio.to_thread(queue.defer, item, error, delay_s)
+    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+        _logger.exception("capture intake item %s could not be deferred",
+                          item.item_id)
+        return "unknown"
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+async def _capture_intake_park_sync(org: dict, item, error: str) -> str:
+    """Park a PERMANENT refusal as a visible `failed` row. Never raises."""
+    sdk = None
+    try:
+        sdk = await asyncio.to_thread(_data_sdk, org)
+        return await asyncio.to_thread(
+            lambda: _capture_intake_for_proj(sdk._get_proj()).park(item, error))
+    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+        _logger.exception("capture intake item %s could not be parked",
                           item.item_id)
         return "unknown"
     finally:
@@ -4351,6 +4603,34 @@ async def _lifespan(app):
             _logger.error(
                 "capacity notice sweep not started — no 80 %/100 % working-set "
                 "notice will be sent by this process: %s", exc, exc_info=True)
+
+        # ── #14342 (#14707 review P2): the intake drain's RESTART-RESUME sweep.
+        # The accept path kicks its own tenant's drain, but a queue stranded by a
+        # restart/deploy has no accept to kick it and `reclaim()` — which returns
+        # a dead drain's claimed item — never runs. This pass re-drains every
+        # tenant this process has SERVED, so the tenant's next ordinary capture
+        # (which need not be over capacity) resumes its queue. Its OWN try, for
+        # the same reason as the two sweeps above: a bad interval must disable
+        # only this pass.
+        try:
+            if _capture_intake_enabled():
+                _intake_interval = max(
+                    5.0, float(os.environ.get(
+                        "TORTOISE_CAPTURE_INTAKE_SWEEP_S", "") or
+                        _CAPTURE_INTAKE_SWEEP_S))
+                # INFO for the same reason as the notice sweep: the interval is
+                # the only way an operator can tell "sweeping, nothing due" from
+                # "never armed".
+                _logger.info("capture intake sweep armed: interval=%ss",
+                             _intake_interval)
+                app.state._capture_intake_sweep_task = \
+                    asyncio.get_event_loop().create_task(
+                        _capture_intake_sweep(_intake_interval))
+        except Exception as exc:
+            _logger.error(
+                "capture intake sweep not started — a queue stranded by a "
+                "restart resumes only when its tenant captures again: %s",
+                exc, exc_info=True)
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
@@ -23159,6 +23439,14 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     harness — only the capture itself is observed.
     """
     _require_scope(org, "graphs:write", "capture_session")
+    # ── #14707 review P2: ANY request for this tenant may resume its queue ────
+    # A queue stranded by a restart/deploy used to resume only if a NEW
+    # OVER-CAPACITY capture for the same tenant happened to arrive — and
+    # `reclaim()` (what returns a dead drain's claimed item) ran only from a
+    # drain, which nothing restarted. Recording the tenant here is a set insert
+    # with no I/O; the periodic sweep (`_capture_intake_sweep`) turns it into a
+    # drain, so this tenant's next ordinary capture re-drains its queue.
+    _capture_intake_note_tenant(org, _data_graph_name(org))
     try:
         # #3060: reserve ADMISSION before ANY state is written. Reserving (not
         # merely checking) bounds the queue under a concurrent burst, and a
@@ -23173,10 +23461,31 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
             # ⛔ Only the CAPACITY refusal is converted (`_is_capture_capacity_refusal`):
             # every other 429/409/402 is a verdict about the CALLER or the ENTRY
             # and must keep its meaning.
-            if (_capture_intake_enabled()
+            if not (_capture_intake_enabled()
                     and _is_capture_capacity_refusal(_capacity_exc)):
-                return await _capture_accept_into_intake(body, request, org)
-            raise
+                raise
+            # ⛔ THE ENTRY GATES RUN BEFORE THE ACCEPTANCE (#14707 review P1).
+            # `_reserve_capture_slot` is the FIRST thing this handler does, so
+            # converting its refusal here would answer `202 accepted` to an org
+            # at `max_points`, to an org whose recording is switched off and to
+            # a caller over its per-org ingest window — each of which the client
+            # would then prune from its spool, and each of which the drain could
+            # only re-discover as a permanent refusal it parks `failed`. A
+            # permanently lost turn, where the pre-change code answered 402/409
+            # and the client kept its copy.
+            # So the gates are run FIRST, in their pinned order, by the SAME
+            # implementation (`gate_only=True` stops at the first-write
+            # boundary). ANY refusal they raise propagates to the caller with
+            # its original status; only a capture that passes every gate is
+            # queued. The preflight also takes the ingest charge, which is why
+            # the queued item is drained with `ingest_charged=True` (one charge
+            # per turn, at the door).
+            try:
+                await _capture_session_impl(body, request, org, slot=None,  # type: ignore[arg-type]
+                                           gate_only=True)
+            except _CaptureEntryGatesSatisfied:
+                pass
+            return await _capture_accept_into_intake(body, request, org)
         # #3129: the impl records whether an ATTEMPT started and whether it
         # FINALIZED (recorded its outcome). If the request is cancelled between
         # the two, the Session would be left at `capture_ok=NULL`, which the
@@ -23214,7 +23523,15 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
         # Review PR #1827: a last-error state-write failure must never mask the
         # intended 403/402/503 with a 500.
         if (e.status_code >= 400 and e.status_code != 429
-                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL
+                # #14707 review P3: `capture_intake_unavailable` is a SERVER
+                # condition (our store could not be written), and the handler's
+                # own exemption rule says a server condition is not the org's
+                # capture-failure. Recording it there made the dashboard's
+                # failure sub-line report OUR fault as the caller's.
+                and not (e.status_code == 503 and isinstance(e.detail, dict)
+                         and e.detail.get("code")
+                         == "capture_intake_unavailable")):
             try:
                 _record_capture_last_error(
                     org["org_id"],
@@ -23555,7 +23872,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 org: dict, slot: _CaptureSlot,
                                 state: dict | None = None,
                                 _graph_ops: GraphOpsCounter | None = None,
-                                deferred_resume: bool = False) -> dict:
+                                deferred_resume: bool = False,
+                                gate_only: bool = False,
+                                ingest_charged: bool = False) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -23594,7 +23913,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
          ``:Session``, ``:Event`` or transcript ``:Source`` and the documented
          ``Retry-After`` retry is a clean first attempt. Not the 429
          ``_reserve_capture_slot`` raises for CAPACITY (#3060) — a different
-         refusal, taken earlier, in the REST wrapper.
+         refusal, taken elsewhere (the REST wrapper, or by the MCP tool).
+      7. — THE FIRST WRITE BOUNDARY. `gate_only=True` stops here (see
+         `_CaptureEntryGatesSatisfied`) so the REST wrapper can run the SAME
+         gates before it converts a capacity refusal into an intake acceptance
+         (#14707 review P1): an org at `max_points`, an org with recording off
+         and a caller over its ingest window keep their 402/409/429 instead of
+         being told `202 accepted` and then parked `failed` by the drain.
+         `ingest_charged=True` says the caller's window was ALREADY charged
+         before the item was queued, so a drained item is charged once.
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
@@ -24154,10 +24481,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # ``asyncio.to_thread(_commit_sync)``.
     from tortoise.quota import commit_ingest_admit
 
-    charge_bytes = await asyncio.to_thread(capture_ingest_charge_bytes, body)
-    admission = commit_ingest_admit(org.get("org_id"), charge_bytes)
-    if not admission.allowed:
-        raise _ingest_rate_limited(admission, resource="capture_ingest_bytes")
+    # ⛔ THE CHARGE IS TAKEN AT THE DOOR, ONCE (#14707 review P1). An item the
+    # intake QUEUED was already charged by the door's gate preflight before the
+    # accept was written, so the drain must not charge the same bytes a second
+    # time — that would spend the org's window twice for one turn and turn the
+    # drain's own re-entry into the `ingest_rate_limited` it just accepted.
+    if not ingest_charged:
+        charge_bytes = await asyncio.to_thread(capture_ingest_charge_bytes, body)
+        admission = commit_ingest_admit(org.get("org_id"), charge_bytes)
+        if not admission.allowed:
+            raise _ingest_rate_limited(admission, resource="capture_ingest_bytes")
+
+    # ⛔ THE FIRST-WRITE BOUNDARY. Everything above is a gate about the ENTRY; the
+    # preflight stops here so a capacity refusal converted into an acceptance
+    # cannot swallow a 402/409/400/429 that the caller must still act on.
+    if gate_only:
+        raise _CaptureEntryGatesSatisfied()
 
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -29546,6 +29885,24 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
+        # ⛔ #14707 review P2: the 202 advertises `status_url: /v1/sessions/{id}`
+        # (plan D2/§6: "`GET /v1/sessions/{id}` returns phase `queued` while the
+        # item waits") for the WHOLE queued period, and NOTHING about the session
+        # is written at accept. Without this arm the address the door handed out
+        # 404s until the drain runs — an address that answers "no such session"
+        # for a turn we have accepted and hold.
+        queued = await _capture_intake_status(org, session_id)
+        if queued is not None:
+            return {
+                "session": None,
+                "session_id": session_id,
+                "status": "accepted",
+                # Same shape the 202 carries: a ZERO would read as "nothing",
+                # and the extraction has not run.
+                "extraction": {"outcome_known": False, "phase": "queued",
+                               "queued": True},
+                "intake": queued,
+            }
         raise HTTPException(status_code=404, detail="Session not found")
     sess = sess_rows[0]
     # #2600: actor display — SAME shared helper as list_sessions (never a
