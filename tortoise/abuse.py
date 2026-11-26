@@ -336,10 +336,12 @@ def _ratio_env(name: str, default: float) -> float:
 #: not change per request; 5 minutes bounds a stale level to a TWELFTH of the
 #: rule's own 1-hour window (300 of 3 600 s), not the fifth an earlier version of
 #: this note claimed — a fifth would be 720 s. And the direction matters, because
-#: a stale floor errs the SAME way as a failed read must NOT: a DOWNGRADE leaves a
-#: stale HIGHER floor cached, which keeps R1 blind (level too high, nothing fires)
-#: until the TTL expires. An UPGRADE leaves a stale LOWER floor, so the level is
-#: merely applied late and errs toward alerting rather than away from it.
+#: a stale floor errs the SAME way a failed read MUST (``_tier_floor_unknown``
+#: reuses the last KNOWN, higher floor rather than lowering the level): toward
+#: SILENCE. A DOWNGRADE leaves a stale HIGHER floor cached, which keeps R1 blind
+#: (level too high, nothing fires) until the TTL expires; an UPGRADE leaves a
+#: stale LOWER floor, so the level is merely applied late and errs toward
+#: alerting rather than away from it.
 _TIER_FLOOR_TTL_S = 300.0
 
 #: #14687: how long a FAILED allowance read is remembered before another attempt.
@@ -2334,9 +2336,13 @@ class AbuseEngine:
 
         A single absolute constant cannot be right: the measured fleet org peaks
         at 3 001 units/hour in one rolling window while the ONLY other org ever
-        flagged peaked at 779 — below that org's ordinary p90. Any constant high
-        enough to silence the fleet is blind to the entire class of org the rule
-        exists for, which is why "just raise the number" was refused.
+        flagged peaked at 779/h — below the FLEET org's ordinary p90 of 1 050
+        units/hour, which is the whole finding. (The p90 belongs to the fleet
+        org; the flagged org has no p90 on record, and an earlier version of
+        this line misattributed it — a peak cannot sit below its own p90.)
+        Any constant high enough to silence the fleet is blind to the entire
+        class of org the rule exists for, which is why "just raise the number"
+        was refused.
 
         So the level is TIER-RELATIVE: an org consuming a large share of its own
         tier's MONTHLY write allowance within ONE window is abnormal by its OWN

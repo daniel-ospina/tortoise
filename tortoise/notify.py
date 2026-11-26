@@ -977,10 +977,13 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # surface that decides whether to raise a limit or reach out.
                 # `ABUSE_INCIDENT_KINDS` keeps the flag as an operator WORK ITEM
                 # (a rate is still worth a human look), but a work item is not an
-                # accusation: the wording names the measurement, and says that
-                # nothing was enforced, so the operator is not nudged toward
-                # acting on a number that never supported it.
-                else "High activity rate flagged — measurement, nothing enforced")
+                # accusation: the wording names the measurement, and says what
+                # did NOT follow it. ⛔ "nothing enforced" would be false —
+                # `flag_org` IS `KIND_ABUSE_ENFORCEMENT_FAULT`'s one lane, and an
+                # operator could not tell this message apart from the case where
+                # that write FAILED. "nothing disabled" is the reconciled claim
+                # (`abuse._point_rate_message`, and the registry row).
+                else "High activity rate flagged — measurement, nothing disabled")
         detail = {
             "detail": (f"{what}: {details.get('rule', '?')} "
                        f"count={details.get('count', '?')}"),
