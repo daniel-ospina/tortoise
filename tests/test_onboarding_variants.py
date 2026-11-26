@@ -1774,12 +1774,33 @@ _CONFIRM_PREDICATE = (
     # form (f)'s modal slot — it simply never admitted it in the OBJECT
     # position, so the declared-RED `Before you restart your client, confirm the
     # tools are actually there.` went GREEN one word over (#14679 review at
-    # `1dedd33da07e`, measured: `make sure` flips 82 declared-RED rows, `made
-    # sure` 31, `validate` 107, and the doc-level test passes end-to-end on
-    # `Restart your client upon confirming the tools are actually there`'s
-    # `make sure` twin). The list stays CLOSED — these are members of it, not a
-    # new arm.
-    r"|mak(?:e|es|ing)\s+sure|made\s+sure|be\s+sure|validat(?:e|es|ed|ing)"
+    # `1dedd33da07e`).
+    # ⛔ THE COUNTS, AND THE RULE THAT MAKES THEM CHECKABLE — substituting the
+    # spelling on EACH of the 238 declared-RED rows in `1dedd33da07e`'s table and
+    # counting the rows that then grade GREEN: `confirm`→`make sure` **77**,
+    # `confirming`→`making sure` **26**, `confirmed`→`made sure` **17**,
+    # `confirm|verify`→`validate` **78**. (The figures first written here were
+    # inherited from the review's prose and could not be reproduced — the rule was
+    # unstated — so they are re-measured here rather than repeated;
+    # #14679 review at `fdaaa23d016c` flagged exactly that.) The same rule at THIS
+    # head flips 0 rows, which is the fix: the substitution no longer buys
+    # anything. The list stays CLOSED — these are members of it, not a new arm.
+    # ⛔ `make certain` / `be certain` ARE THE SAME PREDICATE ONE SYNONYM OVER, and
+    # leaving them out re-created the very defect this closure was widened for —
+    # the comment above claims `make sure`/`be sure` are "the same predicate",
+    # and `certain` is that predicate's other spelling. Measured at the review of
+    # `fdaaa23d016c`: `Restart your client after making certain the tools are
+    # actually there.` was GREEN end-to-end on the real quickstart while its
+    # `making sure` twin is a declared-RED row, and because all seven forms route
+    # through this constant the gap defeated every one of them at once, the
+    # pre-cue (f) and the negated-cue arm included.
+    # ⛔ DECLARED RESIDUAL: the COPULA spelling (`once you are sure|certain the
+    # tools …`) is deliberately NOT here. It is a different construction (a
+    # predicate adjective, not a verb phrase), and admitting a bare `sure|certain`
+    # to a list whose members must take the object directly would need its own
+    # measurement rather than a synonym slot.
+    r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
+    r"|be\s+(?:sure|certain)|validat(?:e|es|ed|ing)"
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
 )
 
@@ -1839,8 +1860,15 @@ _PRE_CUE_ONLY = _inversion_form(
     # declared RED rows (measured, #14679 review at `2ce284961b`, which also
     # measured `You must confirm … , then restart your client` end-to-end on the
     # real doc as a false PASS). `make sure to` / `be sure to` are the same
-    # instruction; "after making sure the tools …" remains a DECLARED residual
-    # of form (a), not of this slot.
+    # instruction; "after making sure the tools …" used to be a declared residual
+    # of form (a) and is now GRADED by it — through the shared
+    # `_CONFIRM_PREDICATE`, which `make sure`/`be certain`/`validate` are members
+    # of (row `Restart your client after making sure the tools are actually
+    # there.`), so the residual wording had to go rather than be restored. What
+    # remains genuinely ungraded is the COPULA spelling (`after making certain
+    # the tools …`'s `once you are certain the tools …` twin), and that is a
+    # predicate-vocabulary gap in `_CONFIRM_PREDICATE`, declared there — not a
+    # residual of this slot.
     # ⛔ A LEADING SEQUENCER/ADVERB IS THE SAME ONE-INSERTED-WORD DEFECT as the
     # courtesy and modal slots above, and it was the LAST one left: `Now`/`Then`
     # /`Next`/`Finally`/`Immediately`/`Simply`/`Again`/`Still` in front of the
@@ -1898,7 +1926,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # shared constant was widened (`Make sure the tools are actually there.
     # Restart your client, then run a query.` — measured, #14679 review at
     # `1dedd33da07e`).
-    r"|make\s+sure|be\s+sure|validate)\w*\b[^\n]*?"
+    r"|make\s+(?:sure|certain)|be\s+(?:sure|certain)|validate)\w*\b[^\n]*?"
     + _TOOLS_OBJECT
     # …and a documentation noun immediately after `tools` is not a presence
     # claim even when a copula follows it ("Ensure the tools table is up to
@@ -1956,7 +1984,20 @@ _PRE_CUE_ONLY = _inversion_form(
 # out AND contracted"). The `'re` arm below is that fix; the bare `able to` here
 # is the other half of it (`you're` + `able to`).
 _MODAL_TO_VERB = (
-    r"(?:can|should|will|must"
+    # ⛔ THE BARE COPULA BELONGS HERE, and it was the ONE slot that made the
+    # completive above REACHABLE ONLY THROUGH ITS CONTRACTION. `you're done
+    # confirming` matched (the subject slot admits `you(?:'(?:ve|re)|…)`) while
+    # `you are done confirming` had no path — `_MODAL_TO_VERB` admitted
+    # `are\s+able\s+to` but not `are` alone — so the verdict turned on the
+    # apostrophe, which is the exact asymmetry the `are|were` doctrine in this
+    # form's own comment forbids (`… after you've verified …` GREEN vs the
+    # uncontracted twin RED, measured). Measured at the review of `fdaaa23d016c`:
+    # `Restart your client after you are done confirming the tools are actually
+    # there.` was GREEN while the `you're` twin is a declared-RED row, and forward
+    # copy that uses the same copula (`after you are back, then confirm …`,
+    # `after you are done with setup, then confirm …`) stays GREEN because a
+    # confirmation predicate must still follow.
+    r"(?:can|should|will|must|are|were"
     r"|are\s+able\s+to|able\s+to)"
 )
 
@@ -1965,7 +2006,16 @@ _MODAL_TO_VERB = (
 # so one adverb inserted between them re-opened the exact false PASS the modal
 # slot closes: `once you can actually confirm …` was GREEN while both
 # `once you can confirm …` and `once you actually confirm …` are RED (measured).
-_ADVERBS = r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also)"
+# ⛔ `now` AND `still` ARE ADVERBS IN THIS FILE ALREADY — `_ABSENCE_ADVERB_RUN`
+# lists both — and leaving them out of THIS run was the same one-word gap
+# `following|upon` and `file` were: `after you have now confirmed the tools are
+# actually there` and its `you've` contraction measured GREEN while the bare twin
+# is a declared-RED row (measured at this head). Neither word changes the sense
+# of `after`/`once`, so they order nothing and must not defeat the form. They are
+# BARE (non-`-ly`) time adverbs, which is why the `\w+ly` arm never reached them
+# (#14679 review at `fdaaa23d016c`).
+_ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
+            r"|now|still)")
 # ⛔ `rather` IS AN ALLOW-LIST MEMBER, and it is DECLARED here rather than
 # dropped as dead weight: mutating it out flips 0 of 493 rows (measured), but
 # removing an allow-list adverb does not close a hole — it risks a future FALSE
@@ -2000,11 +2050,13 @@ _INVERSION_FORMS = (
     #     the whole form — "… after you have first verified the tools …" was
     #     GREEN (measured) while its bare twin is a declared RED row, the same
     #     one-inserted-word class `c30589f4df458` closed one form over. The slot
-    #     admits ANY `-ly` adverb (plus the bare four), and repeats, because a
-    #     MANNER adverb does not change the connective's verdict — a closed
-    #     four-word list only re-opened the hole for `previously` / `recently` /
-    #     `thoroughly` / `also already` (each measured GREEN with the closed
-    #     list).
+    #     admits ANY `-ly` adverb plus a CLOSED list of bare ones (`_ADVERBS`), and
+    #     repeats, because a MANNER adverb does not change the connective's
+    #     verdict — a closed `-ly` list only re-opened the hole for `previously` /
+    #     `recently` / `thoroughly` / `also already` (each measured GREEN with the
+    #     closed list). The bare list is the part that has to be by enumeration,
+    #     and every gap in it is a one-word false PASS: `first` was the first such
+    #     gap, and `now` / `still` the last (measured — see `_ADVERBS`).
     #     ⛔ THE CONDITIONAL ARMS ARE GATED ON THE VERB'S CLASS, NOT ON AN ADVERB
     #     LIST. "if you ONLY see the tools after a second restart" describes the
     #     SYMPTOM that motivates a restart, and this table already declares
@@ -2069,14 +2121,22 @@ _INVERSION_FORMS = (
     #     an unrelated object stays out: `… after you have finished the config and
     #     can confirm the tools …` and `… once you're through with setup and
     #     confirm the tools …` are declared-GREEN rows below.
+    #     ⛔ `completed` IS THE SAME SLOT, and it was the one synonym the closure
+    #     left out — `Restart your client after you have completed confirming the
+    #     tools are actually there.` measured GREEN while its `finished` twin is a
+    #     declared-RED row (measured at this head). The class is a closed list of
+    #     completives, so it has to be enumerated; a missing member is a one-word
+    #     false PASS, exactly as `make sure` / `be sure` / `validate` were in
+    #     `_CONFIRM_PREDICATE` (#14679 review at `fdaaa23d016c`).
     _inversion_form(
         # ⛔ `following` AND `upon` ARE `after`, SPELLED DIFFERENTLY, and the
         # denial of that here is what made them false PASSes: this file already
         # treats them as the same relation in `_DEFERRED_CHECK_RE`
         # (`(?:after|once|when|following|upon)\s+…restart…`), and both put the
         # confirmation strictly BEFORE the restart — the inversion this pin
-        # exists to red. Measured at the review of `1dedd33da07e`: `after <gerund>`
-        # → `upon <gerund>` flips 26 declared-RED rows GREEN, and the doc-level test
+        # exists to red. Measured at `1dedd33da07e` by the substitution rule stated
+        # at `_CONFIRM_PREDICATE`: `after`→`upon` flips **54** of the 238
+        # declared-RED rows GREEN, `after`→`following` **54** (0 at this head), and
         # passes end-to-end on `Restart your client upon confirming the tools are
         # actually there`.
         r"\b(?:(?:after|once|following|upon)\s+"
@@ -2084,18 +2144,19 @@ _INVERSION_FORMS = (
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
         # the completive slot — see the block above `_inversion_form(`
-        r"(?:(?:done|finished|through)\s+)?"
+        r"(?:(?:done|finished|through|completed)\s+)?"
         # ⛔ `whenever` IS `when` AND `as soon as` IS `once`, and both were GREEN
         # twins of declared-RED rows (`Restart your client whenever the tools are
-        # actually there.` vs the declared-RED `when` row — 14 rows flipped;
-        # `once`→`whenever` flips 40). This is the SAME defect class the file
+        # actually there.` vs the declared-RED `when` row — by the same rule:
+        # `when`→`whenever` **14**, `once`→`whenever` **40**; 0 each at this
+        # head). This is the SAME defect class the file
         # already closed once for `first`→`firstly` (cycle 29), and `whenever` is
         # not exotic — `_AND_SUBORDINATE_HALF_RE` lists it 900 lines up.
         r"|(?:if|when|whenever|as\s+soon\s+as)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
         # the completive slot — see the block above `_inversion_form(`
-        r"(?:(?:done|finished|through)\s+)?"
+        r"(?:(?:done|finished|through|completed)\s+)?"
         # ⛔ THE OBSERVATION GATE CARRIES THE PROGRESSIVE, and it did not until the
         # `'re` subject arm made it REACHABLE: the spelling was `see(?:s)?|saw|seen`
         # — no `seeing` — while its siblings on this line do carry it
@@ -2180,7 +2241,8 @@ _INVERSION_FORMS = (
         # client` ungrammatical. That argument never applied HERE: in form (d)
         # the object is `restarting`, so it is reachable ordinary English, and
         # the declared-RED row's GREEN twin was one synonym over (#14679 review
-        # at `1dedd33da07e`, measured: `before`→`prior to` flips 2 rows).
+        # at `1dedd33da07e`, measured by the `_CONFIRM_PREDICATE` rule:
+        # `before restarting`→`prior to restarting` flips 1 row; 0 at this head).
         r"|prior\s+to\s+restarting|ahead\s+of\s+restarting"
         r")\b"
         r"|\bfirst(?:ly)?\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
@@ -2560,7 +2622,8 @@ def _negated_observation_only(clause: str) -> bool:
                  # …and the THIRD copy (see `_CONFIRM_PREDICATE`): a negated
                  # observation followed by `make sure` is still a confirmation
                  # the skip must not swallow.
-                 r"|mak(?:e|es|ing)\s+sure|made\s+sure|be\s+sure"
+                 r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
+                 r"|be\s+(?:sure|certain)"
                  r"|validat(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
         return False
     # ⛔ THE REMAINDER IS THE CLAUSE WITH THE NEGATED OBSERVATION *DELETED*, NOT
@@ -2650,8 +2713,28 @@ _CUE_UNDER_INVERTING_SUBORDINATE_RE = re.compile(
 # tools appear.`) stays GREEN: nothing there names who confirms what, and
 # grading it would widen the pin into copy the docs do not ship (declared
 # residual, measured on the three spellings above).
+# ⛔ AND THE LEAD IS EVERY NEGATED MODAL, NOT JUST THE IMPERATIVE — the closure
+# below used to be `do not|don't|never`, so the MODAL spellings of the same
+# instruction went GREEN while `Don't …` is a declared-RED row (measured at this
+# head):
+#
+#   GREEN  You shouldn't restart your client until you have confirmed the tools are actually there.
+#   GREEN  You shouldn't restart your client until you've confirmed the tools are actually there.
+#   GREEN  You should not restart your client until you have confirmed the tools are actually there.
+#   GREEN  You must not restart your client until you have confirmed the tools are actually there.
+#
+# `shouldn't` is ordinary doc prose ("you shouldn't need to restart …"), and the
+# deferral is identical whichever negation spells it: the confirmation must land
+# BEFORE the restart, which is the inversion. Monotonicity is preserved — the
+# lead still has to END at the cue, and the connective + confirmation predicate
+# are still required — so a positive-modal forward twin stays GREEN (`You can't
+# confirm the tools are actually there until you restart your client.` measures
+# GREEN: the negation is not on the cue's lead, and the order is forward).
 _NEGATED_CUE_LEAD_RE = re.compile(
-    r"(?:\bdo\s+not|\bdon['\u2019]t|\bnever)\s*$", re.IGNORECASE)
+    r"(?:\bnever"
+    r"|\b(?:do|does|did|should|could|would|must|need|can|may|might)"
+    r"(?:\s+not|n['\u2019]t)"
+    r"|\bcannot)\s*$", re.IGNORECASE)
 _DEFERRING_CONNECTIVE_RE = re.compile(
     r"^(?:until|before|by\s+the\s+time|prior\s+to)\b", re.IGNORECASE)
 
@@ -3656,6 +3739,15 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "are actually there.", True),
     ("Restart your client once you're through confirming the tools are actually "
      "there.", True),
+    # `completed` is the synonym the closure left out — the same one-word class as
+    # `make sure` / `be sure` / `validate` in `_CONFIRM_PREDICATE` (#14679 review
+    # at `fdaaa23d016c`, measured GREEN before, GREEN again if it is removed):
+    ("Restart your client after you have completed confirming the tools are "
+     "actually there.", True),
+    # …and the slot still binds only to a predicate that FOLLOWS: a completive
+    # over an unrelated object stays out (`completed the config and confirmed`).
+    ("Restart your client after you have completed the config and confirmed the "
+     "tools are actually there.", False),
     # …and the slot must NOT reach a completive over an UNRELATED object: the
     # predicate does not follow, so there is no deferred confirmation to grade.
     # Both are GREEN, and both would be false REDs if the slot were a bare
@@ -3948,6 +4040,21 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "actually there.", True),
     ("Restart your client after you have also already verified the tools are "
      "actually there.", True),
+    # …and a BARE (non-`-ly`) time adverb is in the same slot: `now` / `still`
+    # are adverbs in this file's own `_ABSENCE_ADVERB_RUN`, so omitting them here
+    # was the `file` / `following|upon` class — a one-word false PASS. Each of
+    # these measured GREEN before the bare list carried them, and each is GREEN
+    # again if they are removed from it (measured at `fdaaa23d016c`).
+    ("Restart your client after you have now confirmed the tools are actually "
+     "there.", True),
+    ("Restart your client once you've now confirmed the tools are actually "
+     "there.", True),
+    ("Restart your client after you have still confirmed the tools are actually "
+     "there.", True),
+    # …while the adverb does NOT widen the CONFIG exclusion it sits in front of:
+    # a file-side fact is forward copy whatever adverb precedes the predicate.
+    ("Restart your client after you have now confirmed the config lists the "
+     "tools.", False),
     # ── cycle 20: an OPEN class must be bounded on BOTH sides ──────────────
     # a RESTRICTIVE / FREQUENCY adverb is not a manner adverb, and it changes the
     # sense: this copy describes the SYMPTOM that motivates a restart, which the
@@ -4368,13 +4475,15 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Before you restart your client: then, confirm the tools are actually "
      "there.", False),
     # ── CYCLE 37 RESIDUALS, pinned RED so they are visible rather than claimed
-    # away. Each is measured and each needs a decision, not another widening:    # (a) an inserted `, then` splits the clause and re-opens the negated-
+    # away. Each is measured and each needs a decision, not another widening:
+    # (a) an inserted `, then` splits the clause and re-opens the negated-
     #     observation false PASS closed two rows above:
     ("Restart your client after seeing no errors, then confirming the tools "
      "are actually there.", False),
     # (b) CLOSED (was: `be|make sure` is a confirmation with no confirmation
     #     VERB, so it was missed by both the suffix arm and form (f)'s verb
-    #     slot — 82 declared-RED rows had a `make sure` GREEN twin). Closing it
+    #     slot — 77 declared-RED rows had a `make sure` GREEN twin, per the
+    #     substitution rule at `_CONFIRM_PREDICATE`). Closing it
     #     was a DECISION, not a widening: this sentence's `and` may conjoin
     #     INSIDE the `after` clause ("after [seeing no errors and making sure the
     #     tools are there]" = confirm first), which is exactly why its `confirm`
@@ -5028,6 +5137,45 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there.", True),
     ("Restart your client as soon as you have made sure the tools are actually "
      "there.", True),
+    # (5) `make certain` / `be certain` are `make sure` / `be sure` — the same
+    #     predicate the closure's own comment says it closes over, one synonym over.
+    #     The two IMPERATIVE spellings are pinned too: `be sure` had no row either,
+    #     so both arms were unpinned until these two (`be_certain` measured 0
+    #     flips without them, #14679 review at `fdaaa23d016c`).
+    ("Be sure the tools are actually there. Restart your client, then run a "
+     "query.", True),
+    ("Be certain the tools are actually there. Restart your client, then run "
+     "a query.", True),
+    # …and a POST-cue spelling, so the shared constant's `be certain` arm is
+    # pinned by a form that actually reads it (the two rows above are pre-cue, and
+    # form (f) carries its own copy of the alternation).
+    ("Restart your client, but first be certain the tools are actually there.",
+     True),
+    ("Restart your client after making certain the tools are actually there.",
+     True),
+    ("Restart your client after you've made certain the tools are actually "
+     "there.", True),
+    ("Restart your client, having first made certain the tools are actually "
+     "there.", True),
+    ("Make certain the tools are actually there. Restart your client, then run "
+     "a query.", True),
+    # …and the DECLARED residual of that closure: the COPULA spelling is a
+    # different construction (predicate adjective, not a verb phrase), so
+    # `once you are certain the tools …` stays GREEN while its bare twin
+    # `once certain the tools …` is RED through form (e)'s 0-2-word slot. Pinned
+    # GREEN so the boundary is visible and a future fix flips exactly this row.
+    ("Restart your client once you are certain the tools are actually there.",
+     False),
+    # (6) the bare copula makes the completive reachable uncontracted, so the
+    #     verdict no longer turns on the apostrophe.
+    ("Restart your client after you are done confirming the tools are actually "
+     "there.", True),
+    ("Restart your client once you are finished checking the tools are actually "
+     "there.", True),
+    ("Restart your client once you are through verifying the tools are actually "
+     "there.", True),
+    ("Restart your client after you are done with setup, then confirm the tools "
+     "are actually there.", False),
     # (4) a NEGATED cue defers the restart into its own `until`/`before` clause,
     #     so the confirmation inside it happens first. `until` was admitted on
     #     the PRE-cue side only.
@@ -5037,6 +5185,23 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "actually there.", True),
     ("Never restart your client before you have made sure the tools are "
      "actually there.", True),
+    # …and the lead is EVERY NEGATED MODAL, not just the imperative (#14679
+    # review at `fdaaa23d016c`): `shouldn't` is ordinary doc prose and its
+    # deferral is the same inversion. Each measured GREEN before the lead was
+    # widened, and each is GREEN again if it is narrowed back.
+    ("You shouldn't restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("You shouldn't restart your client until you've confirmed the tools are "
+     "actually there.", True),
+    ("You should not restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("You must not restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    # …and the arm still does not reach a negation that is NOT on the cue's lead,
+    # nor a forward order that merely contains `can't`:
+    ("You can't confirm the tools are actually there until you restart your "
+     "client.", False),
+    ("You shouldn't restart your client unless the tools are missing.", False),
     # …while a negated cue followed by a FORWARD step stays GREEN (the arm is
     # monotone: it only fires on a deferring connective + a confirmation).
     ("Don't restart your client, then confirm the tools are actually there.",
