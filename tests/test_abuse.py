@@ -1143,8 +1143,14 @@ class TestR1Calibration:
         """#14687 round-2 review: the latch keeps the episode OPEN, so its age
         keeps accumulating and stage 2 becomes reachable across a band dip —
         where the old clear-and-refire reset the clock. That is what stage 2
-        means (an episode a full window old, with continuity) and it fires ONCE
-        per episode; pinned so the trade is measured rather than accidental."""
+        means (an episode a full window old, with continuity). ⛔ It does NOT
+        fire once per episode: its claim is `_claim_notify(…, EVENT_REVIEW, now,
+        window_s)`, which expires a WINDOW later, so the SAME open episode
+        escalates once per window — `_evaluate`'s own note measures the
+        oscillating series as "1 flag + 19 review". An earlier version of this
+        docstring said "once per episode", which contradicts both the code and
+        that note. What THIS test pins is narrower and still the point: a band
+        dip does not reset the clock, so the escalation lands at all."""
         monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
