@@ -164,7 +164,7 @@ export function storageKey({ userId, orgId } = {}) {
 export function emptyState() {
   return {
     v: 1, snoozed: {}, snoozedAt: {}, dismissed: {}, dismissedLast: {}, dismissedFirst: {},
-    dismissedWindows: {},
+    dismissedAt: {}, dismissedWindows: {},
   }
 }
 
@@ -299,15 +299,40 @@ export function readState(storage, key, now = new Date()) {
   const dismissedEntries = Object.entries(
     isPlainObject(parsed.dismissed) ? parsed.dismissed : {},
   )
-  // Newest-first cap: the entries we keep are the most recent dismissals, which
-  // are the ones an in-window episode can still match.
+  // ⛔ THE DECISION TIME, NOT THE ROW'S OWN WATERMARK, IS WHAT THE CAP ORDERS BY.
+  // `dismissed[episode]` is the row's `at` (the acknowledged window's END), and the
+  // cap used to sort on it — so the "most recent dismissals" it kept were really the
+  // most recent ROWS. Dismissing a row from the OLDER group stamps a 40-day-old
+  // watermark, lands last, and the next `readState` drops it: the reader files an
+  // aged row, closes the panel, reopens (`toggleOpen` re-reads on every open) and the
+  // row is back with the badge on it. Measured: after `MAX_DISMISSED` recent
+  // dismissals, `dismiss(...)` on a 40-day-old row gives `isDismissed = true` and one
+  // `readState` later `false` (#14694 review P1). Nothing prunes `dismissed` by age,
+  // so a long-lived reader reaches the cap monotonically — the "I dismissed it and it
+  // came back" class this ledger exists to close.
+  //
+  // A store written before this field existed has no entry here: it falls back to the
+  // watermark, which is exactly the ordering it was written under, so the upgrade
+  // changes no existing decision.
+  const dismissedAtRaw = isPlainObject(parsed.dismissedAt) ? parsed.dismissedAt : {}
+  const decisionMs = (episode) => {
+    const at = Number(dismissedAtRaw[episode])
+    return Number.isFinite(at) && at > 0 ? at : Number(parsed.dismissed?.[episode]) || 0
+  }
   dismissedEntries
-    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .sort((a, b) => decisionMs(b[0]) - decisionMs(a[0]))
     .slice(0, MAX_DISMISSED)
     .forEach(([episode, at]) => {
       const atMs = Number(at)
       dismissed[episode] = Number.isFinite(atMs) ? atMs : 0
     })
+  // Carried for the readers below, and only for the keys the cap KEPT — a dropped
+  // entry's stamp would be residue for a decision that no longer exists.
+  const dismissedAt = {}
+  for (const episode of Object.keys(dismissed)) {
+    const at = Number(dismissedAtRaw[episode])
+    if (Number.isFinite(at) && at > 0) dismissedAt[episode] = at
+  }
   // The acknowledged window's END per dismissal, for the ACTIVITY bound in
   // `isDismissed`. Kept in a SIBLING map rather than reshaping `dismissed` into
   // objects on purpose: `dismissed` is a numeric watermark that the newest-first
@@ -353,7 +378,8 @@ export function readState(storage, key, now = new Date()) {
   }
   return {
     state: {
-      v: 1, snoozed, snoozedAt, dismissed, dismissedLast, dismissedFirst, dismissedWindows,
+      v: 1, snoozed, snoozedAt, dismissed, dismissedLast, dismissedFirst, dismissedAt,
+      dismissedWindows,
     },
     persisted: true,
   }
@@ -585,6 +611,15 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
     },
     dismissedLast: { ...(base.dismissedLast || {}), [episode]: lastMs },
     dismissedFirst: { ...(base.dismissedFirst || {}), [episode]: firstMs },
+    // ⛔ WHEN THE DECISION WAS MADE, which is what `readState`'s cap orders by. It is
+    // NOT the watermark (`lastMs`, the row's own `at`): an aged row's watermark is
+    // weeks old, so ordering the cap by it dropped a fresh dismissal of an old row on
+    // the very next read and the row came back (#14694 review P1). Monotonic in the
+    // direction that matters — a later decision never moves it backwards.
+    dismissedAt: {
+      ...(base.dismissedAt || {}),
+      [episode]: Math.max(Number((base.dismissedAt || {})[episode]) || 0, nowMs || 0),
+    },
     dismissedWindows: windows.length
       ? { ...(base.dismissedWindows || {}), [episode]: windows }
       : { ...(base.dismissedWindows || {}) },
@@ -613,7 +648,9 @@ export function undismiss(state, episode) {
   delete dismissedFirst[episode]
   const dismissedWindows = { ...(base.dismissedWindows || {}) }
   delete dismissedWindows[episode]
-  return { ...base, dismissed, dismissedLast, dismissedFirst, dismissedWindows }
+  const dismissedAt = { ...(base.dismissedAt || {}) }
+  delete dismissedAt[episode]
+  return { ...base, dismissed, dismissedLast, dismissedFirst, dismissedAt, dismissedWindows }
 }
 
 // ── Reading the state for one episode ──────────────────────────────────────

@@ -1820,3 +1820,85 @@ test('windowLabel speaks the same units as the row sentence it sits beside', () 
   assert.equal(windowLabel(null), '')
   assert.equal(windowLabel('nonsense'), '')
 })
+
+test('#14694 P1: a dismissal of an AGED row survives the cap, because the cap orders by the DECISION', () => {
+  // ⛔ THE CAP USED TO ORDER BY THE ROW'S OWN `at`. `dismissed[episode]` is the
+  // acknowledged window's END — the row's watermark — so "the most recent dismissals"
+  // it kept were really the most recent ROWS: dismissing an aged row stamped a
+  // 40-day-old value, landed last, and the very next `readState` dropped it. The
+  // reader files the row, closes the panel, reopens (`toggleOpen` re-reads on EVERY
+  // open) and the row is back with the badge on it — the "I dismissed it and it came
+  // back" class this ledger exists to close (#14694 review P1).
+  //
+  // Premise: the cap is 400 and nothing prunes `dismissed` by age, so a long-lived
+  // reader reaches it monotonically.
+  // `first_at` is set with `at` on every row: the helper's fixed default
+  // (`NOW - 5 min`) would make an aged row's window INVERTED (start after end) and
+  // the dismissal would read as uncovered for a reason unrelated to this test.
+  const rowAt = (ms) => ({
+    at: new Date(ms).toISOString(),
+    first_at: new Date(ms).toISOString(),
+  })
+  const recent = (i) => alert({
+    message: `recent ${i}`,
+    episode: `flag|rule-${i}|${i}`,
+    ...rowAt(NOW.getTime() - i * MIN),
+  })
+  const AGED = alert({
+    message: 'aged but real',
+    episode: 'flag|rule-aged|aged',
+    ...rowAt(NOW.getTime() - 40 * 24 * HOUR),
+  })
+  // DISTINCT decision times, oldest first: 400 dismissals made in the minutes
+  // before NOW, each of a row that is itself newer than the aged one. The aged row
+  // is dismissed LAST — so it is the newest DECISION and the OLDEST window, which is
+  // the whole point (with one `now` for all 401 the tie would make the ordering the
+  // test's own artifact rather than the reader's).
+  let state = emptyState()
+  for (let i = 0; i < 400; i += 1) {
+    const r = recent(i)
+    state = dismiss(state, entryKeyOf(r), new Date(NOW.getTime() - (400 - i) * MIN), r)
+  }
+  // The 401st dismissal is the AGED row, made LAST — so it is the newest DECISION
+  // and the oldest window. It must survive.
+  const agedKey = entryKeyOf(AGED)
+  state = dismiss(state, agedKey, NOW, AGED)
+  assert.equal(isDismissed(state, agedKey, AGED), true, 'premise: the dismissal took')
+
+  const storage = fakeStorage()
+  assert.equal(writeState(storage, 'k', state), true)
+  const { state: restored } = readState(storage, 'k', NOW)
+  assert.equal(Object.keys(restored.dismissed).length, 400, 'premise: the cap applied')
+  assert.equal(
+    isDismissed(restored, agedKey, AGED), true,
+    'a dismissal made LAST must not be the one the cap drops — ordering by the '
+    + 'row\'s own `at` dropped it on the very next read and the row came back',
+  )
+  assert.equal(
+    buildLedger({ alerts: [AGED], state: restored, now: NOW }).unresolved, 0,
+    'and the row stays in the dismissed bucket, badge at 0',
+  )
+  // The store carries the decision time, so a THIRD read reaches the same verdict
+  // (a rebuild must not depend on the order the map happens to hold).
+  const again = readState(
+    { getItem: () => JSON.stringify(restored) }, 'k', NOW,
+  ).state
+  assert.equal(isDismissed(again, agedKey, AGED), true, 'and it is stable across reads')
+
+  // A store written BEFORE this field existed still reads: it falls back to the
+  // watermark, i.e. the ordering it was written under. No decision changes.
+  const legacy = {
+    v: 1,
+    snoozed: {},
+    snoozedAt: {},
+    dismissed: { [agedKey]: AGED.at ? Date.parse(AGED.at) : NOW.getTime() },
+    dismissedLast: {},
+    dismissedFirst: {},
+    dismissedWindows: {},
+  }
+  const legacyRead = readState(
+    { getItem: () => JSON.stringify(legacy) }, 'k', NOW,
+  ).state
+  assert.equal(isDismissed(legacyRead, agedKey, AGED), true,
+    'a pre-`dismissedAt` store keeps its decision')
+})

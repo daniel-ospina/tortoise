@@ -2091,10 +2091,22 @@ test('#14694: the accessible name carries the REGISTER the row renders', () => {
     message: 'read rate above the usual range',
     episode: 'rv||act',
   })
-  const { container } = renderBell({ alerts: [incident, activity] })
+  // ⛔ AND AN UNCLASSIFIED ROW, because that is the value #10156's three-valued
+  // chip exists for and it was the one arm no test read: collapsing the ternary to
+  // two values shipped "activity" ("a measurement that disabled nothing") to AT on
+  // a row whose chip and detail both say we could not classify it (#14694 round-9
+  // P2).
+  const unclassified = alert({
+    type: 'brand_new',
+    register: 'brand_new',
+    label: 'Unrecognised alert',
+    message: 'something we cannot classify',
+    episode: 'brand_new||u',
+  })
+  const { container } = renderBell({ alerts: [incident, activity, unclassified] })
   fireEvent.click(bell(container))
   const names = rowActionNames(container).flat(2)
-  assert.equal(names.length, 6, 'two rows, three named actions each')
+  assert.equal(names.length, 9, 'three rows, three named actions each')
   for (const name of names) {
     assert.match(
       name,
@@ -2110,11 +2122,16 @@ test('#14694: the accessible name carries the REGISTER the row renders', () => {
     'the incident row is named an alert')
   assert.equal(open.filter((n) => n.includes(`: ${CHIP_ACTIVITY} — `)).length, 1,
     'the activity row is named activity')
+  assert.equal(open.filter((n) => n.includes(`: ${CHIP_UNCLASSIFIED} — `)).length, 1,
+    'an unclassifiable row says so in its name, not "activity"')
   // …and the chip the name now states is still the chip the line renders, so the
   // two cannot drift into two different registers.
   const chips = [...container.querySelectorAll('.notif-list .notif-chip')]
     .map((c) => c.textContent.trim())
-  assert.deepEqual(chips.sort(), [CHIP_ACTIVITY, CHIP_INCIDENT].sort())
+  assert.deepEqual(
+    chips.sort(),
+    [CHIP_ACTIVITY, CHIP_INCIDENT, CHIP_UNCLASSIFIED].sort(),
+  )
 })
 
 test('#14694: the accessible name carries the `×N+` truncation note', () => {
@@ -2130,42 +2147,81 @@ test('#14694: the accessible name carries the `×N+` truncation note', () => {
     `the name must carry the note the line renders; got: ${name}`)
 })
 
-test('#14694: each group disclosure states its expanded STATE, not only its label', () => {
+test('#14694: EVERY group disclosure states its expanded STATE, not only its label', () => {
   // ✧ The bell is a conformant disclosure (`aria-expanded` + `aria-controls`), and
   // its four siblings below it were not: their only cue was the label flipping
   // between `Snoozed (2)` and `Hide snoozed`, so an AT user was told "button" with
   // no state — the exact rule this file's A11Y contract cites for the bell and did
   // not apply to the others (#14694 review P2).
+  //
+  // ⛔ ALL FOUR, PARAMETERISED. The first version of this row read the SNOOZED
+  // toggle only, so dropping `aria-expanded` from the older, dismissed or acked
+  // trigger kept the whole file green — the fix's own claim ("the four group
+  // disclosures now carry it") was three-quarters unpinned (#14694 round-9 P2).
   const { container } = renderBell({
-    alerts: [alert({ message: 'snooze me' }), alert({ message: 'dismiss me', episode: 'flag||two' })],
+    alerts: [
+      alert({ message: 'snooze me' }),
+      alert({ message: 'dismiss me', episode: 'flag||two' }),
+      alert({ message: 'ack me', episode: 'flag||three', acked: true }),
+      alert({
+        message: 'older, please',
+        episode: 'flag||four',
+        at: new Date(NOW.getTime() - 30 * 24 * HOUR).toISOString(),
+      }),
+    ],
+    canAcknowledge: true,
   })
   fireEvent.click(bell(container))
-  fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
-  // …then put the remaining row away, so both groups exist at once.
-  const remaining = container.querySelectorAll('.notif-list .notif-row')
-  assert.equal(remaining.length, 1, 'precondition: the snooze left one row in the list')
-  fireEvent.click([...remaining[0].querySelectorAll('.notif-actions button')]
+
+  // Put one row into each group so all four triggers exist: the snoozed and
+  // dismissed groups come from the two clicks below, the acked group from the
+  // `acked: true` row, and the older group from the 30-day-old row.
+  const listRow = (text) => {
+    const row = [...container.querySelectorAll('.notif-list .notif-row')]
+      .find((r) => r.textContent.includes(text))
+    assert.ok(row, `precondition: the "${text}" row is in the list`)
+    return row
+  }
+  fireEvent.change(listRow('snooze me').querySelector('.notif-snooze'), {
+    target: { value: '1h' },
+  })
+  const dismissable = listRow('dismiss me')
+  fireEvent.click([...dismissable.querySelectorAll('.notif-actions button')]
     .find((b) => /Dismiss/.test(b.textContent)))
 
   const toggle = (re) => [...container.querySelectorAll('.notif-more')]
     .find((b) => re.test(b.textContent))
-  const snoozed = toggle(/Snoozed \(/)
-  assert.ok(snoozed, 'precondition: a snoozed row exists')
 
-  // Collapsed: state is exposed, and nothing dangles while the list is unmounted.
-  assert.equal(snoozed.getAttribute('aria-expanded'), 'false')
-  assert.equal(snoozed.getAttribute('aria-controls'), null,
-    'a reference to an unmounted region must not be emitted')
+  // Every disclosure, collapsed: state exposed, and NO dangling IDREF while the
+  // region it would name is unmounted.
+  const groups = [
+    { label: /Older than/, hide: /Hide older/, region: '.notif-list', kind: 'the MAIN list' },
+    { label: /Snoozed \(/, hide: /Hide snoozed/, region: '.notif-list-muted', kind: 'the snoozed list' },
+    { label: /Dismissed \(/, hide: /Hide dismissed/, region: '.notif-list-muted', kind: 'the dismissed list' },
+    { label: /Acknowledged for everyone/, hide: /Hide acknowledged/, region: '.notif-list-muted', kind: 'the acked list' },
+  ]
+  for (const g of groups) {
+    const collapsed = toggle(g.label)
+    assert.ok(collapsed, `precondition: the ${g.kind} trigger exists`)
+    assert.equal(collapsed.getAttribute('aria-expanded'), 'false',
+      `the ${g.kind} trigger must expose its collapsed state`)
+    assert.equal(collapsed.getAttribute('aria-controls'), null,
+      'a reference to an unmounted region must not be emitted')
+  }
 
-  fireEvent.click(snoozed)
-  const expanded = toggle(/Hide snoozed/)
-  assert.equal(expanded.getAttribute('aria-expanded'), 'true')
-  const controlledId = expanded.getAttribute('aria-controls')
-  assert.ok(controlledId, 'the expanded trigger must name the region it controls')
-  // Id-exact rather than a CSS selector: `React.useId` emits colons, and jsdom's
-  // `querySelector` needs them escaped.
-  const region = [...container.querySelectorAll('[id]')].find((n) => n.id === controlledId)
-  assert.ok(region, 'aria-controls must name the group the click revealed')
-  assert.ok(region.classList.contains('notif-list-muted'))
-  assert.ok(region.textContent.includes(UNSNOOZE), 'and it is the region that opened')
+  for (const g of groups) {
+    const collapsed = toggle(g.label)
+    fireEvent.click(collapsed)
+    const expanded = toggle(g.hide)
+    assert.ok(expanded, `precondition: the ${g.kind} trigger flipped to its hide label`)
+    assert.equal(expanded.getAttribute('aria-expanded'), 'true',
+      `the ${g.kind} trigger must expose its expanded state`)
+    const controlledId = expanded.getAttribute('aria-controls')
+    assert.ok(controlledId, `the expanded ${g.kind} trigger must name the region it controls`)
+    // Id-exact rather than a CSS selector: `React.useId` emits colons, and jsdom's
+    // `querySelector` needs them escaped.
+    const region = [...container.querySelectorAll('[id]')].find((n) => n.id === controlledId)
+    assert.ok(region, `aria-controls on the ${g.kind} trigger must name an element that exists`)
+    assert.ok(region.matches(g.region), `it must name ${g.region}, not some other node`)
+  }
 })
