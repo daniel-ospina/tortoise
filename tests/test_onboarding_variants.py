@@ -1657,6 +1657,19 @@ def test_key_never_interpolated_into_env_blocks():
 QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 
 _RESTART_CUE = "Restart your client"
+# ⛔ THE CUE IS FOUND CASE-INSENSITIVELY. Every form is IGNORECASE because "case
+# carries no meaning in this prose", but the cue itself was matched with `in`, so
+# a reword that keeps the required ORDER and merely lower-cases it mid-sentence
+# ("Once the config is written, restart your client, then confirm the tools are
+# actually there") failed the "must keep its restart cue" assert (measured) and
+# silently stopped the paragraph being graded at all.
+_RESTART_CUE_RE = re.compile(re.escape(_RESTART_CUE), re.IGNORECASE)
+
+
+def _cue_start(text: str) -> int:
+    """Index of the cue in `text`, case-insensitively; -1 when absent."""
+    match = _RESTART_CUE_RE.search(text)
+    return -1 if match is None else match.start()
 
 # ── The restart-order pin's GRADED inversion forms — a CLOSED, MEASURED set ───
 # The pin exists for one defect (#3232, #14676): the client reads its MCP config
@@ -1690,8 +1703,16 @@ _RESTART_CUE = "Restart your client"
 # overview` was GREEN in one and RED in the other, and forms (b)/(c)/(d) had no
 # exclusion at all (each measured). The rule is defined once here and appended to
 # every form's object, so it cannot drift again.
-_DOC_NOUN = (r"(?:section|reference|table|guide|docs?|page|overview|summary"
-             r"|readme|appendix)")
+# ⛔ THE WHOLE DOCUMENTED FAMILY, not just the two words the comments happened to
+# use. `documentation` — the very word these comments name the category with —
+# was MISSING, so "after checking the tools documentation" was RED while its
+# `tools reference` twin is a declared-GREEN row (measured), and the same held
+# for every other cross-reference noun. A doc is readable without a restart, so
+# grading one as an inversion asserts something the copy does not say.
+_DOC_NOUN = (r"(?:section|reference|table|guide|docs?|documentation|page"
+             r"|overview|summary|readme|appendix|catalog(?:ue)?|manifest"
+             r"|inventory|walkthrough|tour|cheat-?sheet|matrix|screenshot"
+             r"|diagram|index|chapter|listing)")
 _DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
 _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
               r"|in\s+the\s+table|on\s+this\s+page)")
@@ -2051,7 +2072,10 @@ _STATEMENT_BREAK_RE = re.compile(
     # run …"), and the file's own doctrine is that glyph variants are the same
     # punctuation. Without it the colon twin of a DECLARED-GREEN row was RED and
     # the colon twin of a declared-RED row was GREEN, both one-character edits
-    # (measured). Whitespace-bounded so `https:` and `e.g.:` do not split.
+    # (measured). Whitespace-bounded, so `https://` is safe — but note that a
+    # DOTTED TOKEN FOLLOWED BY A SPACE still splits (`e.g.: quit and reopen`
+    # splits at `e.g.`), which is the same window truncation the colon doctrine
+    # already accepts, not extra protection.
     r"(?:[;—–]\s*|:\s+|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
@@ -2073,6 +2097,30 @@ _STATEMENT_BREAK_RE = re.compile(
 _OBSERVATION_NEGATION_RE = re.compile(
     r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b(?!\s+that\b)[^\n]*?"
     r"\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
+
+
+def _negated_observation_only(clause: str) -> bool:
+    """True when the clause's ONLY claim is a negated observation.
+
+    ⛔ THE SKIP IS CLAUSE-WIDE, SO IT MUST NOT FIRE ON A CLAUSE THAT ALSO DEMANDS
+    A PRE-RESTART CONFIRMATION. Appending one unrelated negated observation
+    disarmed EVERY form — "… but first confirm the tools are actually there, and
+    see no errors in the log" was GREEN, and so was the same appended to (b),
+    (d), (d′), (e) and (f) (measured; each twin without the phrase is RED). The
+    rule is scoped to the observation *verb*, so a confirmation predicate stated
+    LEFT BEHIND must not match a form, while "if you see no tools" leaves
+    nothing to grade and stays GREEN.
+    """
+    neg = _OBSERVATION_NEGATION_RE.search(clause)
+    if neg is None:
+        return False
+    # ⛔ THE TEST IS FORM-AGNOSTIC: strip the negated observation and ask whether
+    # any graded form still matches what is left. Keying it on a confirmation
+    # PREDICATE was too narrow — form (e) ("only once the tools are actually
+    # there and see no errors") carries no confirmation verb at all, so it
+    # stayed GREEN (measured).
+    remainder = clause[: neg.start()]
+    return not any(pattern.search(remainder) for pattern in _INVERSION_FORMS)
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
@@ -2178,9 +2226,9 @@ def _tools_appear_after_cue(quick: str) -> bool:
     next one — `parts[:2]` of a split at REAL statement breaks — and no further: measured, "Restart your client. The config is
     reloaded. The tools appear later." must NOT satisfy it.
     """
-    para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
+    para = next(p for p in quick.split("\n\n") if _RESTART_CUE_RE.search(p))
     flat = " ".join(para.split())
-    after = flat[flat.index(_RESTART_CUE) + len(_RESTART_CUE):]
+    after = flat[_cue_start(flat) + len(_RESTART_CUE):]
     # ⛔ DO NOT `lstrip` THE TERMINATOR. Stripping it turns "the cue's sentence or
     # the next one" into "the next TWO", because the empty first part is then
     # filled from further along — measured: "Restart your client. The config is
@@ -2236,7 +2284,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # ⛔ EVERY CUE PARAGRAPH, not just the first. `next(...)` graded only the
     # first paragraph containing the cue, so a troubleshooting/FAQ paragraph
     # later in the doc could invert the order with no signal (measured).
-    for para in [p for p in quick.split("\n\n") if _RESTART_CUE in p]:
+    for para in [p for p in quick.split("\n\n") if _RESTART_CUE_RE.search(p)]:
         violation = _paragraph_cue_order_violation(para)
         if violation is not None:
             return violation
@@ -2245,7 +2293,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
 
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
-    cue_at = flat.index(_RESTART_CUE)
+    cue_at = _cue_start(flat)
     before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
     # ⛔ STATEMENT BREAKS FIRST, then clauses — the same reason the post-cue side
     # does it. A bare `[,.;]` cut inside `v1.2`/`e.g.` and ignored the em dash, so
@@ -2330,7 +2378,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
     for clause in pre_clauses:
         if (_confirmation_scopes_the_config(clause)
-                or _OBSERVATION_NEGATION_RE.search(clause)):
+                or _negated_observation_only(clause)):
             continue
         # ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS
         # FORWARD: "Check the tools after restarting. Restart your client, then
@@ -2356,7 +2404,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
         # the dash ends the window, so it never reaches this clause.)
         if (_FORWARD_SEQUENCER_RE.match(clause)
                 or _confirmation_scopes_the_config(clause)
-                or _OBSERVATION_NEGATION_RE.search(clause)):
+                or _negated_observation_only(clause)):
             continue
         for pattern in _INVERSION_FORMS:
             if pattern is _PRE_CUE_ONLY:
@@ -2419,8 +2467,7 @@ def test_3232_generic_restart_lines_are_exact():
     # equality pin called it a regression — the shape that trains the next
     # author to delete the pin instead of keeping the order (measured red at
     # `7107272801e5` on `main` and on this head alike).
-    cue = _RESTART_CUE
-    assert cue in quick, (
+    assert _RESTART_CUE_RE.search(quick), (
         "docs/quickstart-cloud.md must keep its restart cue — the config is "
         "read at client start, so a written config is not a loaded one")
     # ⛔ THE CLAUSE MUST BE IN THE CUE'S SENTENCE, NOT MERELY SOMEWHERE LATER IN
@@ -2497,6 +2544,27 @@ def test_3232_generic_restart_lines_are_exact():
 # red here is how a pin gets deleted), and each RED row was GREEN on the pre-fix
 # pattern — so this table is the executable form of the review's mutation matrix,
 # not a restatement of it.
+def test_3232_the_restart_cue_is_found_case_insensitively():
+    """The cue is located case-insensitively, as every form is.
+
+    Every `_inversion_form` is IGNORECASE because "case carries no meaning in
+    this prose", but the cue itself was matched with `in`, so a reword that keeps
+    the required ORDER and merely lower-cases it mid-sentence stopped the
+    paragraph being graded at all (measured — and it failed the "must keep its
+    restart cue" assert on the real doc, which trains the next author to delete
+    the cue rather than keep the order).
+    """
+    forward = ("Once the config is written, restart your client, then confirm "
+               "the tools are actually there.")
+    inverted = ("Once the config is written, RESTART YOUR CLIENT after "
+                "confirming the tools are actually there.")
+    assert _restart_cue_order_violation(forward) is None, forward
+    assert _restart_cue_order_violation(inverted) is not None, inverted
+    # …and the same doc with the cue lower-cased is graded, not skipped:
+    doc_lower = f"Lead-in.\n\n{inverted[0].lower() + inverted[1:]}\n"
+    assert _restart_cue_order_violation(doc_lower) is not None, doc_lower
+
+
 @pytest.mark.parametrize("line, inverted", [
     # ── forward: restart first, the confirmation follows ────────────────────
     ("Restart your client, then confirm the tools are actually there — "
@@ -3122,9 +3190,9 @@ def test_3232_generic_restart_lines_are_exact():
     # `_SESSION_PRESENCE_RE` — both measured: removing each alone changes no row,
     # though removing the presence copy flips `installed and they are loaded`).
     # ⛔ `when` used to be listed here and is NOT row-less: replacing form (a)'s
-    # `(?:if|when)` with `(?:if)` flips THREE declared rows (measured), so it is
-    # pinned and the claim that it carries no row was wrong in the safe direction
-    # but still wrong.
+    # `(?:if|when)` with `(?:if)` flips FOUR declared rows (measured; the fourth
+    # is the degree-intensifier row added later), so it is pinned and the claim
+    # that it carries no row was wrong in the safe direction but still wrong.
     # ⛔ `list` is NOT redundant and is not in that list: it is load-bearing for
     # form (d) and row-pinned (`list the tools beforehand`), which is how a claim
     # of redundancy about a live arm was caught here — measured by deleting it
@@ -3191,6 +3259,30 @@ def test_3232_generic_restart_lines_are_exact():
     # ── `see THAT …` is an INSTRUCTION, not an observation, so the observation
     # skip must not swallow it (its `confirm` twin is a declared-RED row):
     ("Restart your client, but first see that no tools are missing.", True),
+    # ── …and the observation skip is SCOPED: one appended, unrelated negated
+    # observation must not disarm the form. Every one of these was GREEN before
+    # the scope was fixed (measured, all seven forms):
+    ("Restart your client, but first confirm the tools are actually there, and "
+     "see no errors in the log.", True),
+    ("Restart your client, having first confirmed the tools are actually there "
+     "and noticed no errors.", True),
+    ("Restart your client after confirming the tools are actually there and "
+     "seeing no errors.", True),
+    ("Restart your client, but confirm the tools are already there and see no "
+     "errors.", True),
+    ("Restart your client only once the tools are actually there and see no "
+     "errors.", True),
+    # ── …while a clause whose only claim IS a negated observation stays GREEN:
+    ("Restart your client if you see no `tortoise_*` tools in the list.", False),
+    ("Restart your client after you have noticed no errors in the log.", False),
+    # ── a documentation CROSS-REFERENCE is readable without a restart, so it is
+    # not an inversion. `documentation` was missing from the doc-noun list, so
+    # these were RED while their `tools reference` twins are GREEN (measured):
+    ("Restart your client after checking the tools documentation.", False),
+    ("Restart your client, having checked the tools documentation.", False),
+    ("Ensure the tools documentation is up to date. Restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("Restart your client after checking the tools manifest.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
