@@ -3566,8 +3566,15 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
     # to read is the value TWO retirements earlier (the SDK traversal row took
     # 31 -> 30, `#11609` batch 1 another).
-    assert total >= 21, (
-        f"only {total} pairs are accepted although §13's cells name 21 door "
+    # ⛔ #14592 moved it again, 21 -> 22 (`#14689`): row 46
+    # (`entity_reads.py::entity_relations`) arrived with ONE door (REST
+    # `GET /v1/entities/{entity_id}/relations`) and therefore ONE cell occurrence.
+    # The floor is stated as an equality against §13's own stated
+    # "N cell occurrences" (asserted exactly in the door arm below), so a floor
+    # left at the old count would pass a table one occurrence short of what this
+    # comment says it measures.
+    assert total >= 22, (
+        f"only {total} pairs are accepted although §13's cells name 22 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
         "other way"
     )
