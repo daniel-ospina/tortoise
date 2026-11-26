@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `1aef0b618b` folded in, carrying
+# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a38` folded in, carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -66,13 +66,14 @@ version: 1
 # `tests/test_14559_reaper_schedule.py` row, `#14574`'s drift-reporter registration
 # (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
-# (`core` and `api` — ONE `fast_pool()` entry, two surfaces), and `#14607`'s
-# registrations (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb
-# packs the pool into two bins: six shards at 827.1 s (a, b, g, i, j, k) and five at 827.0 s
-# (c, d, e, f, h), so `ceil(827.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.1 = 2.0312), so the two agree by construction rather than by
-# a hand re-read.
+# (`core` and `api` — ONE `fast_pool()` entry, two surfaces), `#14607`'s registrations
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
+# `tests/test_13450_ep_position_axis_participation.py` — `core`-registered, carrying its own
+# `durations` row — the verb packs the pool into two bins: seven shards at 827.2 s
+# (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m governs
+# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree by
+# construction rather than by a hand re-read.
 # ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
 # registration status is a THIS-HEAD fact no arm reads, and `#14544` is the proof it moves (the
 # sentence below records that file leaving `core`) — the fold's own doctrine is that a claim
@@ -146,30 +147,6 @@ version: 1
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
-# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
-# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
-# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
-# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
-# name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
@@ -177,7 +154,9 @@ version: 1
 # called this branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
 # describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
-# re-pointed.
+# re-pointed. ⛔ The SAME splice arrived again at the `origin/main` `c1c8df1a38` fold — both
+# parents' re-derivations kept, the copies disagreeing on the bins — and is repaired the same way,
+# by the verb rather than around the splice.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
