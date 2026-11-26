@@ -10152,27 +10152,37 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: `neither of which` AT ALL, plus the paraphrase a fold would reach for instead — `#14544` never
 #: touched it. The anaphor form was the shipped defect; the paraphrase is the same claim spelled
 #: without the pronoun, so banning only the pronoun would grade the wording rather than the claim.
-#: ⛔ THE BAN IS UNBOUNDED IN DISTANCE AND APPLIED TO THE WHOLE BLOCK, and both are load-bearing
-#: (measured at `d1f14298`, #14623 review round 4). The pre-fix form required `#14544` within 80
-#: characters AFTER `which`, so the claim shipped GREEN in two shapes: label-first — “And `#14544`'s
-#: cut touched neither of which.” — and the same anaphor with its label padded past the window. A
-#: DISTANCE WINDOW on a pronoun form is escapable by padding, so the form itself is what is refused
-#: here: `neither of which` names nothing, which is the defect. ⛔ AND THE SUBJECT IS THE BLOCK, not
-#: the bounded paragraph: bounding the BAN at the next `⛔` made the graded region TEXT-CONTROLLED —
-#: one `⛔` inserted before “The weight is not restated here:” truncated it, and the RETIRED SENTENCE
-#: returned verbatim after the bound with this arm reporting GREEN. A ban that the graded text can
-#: move out from under is not a ban, so every NEGATIVE claim here reads the whole block; the
-#: POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
+#: ⛔ THE BAN IS APPLIED TO THE WHOLE BLOCK, and that half is load-bearing (measured at
+#: `d1f14298`, #14623 review round 4). The pre-fix form required `#14544` within 80 characters AFTER
+#: `which`, so the claim shipped GREEN in two shapes: label-first — “And `#14544`'s cut touched
+#: neither of which.” — and the same anaphor with its label padded past the window. ⛔ AND THE
+#: SUBJECT IS THE BLOCK, not the bounded paragraph: bounding the BAN at the next `⛔` made the graded
+#: region TEXT-CONTROLLED — one `⛔` inserted before “The weight is not restated here:” truncated it,
+#: and the RETIRED SENTENCE returned verbatim after the bound with this arm reporting GREEN. A ban
+#: that the graded text can move out from under is not a ban, so every NEGATIVE claim here reads the
+#: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
+#: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Three spellings are graded — the bare pronoun form
+#: (`neither of which`), the ACTIVE form (`#14544` … never/not/didn't/has not … touch…, within 400
+#: characters), and the PASSIVE form (`<that|the|its> <row|entry> … was/were/is/are/has/had not …
+#: touch… … `#14544`, label within 80 characters). Those bounds are STATED because they are real:
+#: measured at `49a6dd89`, padding the active form past 400 characters or the passive label past 80
+#: escapes both, and a pronoun paraphrase (`it was never touched by `#14544``) and a noun this list
+#: does not name are NOT read. A phrase-level guard cannot be widened into honesty — the next noun
+#: or the next verb form is always one edit away — so the graded set is what is claimed, and this
+#: paragraph is the record of what is not. The PASSIVE arm needs its BE verb on purpose: without it,
+#: "the row … does not touch the shard layout, and `#14544`'s cut is separate" reds, which is honest
+#: prose (the subjects differ) and would make the arm a false block.
 _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
     r"neither\s+of\s+which"
-    # ACTIVE: `#14544` … (never|not|did not|didn't|has not) … touch…, at any distance.
+    # ACTIVE: `#14544` … (never|not|did not|didn't|has not) … touch…, within 400 characters.
     r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
     r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?"
-    # PASSIVE / ROW-FIRST: `<the row> was never touched by `#14544`` — the same claim with the
-    # label at the END, which no `#14544`-first arm can reach. Bounded by the ROW noun rather than
-    # by distance on the label, because the noun is what makes it a claim about the row.
-    r"|\brow\b[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
-    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?[\s\S]{0,80}?#14544",
+    # PASSIVE: `<that|the|its> <row|entry> … was/were/is/are/has/had not touched … `#14544`` — the
+    # same claim with the label at the END, which no `#14544`-first arm can reach. The BE verb is
+    # required so an ACTIVE sentence about a different subject does not red this.
+    r"|\b(?:that|the|its)\b[\s\S]{0,40}?\b(?:row|entry)\b[\s\S]{0,400}?"
+    r"(?:was|were|is|are|has|had)\s+(?:never|not)\s+(?:\w+\s+){0,2}touch(?:ed|es|ing)?"
+    r"[\s\S]{0,80}?#14544",
     re.IGNORECASE)
 #: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
 #: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
@@ -10314,23 +10324,41 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "paragraph DOES exclude`) — it grades `exclude` without the polarity, so a fold that "
         "restored the false reading `#14612` deletes would keep this arm GREEN")
     # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for, in
-    # BOTH orders and at any distance — the shapes measured GREEN at `d1f14298` are fixtures now.
+    # BOTH orders — the shapes measured GREEN at `d1f14298` and `148ab7c1` are fixtures now.
     # ⛔ BOTH ORDERS, because the ban is only as wide as the reading order it asserts: a `#14544`-first
     # arm certifies `that row was never touched by `#14544`` as CLEAN (measured at `148ab7c1`, when
     # this comment already claimed "both orders"). The two orders are separate alternatives
     # above, and each is asserted here rather than assumed.
+    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises: the passive arm reads
+    # `<row|entry>` (the two nouns the block itself uses for the same thing), the active arm reads
+    # 400 characters and the passive label 80. Widening past those is NOT claimed — the residual is
+    # declared above, and a phrase guard that claimed it would be false one noun later.
     for paraphrase in (
             "`#14544` never touched that row",
             "`#14544`'s cut did not touch the row",
             "that row was not touched by `#14544`",
             "the row itself was never touched by `#14544`",
+            "the `durations` entry was never touched by `#14544`",
             "And `#14544`'s cut touched neither of which.",
             "neither of which " + "x" * 95 + " `#14544` touched",
-            "`#14544`'s cut took the file off `core`, and that row was never touched"):
+            "`#14544`'s cut took the file off `core`, and that row was never touched",
+            "`#14544`" + "y" * 399 + " never touched that row"):
         assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(paraphrase), (
             f"the anaphor ban misses the paraphrase {paraphrase!r} — it grades the pronoun rather "
-            "than the claim, bounds a pronoun form by DISTANCE (escapable by padding), or reads only "
+            "than the claim, bounds a pronoun form by a DISTANCE the fixture exceeds, or reads only "
             "ONE ORDER of the claim, so a false reading labelled at the other end passes clean")
+    # …and it must NOT red honest prose: an ACTIVE sentence whose subject is not the row, and the
+    # paragraph's own TRUE statements, are not this claim. Without these the arm is a false block.
+    for honest in (
+            "the row was not touched by the reaper",
+            "the row's weight was never re-read, and `#14544` cut its cases",
+            "another row's weight was retimed; the retime does not touch the shard layout, and "
+            "`#14544`'s cut is separate",
+            "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
+        assert not _H_14544_UNTOUCHED_ANAPHOR_RE.search(honest), (
+            f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
+            "verb or the active arm ignores its subject, so the guard refuses a true sentence "
+            "rather than the claim")
     # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
     # grade: the shapes above are the claim, this is the prose the repository actually ships.
     live_anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(_emission_block_header(
