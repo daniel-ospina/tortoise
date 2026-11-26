@@ -2658,7 +2658,17 @@ _CONFIG_PREP_RE = re.compile(
     # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
     r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:\s+Code)?[`*_]*(?:'s|\u2019s)?[`*_]*\s+)?"
-    r"(?:[`'\"]?)(?:config|settings|file|\.mcp\.json)\b",
+    # ⛔ THIS NOUN LIST MUST BE `_CONFIG_NOUN_RE`'S, and it was not: it read
+    # `config|settings|file|.mcp.json` while the noun arm carries `configs?` and
+    # `installer`. The SAME noun therefore scoped the clause file-side in noun
+    # position and session-side in prep position, which is a one-word
+    # substitution flipping a declared-GREEN row — this file's own standard for a
+    # defect (#14679 review cycle 49):
+    #
+    #     GREEN  … after confirming the installer lists the tools.      (noun arm)
+    #     RED    … after confirming the tools appear in your installer. (prep arm)
+    #     GREEN  … after confirming the tools appear in your configs.    (fixed here)
+    r"(?:[`'\"]?)(?:configs?|settings|installer|file|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
 # config-scope escape keys on NOUNS (`config|settings|installer`), so it could
@@ -2935,6 +2945,24 @@ _SEQUENCER_FRAGMENT_RE = re.compile(
     r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
     r"|probably|likely|maybe|perhaps|want|wants|better|best|had|ought"
     r"|always|simply|prefer|very|really|actually|definitely|surely"
+    # ⛔ THE OPEN `-ly` ADVERB CLASS, AND THE FILLER IDIOMS. `_ADVERBS` is the
+    # OPEN class (`\w+ly` + a closed remainder) precisely because "a noun list
+    # cannot be completed"; form (f) and form (a) both use it, while THIS list
+    # carried no `\w+ly` arm at all — so one adverb re-opened the whole pre-cue
+    # half, and the two arms of the same pin disagreed about the same word class
+    # (#14679 review cycle 49):
+    #
+    #     RED    … , then restart your client.      (declared table row)
+    #     GREEN  … , then quickly restart your client.      (measured)
+    #     GREEN  … , then immediately restart your client.  (measured)
+    #     GREEN  … , then all you need to do is restart …   (measured)
+    #
+    # `immediately|again|additionally` are already members of `_PRE_CUE_ONLY`'s
+    # leading run, and the six contractions are the same one-apostrophe family
+    # cycle 48 closed ten of (`it'd` vs the declared-RED `it is` twin).
+    r"|\w+ly|immediately|again|additionally|soon|already"
+    r"|all|do|does|next|step|going|the|a|an|of"
+    r"|it'd|it'll|that'd|they'll|we're|we've|there'll|i'll"
     # ⛔ CONTRACTIONS, PRONOUNS, COPULAS AND THE `able|ready|done` ADJECTIVES.
     # The class claims to be "sequencers, restrictives, courtesy, modal subjects,
     # PRONOUNS and subordinators" — and `it`, `that`, `there`, `is`, `are` are
@@ -5860,6 +5888,47 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client after confirming the tools are installed and the "
      "tools are really there, then confirm the tools are actually there.",
      True),
+    # ⛔ CYCLE 49 — the fragment class had NO `\w+ly` arm while `_ADVERBS` is the
+    # OPEN class, so one adverb re-opened the pre-cue half; the filler idioms and
+    # six more contractions were the same one-word class.
+    ("Confirm the tools are actually there, then quickly restart your client.",
+     True),
+    ("Confirm the tools are actually there, then immediately restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then again restart your client.",
+     True),
+    ("Confirm the tools are actually there, and additionally restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then all you need to do is restart "
+     "your client.", True),
+    ("Confirm the tools are actually there, then the next step is to restart "
+     "your client.", True),
+    ("Confirm the tools are actually there, then it'd be best to restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then you are going to restart your "
+     "client.", True),
+    # …and `_CONFIG_PREP_RE`'s noun list now carries `_CONFIG_NOUN_RE`'s: the same
+    # noun scoped the clause file-side in noun position and session-side in prep
+    # position, a one-word substitution flipping the verdict.
+    ("Restart your client after confirming the tools appear in your installer.",
+     False),
+    ("Restart your client after confirming the tools appear in your configs.",
+     False),
+    # ⛔ CYCLE 49 — DECLARED RESIDUAL: MARKDOWN BLOCK STRUCTURE. A BLANK LINE
+    # between two list items puts the confirmation and the cue in DIFFERENT
+    # paragraphs, and `_restart_cue_order_violation` grades per paragraph, so the
+    # confirmation is never read. A TABLE never splits at all (`|` is stripped by
+    # `_DECORATION_RE` but is not a statement break). Both are declared rather
+    # than fixed: grading ACROSS paragraphs re-opens every decision this pin made
+    # about "only the cue's own statement" (a concession in a previous paragraph
+    # is ordinary copy), and adding `|` as a statement break would cut cell text
+    # in two for no gain elsewhere. Pinned so the residual is MEASURED and
+    # visible, and a future tightening shows up as a deliberate row flip.
+    ("## Activate\n\n1. Confirm the tools are actually there.\n\n"
+     "2. Restart your client, then run a query.", False),
+    ("| Step | Action |\n| --- | --- |\n"
+     "| 1 | Confirm the tools are actually there. |\n"
+     "| 2 | Restart your client, then run a query. |", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
