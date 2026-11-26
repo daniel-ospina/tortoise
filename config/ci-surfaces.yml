@@ -64,52 +64,26 @@ version: 1
 # (`tests/test_fly_secret_declaration_report.py`), and `#14607`'s two core rows
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — PLUS this PR's own row
 # (`tests/test_14592_read_parity.py`, `core` and `api` — ONE `fast_pool()` entry, two surfaces, the
-# same flat 2.0 s) plus #14342's two intake suites (`tests/test_14342_capture_intake_door.py`,
-# `core` and `api`; `tests/test_capture_intake.py`, `core` — ONE `fast_pool()` entry each, the same
-# flat 2.0 s) — the verb packs the pool into two bins: nine shards at 827.4 s (a, c, d, e, f, h, i,
-# j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level
-# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than by
-# a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1340 entries here
+# same flat 2.0 s) plus #14342's two intake suites (`tests/test_14342_capture_intake_door.py`, `core`
+# and `api`; `tests/test_capture_intake.py`, `core` — ONE `fast_pool()` entry each, the same flat
+# 2.0 s) — the verb packs the pool into ONE bin: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i,
+# j, k), so `ceil(827.6/60 x 2)` = 28 m governs — and the same emission prints `watchdog_minutes: 28`
+# with `watchdog_headroom: 2.03` (1680 / 827.6 = 2.0300), so the two agree by construction rather than
+# by a hand re-read.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1341 entries here
 # against 1339 on `origin/main` `c1c8df1a3817f`, both re-derived by loading each tree's OWN manifest
-# through `fast_pool()` — not carried from either parent's paragraph — and this tree's set difference
-# is exactly THREE entries that main does not carry: `tests/test_14592_read_parity.py` (this PR's
-# `#14592` Phase A suite) and #14342's two intake suites above. ⛔ `main` DOES carry one file this
-# branch lacks — `tests/test_13450_ep_position_axis_participation.py`, landed on main after this
-# branch's merge base — so the two counts differ by 1 in BOTH directions until the next main merge;
-# an earlier revision of this sentence said `main` carries nothing this tree lacks, which was true at
-# `4b2fba3e8a` and is not true at this head. ⛔ Every other row named above is `main`'s at this head,
-# NOT this PR's; counting one as this PR's would contradict the 1340 − 1339 + 1 the two readings
-# give. The name lists are what the guard COMPARES against the live emission
+# through `fast_pool()` — not carried from either parent's paragraph — and the set difference is
+# exactly TWO entries: #14342's intake suites above (`test_14342_capture_intake_door.py`,
+# `test_capture_intake.py`). `main` carries nothing this tree lacks, MEASURED AFTER this branch merged
+# `origin/main` `c1c8df1a3817f` — before that merge it carried `test_13450_ep_position_axis_participation.py`
+# (landed on main after this branch's base), and this sentence said so rather than claiming otherwise.
+# ⛔ Every other row named above is `main`'s at this head, NOT this PR's; counting one as this PR's
+# would contradict the 1341 − 1339 = 2 the two readings give. The name lists are what the guard
+# COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
-# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
-# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
-# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
-# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
-# name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
