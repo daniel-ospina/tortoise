@@ -1743,7 +1743,7 @@ _PRE_CUE_ONLY = _inversion_form(
 # Deliberately a SEPARATE set from the post-cue `lstrip`, which is pinned by rows
 # of its own — widening that one would move behaviour this fix has no reason to
 # touch.
-_PRE_CUE_PREFIX = " \t,.;:—–-('\"`*>#_"
+_PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_"
 
 
 _INVERSION_FORMS = (
@@ -1769,16 +1769,32 @@ _INVERSION_FORMS = (
     #     the whole form — "… after you have first verified the tools …" was
     #     GREEN (measured) while its bare twin is a declared RED row, the same
     #     one-inserted-word class `c30589f4df458` closed one form over. The slot
-    #     admits ANY `-ly` adverb (plus the bare four), and repeats, because the
-    #     connective is what carries the order: which adverb sits in it does not
-    #     change the verdict, so a closed four-word list only re-opened the hole
-    #     for `previously` / `recently` / `thoroughly` / `also already` (each
-    #     measured GREEN with the closed list).
+    #     admits ANY `-ly` adverb (plus the bare four), and repeats, because a
+    #     MANNER adverb does not change the connective's verdict — a closed
+    #     four-word list only re-opened the hole for `previously` / `recently` /
+    #     `thoroughly` / `also already` (each measured GREEN with the closed
+    #     list).
+    #     ⛔ BUT A RESTRICTIVE OR FREQUENCY ADVERB IS NOT A MANNER ADVERB, and it
+    #     DOES change the sense: "if you ONLY see the tools after a second
+    #     restart" describes the SYMPTOM, and this table already declares
+    #     "Restart your client if you cannot see the tools in the list" GREEN — a
+    #     tool-observation CONDITION is expressly not an inversion here. An
+    #     unfiltered `\w+ly` reddened `only` / `barely` / `rarely` / `mostly` /
+    #     `lately` copy that was GREEN at the previous head (each measured).
+    #     ⛔ A HYPHENATED PREDICATE IS THE SAME PREDICATE: "double-checked" was
+    #     GREEN while "checked" is a declared RED row (measured).
+    #     ⛔ AND A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK. Form (f) already
+    #     excludes it ("a DOC CROSS-REFERENCE … the noun must name the RUNNING
+    #     SESSION's tools"); form (a) had no such arm, so "after you have checked
+    #     the tools reference" was RED while the same clause BEFORE the cue is
+    #     declared GREEN. The lookahead below is form (f)'s rule, shared.
     _inversion_form(
         r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|first|already|just|also)\s*,?\s+)*"
+        r"(?:(?!(?:only|barely|rarely|mostly|lately|merely|simply|hardly)\b)"
+        r"(?:\w+ly|first|already|just|also)\s*,?\s+)*"
+        r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b"
+        + r"[^\n]*?\btools\b(?!\s+(?:section|reference|table|guide|docs?|page)\b)"
     ),
     # (b) a participle that places the confirmation before the restart:
     #     "Restart your client, having first confirmed the tools are there".
@@ -1809,7 +1825,7 @@ _INVERSION_FORMS = (
     _inversion_form(
         _CONFIRM_PREDICATE + r"[^\n]*?\btools\b[^\n]*?"
         r"(?:\b(?:beforehand|before restarting|before you restart)\b"
-        r"|\bfirst\b(?=[\s.,;:!?)]*$))"
+        r"|\bfirst\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
     ),
     # (d′) `already` DOES carry an order claim — but only where an adversative,
     #     not the adverb, is what asserts it ("… but confirm the tools are
@@ -1878,8 +1894,9 @@ _CONFIG_PREP_RE = re.compile(
 # sentence beginning lower case ("… . otherwise, once the tools …") is graded as
 # though it continued, which is pinned as RED below rather than left implicit.
 # ⛔ GLYPH VARIANTS ARE THE SAME PUNCTUATION. The break class carried only the em
-# dash while three `lstrip('—–-:;…')` calls in the same function treat `–` and `-`
-# as the same mark, so an en-dash or spaced-hyphen twin of a declared-GREEN row
+# dash while the punctuation strip (`_PRE_CUE_PREFIX`) and both sequencer
+# `lstrip` calls in this function treat `–` and `-` as the same mark, so an
+# en-dash or spaced-hyphen twin of a declared-GREEN row
 # went RED with a message claiming an inversion (measured):
 # "Restart your client – once the tools are listed, run …".
 # The dash/hyphen arms do NOT require a following space: "client—once",
@@ -1996,7 +2013,7 @@ def _tools_appear_after_cue(quick: str) -> bool:
     # filled from further along — measured: "Restart your client. The config is
     # reloaded. The tools appear later." wrongly satisfied the bound. Only the
     # separating whitespace/comma that continues the cue is stripped.
-    parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,"), maxsplit=2)
+    parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=2)
     return re.search(r"\btools\b", " ".join(parts[:2])) is not None
 
 
@@ -2070,7 +2087,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # An em dash ends it too: "Restart your client — once the tools are listed,
     # run `tortoise mcp-status --live`." is a separate statement (measured RED
     # while the dash was inside the window), exactly as the `;` twin is.
-    post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,"), maxsplit=1)[0]
+    post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=1)[0]
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE. Splitting at the comma
     # made the second half its own clause, which the forward-sequencer skip then
@@ -2079,7 +2096,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # first lets the config-conjunction rule see both halves.
     merged: list[str] = []
     for clause in post_clauses:
-        if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
+        if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;…(\'" \t')):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged and (introducer := _SEQUENCER_TAIL_RE.search(merged[-1]))
                 and not _ADVERSATIVE_LEAD_RE.match(
@@ -2136,7 +2153,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         # tools are listed, run …)" was RED (measured) while its bare twin was
         # GREEN. (The em-dash twin is protected by the STATEMENT BREAK instead —
         # the dash ends the window, so it never reaches this clause.)
-        if (_FORWARD_SEQUENCER_RE.match(clause.lstrip('—–-:;(\'" \t'))
+        if (_FORWARD_SEQUENCER_RE.match(clause.lstrip('—–-:;…(\'" \t'))
                 or _confirmation_scopes_the_config(clause)):
             continue
         for pattern in _INVERSION_FORMS:
@@ -2440,6 +2457,42 @@ def test_3232_generic_restart_lines_are_exact():
      "actually there.", True),
     ("Restart your client after you have also already verified the tools are "
      "actually there.", True),
+    # ── cycle 20: an OPEN class must be bounded on BOTH sides ──────────────
+    # a RESTRICTIVE / FREQUENCY adverb is not a manner adverb, and it changes the
+    # sense: this copy describes the SYMPTOM that motivates a restart, which the
+    # table above already treats as forward ("if you cannot see the tools …").
+    # All four were RED under the unfiltered `\w+ly` (measured):
+    ("Restart your client if you only see the tools after a second restart.",
+     False),
+    ("Restart your client if you have lately seen the tools vanish from the "
+     "list.", False),
+    ("Restart your client if you have rarely seen the tools appear at all.",
+     False),
+    ("Restart your client if you have barely seen the tools appear.", False),
+    # markdown decoration on the trailing marker is not a hedge (the same
+    # doctrine as the bolded adversative row above), and all three were GREEN:
+    ("Restart your client, confirm the tools are actually there **first**.",
+     True),
+    ("Restart your client, confirm the tools are actually there `first`.", True),
+    ("Restart your client, confirm the tools are actually there [first].", True),
+    # a DOC cross-reference is not a presence check — the rule form (f) already
+    # carries, now shared by form (a) (both were RED):
+    ("Restart your client after you have quickly checked the tools reference.",
+     False),
+    ("Restart your client after you have carefully checked the tools section.",
+     False),
+    ("Restart your client after you have checked the tools reference.", False),
+    # a leading ellipsis hides the adversative unless it is stripped like every
+    # other glyph (both were GREEN):
+    ("Restart your client … but first confirm the tools are actually there.",
+     True),
+    ("Restart your client, … but first confirm the tools are actually there.",
+     True),
+    # a hyphenated predicate is the same predicate (both were GREEN):
+    ("Restart your client after you have double-checked the tools are "
+     "actually there.", True),
+    ("Restart your client after you have re-checked the tools are actually "
+     "there.", True),
     # a determiner/modifier other than a bare `the` in form (e):
     ("Restart your client once all the tools appear.", True),
     ("Restart your client once your tools appear.", True),
