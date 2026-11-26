@@ -1211,8 +1211,9 @@ def test_pi_install_does_not_claim_an_install_the_noop_run_skipped(home):
     ext_dir = home / ".pi" / "agent" / "extensions"
     seeded = install_capture("pi", home=home)
     assert seeded.ok, seeded.error
-    assert seeded.changed_artifacts, (
-        "the seeding run was expected to WRITE the seam")
+    assert capture_install.PI_EXTENSION_NAME in seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam — the row's whole "
+        f"premise is that run 2 skips that copy: {seeded.changed_artifacts}")
 
     target = home / "checkout" / "tortoise-capture"
     target.mkdir(parents=True)
@@ -1244,8 +1245,9 @@ def test_pi_install_second_producer_refusal_does_not_claim_an_install_it_skipped
     ext_dir = home / ".pi" / "agent" / "extensions"
     seeded = install_capture("pi", home=home)
     assert seeded.ok, seeded.error
-    assert seeded.changed_artifacts, (
-        "the seeding run was expected to WRITE the seam")
+    assert capture_install.PI_EXTENSION_NAME in seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam — the row's whole "
+        f"premise is that run 2 skips that copy: {seeded.changed_artifacts}")
 
     target = home / "checkout" / "reflect-hook"
     target.mkdir(parents=True)
@@ -1373,6 +1375,50 @@ def test_pi_install_refuses_a_symlinked_preservation_target(home):
     assert "not a regular file" in res.error, res.error
     assert live.read_text() == body, "the only copy of the producer was deleted"
     assert retired.is_symlink(), "the preservation target was rewritten"
+
+
+def test_pi_install_does_not_claim_a_byte_comparison_it_did_not_run(home):
+    """A DIRECTORY producer beside a regular FILE at the retired name: both
+    paths exist, neither is touched, and the install refuses — but there is no
+    digest of the directory's entry point to compare against, so the receipt
+    must not say the retired copy "holds DIFFERENT bytes".
+
+    That sentence reports a comparison the code cannot support: the branch
+    fires on ``live_digest is None``, which is the ABSENCE of a comparison, and
+    the pre-fix text invented the evidence for its own refusal. A receipt that
+    fabricates the measurement behind it is the class this module refuses
+    elsewhere for an unreadable seam (#14342 round 15, note 4).
+
+    Mutation: key the sentence on the branch CONDITION alone (``live_digest is
+    None or live_digest != retired_digest`` → "holds DIFFERENT bytes") — this
+    row REDs on the claimed comparison, on a shape whose remedy is unchanged."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.mkdir(parents=True)
+    body = "// a producer shipped as a directory\n"
+    (active / "index.ts").write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    kept = "// the copy we retired, as a regular FILE\n"
+    retired.write_text(kept)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "DIFFERENT bytes" not in error, (
+        f"the receipt claimed a byte comparison that never ran: {error!r}")
+    assert "NOT compared" in error, error
+    assert "is a directory" in error, error
+    # The refusal still names the consequence and the remedy, so saying LESS
+    # about the comparison does not make it less actionable.
+    assert "captured twice" in error, error
+    assert "move one" in error.lower(), error
+    # Non-destructive, and the duplication is still reported honestly: BOTH
+    # paths survive, so the box really does still have two producers.
+    assert (active / "index.ts").read_text() == body
+    assert retired.read_text() == kept
+    assert capture_install.PI_EXTENSION_NAME in _registered_producers(ext_dir)
 
 
 def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):

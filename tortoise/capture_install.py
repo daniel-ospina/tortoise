@@ -2083,6 +2083,12 @@ def _disable_pi_second_producer(
     destroys nothing), and only a copy that DIFFERS is a refusal. Refusing on
     every farm sync would make ``tortoise install pi`` permanently red on
     exactly the boxes this guard targets, while the duplication stayed live.
+
+    ``dry_run`` selects the PREVIEW: nothing is written, so every action is
+    phrased in the subjunctive and no line claims a mutation. ``seam_written``
+    is the other plane's truth — whether THIS run copied the capture seam
+    (:func:`_seam_state_clause`) — and is KEYWORD-ONLY WITHOUT A DEFAULT so a
+    call site cannot silently regain the wrong sentence (#14342 round 14).
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
     retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
@@ -2133,7 +2139,27 @@ def _disable_pi_second_producer(
                 "aside by hand.")
         live_digest = _sha256_file(active) if active.is_file() else None
         retired_digest = _sha256_file(retired)
-        if live_digest is None or live_digest != retired_digest:
+        if live_digest is None or retired_digest is None:
+            # ⛔ NO COMPARISON RAN, SO THE RECEIPT MAY NOT CLAIM ONE. `active`
+            # here is a DIRECTORY producer (a real directory, or a link to one
+            # — both loadable, and its entry point retired inside it), or one
+            # of the two paths is unreadable, so at most one digest exists.
+            # Saying the retired copy "holds DIFFERENT bytes" reports a
+            # comparison the code cannot support — the same class `_install_pi`
+            # already refuses for an unreadable seam (#14342 round 15, note 4).
+            # Both paths exist and the remedy is unchanged; the sentence says
+            # what was actually measured.
+            unmeasured = active if live_digest is None else retired
+            why = ("is a directory, so its entry point is not a file to digest"
+                   if not unmeasured.is_file() else "could not be read")
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} already exists and {unmeasured} {why} — the two "
+                "were NOT compared. Move one of them aside and re-run. Both "
+                "would otherwise stay registered, so every session would be "
+                "captured twice (~/.tortoise/capture-spool and "
+                "~/.tortoise/session-events).")
+        if live_digest != retired_digest:
             return False, [], (
                 f"cannot disable the second capture producer {active}: "
                 f"{retired} already exists and holds DIFFERENT bytes. Move one "
