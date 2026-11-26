@@ -9375,7 +9375,23 @@ def _carry_row_claim_violations(positive: dict[str, set[float]], negative: set[s
 
 
 def _row_claims(header: str) -> list[str]:
-    """Every test file the block calls a `durations` ROW, in any shape it spells one.
+    """Every test file the block calls a `durations` ROW, in each of the FOUR shapes read here.
+
+    ⛔ THAT IS A REMIT, NOT A UNIVERSAL PROPERTY — and this docstring said "in any shape it spells
+    one" until a fresh-context review measured the difference (2026-11-26, P3). A fifth spelling
+    was live in this very block: "… and `#14671`'s
+    `tests/test_13450_ep_position_axis_participation.py` — `core`-registered, carrying its own
+    `durations` row …", where the word sits three tokens off the path. MEASURED: `_row_claims`
+    omitted the file, and DELETING its `durations` row left all six of this PR's arms GREEN — the
+    exact "a claim graded by nothing rots" class the block exists to warn about, reproduced in the
+    matcher cut to catch it. The sentence was re-spelled to `<path> row in `durations`` (the same
+    repair the `#14544` paragraph took), so the claim is now reachable and the row's deletion reds
+    `test_the_fast_shards_header_block_calls_a_row_only_what_has_one`.
+
+    The four shapes, stated so a new spelling has something to be checked against: `<file>` row,
+    `row (`A`, `B`)`, `rows:` then a comma-separated run, and the CARRY run (see the module
+    comment above `_ROW_CLAIM_AFTER_FILE_RE`). A comment claiming a row in a shape not listed here
+    is graded by NOTHING — re-spell it beside the path rather than trusting this docstring.
 
     Double-quoted spans are masked FIRST, for the reason `_repeated_header_spans` masks them
     (`_QUOTED_SPAN_RE`, below): this block legitimately QUOTES dead claims for the record, and
