@@ -3137,7 +3137,7 @@ _SEQUENCER_LEAD_RE = re.compile(
     r"^(?:(?:and|but|so|only)\s+)?"
     r"(?:then|next|afterwards?|after\s+that|after\s+which|which"
     r"|subsequently|finally|lastly|later|thereafter|once\s+more"
-    r"|only\s+at\s+the\s+end)\b", re.IGNORECASE)
+    r"|at\s+that\s+point|only\s+at\s+the\s+end)\b", re.IGNORECASE)
 
 #: A determiner/possessive: the clause names something, so it is an instruction.
 #: ⛔ A BARE `that` **IS** ADMITTED HERE, and this comment says so because the
@@ -3171,12 +3171,25 @@ _FILLER_FRAME_RE = re.compile(
     r"|\b(?:is|are|was|were)\s+to\b"
     # …or a clause that OPENS with a locative and names no confirmation
     # ⛔ THE LOCATIVE SET IS A LIST TOO, and this is its declared residual: `with`,
-    # `via`, `during` and `after` are members now (measured RED at `b8c41f9f0c`),
-    # and the next preposition re-opens exactly this — the same bound the sequencer
-    # front above states about itself. `after` is safe here because the clause it
-    # reaches is the PRE-cue one, and `after CONFIRMING the tools` is graded by
-    # form (a) BEFORE this walk-back ever runs.
-    r"|^(?:on|in|at|inside|within|from|under|with|via|during|after)\b",
+    # `via`, `during` and `after` are members (measured RED without them), and the
+    # next preposition re-opens exactly this — the same bound the sequencer front
+    # above states about itself.
+    # ⛔ AND `after` MUST NOT REACH A PARTICIPLE. A popped clause is DISCARDED,
+    # never graded — `_cue_governing_clause` returns `clauses[-1:]` and
+    # `_INVERSION_FORMS` is not consulted until after it returns — so letting
+    # `after` match `after confirming the tools are actually there` re-opened the
+    # file's canonical inversion:
+    #
+    #     RED    After confirming the tools are actually there, restart your client.
+    #     GREEN  Then after confirming the tools are actually there, restart your client.
+    #     GREEN  Then after checking the tools … / Finally after confirming the tools …
+    #
+    # (measured at cycle 56, a regression that commit introduced — its comment
+    # claimed form (a) graded the clause "before this walk-back ever runs", which
+    # is the reverse of the execution order). The negative lookahead keeps
+    # `after the config change`, which is 56e's pinned row.
+    r"|^(?:on|in|at|inside|within|from|under|with|via|during"
+    r"|after(?!\s+(?:\w+ing|confirmed|checked|verified|validated|ensured)\b))\b",
     re.IGNORECASE)
 
 
@@ -3356,7 +3369,14 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     # `won't` (will + not) and `shan't` are the same contraction class.
     r"|\b(?:ca|wo|sha)n['\u2019]t"
     # …and the spelled-out forms of the same modals, which involve no contraction:
-    r"|\b(?:will|shall|are)\s+not(?:\s+to)?"
+    # ⛔ `you're not` IS `aren't` ONE APOSTROPHE OVER, and BOTH were unhandled on
+    # this side of the arm: the spelled-out form admitted `are not`, the contraction
+    # form admitted `aren't`, and the far commoner `you're not` / `they're not` /
+    # `it's not` matched NEITHER — so `You're not supposed to restart … until you
+    # have confirmed …` was GREEN while the `aren't` spelling of the same sentence
+    # is a declared-RED row (measured, #14679 review cycle 57).
+    r"|\b(?:will|shall|are|you['\u2019]re|we['\u2019]re|they['\u2019]re"
+    r"|it['\u2019]s|he['\u2019]s|she['\u2019]s)\s+not(?:\s+to)?"
     # ⛔ THE CONTRACTIONS OF `be`, which the `ca|wo|sha` arm one line below does
     # NOT cover — `aren't`/`isn't`/`wasn't`/`weren't` never matched this arm at all
     # (`You aren't going to restart … until you have confirmed …` measured GREEN,
@@ -3800,15 +3820,13 @@ _CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
 # present-tense deferral `If you check the tools before restarting …` RED — so it
 # is a one-line fix with no counter-cost, not a wider change. Pinned by three rows
 # in the table's declared-residual block.
-# ⛔ AND IT ALREADY COVERS CYCLE 55's FALSE RED, so cycle 55's own widening is NOT
-# carried here. Cycle 54's sequencer arm correctly stops popping at `then go ahead
-# and`, which exposed the concessive `Even if you confirmed the tools IN AN
-# EARLIER SESSION` and turned forward copy RED (measured, review cycle 55 P1). A
-# phrase member (`in an? (earlier|previous|prior) (session|run|conversation)`) was
-# written for it, then measured REDUNDANT: `confirmed` above already matches that
-# clause, so the phrase flipped 0 rows and was DROPPED rather than shipped as
-# unpinned dead weight. The two forward-copy rows cycle 55 added stay, because
-# they are what makes EITHER marker load-bearing.
+# ⛔ AND THE SESSION PHRASE IS CARRIED, IN `_PAST_TIME_ADVERBIAL` — it is NOT
+# dropped. Cycle 55 wrote here that it had been: that measurement was taken under
+# the UNGATED predicate arm, where `confirmed` alone matched `… in an earlier
+# session`, and it was never re-measured after this commit gated that arm. Gated,
+# the phrase does real work (`in a previous session` and `on the previous run` are
+# now rows), so the claim was false about the code it described — corrected after
+# review cycle 57 found the comment contradicting the regex.
 #: The past-time adverbial a bare past-tense predicate NEEDS before it marks prior
 #: completion. ⛔ WITHOUT IT THE PREDICATE EXEMPTS THE PRESENT-PERFECT CONDITIONAL,
 #: which is form (a)'s CORE SHAPE — `When you have confirmed the tools are actually
@@ -3818,8 +3836,23 @@ _CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
 #: was right about the class and wrong about the gate: the three shapes it fixed
 #: all carry `before`/`earlier`/`last time`.
 _PAST_TIME_ADVERBIAL = (
-    r"(?:before|earlier|last\s+time|prior|previously"
-    r"|in\s+an?\s+(?:earlier|previous|prior)\s+(?:session|run|conversation))")
+    # ⛔ `before` AND `prior` ARE NOT PAST-TIME ADVERBIALS HERE — they are THE
+    # INVERSION. `When you have confirmed the tools PRIOR TO restarting, restart
+    # your client.` says the confirmation is ordered BEFORE the restart, which is
+    # the exact ordering #14676 forbids, and admitting `prior` let it pass as a
+    # "completed concession" (measured, #14679 review cycle 57). The file says the
+    # same thing one arm over: `until`/`prior to` ARE the same inversion.
+    # ⛔ AND THE DETERMINER IS `an?|the`: `an?` alone excluded `in THE previous
+    # session`, ordinary forward copy one article from a declared-GREEN row (false
+    # RED, same review). `on the previous run` is the same phrase with another
+    # preposition.
+    # ⛔ …BUT A CLAUSE-FINAL `before`/`prior` IS the bare adverb ("if you checked
+    # the tools before,"), which is prior completion and must stay GREEN — its
+    # row is the peer lane's and it caught this. The bound is the clause END, not
+    # the word: `prior TO restarting` keeps the inversion reading and stays graded.
+    r"(?:earlier|last\s+time|previously|(?:before|prior)(?=\s*$)"
+    r"|(?:in|on)\s+(?:an?|the)\s+(?:earlier|previous|prior|last)\s+"
+    r"(?:session|run|conversation))")
 
 #: ⛔ AND THE PREDICATE ARM MUST COVER THE WHOLE `_PRE_CUE_VERB` CLASS, not three
 #: of its spellings: `If you validated the tools earlier, …` and `If you made sure
@@ -6926,7 +6959,7 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("If you made sure the tools were there earlier, restart your client, then "
      "confirm the tools are actually there.", False),
     # 56b. `be able to` WAS NOT DEAD — cycle 55 dropped it from the negated slot and
-    #      took two real inversions GREEN with it (a subset of the class it had just
+    #      took THREE real inversions GREEN with it (a subset of the class it had just
     #      been fixed to stop copying).
     ("You won't be able to restart your client until you have confirmed the "
      "tools are actually there.", True),
@@ -6950,6 +6983,47 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "client.", True),
     ("Confirm the tools are actually there, then during the install restart your "
      "client.", True),
+    # ── cycle 57 — the fourth review found three regressions CYCLE 56 INTRODUCED
+    #    (`after` reaching a participle, `at that point` dropped, `an?` excluding
+    #    `the`) plus two pre-existing holes in the same arms.
+    # 57a. ⛔ `after` MUST NOT REACH A PARTICIPLE: a popped clause is DISCARDED,
+    #      never graded, so this is the file's canonical inversion shipping GREEN.
+    ("Then after confirming the tools are actually there, restart your client.",
+     True),
+    ("Finally after confirming the tools are actually there, restart your client.",
+     True),
+    ("Then after checking the tools are actually there, restart your client.",
+     True),
+    # …while the bare-noun locative that motivated the member stays RED, so the
+    # lookahead is not paid for by losing 56e.
+    ("Confirm the tools are actually there, then after the config change restart "
+     "your client.", True),
+    # 57b. `and at that point` — one word from the member cycle 56 called redundant.
+    ("Confirm the tools are actually there, and at that point, restart your "
+     "client.", True),
+    # 57c. `prior to restarting` IS the inversion, not a past-time adverbial.
+    ("When you have confirmed the tools prior to restarting, restart your client.",
+     True),
+    ("When you have confirmed the tools before you restart, restart your client.",
+     True),
+    # 57d. `you're not` / `they're not` — the negation of `be` with the auxiliary
+    #      contracted and `not` separate, which NEITHER existing spelling reached.
+    ("You're not supposed to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You're not able to restart your client until you have confirmed the tools "
+     "are actually there.", True),
+    ("You're not going to restart your client until you have confirmed the tools "
+     "are actually there.", True),
+    ("They're not able to restart the client until they have confirmed the tools "
+     "are actually there.", True),
+    # 57e. …and the `an?`→`an?|the` widening, from both sides: forward copy that
+    #      was a false RED, and the bare clause-final adverb that must stay GREEN.
+    ("If you confirmed the tools in the previous session, restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("If you confirmed the tools on the previous run, restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("If you checked the tools before, restart your client, then confirm the "
+     "tools are actually there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -7045,7 +7119,7 @@ def test_3232_the_two_copies_of_the_periphrastic_modals_agree():
     assert _PRE_CUE_ONLY.search("You have got to confirm the tools are actually there.")
     assert _NEGATED_CUE_LEAD_RE.search("You have not got to ")
     # ⛔ AND `be able to` — cycle 55 dropped `be|able` from this slot as "dead" and
-    # took two real inversions GREEN with it (`You won't be able to restart … until
+    # took THREE real inversions GREEN with it (`You won't be able to restart … until
     # you have confirmed …`), which this test could not see because it only listed
     # the periphrastic spellings. A member the two arms disagree about is a red row
     # now, not a footnote.
