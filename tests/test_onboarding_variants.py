@@ -1920,10 +1920,32 @@ _PRE_CUE_ONLY = _inversion_form(
 # once you can confirm the tools are actually there` was GREEN while its
 # modal-free twin `after you confirm …` is a declared RED row — the canonical
 # inversion, admitted one word over).
+# ⛔ THE SET IS MEASURED, AND TWO OF ITS CLASSES ARE DELIBERATELY SMALL.
+#   * `could|would|shall|may|might` are NOT here: each flips 0 rows and none is
+#     natural copy in this construction ("after you could confirm the tools"
+#     reads as a hypothetical, not an instruction), so they are the same dead
+#     weight the file deletes elsewhere.
+#   * The ability subject is `are` only, plus the BARE `able to` that the
+#     contracted subject needs. `is|am|be|was|were` are unreachable: the subject
+#     slot admits only implied / `you` / `you have` / `having`, so nothing can
+#     agree with them (measured — each flips 0 rows).
+# ⛔ AND THE CONTRACTION MUST BE ADMITTED ON BOTH SIDES OF IT. `you are able to
+# confirm …` was a declared RED row while its `you're` / `you’re` twins were
+# GREEN — ONE APOSTROPHE bypassed a row this arm exists to hold, which is the
+# same defect the file already states for `you've` ("The auxiliary is spelled
+# out AND contracted"). The `'re` arm below is that fix; the bare `able to` here
+# is the other half of it (`you're` + `able to`).
 _MODAL_TO_VERB = (
-    r"(?:can|could|will|would|should|shall|may|might|must"
-    r"|(?:is|are|am|be|was|were)\s+able\s+to)"
+    r"(?:can|should|will|must"
+    r"|are\s+able\s+to|able\s+to)"
 )
+
+# An adverb run that may sit EITHER side of the modal. The slot used to be glued
+# to the predicate (`_MODAL_TO_VERB\s+` then straight into `_CONFIRM_PREDICATE`),
+# so one adverb inserted between them re-opened the exact false PASS the modal
+# slot closes: `once you can actually confirm …` was GREEN while both
+# `once you can confirm …` and `once you actually confirm …` are RED (measured).
+_ADVERBS = r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also)"
 
 _PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_[]{}"
 
@@ -2000,13 +2022,12 @@ _INVERSION_FORMS = (
     #     this pin claims.
     _inversion_form(
         r"\b(?:(?:after|once)\s+"
-        r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
-        r"(?:" + _MODAL_TO_VERB + r"\s+)?"
-        r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
-        r"(?:" + _MODAL_TO_VERB + r"\s+)?"
-        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
+        r"(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
+        r"(?:" + _ADVERBS + r"\s+)*"
+        r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
+        r"|(?:if|when)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
+        r"(?:" + _ADVERBS + r"\s+)*"
+        r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
         # ⛔ THE GUARD READS THE GRADED OBJECT, not its own copy of it. It spelled
         # `tools|tool\s+list` inline, so `tool LISTS` was not found, the clause was
@@ -3135,16 +3156,39 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there beforehand.", True),
     # a MODAL between the subject and the predicate is one inserted word, and it
     # used to defeat form (a) end-to-end (measured GREEN before the slot added
-    # at `_MODAL_TO_VERB`). The modal-free twins above/below are the same
-    # sentences; only the modal differs.
+    # at `_MODAL_TO_VERB`). ⛔ THESE ARE **NOT** 「twin pairs」 WITH THE ROWS ABOVE:
+    # an earlier revision of this comment claimed each modal row sits beside a
+    # declared modal-free twin of the same sentence, and no such row existed
+    # (`grep` found only this comment) — the paired rows above differ by the
+    # CONNECTIVE as well as the modal, and the modal-free twins that exist are
+    # the `after you confirm …` / `after you see …` rows further down this table,
+    # which are RED for that reason alone. Every alternative in `_MODAL_TO_VERB`
+    # is pinned by ONE row here and by nothing else, which is what makes removing
+    # it observable (measured: each dropped alternative flips its own row).
     ("Restart your client once you can confirm the tools are actually there.",
      True),
     ("Restart your client once you are able to confirm the tools are there.",
      True),
     ("Restart your client after you should confirm the tools are there.", True),
+    ("Restart your client once you will confirm the tools are there.", True),
+    ("Restart your client after you must confirm the tools are there.", True),
+    # ⛔ ONE APOSTROPHE IS NOT A DIFFERENT SENTENCE. The `are able to` row above
+    # was RED while these two contracted twins were GREEN (measured) — the file's
+    # own doctrine spells the auxiliary out AND contracted, so both spellings are
+    # rows here rather than one row and a false PASS.
+    ("Restart your client once you're able to confirm the tools are there.",
+     True),
+    ("Restart your client once you\u2019re able to confirm the tools are there.",
+     True),
+    # …and an ADVERB between the modal and its predicate must not re-open the
+    # same hole: `once you can actually confirm …` was GREEN while both
+    # `can confirm` (above) and `actually confirm` are RED (measured).
+    ("Restart your client once you can actually confirm the tools are there.",
+     True),
     # …and the same slot closes the modal+OBSERVATION inconsistency: the
-    # modal-free twin `… after you see the tools in the list` is a declared RED
-    # row, so its `can see` spelling must be RED too (measured GREEN before).
+    # modal-free `after you see the tools in the list` row (further down this
+    # table) is RED, so its `can see` spelling must be RED too (measured GREEN
+    # before).
     ("Restart your client once you can see the tools in the list.", True),
     ("Restart your client only once the tools are actually there.", True),
     ("Restart your client, after confirming the tools are actually there.", True),
