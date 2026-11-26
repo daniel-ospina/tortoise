@@ -10909,6 +10909,30 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the scope pattern still matches when the OTHER half holds the exemption ("
         "`row is the ONLY half`) — it grades the word `exempt`/`ONLY` rather than WHICH half, so a "
         "fold that exempted the row again would keep this arm GREEN")
+    # ⛔ THE ADMITTED SPELLINGS ARE FIXTURES, not prose in the comment above (#14623 review round
+    # 24, P3). This pin had NO positive fixture — it was asserted only against the live block, so a
+    # re-narrowing to one spelling stayed GREEN on the paragraph while redding any TRUE rewording
+    # of it with a diagnostic asserting the paragraph named no scope at all. MEASURED on the
+    # pre-fix alternation: `The REGISTRATION alone is exempt` and `The REGISTRATION half is exempt`
+    # matched none of its three spellings. The `scope_inverted` swap above does not cover this: it
+    # only proves WHICH half is graded, never that a differently-spelled TRUE claim is read.
+    for scope_spelling in (
+            "The REGISTRATION is the ONLY half exempt.",
+            "The REGISTRATION alone is the ONLY half exempt.",
+            "The REGISTRATION alone is exempt.",
+            "The REGISTRATION half is exempt.",
+            "Only the REGISTRATION half is exempt.",
+            "The exempt half is the REGISTRATION, not the row."):
+        assert _H_14544_SCOPE_RE.search(scope_spelling), (
+            f"the scope pin no longer reads {scope_spelling!r} — a TRUE statement of the scope the "
+            "paragraph makes would red this arm, and the diagnostic would assert the opposite of "
+            "what the paragraph says (the spelling lock #14623 review round 24 measured)")
+    # …and widening it must not have widened the POLARITY with it: neither half-swapped inverse may
+    # read, or the pin now certifies the reading `#14612` deletes.
+    for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt."):
+        assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
+            f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
+            "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
     conclusion_inverted = re.sub(
         r"\bnot\b\s+", "", conclusion.group(0), count=1, flags=re.IGNORECASE)
     assert conclusion_inverted != conclusion.group(0), (
@@ -11248,6 +11272,33 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             f"the `carry` matcher does not read the unit-spelled value ({spelling!r}), so a TRUE "
             "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
             f"positive-side twin of the round-23 finding: {unit_positive!r}")
+    # ⛔ THE ADJECTIVE, the positive half's third optional word (#14623 review round 24, P3). The
+    # branch required the literal `explicit`, so a TRUE rewording — `carry a `2.0` `durations` row`
+    # — emptied `positive`, and the non-vacuity assertion at the top of this arm then reported the
+    # block as naming NO file: the inverse of its own text, on prose that states the same claim.
+    # MEASURED on the pre-fix alternation: `positive={}` for EVERY reworded spelling below, the
+    # live `an explicit` spelling alone surviving — which is why nothing redded while the lock was
+    # in place, the same shape as the unit and the noun-inserted absence beside it. A fixture is
+    # what stops it being re-narrowed, since the live sentence spells the adjective.
+    for claim in ("carry an explicit `2.0` `durations` row",
+                  "carry a `2.0` `durations` row",
+                  "carry `2.0` `durations` row"):
+        adjective_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` {claim}")
+        assert adjective_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read {claim!r}, so a TRUE rewording of the block reds "
+            "this arm and the diagnostic blames the matcher — the adjective was a spelling lock "
+            f"(#14623 review round 24, P3): {adjective_positive!r}")
+    # …and making the adjective optional must not have dropped the VALUE the claim carries: the row
+    # whose weight moved under a sentence still stating the old one has to red, or the loosening
+    # traded a false block for a false PASS.
+    adjective_positive, _ = _carry_row_claims(
+        "`tests/test_carry_planted_first.py` carry a `2.0` `durations` row")
+    assert _carry_row_claim_violations(
+        adjective_positive, set(), {"test_carry_planted_first.py": 3.1})[0] == [
+            ("test_carry_planted_first.py", [2.0], 3.1)], (
+        "the adjective-less spelling read a file but lost the weight it states, so a `durations` "
+        "row that moved while the sentence still claimed the old value would pass GREEN")
     # All three directions in one map: `second` carries the row at the wrong value, `subdir` has
     # no row at all, and `absent` DOES carry one while the sentence says it does not.
     planted_rows = {
