@@ -331,9 +331,61 @@ PI_VOLUNTEER_EXTENSION_NAME = (
 #: ``session_id``.
 LEGACY_PI_DIRNAME = "tortoise-capture"
 
-#: Where the legacy entry is moved when disabled — dot-prefixed, so Pi's
-#: loader skips it (``entry.name.startsWith(".")``) while its files live on.
+#: Where the legacy entry is moved when disabled.  ⛔ THE DOT PREFIX RETIRES
+#: NOTHING: Pi's ``discoverExtensionsInDir`` applies NO dot-prefix filter (the
+#: loader contains no ``startsWith(".")`` at all) and resolves EVERY
+#: subdirectory through ``resolveExtensionEntries``, so a dot-prefixed
+#: directory is still LOADED.  This constant is only the non-destructive
+#: DESTINATION of the rename; what actually stops the producer loading is the
+#: entry point being retired INSIDE it (``index.ts`` → ``index.ts.disabled``),
+#: which the installer does once the replacement seam is verified (#14342).
 PI_DISABLED_DIRNAME = ".tortoise-capture.disabled"
+
+#: The OTHER producer agent-infra installs (#3512, #3713's sibling): a
+#: top-level ``extensions/reflect-hook.ts`` whose only handler is the
+#: ``session_shutdown`` capture. It writes ONE record per quit session into
+#: ``~/.tortoise/session-events/<day>.jsonl`` BEFORE its network attempt — for
+#: EVERY session, whether or not the egress gate is open — and then POSTs the
+#: same ``/v1/sessions`` body. So a box carrying both producers stores every
+#: session TWICE, in two substrates, and drains both.
+#:
+#: MEASURED on the reference box (2026-11-25): 265/265 sessions in the capture
+#: spool were ALSO in ``session-events/``, turn-for-turn identical except for
+#: the truncation marker (the spool annotates a 5 000-char cut, reflect-hook
+#: hard-slices). The four fields only reflect-hook records
+#: (``metadata.team/projectRoot/prs/charCount``) are dropped by the drain at
+#: filing time — see ``session_events_drain``'s payload builder — so nothing is
+#: filed from them.
+PI_SECOND_PRODUCER_NAME = "reflect-hook.ts"
+
+#: Where the second producer is moved when disabled. NOT a loadable name: Pi's
+#: loader takes top-level ``*.ts`` / ``*.js`` (``dist/core/extensions/loader.js``),
+#: so ``<stem>.ts.disabled`` is skipped while the file itself lives on — the
+#: same non-destructive contract as the legacy guard above.
+#:
+#: ⛔ DERIVED FROM THE NAME, NOT SPELLED OUT (#14342 round 25, finding 1).
+#: :func:`_retire_pi_entry` produces its rename target from the PATH
+#: (``f"{path.name}.disabled"``), so a hand-spelled ``"reflect-hook.ts.disabled"``
+#: would be a SECOND derivation of one fact — and the drift is destructive, not
+#: cosmetic. MEASURED with the two spellings disagreeing: a box holding a
+#: preserved ``reflect-hook.ts.disabled`` plus a farm-recreated live
+#: ``reflect-hook.ts`` returned ``ok=True``, the preserved bytes became the live
+#: copy's, and the live copy was unlinked — a refusal turned into silent
+#: destruction of the only preserved copy, reported GREEN. Deriving it here
+#: makes the guards and the mutation read the same name by construction.
+PI_SECOND_PRODUCER_DISABLED_NAME = f"{PI_SECOND_PRODUCER_NAME}.disabled"
+
+#: ⛔ THE SAME PRODUCER UNDER THE OTHER NAME PI LOADS (#14342 round 19,
+#: finding 6). Pi's ``isExtensionFile`` accepts ``*.ts`` **or** ``*.js``, so a
+#: ``reflect-hook.js`` beside the seam is the second capture producer — and the
+#: guard, which is name-exact on ``reflect-hook.ts``, never looked at it.
+#: MEASURED: with ``reflect-hook.js`` present, ``install_capture("pi")``
+#: returned ``ok=True`` with ``actions`` naming only the seam and the ``.js``
+#: copy untouched — a GREEN install with TWO producers registered, which is
+#: precisely the failure this guard exists to report. Any other loadable suffix
+#: belongs here too; the check is driven off this tuple, never off a second
+#: name test.
+PI_SECOND_PRODUCER_OTHER_NAMES = ("reflect-hook.js",)
 
 # ── #3516 §B / #3515 piece 12 — the client-timestamp floor ───────────────
 # The store-proven check pairs with a FLOOR: the matched record's
@@ -1320,23 +1372,145 @@ def legacy_extension_obstacle(harness: str,
     ``test_pi_legacy_obstacle_matches_the_installers_own_refusal`` drives both
     over the shape space (no legacy entry / a renameable one / its backup name
     taken / a regular FILE at its name with the backup taken / a symlinked
-    entry, with and without the backup name taken) and pins them together.
+    entry, with and without the backup name taken / a SYMLINK at the backup
+    name that Pi still loads) and pins them together.
 
     A symlinked legacy entry is deliberately NOT a collision: the installer
     unlinks it (the checkout it points at is untouched) and never reaches the
     refusal, so calling it one would withhold a command that works.
+
+    ⛔ THIS DOCSTRING IS NOT A COMPLETENESS CLAIM (#14695 review). It mirrors the
+    refusals listed above and NOT every arm the installer has: a
+    manifest-declared directory producer with no retired name yet, and an
+    UNREADABLE-``package.json`` directory, both refuse while this returns ``""``.
+    Those are disclosed, with their shapes, in ``tortoise/pi-hooks/README.md``
+    under "Residuals this guard does NOT close" — read that list (or re-derive
+    from the arms below) before quoting this predicate as full coverage; a
+    hand-maintained count is exactly what drifted it the three times rounds
+    20/24/25 fixed.
     """
     if harness != "pi":
         return ""
     root_path = Path(root)
     legacy = root_path / LEGACY_PI_DIRNAME
     legacy_disabled = root_path / PI_DISABLED_DIRNAME
-    if not (legacy.is_dir() and not legacy.is_symlink()):
-        return ""
-    if not (legacy_disabled.exists() or legacy_disabled.is_symlink()):
-        return ""
-    return (f"a legacy capture extension is already disabled at "
-            f"{PI_DISABLED_DIRNAME} — move one aside")
+    if (legacy.is_dir() and not legacy.is_symlink()
+            and (legacy_disabled.exists() or legacy_disabled.is_symlink())):
+        return (f"a legacy capture extension is already disabled at "
+                f"{PI_DISABLED_DIRNAME} — move one aside")
+    # #14342 round 9, finding 4: the STICKIEST refusal the installer has — a
+    # SYMLINK at the disabled name that still resolves to a directory with an
+    # entry point. `_retire_pi_entry` renames the LINK, and a suffixed link to a
+    # directory is still loaded, so the installer refuses before mutating and
+    # refuses again on EVERY re-run. An unmirrored refusal is a hint that names
+    # a command which refuses forever, which is what this predicate exists to
+    # prevent (:func:`legacy_extension_obstacle`) — named, not numbered: a line
+    # range cannot be kept honest by hand (#14342 round 22, finding 6).
+    if legacy_disabled.is_symlink() and _pi_entry_is_loadable(legacy_disabled):
+        return (f"the disabled capture extension at {PI_DISABLED_DIRNAME} is a "
+                f"SYMLINK Pi still loads — move it out of the extensions "
+                f"directory")
+    # #14342: the SECOND producer has its own collision, and the install refuses
+    # it on the same condition the installer does — both names present with
+    # DIFFERENT bytes. A re-created copy with identical bytes is re-asserted by
+    # the installer (the farm re-materializes this file), so it is NOT an
+    # obstacle and naming it here would withhold a command that works.
+    active = root_path / PI_SECOND_PRODUCER_NAME
+    retired = root_path / PI_SECOND_PRODUCER_DISABLED_NAME
+    # ⛔ THE SAME PRODUCER UNDER THE OTHER NAME PI LOADS (#14342 round 20,
+    # finding 5). The installer refuses a loadable `reflect-hook.js`
+    # (`PI_SECOND_PRODUCER_OTHER_NAMES`), so a hint that stays silent about it
+    # names a command that refuses — the drift this predicate exists to stop.
+    for other_name in PI_SECOND_PRODUCER_OTHER_NAMES:
+        if _pi_entry_is_loadable(root_path / other_name):
+            # ⛔ A GUESS IS NOT A MEASUREMENT (#14342 round 21, finding 4). The
+            # installer's own receipt says "could not be VERIFIED — it may still
+            # register" on exactly this branch, so a hint asserting "is
+            # registered" would have two surfaces of one guard contradict each
+            # other on the same shape.
+            if _pi_loadability_is_guessed(root_path / other_name):
+                return (f"a second copy of the second capture producer could "
+                        f"not be VERIFIED at {other_name} — it may still "
+                        f"register; move it out of the extensions directory")
+            return (f"a second copy of the second capture producer is "
+                    f"registered at {other_name} — move it out of the "
+                    f"extensions directory")
+    # ⛔ A SYMLINK TO AN INDEX-BEARING DIRECTORY IS A REFUSAL THIS MIRROR DID
+    # NOT EXPRESS (#14695 review round 2, finding 1). The installer renames the
+    # LINK and then refuses, because a NON-suffixed `<name>.disabled` link
+    # resolves through `resolveExtensionEntries` and Pi registers the target's
+    # `index.ts` — so `tortoise install pi` fails on EVERY run, and it MUTATES
+    # on each one. This predicate answered '' for that shape: exactly the
+    # silent-over-a-refusing-verb drift it exists to stop. MEASURED before the
+    # arm: hint '', real `ok=False` with the link already renamed aside.
+    #
+    # Gated on `not lexists(retired)`: once a retired name exists, the arms below
+    # already answer for it. The loadability test is the SAME computation the
+    # `--dry-run` makes post-mutation (`_disable_pi_second_producer`), so the two
+    # surfaces cannot drift: an INERT target (no manifest entry, no index) is
+    # still retired silently by the installer and must stay silent here.
+    if (not os.path.lexists(retired) and active.is_symlink()
+            and active.is_dir()):
+        _link_entries, _link_unreadable = _pi_manifest_entries(active)
+        if _link_unreadable:
+            # A guess is not a measurement (same rule the arms above keep).
+            return (f"the second capture producer at {PI_SECOND_PRODUCER_NAME} "
+                    f"is a symlink to a directory whose package.json cannot be "
+                    f"read — it may register through the link, and the "
+                    f"install refuses; move it out of the extensions "
+                    f"directory")
+        if ((_link_entries and any(os.path.exists(active / name)
+                                   for name in _link_entries))
+                or os.path.exists(active / "index.ts")
+                or os.path.exists(active / "index.js")):
+            return (f"the second capture producer at {PI_SECOND_PRODUCER_NAME} "
+                    f"is a SYMLINK to a directory Pi resolves through its "
+                    f"entry point — the install renames the link and then "
+                    f"still refuses on every run; move it out of the "
+                    f"extensions directory")
+    # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN —
+    # mirrored here (#14342 round 24, finding 2). The installer re-reads
+    # `retired` on EVERY run and refuses when Pi still loads it (the
+    # retired-name arm in `_disable_pi_second_producer`), guard
+    # state that does not depend on `active` existing. The mirror's arm was
+    # gated on `lexists(active)`, so on a box that carries ONLY the retired
+    # name it was SILENT while `tortoise install pi` refused. MEASURED on the
+    # shape this repo's own removed dashboard snippet produced (it renamed a
+    # `reflect-hook.ts` DIRECTORY to `reflect-hook.ts.disabled`): the installer
+    # answers ok=False ("every session is captured twice") and this predicate
+    # answered ''. A hint that stays silent about a verb that refuses is the
+    # drift this predicate exists to stop.
+    if _pi_entry_is_loadable(retired):
+        if _pi_loadability_is_guessed(retired):
+            return (f"a disabled copy of the second capture producer at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} could not be "
+                    f"VERIFIED — it may still register; move it out of the "
+                    f"extensions directory")
+        return (f"the disabled copy of the second capture producer at "
+                f"{PI_SECOND_PRODUCER_DISABLED_NAME} is still an extension Pi "
+                f"loads — move it out of the extensions directory")
+    if (os.path.lexists(active) and os.path.lexists(retired)
+            and _pi_entry_is_loadable(active)):
+        # ⛔ MIRROR THE INSTALLER'S PREDICATE, NOT A DIGEST (#14342 round 25,
+        # finding 2). `_sha256_file` FOLLOWS a link, so a `retired` that IS a
+        # link to the live producer yields two equal digests read from ONE file
+        # — the hint answered "" while the installer refused at its
+        # `retired.is_symlink() or not retired.is_file()` guard. Two surfaces of
+        # one guard disagreeing is the drift this predicate exists to stop, and
+        # it landed on the very shape the installer's own comment calls the
+        # hazard. Ask the same question the installer asks, first.
+        if retired.is_symlink() or not retired.is_file():
+            return (f"the disabled copy of the second capture producer at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} is not a regular file "
+                    f"(a symlink or a directory) — the install refuses rather "
+                    f"than overwrite it; move one aside")
+        live = _sha256_file(active) if active.is_file() else None
+        kept = _sha256_file(retired)
+        if live is None or live != kept:
+            return (f"the second capture producer is registered AND its "
+                    f"disabled copy already exists at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} — move one aside")
+    return ""
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -1799,6 +1973,810 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
+def _pi_manifest_entries(path: Path) -> tuple[list[str] | None, str | None]:
+    """The ``pi.extensions`` entries Pi's own manifest reader would ACCEPT.
+
+    ONE reader for both halves of the guard (:func:`_pi_entry_is_loadable` and
+    :func:`_retire_pi_entry`), because Pi's rule is subtle enough that two
+    implementations of it disagree — and when they did, the installer retired a
+    producer and then asserted it was still live, forever (#14342 review round
+    4, finding 1).
+
+    Returns ``(entries, error)``:
+
+    * ``([...], None)`` — ``pi.extensions`` is an ARRAY and EVERY element is a
+      string, which is ``readPiManifest``'s shape test
+      (``entries.every(e => typeof e === "string")``). This is a declaration
+      Pi would consider; whether any entry RESOLVES is the caller's question.
+    * ``(None, None)`` — nothing Pi would consider: no ``package.json``, or one
+      it IGNORES (a JSON syntax error makes ``readPiManifest`` return null, and
+      a wrong-shaped ``pi.extensions`` is dropped field-wise) — so the loader
+      falls through to ``index.ts`` / ``index.js``. An ignored manifest is not
+      a declaration and not an obstacle.
+    * ``(None, "<reason>")`` — the file exists but cannot be READ, so no
+      assumption is safe. Deliberately NOT conflated with the ignored case:
+      Pi fails open on unparseable JSON and this installer must not read an
+      I/O failure as the same thing.
+    """
+    manifest = path / "package.json"
+    if not manifest.is_file():
+        return None, None
+    try:
+        # `utf-8-sig`: Pi's `readPiManifest` strips a BOM, so a BOM-ed manifest
+        # is READABLE to the loader — failing on it here would refuse over a
+        # manifest Pi understands.
+        declared = json.loads(manifest.read_text("utf-8-sig"))
+    except ValueError:
+        return None, None  # Pi's `catch { return null }` — it falls through
+    except OSError as e:
+        return None, f"{manifest}: {e.__class__.__name__}: {e}"
+    pi_section = declared.get("pi") if isinstance(declared, dict) else None
+    entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
+    if isinstance(entries, list) and all(isinstance(name, str) for name in entries):
+        return list(entries), None
+    return None, None
+
+
+def _pi_entry_is_loadable(path: Path) -> bool:
+    """Does Pi's loader REGISTER anything at ``path``?
+
+    The rule is Pi's own (``dist/core/extensions/loader.js``), and it is
+    narrower AND wider than a name test:
+
+    * a direct entry is loaded iff its name ENDS WITH ``.ts`` / ``.js``
+      (``isExtensionFile``) — so ``<stem>.ts.disabled`` is NOT loaded;
+    * **every** subdirectory is resolved through ``resolveExtensionEntries``:
+      a ``package.json`` with ``pi.extensions``, else ``index.ts`` /
+      ``index.js``. There is **NO dot-prefix filter** anywhere in
+      ``discoverExtensionsInDir``, so ``.tortoise-capture.disabled/index.ts``
+      is a LOADED extension.
+
+    That second half is why this predicate exists as code: the #3713 guard
+    renamed a legacy extension directory to a DOT-prefixed name and treated it
+    as retired, while Pi kept loading it — a guard that leaves both producers
+    registered is the duplication it was written to remove (#14342).
+
+    ABSENT ⇒ ``False``; UNREADABLE ⇒ ``True``. The asymmetry is deliberate: an
+    absent path registers nothing, while a path this reader cannot read may
+    register anything, and a retired entry that might still load must fail
+    closed (:func:`_assert_pi_entry_not_loadable`).
+
+    ⛔ A ``*.ts`` / ``*.js`` SYMLINK TO A DIRECTORY IS RESOLVED BY **NODE**, NOT
+    BY ``resolveExtensionEntries`` (#14342 round 20, finding 1 — MEASURED). Pi
+    pushes such a path as a direct entry (``isFile() || isSymbolicLink()``) and
+    the loader then resolves it the way node resolves a directory: the
+    ``package.json`` ``main`` field first, else ``index.ts`` / ``index.js``.
+    ``main`` is NOT in ``resolveExtensionEntries``' vocabulary, so modelling only
+    the manifest-else-index rule reported a `main`-resolving producer as NOT
+    loadable — and the install then went GREEN with two live producers (real Pi
+    registered ``['reflect-hook.js', 'tortoise-capture.ts', 'tortoise-volunteer.ts']``
+    on exactly that tree). Only the SYMLINK takes this path: a real directory
+    named `foo.ts` is not a direct entry at all, so it keeps the
+    ``resolveExtensionEntries`` rule.
+
+    ⛔ AND THIS IS DELIBERATELY **CONSERVATIVE**, NOT A MODEL OF NODE. Hand-
+    modelling node's resolution here was tried three times and produced a NEW
+    under-count each time (`main` absent → index fallback; extensionless `main`
+    → `.js` appended; `main` → a directory). Every one of those is the LENIENT
+    direction, i.e. `install_capture` reporting GREEN over two live producers
+    (#14342 rounds 20-21, two of them P0). The guard's ONE job is never to
+    certify that state, so the answer is not a better model — it is a rule that
+    cannot under-count: **a suffix-named symlink to a NON-EMPTY directory is
+    treated as loadable.** Measured against real Pi, every non-empty target
+    either registers (via `main`, `main + '.js'`, an index, or a subdirectory
+    `main`) or is one of the shapes Pi ignores — and Pi ignoring it costs only a
+    refusal, which is the safe direction and is already a documented residual.
+    An EMPTY target registers nothing, so it is the one case answered ``False``.
+    """
+    try:
+        if not os.path.lexists(path):
+            return False
+        if path.is_dir():
+            if path.is_symlink() and path.name.endswith((".ts", ".js")):
+                # Conservative, never a model — see the docstring. A non-empty
+                # target MAY register; an empty one cannot.
+                return any(True for _ in path.iterdir())
+            entries, unreadable = _pi_manifest_entries(path)
+            if unreadable:
+                return True  # may declare entries; never guess it away
+            # `resolveExtensionEntries` takes the manifest branch only when it
+            # is NON-EMPTY *after filtering to entries that RESOLVE* — so a
+            # manifest naming only missing files contributes no entry point and
+            # Pi falls through to index.ts/index.js.  Modelling "the array is
+            # non-empty" instead leaves this predicate disagreeing with
+            # `_retire_pi_entry` (which models the filter), and the two halves
+            # of one guard then report a retired producer as still live
+            # forever (#14342 review round 4, finding 1).
+            if entries and any(os.path.exists(path / name) for name in entries):
+                return True
+            # ⛔ `exists`, NOT `is_file` — PI USES `fs.existsSync` (#14342 round
+            # 22, finding 1). A DIRECTORY named `index.ts` (containing its own
+            # `index.js`) is a producer Pi registers, and `is_file()` counted it
+            # as nothing: `ok=True` over two live producers, measured on the
+            # first run, a re-run, and the legacy rename path.
+            return (os.path.exists(path / "index.ts")
+                    or os.path.exists(path / "index.js"))
+        return path.name.endswith(".ts") or path.name.endswith(".js")
+    except OSError:
+        return True
+
+
+def _retire_pi_entry(path: Path, *, dry_run: bool = False,
+                     renamed: list[Path] | None = None) -> str | None:
+    """Make ``path`` unloadable WITHOUT destroying it. Returns an error or None.
+
+    Retires in place, by the loader's own rule, so the file bytes never leave
+    the extensions directory and a user can rename them back:
+
+    * a ``*.ts`` / ``*.js`` entry is renamed to ``<name>.disabled``;
+    * a directory's ``index.ts`` / ``index.js`` is renamed to
+      ``<index>.disabled`` (the directory may stay where it is: with no entry
+      point, ``resolveExtensionEntries`` returns null);
+    * a directory declaring ``pi.extensions`` in ``package.json`` is REFUSED —
+      retiring that shape means editing the manifest, which is the user's file,
+      not this installer's.
+
+    ``dry_run=True`` answers "what WOULD this do" without mutating: every
+    refusal condition below is evaluated by the same code that performs the
+    retirement, so a preview cannot claim a plan the real run refuses, and
+    cannot omit a step the real run performs (#14342 round 9, finding 3).
+
+    ``renamed`` is an OUT-PARAMETER naming every entry this run ACTUALLY MOVED
+    (#14695 review round 2, finding 2). The reorder below makes every REFUSAL
+    leave an untouched disk, but the renames themselves can still raise inside
+    the ``except OSError`` arm — whose own comment names "an immutable target",
+    a PER-FILE condition that can hit the second entry and not the first — so
+    the returned error alone cannot tell a caller whether the disk changed.
+    Only real renames append: ``dry_run`` moves nothing and appends nothing.
+    """
+    try:
+        # ⛔ A SYMLINK IS RETIRED BY RENAMING THE LINK, NEVER BY EDITING THROUGH
+        # IT: `path.is_dir()` follows the link, so the directory branch below
+        # would rename files inside someone else's checkout (an agent-infra
+        # working tree) while the installer's scope is `~/.pi/agent/extensions`.
+        if path.is_symlink():
+            produced = path.with_name(f"{path.name}.disabled")
+            if os.path.lexists(produced):
+                # `Path.rename` OVERWRITES on POSIX: renaming the link over an
+                # existing retired copy destroys it silently, inside an install
+                # that may still report success. The directory branch below and
+                # the second producer's collision arm both refuse this; the
+                # symlink branch must not be the one that deletes.
+                return (f"{produced} already exists — retiring {path} would "
+                        f"overwrite preserved bytes")
+            if not dry_run:
+                path.rename(produced)
+                if renamed is not None:
+                    renamed.append(path)
+            return None
+        if path.is_dir():
+            entries, unreadable = _pi_manifest_entries(path)
+            if unreadable:
+                return (f"{path} carries an unreadable package.json — its "
+                        "declared entries cannot be verified, so it is not "
+                        "retired by this installer. Move it aside by hand.")
+            if entries is not None:
+                # Only entries Pi itself would HONOUR can be obstacles: the
+                # same filtered-for-resolvable rule `resolveExtensionEntries`
+                # applies. A mixed-type array is not a manifest at all to Pi
+                # (`readPiManifest` requires every element to be a string), so
+                # refusing over it would leave a loaded `index.ts` in place
+                # while the install blamed a manifest the loader ignores.
+                declared_present = [name for name in entries
+                                    if os.path.exists(path / name)]
+                if declared_present:
+                    return (f"{path} declares `pi.extensions` in package.json, "
+                            "renaming its files would leave that manifest "
+                            "pointing at nothing. Move the directory aside by "
+                            "hand.")
+            # ⛔ CHECK EVERY COLLISION BEFORE RENAMING ANY ENTRY (#14695 review
+            # round 1, P2). This loop used to interleave check-and-rename per
+            # name: with `index.ts` present and an existing `index.js.disabled`
+            # it renamed `index.ts` and THEN refused on `index.js`. The
+            # retirement lands on disk while the caller returns
+            # `(False, [], msg)`, so no action names it — the #10241 "a failure
+            # that reports zero actions over a modified disk" doctrine this
+            # module enforces everywhere else, skipped by the one branch that
+            # can retire MORE THAN ONE entry. Reproduced on both the second
+            # producer's plane and the legacy plane, which share this function.
+            #
+            # The fix is the ORDER, not a partial receipt: with no rename
+            # performed until every refusal has been cleared, a refusal always
+            # describes an untouched disk, so a receipt is never owed for work
+            # that happened.
+            entries_to_retire: list[Path] = []
+            for name in ("index.ts", "index.js"):
+                entry = path / name
+                # ⛔ `exists`, NOT `is_file` — PI USES `fs.existsSync` (#14342
+                # round 23, finding 2). A DIRECTORY named `index.ts` IS the
+                # entry point Pi resolves, and `is_file()` skipped it: the
+                # receipt then claimed "(index.ts/index.js → *.disabled)" over
+                # an untouched disk, and `--dry-run` reported `ok=True` where
+                # the real run refused — the two moods disagreeing.
+                # `is_symlink()` stays in the test because a DANGLING link has
+                # no target but is still a name to retire.
+                if os.path.exists(entry) or entry.is_symlink():
+                    preserved = path / f"{name}.disabled"
+                    if os.path.lexists(preserved):
+                        # `Path.rename` OVERWRITES on POSIX: renaming over a
+                        # preserved copy would destroy it silently, in an
+                        # install that reports success. Refuse instead — the
+                        # same asymmetry the second producer's collision arm
+                        # already has.
+                        return (f"{preserved} already exists — retiring "
+                                f"{entry} would overwrite preserved bytes")
+                    entries_to_retire.append(entry)
+            if not dry_run:
+                landed_here: list[Path] = []
+                for entry in entries_to_retire:
+                    try:
+                        entry.rename(path / f"{entry.name}.disabled")
+                    except OSError as e:
+                        # ⛔ A HALF-LANDED DIRECTORY MUST NAME WHAT LANDED
+                        # (#14695 review round 2, finding 2). The reorder above
+                        # makes a REFUSAL leave an untouched disk; an OSError
+                        # on the SECOND rename is a different event, and it
+                        # left the first entry renamed while the caller
+                        # reported `actions=()`. MEASURED with `Path.rename`
+                        # failing on `index.js`: `index.ts.disabled` existed and
+                        # the receipt named only the seam.
+                        #
+                        # ⛔ AND NOTHING-LANDED IS NOT A PARTLY-RETIRED
+                        # DIRECTORY (#14695 review round 3). The FIRST rename
+                        # can raise on a PER-FILE condition too (an immutable
+                        # `index.ts`, EROFS mid-run), and a single-entry
+                        # producer has no second rename to reach the landed
+                        # arm at all — yet the shared message still said "this
+                        # directory is PARTLY retired; move the rest aside by
+                        # hand" over a disk nothing had touched, and the
+                        # caller relayed it verbatim. MEASURED before the fix:
+                        # `landed=[]`, `index.ts` still present, and the install
+                        # reported PARTLY retired. A receipt may not describe a
+                        # state it did not measure — the same rule the
+                        # unreadable-manifest arms above are written to keep.
+                        if not landed_here:
+                            return (f"{entry}: {e.__class__.__name__}: {e} — "
+                                    f"nothing was retired (files preserved, "
+                                    f"this directory is UNTOUCHED); move it "
+                                    f"out of the extensions directory by "
+                                    f"hand")
+                        landed_names = ", ".join(
+                            p.name for p in landed_here)
+                        return (f"{entry}: {e.__class__.__name__}: {e} — but "
+                                f"{landed_names} had ALREADY been renamed "
+                                f"aside (files preserved), so this directory "
+                                f"is PARTLY retired; move the rest aside by "
+                                f"hand")
+                    landed_here.append(entry)
+                    if renamed is not None:
+                        renamed.append(entry)
+            return None
+        # ⛔ THE PLAIN-FILE BRANCH MUST REFUSE LIKE ITS SIBLINGS (#14342 round
+        # 25, finding 1). The symlink branch above and the directory-entry
+        # branch below both refuse when the produced name already exists; this
+        # one called `path.rename(...)` straight through, and `Path.rename`
+        # OVERWRITES on POSIX — so it was the one branch that could silently
+        # destroy a preserved copy inside an install that reports success.
+        # MEASURED: with the caller's guard and this target disagreeing, the
+        # preserved file's bytes were replaced by the live copy's and the result
+        # was `ok=True`. The guard is what makes the two spellings impossible to
+        # drift destructively. Evaluated OUTSIDE `if not dry_run`, exactly like
+        # the symlink branch, so a preview cannot plan a rename the real run
+        # refuses.
+        produced = path.with_name(f"{path.name}.disabled")
+        if os.path.lexists(produced):
+            return (f"{produced} already exists — retiring {path} would "
+                    f"overwrite preserved bytes")
+        if not dry_run:
+            path.rename(produced)
+            if renamed is not None:
+                renamed.append(path)
+        return None
+    except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
+        return f"{path}: {e.__class__.__name__}: {e}"
+
+
+def _pi_retirement_unverifiable(path: Path) -> bool:
+    """Would :func:`_retire_pi_entry` refuse because it could not MEASURE?
+
+    One refusal arm answers "I could not read this shape" rather than "I read
+    it and it registers": an unreadable ``package.json``
+    (:func:`_pi_manifest_entries` returning a reason). ``_pi_entry_is_loadable``
+    deliberately fails CLOSED on that shape — "a path this reader cannot read
+    may register anything" — so the retirement is skipped, not asserted.
+
+    ⛔ The receipt must not inherit the fail-closed GUESS as a measurement
+    (#14342 round 16, finding 1). Measured on disk: an unreadable manifest with
+    no ``index.ts`` registers exactly ONE producer, while both wrappers below
+    reported "TWO producers are registered". This predicate is what lets an
+    arm say "could not be verified" instead — it is the SAME reader
+    (:func:`_pi_manifest_entries`) that produced the refusal, so the sentence
+    and the branch cannot drift apart.
+
+    Deliberately narrow: it answers only the unreadable-manifest question. An
+    ``OSError`` outside that reader (ENOSPC, EROFS) is a failed WRITE whose
+    message already names an OS condition, and every other refusal arm fired on
+    a measured fact.
+    """
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return False
+    except OSError:
+        return False
+    _entries, unreadable = _pi_manifest_entries(path)
+    return bool(unreadable)
+
+
+def _pi_loadability_is_guessed(path: Path) -> bool:
+    """Did :func:`_pi_entry_is_loadable` answer from a NON-MEASUREMENT branch?
+
+    Two branches of that predicate are deliberate non-measurements:
+
+    * the UNREADABLE manifest — "a path this reader cannot read may register
+      anything" (fail closed);
+    * the CONSERVATIVE suffix-named-symlink rule — ANY non-empty target answers
+      True, which is a refusal-safe assumption, not a reading of Pi's rule
+      (#14342 round 22, finding 4). Pi ignores some of those targets, so
+      reporting the answer as "is registered" states a fact nobody measured.
+
+    Both must word every receipt that consumes them as "could not be VERIFIED
+    — it may still register", and name no mechanism and no count. Say less,
+    never more than was measured.
+
+    The read FOLLOWS a symlink, because ``_pi_entry_is_loadable`` does.
+    """
+    try:
+        if not path.exists():  # follows the link; False for a dangling one
+            return False
+        target = Path(os.path.realpath(path))
+        if not target.is_dir():
+            return False
+        if (path.is_symlink()
+                and path.name.endswith((".ts", ".js"))):
+            return True  # the conservative branch — always a guess
+    except OSError:
+        return False
+    _entries, unreadable = _pi_manifest_entries(target)
+    return bool(unreadable)
+
+
+def _duplication_consequence(*, dry_run: bool, unverified: bool = False,
+                             subject: str = "the second producer") -> str:
+    """What is (or may be) REGISTERED — stated only as far as it was MEASURED.
+
+    ⛔ ONE helper, so a new call site cannot reintroduce the assertion. The two
+    ``_retire_pi_entry`` refusal arms used to hard-code "TWO producers are
+    registered" / "both producers stay registered"; on the unreadable-manifest
+    branch no code path in it had established that, and the receipt stated the
+    fail-closed guess as a fact — the same class as the byte comparison this
+    PR's parent commit removed (#14342 round 16, finding 1).
+
+    ⛔ ``subject`` is a PARAMETER, not a constant (#14342 round 17, finding 2):
+    the legacy arms reach their refusal BEFORE the second producer is read at
+    all, so naming it there attributes an unverified state to a path the run
+    never touched — and on a legacy-only box, one that does not exist.
+
+    A COMPLETE sentence (capitalised, terminal period), so a call site cannot
+    splice a lowercase fragment onto an interpolated message and leave a
+    consequence whose antecedent was deleted.
+    """
+    if unverified:
+        # ⛔ CAPITALISE AT THE SENTENCE BOUNDARY — the contract this helper's own
+        # docstring states (#14342 round 18, finding 2). Every call site splices
+        # this after ". ", so an un-capitalised subject emitted
+        # "… by hand. the second producer could not be VERIFIED …": the double
+        # period was removed and a lower-case sentence start put in its place.
+        what = subject[:1].upper() + subject[1:]
+        return (f"{what} could not be VERIFIED, so it may still register and "
+                "every session could be captured twice.")
+    if dry_run:
+        return ("Both producers would stay registered and every session would "
+                "be captured twice.")
+    return ("Both producers are registered and every session is captured "
+            "twice.")
+
+
+def _sentence(text: str) -> str:
+    """``text`` terminated by exactly ONE period — never two.
+
+    The wrappers interpolate ``_retire_pi_entry``'s message, which already ends
+    in a period ("… Move it aside by hand."), and then appended their own: the
+    receipt read ``hand.. TWO producers…`` (#14342 round 16, finding 1).
+    """
+    return text.rstrip(". ") + "."
+
+
+def _both_producers_clause(*, dry_run: bool) -> str:
+    """The consequence clause, in the mood the RUN is in.
+
+    ``--dry-run`` writes nothing, so a preview saying "both producers STAY
+    registered" describes a disk it never touched — the same false-report class
+    as claiming a write that did not happen (#14342 rounds 11-12). ONE helper,
+    so every receipt speaks in the same mood and a new call site cannot pick the
+    wrong one by accident.
+    """
+    return ("so both producers WOULD stay registered and every session would "
+            "be captured twice"
+            if dry_run else
+            "so both producers stay registered and every session is captured "
+            "twice")
+
+
+def _seam_state_clause(*, dry_run: bool, wrote: bool) -> str:
+    """What the seam's state IS, attributed to the run that produced it.
+
+    ⛔ KEYED ON THE WRITE, NOT ON THE MODE. A real run whose seam is already
+    current skips the write (`_is_regular_unchanged`) and still reaches these
+    refusals, so saying "the capture seam WAS installed" reports an event the
+    run did not perform — beside its own `actions=()` and
+    `changed_artifacts=()` (#14342 round 13). The same helper serves
+    `--dry-run`, where the seam merely WOULD be there and nothing is written.
+    """
+    if dry_run:
+        return "The capture seam WOULD be in place"
+    if wrote:
+        return "The capture seam is in place (see the actions above)"
+    return "The capture seam was ALREADY in place"
+
+
+#: The post-retirement ACTION line's clauses.
+#:
+#: ⛔ TWO OF THEM, because the assertion that produces the error beside this
+#: action has two epistemics (#14342 round 23, finding 1). A previous cut
+#: hard-coded the measured one and justified it as unreachable — that claim was
+#: FALSE (a suffix-named symlink is renamed to a NON-SUFFIXED SYMLINK TO A
+#: DIRECTORY, and with an unreadable `package.json` the guess is exactly what
+#: the error reports), so the action asserted "STILL an extension Pi loads"
+#: beside an error saying "could not be VERIFIED", over a shape where real Pi
+#: registers nothing. Both clauses are now selected from the SAME predicates
+#: that produced the error, so the two cannot diverge.
+_GUESSED_LOADED = ("whether it is still loaded COULD NOT be verified — it may "
+                   "still register")
+_STILL_LOADED = "it is STILL an extension Pi loads"
+
+
+def _assert_pi_entry_not_loadable(path: Path) -> str | None:
+    """Fail closed when the retirement did not achieve what it claims.
+
+    ⛔ AND SAY WHICH IT IS (#14342 round 19, finding 3). `_pi_entry_is_loadable`
+    answers True for an UNREADABLE entry by design, so this assertion — which is
+    itself the guard's proof — reported that guess as "is STILL an extension Pi
+    loads — the guard renamed it into a shape the loader registers, so both
+    capture producers stay live". Measured on a `.disabled` link whose target's
+    `package.json` is unreadable: Pi registers NOTHING, so the sentence named a
+    state and a cause the predicate never established.
+    """
+    if not _pi_entry_is_loadable(path):
+        return None
+    if _pi_loadability_is_guessed(path):
+        return (f"{path} could not be VERIFIED — the guard renamed it into a "
+                "shape Pi MAY still register (the entry's package.json cannot "
+                "be read), so this box may run both capture producers")
+    return (f"{path} is STILL an extension Pi loads — the guard renamed it "
+            "into a shape the loader registers, so both capture producers "
+            "stay live")
+
+
+def _disable_pi_second_producer(
+        ext_dir: Path, *, dry_run: bool,
+        seam_written: bool) -> tuple[bool, list[str], str | None]:
+    """Disable agent-infra's ``reflect-hook.ts`` — the other capture producer.
+
+    Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the entry is
+    RETIRED in place (:func:`_retire_pi_entry`), so its bytes survive and a
+    user can put it back. Never a recursive delete.
+
+    ⛔ NAME-EXACT IS NOT THE SAME AS LOADABLE (#14342 round 19, finding 6). This
+    guard retires ``reflect-hook.ts``; Pi also loads ``reflect-hook.js``, and a
+    box carrying that one was reported GREEN with two producers registered. The
+    sibling names are checked FIRST, and a loadable one refuses — the installer
+    does not silently retire a file whose bytes it did not choose to, but it
+    must never call that install a success.
+
+    Absent = nothing to do (never installed, or already retired). The FARM
+    re-materializes this producer from agent-infra's ``manifest.json``, so the
+    collision case is the steady state rather than an accident: a re-created
+    copy whose bytes are IDENTICAL to the retired one is re-asserted (the
+    bytes already survive at the retired path, so removing the live duplicate
+    destroys nothing), and only a copy that DIFFERS is a refusal. Refusing on
+    every farm sync would make ``tortoise install pi`` permanently red on
+    exactly the boxes this guard targets, while the duplication stayed live.
+
+    ``dry_run`` selects the PREVIEW: nothing is written, so every action is
+    phrased in the subjunctive and no line claims a mutation. ``seam_written``
+    is the other plane's truth — whether THIS run copied the capture seam
+    (:func:`_seam_state_clause`) — and is KEYWORD-ONLY WITHOUT A DEFAULT so a
+    call site cannot silently regain the wrong sentence (#14342 round 14).
+    """
+    active = ext_dir / PI_SECOND_PRODUCER_NAME
+    # ⛔ ONE FACT, ONE DERIVATION (#14342 round 24, finding 1). This was an
+    # f-string re-derivation of a name that already has a constant, which
+    # `legacy_extension_obstacle` already reads. Two derivations drift: change
+    # one and the installer keeps renaming to the OLD name while the predicate
+    # reports a collision at a path that no longer exists — a phantom "move one
+    # aside" on a converged box. (And the drift is destructive if it is the
+    # DUPLICATE backstop that stops matching: see
+    # `PI_SECOND_PRODUCER_DISABLED_NAME`, which is now derived from the name
+    # for exactly this reason.)
+    retired = ext_dir / PI_SECOND_PRODUCER_DISABLED_NAME
+    # ⛔ THE RECEIPT MUST NOT CLAIM A WRITE THIS RUN DID NOT MAKE. Every refusal
+    # below runs AFTER `_install_pi` handled the seam, so the same InstallResult
+    # may carry `actions=('installed …')` and
+    # `changed_artifacts=('tortoise-capture.ts',)` — saying "nothing was touched"
+    # beside those is the #10241 report shape this module forbids (#14342 round
+    # 10, finding 3). The clause is derived from the WRITE, not the mode, so a
+    # no-op run does not claim a write it skipped and a preview does not claim
+    # one it never made (#14342 round 13).
+    seam_state = _seam_state_clause(dry_run=dry_run, wrote=seam_written)
+    # ⛔ NAME-EXACT IS NOT LOADABLE (#14342 round 19, finding 6). Pi's
+    # `isExtensionFile` accepts `*.ts` OR `*.js`, so `reflect-hook.js` is the
+    # same producer under a name this guard never looked at — MEASURED: with it
+    # present the install returned `ok=True`, `actions` naming only the seam,
+    # and the `.js` copy untouched, i.e. GREEN with two producers registered.
+    # Refuse rather than retire: these are not the bytes this installer chose to
+    # displace, and editing them would be a different mutation than the one the
+    # README documents. Fails CLOSED, so the duplication is reported, never
+    # certified.
+    for other_name in PI_SECOND_PRODUCER_OTHER_NAMES:
+        other = ext_dir / other_name
+        if not _pi_entry_is_loadable(other):
+            continue
+        # ⛔ A GUESS IS NOT A MEASUREMENT here either (#14342 round 19, finding
+        # 2): `_pi_entry_is_loadable` answers True for an unreadable entry by
+        # design, so the count may not be asserted on that branch.
+        if _pi_loadability_is_guessed(other):
+            return False, [], (
+                # ⛔ OPEN WITH `seam_state`, NEVER WITH THE LITERAL "is installed"
+                # (#14342 round 20, finding 3): under `--dry-run` the literal
+                # claimed a write the same sentence then denied, and the clause
+                # that exists for exactly this was appended later.
+                f"{seam_state}, but {other} could not be "
+                f"VERIFIED — Pi loads `{other_name}` exactly as it loads "
+                f"`{PI_SECOND_PRODUCER_NAME}`, so it may still register as a "
+                f"second producer and every session could be captured twice. "
+                f"Move {other} out of the extensions directory "
+                f"by hand and re-run.")
+        return False, [], (
+            f"{seam_state}, but a second copy of the second "
+            f"capture producer is registered at {other}: Pi loads "
+            f"`{other_name}` exactly as it loads `{PI_SECOND_PRODUCER_NAME}`, "
+            f"and this installer only retires the `{PI_SECOND_PRODUCER_NAME}` "
+            f"name. {_duplication_consequence(dry_run=dry_run)} "
+            f"Move {other} out of the extensions directory by hand and "
+            f"re-run.")
+    # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
+    # refusal that fires only in the run that performed the rename is not a
+    # guard: run 1 renamed a SYMLINK TO A DIRECTORY and refused (a suffixed
+    # symlink is still resolved through its index file), and run 2 — the
+    # natural response to a failed install — found `active` absent, answered
+    # "nothing to do", and reported a GREEN install with two producers live.
+    # So `retired` is re-read on EVERY run, exactly as the legacy arm re-reads
+    # its own disabled name (#14342 review, final round finding 1).
+    if _pi_entry_is_loadable(retired):
+        # ⛔ A GUESS IS NOT A MEASUREMENT, and the two branches must not share
+        # one sentence (#14342 round 17, finding 1). `_pi_entry_is_loadable`
+        # answers True for an UNREADABLE entry by design, so the measured branch
+        # below may name a cause and the guessed one may not: on a directory
+        # whose package.json cannot be read, Pi's own reader throws and falls
+        # through to a missing index — it registers NOTHING, while "resolved
+        # through `resolveExtensionEntries` under ANY name" claims otherwise.
+        if _pi_loadability_is_guessed(retired):
+            return False, [], (
+                f"cannot disable the second capture producer: {retired} could "
+                f"not be VERIFIED — it may still register, so every session "
+                f"could be captured twice. {seam_state}. Move it out of the "
+                "extensions directory by hand and re-run.")
+        return False, [], (
+            f"cannot disable the second capture producer: {retired} is still "
+            "an extension Pi loads — a suffixed DIRECTORY, or a link to one, "
+            "is resolved through `resolveExtensionEntries` under ANY name — "
+            f"{_both_producers_clause(dry_run=dry_run)}. {seam_state}. Move it "
+            "out of the extensions directory by hand and re-run.")
+    if not os.path.lexists(active):
+        return False, [], None
+    if not _pi_entry_is_loadable(active):
+        # Something is there, but Pi does not register it — nothing to disable.
+        return False, [], None
+    if os.path.lexists(retired):
+        # ⛔ THE PRESERVATION TARGET MUST BE A REAL, DISTINCT FILE BEFORE ANY
+        # DELETE IS JUSTIFIED. `_sha256_file` FOLLOWS symlinks, so a `retired`
+        # that is a LINK TO `active` yields two equal digests read from ONE
+        # file — and unlinking `active` then destroys the only copy while the
+        # receipt claims the bytes are preserved (measured: the surviving
+        # `retired` resolved to nothing). A symlink here is not exotic in this
+        # fleet (agent-infra's `cell-install.sh` harnesses dangling links at
+        # extension names), so this is refused, never guessed at.
+        if retired.is_symlink() or not retired.is_file():
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} exists and is not a regular file (a symlink or a "
+                "directory), so it is not a preservation copy this installer "
+                "can verify — a link here may resolve to the live producer "
+                "itself, and renaming or removing either could destroy the "
+                f"only copy. It was not modified. {seam_state} — move one "
+                "aside by hand; this refuses on every re-run until you do.")
+        live_digest = _sha256_file(active) if active.is_file() else None
+        retired_digest = _sha256_file(retired)
+        if live_digest is None or retired_digest is None:
+            # ⛔ NO COMPARISON RAN, SO THE RECEIPT MAY NOT CLAIM ONE. `active`
+            # here is a DIRECTORY producer (a real directory, or a link to one
+            # — both loadable, and its entry point retired inside it), or one
+            # of the two paths is unreadable, so at most one digest exists.
+            # Saying the retired copy "holds DIFFERENT bytes" reports a
+            # comparison the code cannot support — the same class `_install_pi`
+            # already refuses for an unreadable seam (#14342 round 15, note 4).
+            # Both paths exist and the remedy is unchanged; the sentence says
+            # what was actually measured.
+            unmeasured = active if live_digest is None else retired
+            why = ("is a directory, so its entry point is not a file to digest"
+                   if not unmeasured.is_file() else "could not be read")
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} already exists and {unmeasured} {why} — the two "
+                "were NOT compared. Move one of them aside and re-run. Both "
+                "would otherwise stay registered, so every session would be "
+                "captured twice (~/.tortoise/capture-spool and "
+                "~/.tortoise/session-events).")
+        if live_digest != retired_digest:
+            return False, [], (
+                f"cannot disable the second capture producer {active}: "
+                f"{retired} already exists and holds DIFFERENT bytes. Move one "
+                "of them aside and re-run. The live copy would otherwise stay "
+                "registered beside the seam, so every session would be captured "
+                "twice (~/.tortoise/capture-spool and "
+                "~/.tortoise/session-events).")
+        if dry_run:
+            return True, [f"[dry-run] would re-assert the retirement of {active} "
+                          f"(an identical copy of {retired})"], None
+        try:
+            active.unlink()
+        except OSError as e:
+            return False, [], (
+                f"the capture seam is installed, but the re-created duplicate "
+                f"{active} could not be removed: {e.__class__.__name__}: {e}. "
+                f"Two producers are registered; the bytes are preserved at "
+                f"{retired}.")
+        return True, [
+            f"re-asserted the disabled second capture producer: removed a "
+            f"re-created copy of {active} (identical bytes preserved at "
+            f"{retired})"], None
+    if dry_run:
+        # ⛔ THE PREVIEW IS DERIVED FROM THE CODE THAT DOES IT. Round 8 added the
+        # missing line but not the SHAPE: this arm reported "retire {active} →
+        # {retired}" for a DIRECTORY producer, which the real run retires in
+        # place and never renames, and it reported success for shapes the real
+        # run REFUSES (a manifest-declared directory) — a dry-run false PASS on
+        # the plane whose whole job is previewing the real run (#14342 round 9,
+        # finding 3).
+        planned = _retire_pi_entry(active, dry_run=True)
+        if planned:
+            # ⛔ THIS ARM ONLY EVER RUNS UNDER `--dry-run` (the real run's refusal
+            # is the `_retire_pi_entry` error below), so it must not read as the
+            # past-tense receipt: the same install wrote nothing and carries
+            # `changed_artifacts=()`. `seam_state` exists for exactly this and was
+            # skipped here (#14342 round 11, finding 1).
+            return False, [], (
+                f"{seam_state}, but the second capture producer could not be "
+                f"disabled ({active}): {_sentence(planned)} "
+                f"{_duplication_consequence(
+                    dry_run=True,
+                    unverified=_pi_retirement_unverifiable(active))}")
+        if active.is_symlink() and active.is_dir():
+            # Model the post-mutation predicate here — and model it CORRECTLY:
+            # the renamed name is `reflect-hook.ts.disabled`, which is
+            # NON-SUFFIXED, so Pi resolves it through `resolveExtensionEntries`
+            # (manifest, else index) and `main` is no longer read (#14342 round
+            # 21, finding 3). Asking `_pi_loadability_is_guessed(retired)` about
+            # a path that does not exist under `--dry-run` answered False and
+            # produced a refusal for a shape the real run completes GREEN.
+            _post_entries, _post_unreadable = _pi_manifest_entries(active)
+            # `exists`, not `is_file` — Pi uses `fs.existsSync`, and a
+            # DIRECTORY named `index.ts` is a producer it registers (#14342
+            # round 22, finding 1).
+            _post_loadable = bool(
+                _post_unreadable
+                or (_post_entries and any(os.path.exists(active / name)
+                                          for name in _post_entries))
+                or os.path.exists(active / "index.ts")
+                or os.path.exists(active / "index.js"))
+            if not _post_loadable:
+                return True, [f"[dry-run] would retire {active} \u2192 {retired}"], None
+            # ⛔ A GUESS IS NOT A MEASUREMENT, ON THIS BRANCH TOO (#14342 round
+            # 22, finding 2). When the manifest cannot be READ, the real run
+            # says "could not be VERIFIED — it MAY still register"; asserting
+            # the mechanism AND the count here made the preview contradict both
+            # the real run and real Pi (which registers nothing on that shape).
+            if _post_unreadable:
+                return False, [], (
+                    f"{seam_state}, but the second capture producer could not "
+                    f"be disabled ({active}): renaming the link to {retired} "
+                    f"COULD NOT be verified — it may still register, so this "
+                    f"box may run both producers. Nothing was written (a dry "
+                    f"run); move {active} out of the extensions directory by "
+                    f"hand and re-run.")
+            return False, [], (
+                f"{seam_state}, but the second capture producer could not be "
+                f"disabled ({active}): renaming the link to {retired} leaves a "
+                f"non-suffixed SYMLINK to a directory that Pi still resolves "
+                f"through `resolveExtensionEntries` (its `package.json` "
+                f"manifest, else its index file) — so both producers would "
+                f"stay registered. Nothing was written (a dry run); move "
+                f"{active} out of the extensions directory by hand and re-run.")
+        if active.is_dir() and not active.is_symlink():
+            return True, [f"[dry-run] would retire the entry point inside "
+                          f"{active} (index.ts/index.js → *.disabled; the "
+                          f"directory stays in place — a suffixed directory is "
+                          f"still LOADED)"], None
+        return True, [f"[dry-run] would retire {active} → {retired}"], None
+    # ⛔ WHICH PATH THE RETIREMENT ACTUALLY PRODUCES DEPENDS ON THE SHAPE, so
+    # read it BEFORE the mutation: a FILE is renamed to ``retired``, while a
+    # DIRECTORY keeps its own name and has its entry point retired INSIDE it
+    # (renaming the directory to ``reflect-hook.ts.disabled`` retires nothing —
+    # a suffixed directory is still resolved through its index file).
+    was_directory = active.is_dir() and not active.is_symlink()
+    landed: list[Path] = []
+    error = _retire_pi_entry(active, renamed=landed)
+    if error:
+        # ⛔ A RENAME THAT LANDED BEFORE THE FAILURE MUST REACH THE RECEIPT
+        # (#14695 review round 2, finding 2). ``InstallResult`` requires it: a
+        # user told only FAILED cannot find what moved.
+        landed_actions = [
+            f"retired {moved.name} inside {active} (files preserved) — "
+            f"but the second capture producer could not be fully retired"
+            for moved in landed]
+        return bool(landed), landed_actions, (
+            f"the capture seam is installed, but the second capture producer "
+            f"could not be disabled ({active}): {_sentence(error)} "
+            f"{_duplication_consequence(
+                dry_run=False,
+                unverified=_pi_retirement_unverifiable(active))}")
+    # ⛔ ASSERT ON THE PATH THE LOADER CONSULTS, NOT ON THE PATH THE FILE SHAPE
+    # HAPPENS TO PRODUCE. ``retired`` is NEVER CREATED for the directory shape
+    # (the directory keeps its name), so asserting on it alone was INERT on
+    # precisely the shape that needed checking — a fail-closed guard that could
+    # not fire (#14342 review round 2, finding 3). ``active`` is
+    # loadable-iff-broken for BOTH shapes: a file was renamed away, a directory
+    # lost its entry point. ``retired`` is checked too WHEN THE RENAME CREATED
+    # IT, because a retired name can still be a loaded shape (a link to a
+    # directory resolves through `resolveExtensionEntries` like any other), and
+    # reporting success over that is the duplication this guard exists to
+    # remove.
+    still = _assert_pi_entry_not_loadable(active)
+    if still is None and os.path.lexists(retired):
+        still = _assert_pi_entry_not_loadable(retired)
+    if still:
+        # #10241's doctrine, applied to a failure AFTER the mutation: the
+        # rename DID land, so the receipt says what landed. A failure that
+        # reports zero actions over a modified disk is the report that doctrine
+        # exists to prevent (#14342 review, final round finding 3).
+        # ⛔ ONE RESULT, ONE EPISTEMIC STATE (#14342 round 23, finding 1). The
+        # clause is asked of the SAME paths the assertion above asked, so the
+        # action and the error cannot contradict each other. A previous cut
+        # hard-coded the measured clause and justified it as unreachable — that
+        # was WRONG: a suffix-named SYMLINK to a directory is renamed to
+        # `reflect-hook.ts.disabled`, which is a non-suffixed SYMLINK TO A
+        # DIRECTORY (not a plain file), and with an unreadable `package.json`
+        # the guess is exactly what the error reports.
+        _guessed = _pi_loadability_is_guessed(retired)
+        if not _guessed and was_directory:
+            _guessed = _pi_loadability_is_guessed(active)
+        _clause = (_GUESSED_LOADED if _guessed else _STILL_LOADED)
+        landed = (f"retired the entry point inside {active} (index.ts/index.js "
+                  f"→ *.disabled) — but {_clause}"
+                  if was_directory else
+                  f"retired {active} → {retired} — but {_clause}")
+        return True, [landed], still
+    if was_directory:
+        detail = (f"retired the entry point inside {active} (index.ts/index.js "
+                  f"→ *.disabled; the directory stays in place — a suffixed "
+                  f"directory is still LOADED)")
+    else:
+        detail = f"retired {active} → {retired}"
+    return True, [
+        f"disabled the second capture producer: {detail} "
+        "(files preserved; it wrote ~/.tortoise/session-events/)"], None
+
+
 def _install_pi(
         home: Path, *, dry_run: bool,
         introduce_read_seam: bool = True) -> InstallResult:
@@ -1888,7 +2866,9 @@ def _install_pi(
     # top-level tortoise-capture.ts AND tortoise-capture/index.ts as two
     # extensions, and both POST the same session_id. NON-DESTRUCTIVE: unlink a
     # symlink (the checkout it points at is untouched) or rename a real
-    # directory to a dot-prefixed name the loader skips. Never a recursive
+    # directory aside to PI_DISABLED_DIRNAME. The dot prefix retires nothing
+    # (Pi has no dot-prefix filter) — the entry point inside that directory is
+    # what gets retired, after the replacement is verified. Never a recursive
     # delete.
     #
     # The whole mutation block is wrapped so a WRITE-TIME failure (ENOSPC,
@@ -1901,14 +2881,19 @@ def _install_pi(
     # machine was modified" report the caller now prints actions to prevent.
     try:
         if legacy.is_symlink():
+            # ⛔ DEFERRED TO AFTER THE VERIFICATION (#14342 review cycle 3).
+            # Unlinking this symlink is the step that ACTUALLY stops the legacy
+            # producer loading — unlike the directory rename, which stops
+            # nothing because a dot-prefixed directory is still loaded. Doing
+            # it here, before the seam write, left a box with ZERO capture
+            # producers when that write failed (measured: ENOSPC on a fresh
+            # home). The link is left in place until a verified replacement
+            # exists; the deferred block below (in this function, after the
+            # verified seam write) is what runs it.
             if dry_run:
                 actions.append(
                     f"[dry-run] would unlink legacy extension {legacy}")
-            else:
-                legacy.unlink()
-                actions.append(f"disabled legacy capture extension: unlinked "
-                               f"{legacy} (symlink target untouched)")
-            changed = True
+                changed = True
         elif legacy.is_dir():
             if legacy_disabled.exists() or legacy_disabled.is_symlink():
                 return InstallResult(harness, changed=changed,
@@ -1992,6 +2977,256 @@ def _install_pi(
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions),
                                  changed_artifacts=_written(), error=divergence)
+
+    # ⛔ #14342, AND ONLY NOW: THE RENAME ABOVE RETIRES NOTHING. Pi's
+    # `discoverExtensionsInDir` applies NO dot-prefix filter — every
+    # subdirectory is resolved through `resolveExtensionEntries`, so
+    # `.tortoise-capture.disabled/index.ts` was a LOADED extension and the
+    # #3713 guard left both producers registered, which is the duplication it
+    # exists to remove. The ENTRY POINT is retired here, by the loader's own
+    # rule, and asserted.
+    #
+    # ⛔ AND HERE — not in the rename block above — BECAUSE OF THE ORDERING
+    # RULE (#14342 review): retiring the old producer before the replacement is
+    # verified would leave a box with NO producer at all if the seam write
+    # failed, which is strictly worse than the duplication. A bare rename is
+    # safe to do early precisely BECAUSE the dot directory still loads; the
+    # step that actually stops capture is this one, so it comes after the
+    # proof. It also HEALS a box carrying a dot directory from an older install.
+    # The legacy SYMLINK is retired here for the same reason (and the same
+    # ordering rule): unlinking it is what stops it loading.
+    if not dry_run and legacy.is_symlink():
+        try:
+            legacy.unlink()
+        except OSError as e:
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=(
+                                     f"the capture seam is installed, but the "
+                                     f"legacy extension symlink {legacy} could "
+                                     f"not be removed: {e.__class__.__name__}: "
+                                     f"{e}. Two producers are registered until "
+                                     f"it is."))
+        actions.append(f"disabled legacy capture extension: unlinked {legacy} "
+                       f"(symlink target untouched)")
+        changed = True
+
+    if dry_run and legacy.is_dir() and not legacy.is_symlink():
+        # The rename above is only PLANNED under `--dry-run`, so the disabled
+        # name does not exist yet and reading it reported nothing to retire —
+        # a dry run that omitted the very step the real run performs, which is
+        # the one that actually stops the producer (#14342 review round 8,
+        # finding 3). Read the SOURCE the real run would rename FROM.
+        legacy_retirable = _pi_entry_is_loadable(legacy)
+    else:
+        legacy_retirable = _pi_entry_is_loadable(legacy_disabled) if (
+            os.path.lexists(legacy_disabled)) else False
+    if legacy_retirable:
+        if legacy_disabled.is_symlink():
+            # ⛔ A LINK TO A DIRECTORY IS NOT RETIRED BY RENAMING IT, and the
+            # assertion used to read the path the rename started FROM — gone
+            # after the rename, so "not loadable" — and the install reported
+            # "retired the legacy extension's entry point" while Pi kept
+            # loading the renamed link (`.disabled.disabled` is still resolved
+            # through `resolveExtensionEntries`). Refuse BEFORE any mutation OF
+            # THIS ENTRY: the link is never renamed, so every re-run reads the
+            # same shape and refuses again instead of going green (#14342 round
+            # 8 finding 1). The SEAM was already written above — that ordering
+            # is the PR's safety property — so the receipt must say what
+            # landed: a refusal claiming "nothing was touched" while its own
+            # `actions` name an install is the report shape #10241 exists to
+            # prevent (#14342 round 9, finding 2).
+            # Refused, not converged: unlinking would destroy a link the
+            # installer did not create, and the sibling arm above already
+            # documents the one link it does unlink.
+            # ⛔ THE LOADABILITY HALF OF THIS SENTENCE IS ALSO A GUESS SOMETIMES
+            # (#14342 round 17, finding 1). The SYMLINK-to-a-directory half is
+            # measured, but "Pi resolves a symlinked subdirectory through its
+            # index file" presumes the target could be READ: a target whose
+            # `package.json` is unreadable makes Pi's reader throw and fall
+            # through to a missing index, registering nothing. One sentence for
+            # both would name a cause the code never established.
+            _guessed = _pi_loadability_is_guessed(legacy_disabled)
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=(
+                                     f"the legacy capture extension "
+                                     f"{legacy_disabled} is a SYMLINK to a "
+                                     f"directory, and "
+                                     + ("its package.json cannot be read, so "
+                                        "whether Pi still registers it COULD "
+                                        "NOT be verified — it may still load, "
+                                        "so every session could be captured "
+                                        "twice"
+                                        if _guessed else
+                                        f"Pi resolves a symlinked "
+                                        f"subdirectory through "
+                                        f"`resolveExtensionEntries` (its "
+                                        f"`package.json` manifest, else its "
+                                        f"index file) under ANY suffixed name "
+                                        f"— renaming it retires nothing, "
+                                        f"{_both_producers_clause(dry_run=dry_run)}")
+                                     + ". "
+                                     # ⛔ "THIS BOX NOW RUNS BOTH PRODUCERS" is
+                                     # the SAME claim one clause later: it presumes
+                                     # the retired name registers, which is exactly
+                                     # what the guessed branch above could not
+                                     # establish. A refusal that says "could not be
+                                     # verified" and then asserts the count has
+                                     # re-broken its own sentence.
+                                     + (f"The capture seam at {dst} WOULD be "
+                                        f"installed, so this box may run both "
+                                        f"producers; nothing was written."
+                                        if _guessed and dry_run else
+                                        (f"The capture seam at {dst} WOULD be "
+                                         f"installed, so this box would run "
+                                         f"BOTH producers; nothing was written."
+                                         if dry_run else
+                                         (f"The capture seam at {dst} WAS "
+                                          f"installed, so this box may run "
+                                          f"both producers."
+                                          if _guessed and capture_written else
+                                          (f"The capture seam at {dst} WAS "
+                                           f"installed, so this box now runs "
+                                           f"BOTH producers."
+                                           if capture_written else
+                                           f"The capture seam at {dst} was "
+                                           f"ALREADY in place, so this box may "
+                                           f"run both producers."
+                                           if _guessed else
+                                           f"The capture seam at {dst} was "
+                                           f"ALREADY in place, so this box now "
+                                           f"runs BOTH producers."))))
+                                     + f" The link was not renamed and the "
+                                       f"checkout it points at is untouched. "
+                                       f"Move {legacy_disabled} out of the "
+                                       f"extensions directory by hand and "
+                                       f"re-run."))
+        if dry_run:
+            # Preview the REAL run's refusal, from the same predicate: a
+            # plan that says "ok" for a shape the real run refuses is a
+            # dry-run false PASS on the one shape the operator is previewing
+            # BECAUSE it looks broken (#14342 round 9, finding 3).
+            # ⛔ AGAINST THE PATH THE REAL RUN RETIRES FROM. Under `--dry-run`
+            # the rename is only PLANNED, so `legacy_disabled` does not exist:
+            # asking about it fell through every branch and answered "no
+            # refusal" — a vacuous preview on exactly the shape round 8 asked
+            # for (#14342 round 10, finding 1). The rename preserves the
+            # directory's contents, so the SOURCE answers every refusal the
+            # destination would.
+            # Which path depends on whether the RENAME is planned: on the fresh
+            # directory shape the real run renames the source aside and retires
+            # inside the destination; on the upgrade shape there is no source
+            # and the destination is already on disk.
+            plan_path = (legacy if (legacy.is_dir() and not legacy.is_symlink()
+                                    and not os.path.lexists(legacy_disabled))
+                         else legacy_disabled)
+            planned = _retire_pi_entry(plan_path, dry_run=True)
+            if planned:
+                # ⛔ THIS ARM IS A PREVIEW: nothing was written, and on the
+                # fresh-directory shape the path just evaluated is `legacy` —
+                # `legacy_disabled` does not exist yet, so naming it would tell
+                # the operator to move a directory that is not there. Mode-blind
+                # wording was round 10's finding 4, one arm over
+                # (#14342 round 11, finding 2).
+                return InstallResult(harness, changed=changed,
+                                     actions=tuple(actions),
+                                     changed_artifacts=_written(), error=(
+                                         f"the legacy capture extension at "
+                                         f"{plan_path} could not be retired "
+                                         f"({_sentence(planned)}). "
+                                         f"{_duplication_consequence(
+                                             dry_run=True,
+                                             unverified=_pi_retirement_unverifiable(
+                                                 plan_path),
+                                             subject="the legacy capture "
+                                                     "extension")} A real run "
+                                         f"would refuse the same way. Nothing was "
+                                         f"written (a dry run). Move "
+                                         f"{plan_path} out of the extensions "
+                                         f"directory by hand and re-run."))
+            actions.append(
+                f"[dry-run] would retire the entry point inside "
+                f"{legacy_disabled} (Pi still loads it)")
+            changed = True
+        else:
+            legacy_renamed: list[Path] = []
+            legacy_error = _retire_pi_entry(legacy_disabled,
+                                            renamed=legacy_renamed)
+            retired_landed = legacy_error is None
+            if retired_landed:
+                legacy_error = _assert_pi_entry_not_loadable(legacy_disabled)
+            if legacy_error:
+                # #10241: a rename that LANDED is reported even when the
+                # assertion then fails — the disk changed, so a receipt with
+                # no action lines would hide it (#14342 review, final round
+                # finding 3).
+                # ⛔ AND A RENAME THAT LANDED BEFORE AN OSError IS THE SAME
+                # FACT (#14695 review round 2, finding 2): `retired_landed` is
+                # False there, but `legacy_renamed` is not empty.
+                if retired_landed:
+                    actions.append(
+                        f"retired the legacy extension's entry point inside "
+                        f"{legacy_disabled} (files preserved) — but Pi STILL "
+                        f"loads it")
+                    changed = True
+                else:
+                    for moved in legacy_renamed:
+                        actions.append(
+                            f"retired {moved.name} inside {legacy_disabled} "
+                            f"(files preserved) — but the legacy extension "
+                            f"could not be fully retired")
+                        changed = True
+                # ⛔ AN UNVERIFIABLE REFUSAL MUST NOT REPORT A MEASUREMENT
+                # (#14342 round 16, finding 1). `legacy_error` here is one of
+                # two DIFFERENT things: `_retire_pi_entry`'s message (which can
+                # be "I could not read this") or `_assert_pi_entry_not_loadable`'s
+                # (which measured that the entry STILL loads). Only the first
+                # leaves the registration unknown, and only when the rename did
+                # not land — a landed rename followed by a failed assertion is a
+                # measurement of exactly one thing: it still loads.
+                _unverified = (not retired_landed
+                               and _pi_retirement_unverifiable(legacy_disabled))
+                return InstallResult(harness, changed=changed,
+                                     actions=tuple(actions),
+                                     changed_artifacts=_written(), error=(
+                                         f"the legacy capture extension at "
+                                         f"{legacy_disabled} could not be "
+                                         f"retired ({_sentence(legacy_error)}). "
+                                         f"{_duplication_consequence(
+                                             dry_run=False,
+                                             unverified=_unverified,
+                                             subject="the legacy capture "
+                                                     "extension")} Move "
+                                         f"{legacy_disabled} out of the "
+                                         f"extensions directory by hand and "
+                                         f"re-run."))
+            actions.append(
+                f"retired the legacy extension's entry point inside "
+                f"{legacy_disabled} (a dot-prefixed directory is still LOADED "
+                f"by Pi; files preserved)")
+            changed = True
+
+    # #3512 / the one-producer invariant: agent-infra installs a SECOND capture
+    # producer (``reflect-hook.ts``) that writes every quit session to
+    # ``~/.tortoise/session-events/`` as well. Left alongside this seam, one
+    # session is stored twice and filed twice; the whole point of the install
+    # is ONE capture path.
+    #
+    # ⛔ ORDERING IS THE SAFETY PROPERTY, not a style choice: this runs AFTER
+    # ``assert_seam_target`` verified the replacement is on disk. Disabling the
+    # other producer first would open a window with NO producer at all — capture
+    # silently stops, which is the failure this guard must never introduce.
+    second_changed, second_actions, second_error = _disable_pi_second_producer(
+        ext_dir, dry_run=dry_run, seam_written=capture_written)
+    changed = changed or second_changed
+    actions.extend(second_actions)
+    if second_error:
+        # A capture seam that installed while BOTH producers stay registered is
+        # not a success: it is the duplication this guard exists to remove,
+        # reported green. Fail closed and say what landed (#10241's doctrine).
+        return InstallResult(harness, changed=changed, actions=tuple(actions),
+                             changed_artifacts=_written(), error=second_error)
 
     # (#2119) The seam's SECOND artifact — the per-turn READ extension. Written
     # after the capture half is verified, so a refused/failed capture install

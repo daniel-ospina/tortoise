@@ -25,7 +25,7 @@ Abuse DELIVERY (``notify_abuse``) is split into two registers (#14407), because
 "how a message reaches a human" and "what record it belongs to" were two
 different decisions and had drifted apart:
 
-* :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
+* :data:`ABUSE_INCIDENT_KINDS` — a HUMAN WORK ITEM. The message belongs to the
   incident lifecycle, so the store's create-once path files the issue AND emits
   the episode's first push, and the message names the issue. While the delivery
   window HOLDS it re-alarms at most once per
@@ -134,9 +134,12 @@ ABUSE_INCIDENT_KINDS: frozenset[str] = frozenset({
 #:
 #: This is a DECLARED non-filing decision, not a gap: #10156 split the dashboard
 #: into two registers and put R3/R4/R8 in ``REGISTER_ACTIVITY`` — *"a detector
-#: OBSERVED a rate. It measured; it changed nothing. Informational, muted, no
-#: verb."* Filing a GitHub incident for a rate blip is the exact framing #10156
-#: removed, so these classes file nothing BY DESIGN and every message says so.
+#: OBSERVED a rate. It measured; it disabled nothing. Informational, muted, no
+#: verb."* (⛔ "changed nothing" was the old spelling: #14687 narrowed it because
+#: a ``flag`` row DOES write ``flagged_at`` — the claim that holds for R3/R4/R8,
+#: which never disable anything, is the enforcement one.) Filing a GitHub
+#: incident for a rate blip is the exact framing #10156 removed, so these classes
+#: file nothing BY DESIGN and every message says so.
 #: Their delivery is a DIGEST (:data:`_ACTIVITY_DELIVERY_WINDOW_S`), because the
 #: detector windows are minutes wide — one message per window is what made the
 #: human channel "out of control" while the detector was working correctly.
@@ -918,7 +921,21 @@ def _adopt_legacy_subject(store, incident_kind: str, subject: str,
 
 
 def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
-    """A state-change class: the INCIDENT owns the message (#14407).
+    """A human-work-item class: the INCIDENT owns the message (#14407).
+
+    ⛔ NOT "a state-change class": two of ``ABUSE_INCIDENT_KINDS``' three members
+    (``abuse_flag``, ``abuse_review_needed``) are re-derived rate MEASUREMENTS, and
+    only ``abuse_suspended`` records a SUSPENSION — a human DECISION. ⚠️ Two traps,
+    in opposite directions, and this note has fallen into both:
+    * do NOT say "the flag changes nothing" — ``abuse_flag`` is emitted right after
+      ``store.flag_org``, which writes ``organizations.flagged_at``, a MARKER that
+      ``/v1/team`` renders as ``status: "flagged"``;
+    * do NOT say the flag is not an enforcement ACTION either — ``flag_org`` IS
+      ``KIND_ABUSE_ENFORCEMENT_FAULT``'s one lane (``abuse.py``'s
+      ``DECISION_FAULT_LANES``, and ``docs/ops/registry-backup-dr.md``).
+    What is true, and all that is true: it sets a marker and imposes nothing —
+    no disable, no throttle, no lock. See ``abuse.py``'s register note and the
+    ``else`` arm of the ``what`` expression below.
 
     One decision point for both channels — the store's create-once object files
     the issue AND emits the single Telegram push for the lifecycle, so the human
@@ -954,7 +971,19 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 if kind == KIND_ABUSE_SUSPENDED
                 else "Human review needed — rate-limit, do not suspend"
                 if kind == KIND_ABUSE_REVIEW_NEEDED
-                else "Suspicious activity flagged")
+                # #14687: this read "Suspicious activity flagged", which is the
+                # exact accusation the change removed from the CUSTOMER path
+                # (`abuse.py::_alert_dict`'s label note) — and it landed on the
+                # surface that decides whether to raise a limit or reach out.
+                # `ABUSE_INCIDENT_KINDS` keeps the flag as an operator WORK ITEM
+                # (a rate is still worth a human look), but a work item is not an
+                # accusation: the wording names the measurement, and says what
+                # did NOT follow it. ⛔ "nothing enforced" would be false —
+                # `flag_org` IS `KIND_ABUSE_ENFORCEMENT_FAULT`'s one lane, and an
+                # operator could not tell this message apart from the case where
+                # that write FAILED. "nothing disabled" is the reconciled claim
+                # (`abuse._point_rate_message`, and the registry row).
+                else "High activity rate flagged — measurement, nothing disabled")
         detail = {
             "detail": (f"{what}: {details.get('rule', '?')} "
                        f"count={details.get('count', '?')}"),

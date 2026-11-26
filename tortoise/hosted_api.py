@@ -460,12 +460,60 @@ _CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
 # is genuinely finished. Bounded by _CAPTURE_IN_FLIGHT (one key per in-flight
 # capture).
 _CAPTURE_SESSIONS: dict[str, int] = {}
-# The detail string is the carve-out key for the org-visible last-error state
-# (both surfaces): an in-flight refusal is a SERVER concurrency condition, not
-# an org capture failure — same rationale as the capacity 429. A shared
-# constant so the raise site and the two carve-outs cannot drift.
+# The MESSAGE of the in-flight refusal, kept byte-identical to the pre-#14700
+# detail string (`#14700`: the body is now typed —
+# `_capture_session_in_flight_body` — and this constant is its `message` field,
+# so a legacy client matching the prose, a log line and the `#3129` carve-out's
+# legacy arm all still match).
+# ⛔ It is NO LONGER the carve-out KEY: that is `_is_capture_in_flight_refusal`,
+# which both surfaces import — an equality compare on this string would stop
+# matching the typed body the moment the raise site was typed, which is the
+# regression that predicate exists to prevent.
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
+# #14700: NEITHER of this route's two `409`s carried a `code` — this one, and its
+# SIBLING "Session recording is disabled for this team/graph", an org policy no
+# amount of waiting clears — so only the `Retry-After` HEADER told them apart
+# (this sends `30`, the policy one none), and a log reader must KNOW that fact:
+# `reflect-hook` (`retryAfterS = headerRetry ?? bodyRetry`, no default) DOES parse
+# it, so `HTTP 409 retry_after=30s` names the raise site — nothing in the body
+# could. The `code` is the branch key. ⛔ That expression is agent-infra's hook
+# source, in NO tree of this repo; #14700 quotes it at `reflect-hook.ts:398-401`.
+_CAPTURE_SESSION_IN_FLIGHT_CODE = "capture_session_in_flight"
+_CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S = 30
+
+
+def _capture_session_in_flight_body() -> dict:
+    """The TYPED body of the in-flight 409 (#14700).
+
+    The same shape as the capacity 429 (`code` + `message` + `retry_after`), so
+    ONE client rule covers BOTH TYPED refusals on this route — this one and the
+    capacity `429` — so branch on `code`, honour `retry_after`, never prose-match. The
+    route's OTHER `409` carries NO `code` and NO `retry_after`, and that absence is
+    itself the terminal branch: an org policy no retry clears.
+    """
+    return {
+        "code": _CAPTURE_SESSION_IN_FLIGHT_CODE,
+        "message": _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+        "retry_after": _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S,
+    }
+
+
+def _is_capture_in_flight_refusal(detail: object) -> bool:
+    """Is this refusal the in-flight 409? (#3129's carve-out key, #14700)
+
+    Both carve-outs used to compare `detail` to the bare MESSAGE by equality, so
+    typing the body would have silently stopped the REST wrapper's org-visible
+    last-error exemption AND `mcp_server`'s twin from matching — repainting a
+    server concurrency condition as an org capture failure on the dashboard.
+    Code-based for the typed body, and it still accepts the legacy bare string so
+    that reverting the raise site cannot silently re-break either carve-out.
+    ONE function imported by both surfaces: a second copy is the drift this
+    exists to prevent.
+    """
+    if isinstance(detail, dict):
+        return detail.get("code") == _CAPTURE_SESSION_IN_FLIGHT_CODE
+    return detail == _CAPTURE_SESSION_IN_FLIGHT_DETAIL
 
 # ── #12992: the capacity refusal is TYPED, and its refusals are COUNTED ────
 # The capacity 429 used to answer a bare detail STRING while its sibling on the
@@ -473,11 +521,11 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
 # `code` + `retry_after`. Consequence, measured in #12992: a client that wants to
 # branch on the refusal must prose-match the message, and the only machine-
 # readable form of the retry instruction was the `Retry-After` HEADER — which the
-# capture clients that produced the issue's log lines never read
-# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
-# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
-# (research §5, #11225). So the delay is published in the BODY as well: a JSON
-# client gets it for free; the header stays for HTTP clients that honour it.
+# deployed capture client (`tortoise-capture.ts`) never honours: it re-arms on its
+# own `30 s × 2^(n-1)` (research §5, #11225). ⛔ `reflect-hook` is NOT that client —
+# by #14700's 2026-11-25 measurement it runs a 4-attempt chain AND parses the
+# header (`retryAfterS = headerRetry ?? bodyRetry`, no default; see the #14700
+# block above). So the delay is published in the BODY too, for every client.
 #
 # ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
 # object is a shape change for any reader that did `detail in text`; keeping the
@@ -1718,9 +1766,16 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     write, instead of racing the first capture's `capture_ok` write. The
     caller passes a key already scoped by TENANT AND RESOLVED GRAPH
     (`_capture_session_key`, whose graph component is `_data_graph_name` —
-    the graph the request will actually open, #3365).
+    the graph the request will actually open, #3365). That refusal is a
+    TYPED condition since #14700 too — ``detail.code`` =
+    ``capture_session_in_flight`` + ``detail.retry_after``, with the
+    ``Retry-After`` header retained — the same envelope as the capacity 429
+    below, so ONE client rule covers both TYPED refusals on this route (this `409`
+    and the capacity `429`); the policy `409` carries no `code` at all. It is NOT
+    counted in ``_CAPTURE_CAPACITY_REFUSED_TOTAL``: a concurrent writer is a
+    different class from saturation (#12992/#14700).
 
-    #12992: a CAPACITY refusal is now a typed condition (``detail.code`` +
+    #12992: a CAPACITY refusal is a typed condition (``detail.code`` +
     ``detail.retry_after``, with the ``Retry-After`` header retained) and every
     one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
@@ -1747,8 +1802,9 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
         if session_key in _CAPTURE_SESSIONS:
             raise HTTPException(
                 status_code=409,
-                detail=_CAPTURE_SESSION_IN_FLIGHT_DETAIL,
-                headers={"Retry-After": "30"})
+                detail=_capture_session_in_flight_body(),
+                headers={"Retry-After": str(
+                    _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S)})
         if session_key is not None:
             _CAPTURE_SESSIONS[session_key] = 1
         _CAPTURE_IN_FLIGHT += 1
@@ -19765,11 +19821,11 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     the appeal path (scoping delta 12).
 
     #10156: each entry carries `register` ("alert" = something happened, or
-    "activity" = a detector measured a rate and changed nothing), `count` and
+    "activity" = a detector measured a rate and disabled nothing), `count` and
     `first_at` (one row per sustained BOUT, not per detector window), `acked`,
     and the opaque `episode` key the acknowledgement route takes. The panel
-    renders the two registers separately and can say "nothing was changed"
-    only because the register travels with the row.
+    renders the two registers separately and can say "nothing was disabled,
+    throttled or locked by them" only because the register travels with the row.
 
     ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
     ``truncated``): it exists for the empty-feed case, where there is no row to
@@ -23539,7 +23595,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
         # Review PR #1827: a last-error state-write failure must never mask the
         # intended 403/402/503 with a 500.
         if (e.status_code >= 400 and e.status_code != 429
-                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL
+                and not _is_capture_in_flight_refusal(e.detail)
                 # #14707 review P3: `capture_intake_unavailable` is a SERVER
                 # condition (our store could not be written), and the handler's
                 # own exemption rule says a server condition is not the org's
@@ -25488,6 +25544,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # count. Conservative over-count when turns dedupe is accepted (the
             # dedup check runs inside the SDK write; recounting here would cost a
             # second query).
+            #
+            # #14687: this expression is PAYLOAD SIZE, not a request count, so it
+            # is unbounded by construction — the per-REQUEST cap that bounds the
+            # contribution lives in ``AbuseEngine.record_point_create`` (the entry
+            # point every recorder shares, including the MCP path), not here.
+            # Do not add a second cap at this call site: two bounds would drift.
             await _abuse_record_points(_audit_request, org, len(body.conversation) + len(extracted))
 
         # #1727 Slice 2 (Task 12, T1-P15): entity-linking pass — Session +
@@ -55750,7 +55812,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 209 tracked files (733 distinct
+# ABSOLUTE line number from 208 tracked files (490 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -123,6 +123,7 @@
       <a href="#quickstart">Quickstart (5 minutes)</a>
       <a href="#mcp">Connect your agent (MCP)</a>
       <a href="#api">API reference</a>
+      <a href="#appeal">Suspended account — how to appeal</a>
       <a href="#next">Next steps</a>
       <a href="/tortoise/faq">FAQ — design questions</a>
     </div>
@@ -387,6 +388,10 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
     <div class="callout">
       <strong>Note:</strong> The <code>context</code> field is deprecated (removed from Point metadata). Use <code>kind</code> to classify content.
     </div>
+
+    <h2 id="appeal">Suspended account — how to appeal</h2>
+    <p>An organization suspended for unusual activity is refused at the door: API calls return a <code>403</code> whose message ends with a link back to this section, and MCP calls are refused with error code <code>SUSPENDED</code>. The graph is not deleted — the records stay where they were while the case is open.</p>
+    <p>To appeal, write to <a href="/contact">the contact form</a> or <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a> from an address on the organization, and say what the traffic was. The two causes we see most are an agent retry loop with no backoff and unattended seeding into a graph you were still testing; naming which one it was is most of the appeal. A suspension is reviewed by a person, not a threshold.</p>
 
     <h2 id="next">Next steps</h2>
     <ul>

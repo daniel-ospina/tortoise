@@ -92,13 +92,18 @@ def test_the_capacity_refusal_names_itself_and_the_delay(
 def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 409's detail is a string and must stay one.
+    """The 409 is still EXEMPT from both last-error carve-outs — and uncounted.
 
-    It is a carve-out KEY, compared by identity in two places
-    (`hosted_api.py`'s last-error exemption and `mcp_server.py`'s twin), so
-    re-typing it alongside the capacity 429 would silently stop both from
-    exempting it — a concurrency condition would be painted on the dashboard as
-    an org capture failure.
+    ⛔ #14700 superseded the SHAPE this row used to pin (`detail` a bare string,
+    "and it must stay one"). The string was never the invariant — it was the
+    carve-out KEY, compared by equality in two places (`hosted_api.py`'s
+    last-error exemption and `mcp_server.py`'s twin), so re-typing it blindly
+    would silently stop both from exempting it, and a concurrency condition
+    would be painted on the dashboard as an org capture failure. The body is
+    typed now (`code` + `message` + `retry_after`, mirroring the capacity 429)
+    and the key is `_is_capture_in_flight_refusal`, which recognises BOTH shapes
+    — so the invariant this row exists for is unchanged and is asserted as
+    itself: the emitted refusal is recognised by the separator.
 
     ⛔ AND THE CARVE-OUT IS COUNTER-FREE, which is the half a status+detail
     assertion cannot see (#13000 review, P3 — measured): the counter increment
@@ -126,7 +131,10 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
     finally:
         slot.release()
     assert excinfo.value.status_code == 409
-    assert excinfo.value.detail == ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL
+    assert ha._is_capture_in_flight_refusal(excinfo.value.detail), (
+        "the in-flight 409 is no longer recognised by the carve-out predicate — "
+        "a server concurrency condition would be written to the org-visible "
+        "last-error state and painted on the dashboard (#3129 / #14700)")
     assert ha._CAPTURE_CAPACITY_REFUSED_TOTAL == 0, (
         "a 409 duplicate-in-flight collision was COUNTED — `/health` would then "
         "report `refusing: true` for a refusal the capacity gate never issued")
