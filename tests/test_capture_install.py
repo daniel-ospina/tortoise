@@ -7481,6 +7481,9 @@ def test_pi_dry_run_receipt_does_not_claim_a_write(home):
     assert "WOULD be installed" in error, error
     assert "WAS installed" not in error, (
         f"a dry run claimed the seam landed: {error!r}")
+    assert "WOULD stay registered" in error, (
+        f"a dry run described a disk it never touched: {error!r}")
+    assert "producers stay registered" not in error, error
     assert dry.changed_artifacts == (), dry.changed_artifacts
     assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
         "a dry run wrote the seam")
@@ -7513,5 +7516,33 @@ def test_pi_dry_run_second_producer_refusal_is_subjunctive(home):
     assert "capture seam is installed" not in error, (
         f"a dry run used the real-run receipt: {error!r}")
     assert "would stay registered" in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()
+
+
+def test_pi_dry_run_retired_name_refusal_speaks_in_the_subjunctive(home):
+    """The retired-name-still-loadable refusal is reachable under `--dry-run`,
+    and its consequence clause used to be past tense on a run that wrote
+    nothing — "both producers stay registered" beside a `seam_state` that says
+    they merely WOULD be (#14342 round 12).
+
+    Mutation: drop the `_both_producers_clause(dry_run=...)` call at this arm —
+    this row REDs while `changed_artifacts` stays empty.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD stay registered" in error, error
+    assert "producers stay registered" not in error, (
+        f"the preview described an untouched disk in the past tense: {error!r}")
     assert dry.changed_artifacts == (), dry.changed_artifacts
     assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()

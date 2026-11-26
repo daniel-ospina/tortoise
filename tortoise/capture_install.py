@@ -2024,6 +2024,22 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
         return f"{path}: {e.__class__.__name__}: {e}"
 
 
+def _both_producers_clause(*, dry_run: bool) -> str:
+    """The consequence clause, in the mood the RUN is in.
+
+    ``--dry-run`` writes nothing, so a preview saying "both producers STAY
+    registered" describes a disk it never touched — the same false-report class
+    as claiming a write that did not happen (#14342 rounds 11-12). ONE helper,
+    so every receipt speaks in the same mood and a new call site cannot pick the
+    wrong one by accident.
+    """
+    return ("so both producers WOULD stay registered and every session would "
+            "be captured twice"
+            if dry_run else
+            "so both producers stay registered and every session is captured "
+            "twice")
+
+
 def _assert_pi_entry_not_loadable(path: Path) -> str | None:
     """Fail closed when the retirement did not achieve what it claims."""
     if _pi_entry_is_loadable(path):
@@ -2075,9 +2091,8 @@ def _disable_pi_second_producer(
             f"cannot disable the second capture producer: {retired} is still "
             "an extension Pi loads — a suffixed DIRECTORY, or a link to one, "
             "is resolved through `resolveExtensionEntries` under ANY name — "
-            "so both producers stay registered and every session is captured "
-            f"twice. {seam_state}. Move it out of the extensions directory "
-            "by hand and re-run.")
+            f"{_both_producers_clause(dry_run=dry_run)}. {seam_state}. Move it "
+            "out of the extensions directory by hand and re-run.")
     if not os.path.lexists(active):
         return False, [], None
     if not _pi_entry_is_loadable(active):
@@ -2482,8 +2497,8 @@ def _install_pi(
                                      f"directory, and Pi resolves a symlinked "
                                      f"subdirectory through its index file "
                                      f"under ANY suffixed name — renaming it "
-                                     f"retires nothing, so both producers "
-                                     f"stay registered. "
+                                     f"retires nothing, "
+                                     f"{_both_producers_clause(dry_run=dry_run)}. "
                                      + (f"The capture seam at {dst} WOULD be "
                                         f"installed, so this box would run "
                                         f"BOTH producers; nothing was written."
