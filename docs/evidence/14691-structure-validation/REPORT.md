@@ -332,7 +332,7 @@ Every one of these was measured through MCP; none was worked around.
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **NO — a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for every node asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
 | **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
-| **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** **walked** names — ⚠️ the walk population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements` (2 rows) and `elements` (32 walks, `root_kind`); the *retrieval* half is a different artifact — `out/t6-score.json` → `A5_retrieval.probes[].walk_root_is_entity`, false on 5/5. ⚠️ An earlier revision wrote `elements[].walk_root_kind`, a field that exists in neither file. Re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
+| **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** | `out/readback.json` → `unresolved_elements` (2 rows) and `elements` (32 walks, `root_kind`); the *retrieval* half is a different artifact — `out/t6-score.json` → `A5_retrieval.probes[].walk_root_is_entity`, false on 5/5. ⚠️ The **walked** population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). ⚠️ An earlier revision wrote `elements[].walk_root_kind`, a field that exists in neither file. Re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
 
 ⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
 emitted by `score_t6.py`). An earlier revision of this section had D2/D4/D5 permuted
@@ -583,6 +583,30 @@ assert a reversal and the arms are exact rather than approximate.
 ---
 
 ---
+
+### 8.4 What the 8th review cycle added (two fail-opens closed, and the ratchet)
+
+The 8th cycle measured two holes in arms this section had already reported as closed. Both were the
+class the PR exists to close — a cell or a line stating something the artifact denies — and both are
+closed by making the arm EXACT rather than by adding one more pin beside a superset test.
+
+| mutation (each ALONE, `61 passed` before these arms) | arm that now reds |
+|---|---|
+| D1's answer cell, appended INSIDE the bold cell: *"The direction is in fact fully visible and correct on every edge read."* — the 5th-cycle arm was a PREFIX test, so one cell could state the finding and its negation, and D2/D4 shared both arms | `test_each_door_finding_answer_states_the_artifacts_ANSWER` (now exact on the normalised cell; D2's "walked" qualifier moved to its evidence column, so nothing was dropped) |
+| §1 `(1.4 min)` → `(16.3 min)` — a supported number (the MEAN ack) on the wrong line | `test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned` |
+| §3 `` `managedBy` is inverted too** (2 rows) `` → `(6 rows)`; §8 `32 element walks` → `39` (the tool-surface count); doc-03 `7 components and 7 dependencies` → `9 components`; VERIFICATION `because 6 ownedBy rows are only 4 pairs` → `4 … 6 pairs`; §1 `Five short meeting transcripts` → `Six` | same arm, each read from the field that produces it and LINE-SCOPED |
+
+The last row is the net arm's own limit, stated plainly: `test_no_FIGURE_in_the_two_documents_is_free`
+asserts membership in the UNION of every artifact value, so it reds a number **no** artifact carries
+and cannot red a right-looking number in the wrong place. It is unchanged and still does exactly that;
+the six figures above moved out of the net and onto their own fields.
+
+The build red this head also carried was the untyped-receiver ratchet: `tools/sdk_privatise.py
+--check` reported `11914` against a `11912` baseline, both rows added by this suite's own
+`readback.update(saved)` restores. `tools/sdk_privatise.py --check` is a ratchet on receivers the
+sweep cannot type, so the restores are spelled `readback |= saved` — `dict.__ior__` mutates in place
+and returns self, so the module's dict is restored exactly as before, and `--check` is exit 0 at
+`11912`.
 
 ## 9. Mandate-preflight disclosure
 
