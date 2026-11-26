@@ -1682,11 +1682,23 @@ class TestWorkerReadinessIsTheSocketExisting:
                 self._sock.listen(backlog)
 
             def accept(self):
+                # ⛔ The fake worker must OUTLIVE the client's connect, and the
+                # bound is `stop` — the same signal the real serve loop is
+                # bounded by. It used to be a single 50 ms timeout whose expiry
+                # raised "stopped", so `serve` reached its `finally`
+                # (close → unlink) ~50 ms after the rename: on a loaded runner the
+                # row's own poll+connect lost that race and read ECONNREFUSED off
+                # a pathname with no listener — the row failing on ITS OWN fake
+                # worker, not on the defect it grades (#14645, `test (a)` red at
+                # run 45659928679: `test_the_published_socket_path_is_connectable_
+                # the_moment_it_exists`, [Errno 111] Connection refused).
                 self._sock.settimeout(0.05)
-                try:
-                    return self._sock.accept()
-                except TimeoutError as exc:
-                    raise OSError("stopped") from exc
+                while not stop.is_set():
+                    try:
+                        return self._sock.accept()
+                    except TimeoutError:
+                        continue
+                raise OSError("stopped")
 
             def close(self) -> None:
                 self._sock.close()
