@@ -1720,8 +1720,16 @@ _DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
 _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
               r"|in\s+the\s+table|on\s+this\s+page)")
 # Appended immediately after the object in a form's pattern.
+# ⛔ A COPULA BETWEEN THE OBJECT AND THE DOC PARTICIPLE IS STILL A
+# CROSS-REFERENCE: `Check the tools are listed above. Then restart your client.`
+# is a pointer at the docs, not a claim about the running session, and it was
+# RED — the second lookahead only suppressed the doc phrase DIRECTLY after the
+# object (`the tools listed above`), so the `are` spelling slipped through
+# (#14679 review cycle 35, measured; pre-existing gap, newly reachable once the
+# pre-cue walk-back graded the clause a `. then` cue introduces).
 _NOT_A_DOC = (r"(?!\s+" + _DOC_NOUN + r"\b)"
-              r"(?!\s+" + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
+              r"(?!\s+(?:(?:are|is|were|was|be|been)\s+)?"
+              + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
 
 # ⛔ THE ADVERB RUN IS DEFINED ONCE, BECAUSE THE ARM USES IT TWICE AND THE TWO
 # COPIES DIVERGED. It skips the adverbs that can sit between a predicate and the
@@ -2366,7 +2374,12 @@ _BARE_SEQUENCER_RE = re.compile(
 # cycle 34): "By the time you restart your client, confirm the tools are
 # actually there" is still a pre-restart demand.
 _CUE_UNDER_INVERTING_SUBORDINATE_RE = re.compile(
-    r"\b(?:before|by\s+the\s+time|prior\s+to|until)\b[^,;.]*$", re.IGNORECASE)
+    # ⛔ `prior to` IS NOT HERE. It was carried unpinned from the first cut and a
+    # reviewer could not reach it in any grammatical shape (the cue is the bare
+    # `Restart your client`, so "prior to restart your client" is not English,
+    # and with a comma the pattern cannot match) — `prior\s+to` flipped 0 of 359
+    # rows on removal. An arm no row can depend on is dead weight.
+    r"\b(?:before|by\s+the\s+time|until)\b[^,;.]*$", re.IGNORECASE)
 
 # …and a clause that ENDS on one introduces the NEXT clause, whichever side of
 # its own comma the sequencer sits on. `_FORWARD_SEQUENCER_RE` can only see an
@@ -2691,8 +2704,18 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # the cue, the confirmation that FOLLOWS it happens first, so form (f) — the
     # only form that grades a bare confirmation imperative, and the one the
     # post-cue side otherwise skips by design — must grade it here.
+    # ⛔ AN EMPTY PRE-CUE STATEMENT MEANS THE BREAK SITS IMMEDIATELY BEFORE THE
+    # CUE, so nothing can GOVERN it: "Before you continue: restart your client,
+    # confirm the tools are actually there." leaves `["Before you continue", ""]`
+    # and the empty fragment was dropped by the split's own filter, so the
+    # `Before …` clause read as the cue's governor and form (f) graded a
+    # comma-spliced confirmation that follows the restart — a forward shape RED
+    # (#14679 review cycle 35, measured, with its `-` and `;` twins).
+    cue_opens_a_statement = not _STATEMENT_BREAK_RE.split(
+        before.lstrip(" \t,.;:—–-"))[-1].strip()
     cue_under_inverting_subordinate = bool(
         pre_statements
+        and not cue_opens_a_statement
         and _CUE_UNDER_INVERTING_SUBORDINATE_RE.search(pre_statements[-1]))
     for clause in post_clauses:
         # A clause led by a FORWARD sequencer continues the cue's own
@@ -3886,6 +3909,33 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      True),
     ("By the time you restart your client, confirm the tools are actually "
      "there.", True),
+    # ── CYCLE 35 (#14679's review at `2ce28496`): four findings, three rows here.
+    # (1) a DOC CROSS-REFERENCE with a copula is still a cross-reference — the
+    # doc-participle lookahead only suppressed the phrase DIRECTLY after the
+    # object, so the `are listed above` spelling went RED once the walk-back
+    # graded the clause a `. then` cue introduces:
+    ("Check the tools are listed above. Then restart your client.", False),
+    ("Check the tools are documented below, then restart your client.", False),
+    # (2) a STATEMENT BREAK IMMEDIATELY BEFORE THE CUE means nothing governs it,
+    # and the empty pre-cue fragment the split produces was dropped by its own
+    # filter — so `Before you continue:` read as the cue's governor and form (f)
+    # graded a comma-spliced confirmation that follows the restart:
+    ("Before you continue: restart your client, confirm the tools are actually "
+     "there.", False),
+    ("Before you start - restart your client, confirm the tools are actually "
+     "there.", False),
+    ("Before you start; restart your client, confirm the tools are actually "
+     "there.", False),
+    # (3) the ONE-WORD twins of the declared-RED "…, then restart …" row, which
+    # no row pinned: removing `and|also|next|afterwards` from
+    # `_BARE_SEQUENCER_RE` flipped 0 declared rows while making each of these
+    # GREEN, so a future dead-arm sweep on this file's own stated ground would
+    # have silently re-opened the false PASS:
+    ("Confirm the tools are actually there, and restart your client.", True),
+    ("Confirm the tools are actually there. Also restart your client.", True),
+    ("Confirm the tools are actually there, next restart your client.", True),
+    ("Confirm the tools are actually there, afterwards restart your client.",
+     True),
     # ⛔ THE WALK-BACK MUST NOT RED FORWARD COPY. A bare sequencer sequences
     # whatever precedes it, so the clause it defers to is graded — and when that
     # clause carries no tools-appear claim, it stays GREEN. These rows are what
