@@ -197,9 +197,10 @@ function actionName(action, entry) {
  *
  * The three muted lists (snoozed, dismissed, acknowledged) each rendered
  * `label · note`, and only the label: the message was painted nowhere. Labels
- * are per-RULE and generic by design — `abuse.py:1820` composes
- * `"Access from a new location: " + country`, and a `flag` row's label is
- * `High activity rate` whatever the rate was — so two snoozed `auth_ip`
+ * are per TYPE and generic by design (`abuse.py` `labels`, keyed by `etype`: a
+ * `flag` row's label is `High activity rate` whatever the rate was) while the
+ * per-row identity travels in the MESSAGE — `abuse.py`'s `messages` composes
+ * `"Access from a new location: " + country` — so two snoozed `auth_ip`
  * episodes from different countries, or two acknowledged rate episodes, were
  * identical on screen except for their timestamp. For the acknowledged group
  * that is the failure the group exists to fix: it was added so an org-wide,
