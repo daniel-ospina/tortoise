@@ -5939,7 +5939,25 @@ def _beats_whose_ground(
             # arm's business, and letting it fall through here credited
             # `margin-bottom: auto` on the first child to the last child's home
             # (measured: the swapped-pair discriminator went GREEN).
-            match = re.search(rf"{subject_re}([^\s>{{:]+)(?=[\s,{{:]|$)",
+            #
+            # ⛔ THE LOOKAHEAD ENDS THE SELECTOR AT `:` OR `,` OR `{` — NOT at a
+            # SPACE (#14683 review cycle 6, measured). Accepting a space also
+            # accepts the DESCENDANT combinator, so a rule on a DESCENDANT of the
+            # ground was collected as a reset OF the ground and won the modelled
+            # cascade on the whole selector's specificity:
+            #
+            #     `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`  ->  RED
+            #
+            # over a page that renders identically to the shipped one: zeroing a
+            # descendant's own margin cannot touch the ground's margin, and the
+            # row's own `#beat-hero > h2` control is built on exactly that
+            # reasoning. The sibling spelling with a CHILD combinator
+            # (`> .doc-grid > .doc-copy`) was already not collected, which is what
+            # shows the space acceptance was accidental rather than a deliberate
+            # fail-closed trade. A real descendant-combinator reset of the GROUND
+            # (`> .doc-grid`) still REDs, as does a comma prelude and a
+            # `:hover`-qualified one.
+            match = re.search(rf"{subject_re}([^\s>{{:]+)(?=[:,{{]|$)",
                               compact)
             if match and _ground_selector_matches(match.group(1),
                                                   sides.get(side)):
@@ -6863,6 +6881,39 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert _short_viewport_centring_problems(page) == [], (
             "`AUTO` was not recognised as `auto`, so a centred page was "
             "reported as uncentred")
+
+    def test_a_reset_on_a_DESCENDANT_is_not_a_reset_of_the_ground(self):
+        """Zeroing a descendant's margin cannot unshare the ground's margin.
+
+        #14683 review cycle 6, measured. The no-pseudo arm's lookahead ended the
+        selector at a SPACE, i.e. it accepted the DESCENDANT combinator, so
+
+            `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`
+
+        was collected as a reset OF the ground and won the modelled cascade on
+        the WHOLE selector's specificity — RED over a page that renders
+        identically to the shipped one (measured in Chromium: ground margin
+        `auto`, 18.03px of shared slack, off-centre 0.02). The child-combinator
+        sibling (`> .doc-grid > .doc-copy`) was already not collected, which is
+        what shows the space acceptance was accidental rather than a deliberate
+        fail-closed trade.
+        """
+        page = self._page(hatch=self.CENTRED_HATCH, extra=(
+            "    #beat-hero > .doc-grid .hero-sub { margin-top: 0; }\n"
+            "    #beat-hero > .doc-grid :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a reset on a DESCENDANT of the ground was graded as a reset of the "
+            "ground — that refuses a behaviourally correct page")
+
+    def test_a_reset_on_the_ground_itself_is_still_red(self):
+        """The control for the row above: the GROUND's own reset must still RED."""
+        page = self._page(hatch=self.CENTRED_HATCH, extra=(
+            "    #beat-hero > .doc-grid { margin-top: 0; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a reset on the ground itself was reported CLEAN — the descendant "
+            "fix above must not cost the catch it exists for")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
