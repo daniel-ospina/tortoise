@@ -10814,7 +10814,9 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: NOTHING (#14623 round 29), i.e. four TRUE rewordings reding the arm inside structures 1-5 with a
 #: diagnostic asserting the paragraph named no scope at all. The plural forms (`are` / `were`) are
 #: unreachable for the singular `REGISTRATION` in TRUE prose; they are kept because one set for both
-#: arms cannot drift, and every copula in it is driven as a fixture below, in both directions.
+#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with the two
+#: the PAST tense makes reachable (`was` / `were`) driven against the inverse as well — a negated
+#: claim and the plural half-swap — so the widening is graded in both directions, not just one.
 #: ⛔ ONE RESIDUAL SHAPE INSIDE THE STRUCTURES IS REFUSED, and it is named here because the sentence
 #: above would otherwise imply that anything built from these five skeletons passes: the exemption
 #: predicate may be spelled as a RELATIVE CLAUSE in the PREDICATE (`The REGISTRATION is the half
