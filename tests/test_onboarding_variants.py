@@ -3228,21 +3228,25 @@ def _is_continuation_fragment(clause: str) -> bool:
         # so the pop decision is taken from the clause: a remainder that names the
         # tools AND carries a confirmation predicate is a GRADED CONFIRMATION, not
         # a locative lead-in, whatever frame word it happens to contain.
-        # ⛔ DECLARED RESIDUAL — the NOMINAL spelling is NOT closed here, and the
-        # attempt to close it changed no row, so it is pinned rather than shipped:
+        # ⛔ BUT KEEPING A CLAUSE IS ONLY WORTH DOING IF SOMETHING CAN GRADE IT. A
+        # frame-led remainder that names the tools and carries a predicate is kept
+        # by the test above — and if no form matches it, the kept clause becomes
+        # the GOVERNING one, nothing is graded, and the confirmation before it is
+        # discarded with `clauses[:-1]`. One inserted clause re-opened a declared-RED
+        # row that way (measured, review cycle 59):
         #
-        #     GREEN  Then after your confirmation that the tools are actually there,
-        #            restart your client.
+        #     RED at cd1e01ad74 → GREEN at e337fcd3d5
+        #     Confirm the tools are actually there, then after the config change
+        #     verify the tools are actually there, restart your client.
         #
-        # `_CONFIRM_PREDICATE` is a VERB list, so the nominal (`your confirmation`)
-        # does not satisfy it, and keeping the clause instead of popping it does not
-        # help either — the retained clause carries a leading `then after`, which no
-        # form's `^` anchor accepts. Closing it means teaching the shared predicate
-        # vocabulary a noun, which is a wider change than this pin claims; the row
-        # below pins the CURRENT verdict so a future tightening shows up as a
-        # deliberate flip instead of a surprise (#14679 review cycle 58).
-        return not (_TOOLS_OBJECT_RE.search(rest) and re.search(
-            _CONFIRM_PREDICATE, rest, re.IGNORECASE))
+        # …and twelve variants of it (frame-noun, `on your machine`, `with the new
+        # config`, `via the tray`, split-sentence). So the test is not "does it look
+        # like a confirmation" but "would a form grade it" — the branch pops
+        # otherwise, which restores the earlier confirmation as the governor.
+        if (_TOOLS_OBJECT_RE.search(rest)
+                and re.search(_CONFIRM_PREDICATE, rest, re.IGNORECASE)):
+            return not any(p.search(clause) for p in _INVERSION_FORMS)
+        return True
     return _OWN_OBJECT_RE.search(rest) is None
 
 
@@ -3891,8 +3895,17 @@ _PAST_TIME_ADVERBIAL = (
     #
     # …while `prior TO restarting` / `before you restart` stay graded. `(?=\s*$)`
     # was also positional, so a parenthetical defeated it.
-    r"|(?:before|prior)(?!\s+(?:to\s+)?(?:you\s+)?restart)"
-    r"|(?:in|on)\s+(?:an?|the)\s+(?:earlier|previous|prior|last)\s+"
+    # ⛔ RESTART-ADJACENCY IS A SET OF VERB SPELLINGS, not two tokens. `(to )?(you )?
+    # restart` exempted `before PROCEEDING TO restart`, `before GOING TO restart`,
+    # `before the client RESTARTS` and `before the client IS RESTARTED` — all
+    # restart-adjacent readings that shipped GREEN (measured, review cycle 59) —
+    # while the NOUN reading `before the restart` is a past-time adverbial and stays
+    # GREEN, which is the line this bound draws: noun vs verb.
+    r"|(?:before|prior)(?!\s+(?:(?:to|you)\s+)?(?:(?:proceeding|going|about)\s+to\s+)?(?:the\s+(?:client|session|editor|app|connector|server)\s+(?:is\s+)?)?restart)"
+    # ⛔ AND THE PREPOSITION+ARTICLE ARE OPTIONAL: `last session` / `last run` are
+    # ordinary past-time prose, and requiring `in the` made the verdict turn on an
+    # article — the one-synonym flip this file forbids (measured, review cycle 59).
+    r"|(?:(?:in|on)\s+(?:an?|the)\s+)?(?:earlier|previous|prior|last)\s+"
     r"(?:session|run|conversation))")
 
 #: ⛔ AND THE PREDICATE ARM MUST COVER THE WHOLE `_PRE_CUE_VERB` CLASS, not three
@@ -7074,12 +7087,46 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("If you checked the tools before the restart, restart your client, then "
      "confirm the tools are actually there.", False),
     # ⛔ DECLARED RESIDUAL, pinned at its CURRENT verdict. The NOMINAL spelling is
-    # not closed: `_CONFIRM_PREDICATE` is a verb list, and the retained clause keeps
-    # its leading `then after`, which no form's `^` anchor accepts. EXPECTED AFTER a
-    # wider fix: True. (#14679 review cycle 58 — the declaration is here, in the
-    # artifact, not only in the review record.)
+    # not closed: `_CONFIRM_PREDICATE` is a verb list, so `your confirmation` does
+    # not satisfy it — and popping the clause instead of keeping it does not help
+    # either, because the clause is ungraded STANDALONE too, measured with the
+    # `then after` lead removed and nothing popped:
+    #
+    #   _restart_cue_order_violation("After your confirmation that the tools are "
+    #                                "actually there, restart your client.") -> None
+    #
+    # ⛔ Cycle 58 first wrote a different mechanism here — "the retained clause keeps
+    # its leading `then after`, which no form's `^` anchor accepts" — and that is
+    # FALSE in both directions: form (f) IS `^`-anchored and DOES accept a `then`
+    # lead, and form (a), which grades the row this pin adds, has no `^` at all
+    # (measured, review cycle 59). The gap is vocabulary, not anchoring. EXPECTED
+    # AFTER a wider fix (a noun arm on the predicate): True.
     ("Then after your confirmation that the tools are actually there, restart "
      "your client.", False),
+
+    # ── cycle 59 — the same three arms, from the reviewer's own measured corpus.
+    #    (a) A KEPT clause nothing grades: the confirmation before it is discarded
+    #        and the inversion ships GREEN. Locative AND frame-noun spellings.
+    ("Confirm the tools are actually there, then after the config change verify "
+     "the tools are actually there, restart your client.", True),
+    ("Confirm the tools are actually there, then the last step is to verify the "
+     "tools are actually there, restart your client.", True),
+    ("Confirm the tools are actually there, then via the tray check the tools "
+     "are actually there, restart your client.", True),
+    #    (b) RESTART-ADJACENCY is a set of verb spellings, not two tokens.
+    ("If you checked the tools before proceeding to restart, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before going to restart, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before the client restarts, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before the client is restarted, restart your "
+     "client, then confirm the tools are actually there.", True),
+    #    (c) the past-time adverbial does NOT require a preposition + article.
+    ("If you confirmed the tools last session, restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("If you confirmed the tools last run, restart your client, then confirm "
+     "the tools are actually there.", False),
     ("If you confirmed the tools in the last session, restart your client, then "
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
