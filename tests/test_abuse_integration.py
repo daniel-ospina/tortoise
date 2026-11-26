@@ -41,7 +41,9 @@ from fastapi.testclient import TestClient  # noqa: I001
 
 import tortoise.supabase_control as sc
 from tortoise import abuse
-from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
+from tortoise.abuse import (
+    ALERT_TYPES, AbuseEngine, SupabaseAbuseStore, _alert_dict,
+)
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
 from tests._verdict import verdict_client, verdict_async_client
@@ -93,6 +95,67 @@ def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
 @pytest.fixture
 def fake():
     return _seed_team(FakeControlPlane())
+
+
+def test_the_tier_read_is_the_real_allowance_column_and_it_moves_the_level(
+        notified, monkeypatch):
+    """#14687's tier-relative R1 level: the ONE production read, pinned by VALUE.
+
+    `AbuseEngine.point_threshold` returns `max(configured, ratio × allowance)`
+    and gets the allowance from `store.org_allowance(org_id)`, which
+    `SupabaseAbuseStore` answers out of `organizations.ops_allowance` through
+    `_org_field` — the store's one-column read of that row.
+
+    ⛔ WHY THIS TEST EXISTS, and why it is HERE rather than in `test_abuse.py`.
+    Every calibration arm over there drives `_TierStore`, a `MemoryAbuseStore`
+    subclass that ANSWERS the allowance itself, so NOTHING read the real store's
+    spelling of the column. A wrong or moved column there answers `None`, and
+    `point_tier_floor` treats `None` as this contract's own word for "cannot
+    answer" — it degrades to the configured ABSOLUTE level (the shipped, more
+    sensitive rule) and the whole tier-relative clause of #14687 goes inert
+    while every assertion stays green. Measured before this test existed:
+    mutating the column to `"ops_allowance_TYPO"` left
+    `tests/test_abuse.py tests/test_abuse_integration.py
+    tests/test_10156_alert_registers.py` at **329 passed**. The fixture's own
+    allowance is 8 against a configured threshold of 5, so the tier term
+    (`floor = 4`) cannot bind and a wrong read was indistinguishable from a
+    right one — which is exactly why the assertion below moves the ALLOWANCE
+    rather than trusting the fixture.
+
+    Also pinned: `None` for a missing org, never 0 — a 0 that reads as a tier
+    would be a fabricated measurement, and `0` is a real answer for some orgs.
+    """
+    store = SupabaseAbuseStore(_seed_team(FakeControlPlane()))
+    assert store.org_allowance(TEAM) == 8, (
+        "the real store did not read `organizations.ops_allowance` — a wrong "
+        "column answers None, which the engine reads as 'unknown tier' and "
+        "silently falls back to the absolute level")
+    assert store.org_allowance("no-such-org") is None, (
+        "a missing org must answer None (unknown), never a number")
+
+    monkeypatch.setenv("TORTOISE_ABUSE_POINT_THRESHOLD", "5")
+    monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "3600")
+    monkeypatch.setenv("TORTOISE_ABUSE_TIER_FLOOR_RATIO", "0.5")
+    monkeypatch.setenv("TORTOISE_ABUSE_CLEAR_RATIO", "0.5")
+
+    # The shipped fixture: allowance 8 -> floor 4, so the configured 5 governs.
+    assert AbuseEngine(store).point_threshold(TEAM) == 5, (
+        "an 8-credit allowance at ratio 0.5 is a floor of 4, so `max(5, 4)` "
+        "must stay the configured 5 — a HIGHER level here means the floor was "
+        "derived from something other than the allowance")
+
+    # A tier whose half-allowance exceeds the configured level: the level MUST
+    # come from the column read above, or a 6-unit burst flags a pro org.
+    tiered = _seed_team(FakeControlPlane())
+    tiered.tables["organizations"][0]["ops_allowance"] = 10_000
+    eng = AbuseEngine(SupabaseAbuseStore(tiered))
+    assert eng.point_threshold(TEAM) == 5_000, (
+        "the tier floor did not reach the level — a 10 000 allowance at "
+        "ratio 0.5 is 5 000, and `max(5, 5 000)` is 5 000")
+    eng.record_point_create(TEAM, 6)
+    assert SupabaseAbuseStore(tiered).org_state(TEAM)["flagged_at"] is None, (
+        "6 units/hour is 0.12% of a 5 000 level: a tiered org was flagged "
+        "anyway, which is exactly the false positive #14687 removes")
 
 
 @pytest.fixture
