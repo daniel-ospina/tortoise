@@ -627,8 +627,8 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
             re.compile(r'(?s) *# ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT.*?'
                        r'\n *"error": f"MCP isError: \{out!r\}"\[:400\]\}\n'),
             re.compile(r"(?s)\n    # ⛔ A FAILED CALL IS NOT A SILENT DOOR.*?"
-                       r"\n        return not is_error_reply\(\(call or \{\}\)"
-                       r'\.get\("reply"\)\)\n'),
+                       r"\n        from score_t6 import call_failed.*?"
+                       r"\n        return not call_failed\(call or \{\}\)\n"),
         ]
         for pattern in blocks:
             text, count = pattern.subn("", text, count=1)
@@ -3448,7 +3448,25 @@ def test_D4_cannot_survive_its_witnesses_all_failing():
         assert count == witness[name]["explore_neighbour_count"], (
             f"D4 says {name} is seen by {count} explore neighbours; the witness "
             f"recorded {witness[name]['explore_neighbour_count']}")
+    # ⛔ THE SET, not only each count (#14691 review, round 8, F2). Rotating a KEY
+    # (`Jonas Bauer: 9` → `Lumen Core: 19`) is byte-neutral, keeps the 809,812 size
+    # and re-derives cleanly, and made the artifact claim a node that ANSWERED one
+    # row was read as isolated. The key set is exactly the SILENT witnesses.
+    silent = {name for name, w in witness.items()
+              if not _rows(w["expand_relationships"]["reply"])
+              and (w.get("explore_neighbour_count") or 0) > 0}
+    assert set(isolated) == silent, (sorted(isolated), sorted(silent))
     assert len(isolated) == 6, sorted(isolated)
+    # ⛔ AND THE PREDICATE CLAIM IN `code_path` (#14691 review, round 8, F3). The
+    # sentence says which predicates the read covers; at constant length it could be
+    # rewritten to `NAND|IMPL|ownedBy only` and stay green, so the arrow-list is
+    # read out of the field and each token must be a predicate the graph has.
+    claimed = re.search(r"the read covers ([A-Za-z|]+) only", d4["evidence"]["code_path"])
+    assert claimed, d4["evidence"]["code_path"]
+    tokens = set(claimed.group(1).split("|"))
+    assert tokens == {"IMPL", "NAND", "hasPart"}, claimed.group(1)
+    known = set(_score()["directions"]) | {"IMPL", "NAND"}
+    assert tokens <= known, (tokens - known)
     assert "tortoise/entity_reads.py" in d4["evidence"]["code_path"]
     assert (REPO / "tortoise" / "entity_reads.py").is_file(), (
         "D4's code_path names a file this tree does not have")
@@ -3601,8 +3619,8 @@ def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
     """
     module = _load_score_module()
     source = (BUNDLE / "run_readback.py").read_text()
-    assert "from score_t6 import is_error_reply" in source, (
-        "run_readback.py no longer asks the scorer which replies are errors")
+    assert "from score_t6 import call_failed" in source, (
+        "run_readback.py no longer asks the scorer which CALLS failed")
     shapes = [
         "Error: timeout",
         "Failure: boom",
@@ -3636,9 +3654,23 @@ def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
     # pass on a producer that only knows the two shapes the scorer's dict arm knows
     disagreed = [s for s in shapes if module.is_error_reply(s)]
     assert len(disagreed) >= 10, disagreed
+    # ⛔ THE ENVELOPE IS PART OF THE CALL (#14691 review, round 8, F1). The reply
+    # half alone was pinned, so deleting the `ok is False` / `error` lines left the
+    # suite green while `_call()`'s own failure shape — an envelope with NO reply —
+    # walked straight through the producer's gate.
+    envelopes = [{"ok": False, "error": "MCP isError: boom"},
+                 {"ok": False, "error": "TimeoutError: 30s"},
+                 {"ok": False},
+                 {"ok": True, "error": "boom"},
+                 {"ok": True, "reply": []}]
+    for call in envelopes:
+        expected = module.call_failed(call)
+        produced = _producer_answered(None, call=call)
+        assert produced is (not expected), (
+            f"the producer answered {call!r} while the scorer says failed={expected}")
 
 
-def _producer_answered(reply):
+def _producer_answered(reply, call=None):
     """`run_readback._answered`'s rule, taken from the file, not restated."""
     source = (BUNDLE / "run_readback.py").read_text()
     start = source.index("    def _answered(call: dict) -> bool:")
@@ -3652,4 +3684,5 @@ def _producer_answered(reply):
         _sys.path.insert(0, str(BUNDLE))
     namespace: dict = {"__name__": "run_readback_answers"}
     exec(compile(dedented, "run_readback.py:answers", "exec"), namespace)
-    return namespace["_answered"]({"ok": True, "reply": reply})
+    return namespace["_answered"](call if call is not None
+                                  else {"ok": True, "reply": reply})

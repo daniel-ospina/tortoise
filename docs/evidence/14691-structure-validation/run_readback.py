@@ -513,10 +513,14 @@ async def run() -> int:
     # manufactures a product defect from a call that failed in a spelling it did not
     # know. It now asks the scorer, so there is one definition of "the call failed".
     def _answered(call: dict) -> bool:
-        if (call or {}).get("ok") is False or (call or {}).get("error"):
-            return False
-        from score_t6 import is_error_reply  # the ONE predicate (bundle-local)
-        return not is_error_reply((call or {}).get("reply"))
+        # ⛔ THE WHOLE CALL, NOT ONLY ITS `reply` (#14691 review, round 8, F1).
+        # Delegating the reply half left the ENVELOPE unguarded: `_call()` reports a
+        # failure as `{"ok": False, "error": "MCP isError: …"}`, so a gate that only
+        # asked about `reply` still answered, and this producer wrote D4 from an MCP
+        # `isError` call. `call_failed` is the scorer's whole-call predicate —
+        # envelope AND reply — so the two cannot drift again.
+        from score_t6 import call_failed  # the ONE predicate (bundle-local)
+        return not call_failed(call or {})
 
     silent = {name: w["explore_neighbour_count"]
               for name, w in (report.get("link_witness") or {}).items()

@@ -446,7 +446,7 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 `provenance.probe_sha256`, the hash of the `run_readback.py` that produced it. It was produced at
 `d4fc8fe51ee5`, where that file hashed
 `5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
-`f24593066e67d6f3611497d0f4f2db8dac99008c7be29a7120f025e791708790`, because three edits landed after it: a later commit renamed
+`db619c1b3caffe02a9a59020b6d55f9c9eb24318c8ec98482e7940ae1400d763`, because three edits landed after it: a later commit renamed
 one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
 `agent-infra-ci / lint` leg — **not a required context** (`main`'s protection, the active
 ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
@@ -456,7 +456,8 @@ baseline for new code, so the rename was taken rather than left as debt. **The r
 it back and diffing against `d4fc8fe`: zero differences. **The other two edits are the
 error-vs-empty guards this review added** — `_call()` now records the MCP `isError` flag instead of
 discarding it, and the D4 emitter refuses a witness whose call FAILED, asking the scorer's
-`is_error_reply` rather than keeping a second, narrower spelling of "the call failed" — so a future
+`call_failed` — the whole call, envelope AND reply — rather than keeping a second, narrower
+spelling of "the call failed" — so a future
 run cannot manufacture D4 from a call that never answered. Both are inert to the numbers in the committed
 artifact (they change what a future run would refuse, not what this one measured), and the sweep
 that measured them is §8.7. The artifact's numbers stand and only the binding is stale. It is stated here rather than silently regenerated, because regenerating a
@@ -729,6 +730,24 @@ pinned by an arm that reds on its own mutation:
 * **P3 — the db_uri port.** The arm claimed to pin "the lane's own port" and pinned
   none: 16413 → 16414 stayed green. The host:port is now the receipt's own, so the
   readback and the ingest cannot be talking to different containers.
+
+### 8.10 What the eighth round closed (the envelope half, the SET, and the claim in `code_path`)
+
+- **P2 — the envelope half of the producer's gate.** Delegating the `reply` was
+  not delegating the CALL: `_call()` reports a failure as
+  `{"ok": False, "error": "MCP isError: …"}`, so a gate that only asked about
+  `reply` still answered and the producer wrote D4 from an MCP `isError` call.
+  Deleting those two lines — with REPORT's documented hash synced — left the suite
+  green. It now asks `call_failed` (envelope AND reply), and the behaviour arm
+  exercises five envelope shapes as whole calls.
+- **P3 — D4's evidence SET.** Each count was pinned but not the key set: rotating a
+  key (`Jonas Bauer: 9` → `Lumen Core: 19`) is byte-neutral, keeps the 809,812 size,
+  re-derives cleanly, and made the artifact claim a node that ANSWERED one row was
+  read as isolated. The key set must now equal the silent witnesses exactly.
+- **P3 — the claim inside `code_path`.** The sentence names the predicates the read
+  covers; at constant length it could be rewritten to `NAND|IMPL|ownedBy only` and
+  stay green. The arrow-list is parsed out of the field, must be exactly
+  `IMPL|NAND|hasPart`, and each token must be a predicate the graph actually has.
 
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some
