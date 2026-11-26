@@ -133,8 +133,11 @@ version: 1
 # both of those are `main`'s (each landed with its own fold, and `fast_pool(main)` contains both), so
 # reading either as this lane's delta attributes a partition move to a row that had already merged.
 # ⛔ Every OTHER row this tree carries is `main`'s at this head, NOT this lane's (`#14597`'s
-# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one
-# `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py`,
+# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one row
+# THESE FOLDS ADDED whose weight is NOT the flat 2.0 s (28.0; the `core` surface as a whole carries many
+# rows off 2.0, so the quantifier is about the rows this sentence NAMES and never about the surface — a
+# `core`-wide "the one" was false and is corrected here, #14691 review 9th cycle P3) — `#14607`'s
+# `tests/test_mcp_selfcheck.py`,
 # `#14700`'s capture-refusal suite, and the rest): each landed before this fold, and reading one of
 # them as this lane's delta would attribute a partition move to a row that did not cause it. The
 # name lists above are what the guard COMPARES against the live emission
