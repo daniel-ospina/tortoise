@@ -25,7 +25,7 @@ Abuse DELIVERY (``notify_abuse``) is split into two registers (#14407), because
 "how a message reaches a human" and "what record it belongs to" were two
 different decisions and had drifted apart:
 
-* :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
+* :data:`ABUSE_INCIDENT_KINDS` — a HUMAN WORK ITEM. The message belongs to the
   incident lifecycle, so the store's create-once path files the issue AND emits
   the episode's first push, and the message names the issue. While the delivery
   window HOLDS it re-alarms at most once per
@@ -954,7 +954,16 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 if kind == KIND_ABUSE_SUSPENDED
                 else "Human review needed — rate-limit, do not suspend"
                 if kind == KIND_ABUSE_REVIEW_NEEDED
-                else "Suspicious activity flagged")
+                # #14687: this read "Suspicious activity flagged", which is the
+                # exact accusation the change removed from the CUSTOMER path
+                # (`abuse.py::_alert_dict`'s label note) — and it landed on the
+                # surface that decides whether to raise a limit or reach out.
+                # `ABUSE_INCIDENT_KINDS` keeps the flag as an operator WORK ITEM
+                # (a rate is still worth a human look), but a work item is not an
+                # accusation: the wording names the measurement, and says that
+                # nothing was enforced, so the operator is not nudged toward
+                # acting on a number that never supported it.
+                else "High activity rate flagged — measurement, nothing enforced")
         detail = {
             "detail": (f"{what}: {details.get('rule', '?')} "
                        f"count={details.get('count', '?')}"),

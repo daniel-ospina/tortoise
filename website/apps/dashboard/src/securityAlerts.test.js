@@ -114,6 +114,21 @@ test('#10156: the activity lead carries no imperative and no incident claim', ()
     + 'changed, disabled or locked" sits beside a `suspend` row on an '
     + 'Organization that IS suspended: the whole-org-state claim the copy rule '
     + 'forbids (round-23 review finding).')
+  // #14687: `flag`/`review_needed` are ACTIVITY rows now, and a `flag` row writes
+  // `organizations.flagged_at` — `/v1/team` renders that as status "flagged" and
+  // `main.jsx` draws the "⚠ flagged" badge ON THIS SCREEN. "Not actions taken on
+  // your account" therefore denied a state the page itself displays: the same
+  // false-claim class as "nothing was changed", reached through the other clause.
+  // The lead must stay scoped to ENFORCEMENT (disabled/throttled/locked).
+  for (const forbidden of [
+    /not actions taken/i,
+    /no action (?:was )?taken/i,
+  ]) {
+    assert.doesNotMatch(ACTIVITY_LEAD, forbidden,
+      'an activity `flag` row DOES set `flagged_at`, which the header renders as '
+      + 'a "flagged" badge — "no action taken on your account" is the same false '
+      + 'claim as "nothing was changed", so the lead may only deny ENFORCEMENT')
+  }
   assert.doesNotMatch(ACTIVITY_LEAD, /nothing was (?:changed, disabled|disabled, changed) or locked\./i,
     'an UNSCOPED no-change clause is a whole-org-state claim')
   assert.match(ACTIVITY_HEADING, /activity/i)

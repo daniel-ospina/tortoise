@@ -57,9 +57,21 @@ export const ACTIVITY_HEADING = 'Recent activity'
 // `suspend` row on an Organization that IS suspended — telling that customer
 // nothing was locked is the one thing the appeal flow exists to contradict
 // (round-23 review finding). "by them" is what makes the clause true.
+//
+// ⛔ #14687 removed "not actions taken on your account" and the clause is scoped
+// to ENFORCEMENT instead. That clause was TRUE while `flag`/`review_needed` were
+// rescued into the incident register (`INCIDENT_BY_DEFINITION` below) — no
+// state-writing row ever reached this one. The register split is what makes them
+// activity rows, and a `flag` row DOES write `organizations.flagged_at`
+// (`abuse.py::flag_org`), which `/v1/team` renders as `status: "flagged"` and
+// `main.jsx` draws as the "⚠ flagged" badge — on THIS screen. "Not actions taken
+// on your account" beside that badge denies a state the header displays, which is
+// the same false-claim class as "nothing was changed". What is true is narrower
+// and is what this says: nothing was disabled, throttled or locked.
 export const ACTIVITY_LEAD =
-  'Rate signals from our abuse detectors. These are measurements, not actions ' +
-  'taken on your account — nothing was disabled, throttled or locked by them.'
+  'Rate signals from our abuse detectors. These are measurements, not ' +
+  'enforcement on your account — nothing was disabled, throttled or locked ' +
+  'by them.'
 
 export const ALERTS_HEADING = 'Security alerts'
 export const ALERTS_LEAD =
