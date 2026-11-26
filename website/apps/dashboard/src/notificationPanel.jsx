@@ -200,12 +200,14 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
                       ackError, onBack, onDismiss }) {
   const detail = detailOf(alert, now)
   const pending = Boolean(ackPending) && ackPending === (alert && alert.episode)
-  // ⛔ The admission must match the chrome's EXACTLY (`message` is the field both
-  // sites actually draw). The chrome is suppressed when the open detail is this
-  // episode, so a payload with a `label` but no `message` was admitted by neither
-  // — stated ZERO times. Unreachable today (both `main.jsx` write sites set a
-  // non-empty message), but that is the "never zero" invariant this pair exists to
-  // hold, and a future caller would break it silently (review finding).
+  // ⛔ The admission must AGREE with the chrome's, because the two gates are exact
+  // complements: the chrome draws the refusal whenever the open detail is NOT that
+  // episode, `DetailView` whenever it IS. Any asymmetry makes one state draw twice
+  // or neither. Both key on `message`, the field both sites actually draw — a
+  // payload with a `label` but no `message` is now deliberately SILENT at both,
+  // and the chrome used to render a dangling `label — ` followed by nothing for it.
+  // Unreachable today (both `main.jsx` write sites set a non-empty message), but a
+  // future caller would break the pair silently.
   const error = ackError && ackError.message
     && alert && ackError.episode === (alert && alert.episode)
     ? ackError.message
@@ -543,7 +545,9 @@ export function NotificationBell({
   // Three conditions, each for a different defect:
   //  * `ackError.orgId === orgId` — the refusal names an Organization, and a
   //    response still in flight when a switch cleared it can land afterwards;
-  //  * the message OR the label must exist, or there is nothing to say;
+  //  * `message` must exist — the field BOTH sites draw, so the pair stays an exact
+  //    complement. `label` is only the bold prefix; a payload carrying a label and
+  //    no message is deliberately silent at both sites;
   //  * ⛔ `!(detailAlert && …)` — "is the OPEN detail this episode", NOT "is any
   //    detail open" (review finding 3). Gated on `!detailAlert`, the refusal was
   //    hidden whenever a DIFFERENT row's detail was open: `DetailView` renders it
