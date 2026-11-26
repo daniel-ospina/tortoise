@@ -506,23 +506,17 @@ async def run() -> int:
     # round 6, P1). `rows()` maps an error reply to `[]`, so an errored witness
     # satisfied the emptiness test and MANUFACTURED D4. Measured: all seven witness
     # replies replaced with the failure text left the finding in place.
+    # ⛔ ONE ERROR PREDICATE, NOT THREE (#14691 review, round 7, P1). The guard
+    # above spelled its own five-token list while `score_t6.is_error_reply` spelled
+    # nine, so the two DISAGREED on 6 of 20 reply shapes and this gate still wrote
+    # D4 for `["Failure: …"]`, `["Refused: …"]`, `["Unauthorized"]` — a producer that
+    # manufactures a product defect from a call that failed in a spelling it did not
+    # know. It now asks the scorer, so there is one definition of "the call failed".
     def _answered(call: dict) -> bool:
-        reply = (call or {}).get("reply")
         if (call or {}).get("ok") is False or (call or {}).get("error"):
             return False
-        if isinstance(reply, dict) and (reply.get("isError") is True
-                                        or reply.get("ok") is False
-                                        or reply.get("error")):
-            return False
-        if isinstance(reply, str):
-            return not reply.lstrip().lower().startswith(
-                ("error", "exception", "traceback", "failed", "timeout"))
-        if isinstance(reply, list) and reply and all(isinstance(x, str)
-                                                     for x in reply):
-            return not any(x.lstrip().lower().startswith(
-                ("error", "exception", "traceback", "failed", "timeout"))
-                for x in reply)
-        return True
+        from score_t6 import is_error_reply  # the ONE predicate (bundle-local)
+        return not is_error_reply((call or {}).get("reply"))
 
     silent = {name: w["explore_neighbour_count"]
               for name, w in (report.get("link_witness") or {}).items()

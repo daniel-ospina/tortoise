@@ -446,7 +446,7 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 `provenance.probe_sha256`, the hash of the `run_readback.py` that produced it. It was produced at
 `d4fc8fe51ee5`, where that file hashed
 `5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
-`a1e3134c6ed60c5ec94f6260c30d78500312bd3b9121b4c3188467b520cffb54`, because three edits landed after it: a later commit renamed
+`f24593066e67d6f3611497d0f4f2db8dac99008c7be29a7120f025e791708790`, because three edits landed after it: a later commit renamed
 one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
 `agent-infra-ci / lint` leg — **not a required context** (`main`'s protection, the active
 ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
@@ -455,8 +455,9 @@ ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
 baseline for new code, so the rename was taken rather than left as debt. **The rename is inert** — mechanically verified by renaming
 it back and diffing against `d4fc8fe`: zero differences. **The other two edits are the
 error-vs-empty guards this review added** — `_call()` now records the MCP `isError` flag instead of
-discarding it, and the D4 emitter refuses a witness whose call FAILED — so a future run cannot
-manufacture D4 from a call that never answered. Both are inert to the numbers in the committed
+discarding it, and the D4 emitter refuses a witness whose call FAILED, asking the scorer's
+`is_error_reply` rather than keeping a second, narrower spelling of "the call failed" — so a future
+run cannot manufacture D4 from a call that never answered. Both are inert to the numbers in the committed
 artifact (they change what a future run would refuse, not what this one measured), and the sweep
 that measured them is §8.7. The artifact's numbers stand and only the binding is stale. It is stated here rather than silently regenerated, because regenerating a
 791 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
@@ -709,6 +710,25 @@ pinned by an arm that reds on its own mutation:
   exits 1 without writing — and it refuses to score at all when the ruled direction
   table cannot be imported (the import used to degrade to `{}` under a bare
   `try/except`, which made the comparison depend on the caller's `PYTHONPATH`).
+
+### 8.9 What the seventh round closed (one predicate, one count, one port)
+
+- **P1 — a THIRD error predicate.** The producer's round-6 guard spelled its own
+  five-token list while the scorer spelled nine, so the two DISAGREED on 6 of 20
+  reply shapes and `run_readback` still wrote D4 for `["Failure: …"]`,
+  `["Refused: …"]`, `["Unauthorized"]` — manufacturing the bundle's central
+  product finding from a call that failed in a spelling its own guard did not know.
+  The producer now ASKS the scorer (`from score_t6 import is_error_reply`), and the
+  contract is pinned by BEHAVIOUR over 20 shapes, taken from the file rather than
+  restated — its body is unpinned content and a literal would not have held.
+- **P3 — D4's evidence counts.** `nodes_read_as_isolated_by_expand` and its
+  byte-identical duplicate were read by nothing: rotating one made the artifact
+  contradict its own `link_witness` block with the size held at 809,812. Every count
+  is now the witness's own `explore_neighbour_count`, the two copies must agree, and
+  `code_path` must name a file this tree has.
+- **P3 — the db_uri port.** The arm claimed to pin "the lane's own port" and pinned
+  none: 16413 → 16414 stayed green. The host:port is now the receipt's own, so the
+  readback and the ingest cannot be talking to different containers.
 
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some

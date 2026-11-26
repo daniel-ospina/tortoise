@@ -627,7 +627,8 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
             re.compile(r'(?s) *# ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT.*?'
                        r'\n *"error": f"MCP isError: \{out!r\}"\[:400\]\}\n'),
             re.compile(r"(?s)\n    # ⛔ A FAILED CALL IS NOT A SILENT DOOR.*?"
-                       r"\n        return True\n"),
+                       r"\n        return not is_error_reply\(\(call or \{\}\)"
+                       r'\.get\("reply"\)\)\n'),
         ]
         for pattern in blocks:
             text, count = pattern.subn("", text, count=1)
@@ -3432,6 +3433,26 @@ def test_D4_cannot_survive_its_witnesses_all_failing():
     d4 = next((f for f in readback["door_findings"] if f["id"] == "D4"), None)
     assert d4, "the artifact no longer carries D4 at all"
 
+    # ⛔ D4'S EVIDENCE IS A CLAIM TOO (#14691 review, round 7, finding 2). The
+    # counts beside the finding — `nodes_read_as_isolated_by_expand` and its
+    # byte-identical duplicate — were read by NOTHING, so rotating them made the
+    # artifact contradict its own `link_witness` block with the size held at
+    # 809,812. Each count is the witness's own `explore_neighbour_count`.
+    witness = readback["link_witness"]
+    isolated = d4["evidence"]["nodes_read_as_isolated_by_expand"]
+    twin = d4["evidence"]["same_nodes_seen_by_explore_connections"]
+    assert isolated == twin, (
+        "D4's two copies of the isolated-node counts disagree with each other")
+    for name, count in isolated.items():
+        assert name in witness, (name, sorted(witness))
+        assert count == witness[name]["explore_neighbour_count"], (
+            f"D4 says {name} is seen by {count} explore neighbours; the witness "
+            f"recorded {witness[name]['explore_neighbour_count']}")
+    assert len(isolated) == 6, sorted(isolated)
+    assert "tortoise/entity_reads.py" in d4["evidence"]["code_path"]
+    assert (REPO / "tortoise" / "entity_reads.py").is_file(), (
+        "D4's code_path names a file this tree does not have")
+
     sibling = BUNDLE / "out" / "readback.json"
     original = sibling.read_text()
     try:
@@ -3497,6 +3518,14 @@ def test_the_readback_db_uri_names_the_graph_it_measured():
     assert uri.endswith("/" + graph), (uri, graph)
     assert "live-v5" not in uri
     assert "127.0.0.1:" in uri, uri
+    # ⛔ THE PORT IS PART OF THE CLAIM (#14691 review, round 7, finding 3): the
+    # docstring said "the lane's own port" and nothing asserted one, so 16413 →
+    # 16414 stayed green. The receipt records the same container's address.
+    receipt_uri = _receipt().get("db_uri") or ""
+    assert receipt_uri, "the receipt records no db_uri to compare against"
+    assert uri.rsplit("/", 1)[0] == receipt_uri.rsplit("/", 1)[0], (
+        f"readback measured {uri.rsplit('/', 1)[0]}, the receipt wrote through "
+        f"{receipt_uri.rsplit('/', 1)[0]} — different container")
 
 
 def test_the_scorer_refuses_to_derive_from_a_PARTIAL_contract(tmp_path):
@@ -3556,3 +3585,71 @@ def test_the_scorer_check_flag_REFUSES_a_corrupted_artifact(tmp_path):
         f"`--check` accepted a corrupted artifact (exit {result.returncode})")
     assert artifact.read_text() == broken, (
         "`--check` REWROTE the artifact — it must never write")
+
+
+def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
+    r"""Reds if the producer grows a second, narrower error spelling again.
+
+    ⛔ #14691 review, round 7, P1. The round-6 producer guard spelled its own
+    five-token list while `score_t6.is_error_reply` spelled nine, so the two
+    DISAGREED on 6 of 20 reply shapes: the producer still wrote D4 for
+    `["Failure: …"]`, `["Refused: …"]`, `["Unauthorized"]` — manufacturing the
+    bundle's central product finding from a call that failed in a spelling its own
+    guard did not know. Its body is unpinned content (emptying both tuples and
+    updating REPORT's documented hash left 85 passed), so the contract is pinned by
+    BEHAVIOUR here rather than by a literal.
+    """
+    module = _load_score_module()
+    source = (BUNDLE / "run_readback.py").read_text()
+    assert "from score_t6 import is_error_reply" in source, (
+        "run_readback.py no longer asks the scorer which replies are errors")
+    shapes = [
+        "Error: timeout",
+        "Failure: boom",
+        "Refused: nope",
+        "Unauthorized",
+        "Unavailable",
+        "exception in tool",
+        "Traceback (most recent call last):",
+        ["Error: timeout"],
+        ["Failure: boom"],
+        ["Refused: nope"],
+        ["Unauthorized"],
+        ["Unavailable"],
+        {"error": "x"},
+        {"ok": False},
+        {"isError": True},
+        {"content": [{"isError": True}], "isError": False},
+        "[]",
+        {"result": []},
+        [{"predicate": "supports"}],
+        {"result": [{"predicate": "supports", "mechanism": "IMPL"}]},
+    ]
+    for shape in shapes:
+        expected = module.is_error_reply(shape)
+        # the producer's own gate, exercised exactly as it is written
+        produced = _producer_answered(shape)
+        assert produced is (not expected), (
+            f"the producer and the scorer disagree about {shape!r}: "
+            f"producer answered={produced}, scorer error={expected}")
+    # and the six shapes that DISAGREED before are among them, so this arm cannot
+    # pass on a producer that only knows the two shapes the scorer's dict arm knows
+    disagreed = [s for s in shapes if module.is_error_reply(s)]
+    assert len(disagreed) >= 10, disagreed
+
+
+def _producer_answered(reply):
+    """`run_readback._answered`'s rule, taken from the file, not restated."""
+    source = (BUNDLE / "run_readback.py").read_text()
+    start = source.index("    def _answered(call: dict) -> bool:")
+    end = source.index("    silent = {name: w[\"explore_neighbour_count\"]", start)
+    body = source[start:end]
+    dedented = "\n".join(line[4:] if line.startswith("    ") else line
+                         for line in body.splitlines())
+    import sys as _sys
+
+    if str(BUNDLE) not in _sys.path:
+        _sys.path.insert(0, str(BUNDLE))
+    namespace: dict = {"__name__": "run_readback_answers"}
+    exec(compile(dedented, "run_readback.py:answers", "exec"), namespace)
+    return namespace["_answered"]({"ok": True, "reply": reply})
