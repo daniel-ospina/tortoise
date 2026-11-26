@@ -2726,6 +2726,114 @@ def test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE(
         "wrong repository")
 
 
+def test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE(
+    tmp_path, monkeypatch, capsys
+):
+    """…and ROOT itself is not exempt: the same damage AT ROOT, nested in a repository.
+
+    ⛔ ROOT WAS THE ONE PROVIDER THAT NEVER PASSED THE ASKABILITY TEST (#14741 review,
+    cycle 3, P2, measured). `_destination_probes` `add`ed `(ROOT, rel)` unconditionally
+    and the walk STOPPED at ROOT, so ROOT was a provider no askability test could
+    reach. With `inner/.git` dangling inside an enclosing repository `O`, probe 1
+    (`git -C inner ls-files --error-unmatch -- docs/K.md`) SKIPS the entry, answers as
+    `O` (rc 1 — "untracked") and permits; `probe_dir` IS `inner`, so the `seen` key
+    deduped it away; and nothing else was asked. `--render docs/K.md` replaced the 8
+    bytes `inner`'s intact index AND HEAD both hold at **rc 0** with empty stderr — the
+    class this module refuses rather than restores.
+
+    The arm above cannot see it: its fixture has NO enclosing repository, so git answers
+    `128 + not a git repository` and the refusal comes from
+    `_plainly_outside_any_repository`'s structural half, never from the askability
+    mechanism. Nesting the same fixture one level inside a repository is what makes the
+    mechanism — not git's own failure — the thing under test.
+
+    This arm pins ROOT's INCLUSION in the boundary walk: make ROOT exempt from the loop
+    (`if boundary == ROOT: continue`, the walk's old `stop = ROOT` shape) and it reds
+    alone, because every other arm's unaskable boundary is NOT ROOT.
+    """
+    outer = _scratch_repo(tmp_path, needs_non_utf8=False)  # the ENCLOSING repository
+    (outer / "README.md").write_text("outer\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(outer), "add", "--", "README.md"], check=True)
+    inner = outer / "inner"  # ROOT: a repository of its own, tracking the destination
+    keeper = inner / "docs" / "K.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("inner keep\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(inner), "add", "--", "docs/K.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), *config, "commit", "-qm", "inner tracks docs/K.md"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(outer), *config, "commit", "-qm", "outer"],
+                   check=True)
+    git_dir = inner / ".git-real"
+    (inner / ".git").rename(git_dir)
+    os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), inner / ".git")
+    monkeypatch.setattr(census, "ROOT", inner)
+    src = inner / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", inner / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the entry at ROOT is PRESENT and cannot be RESOLVED. A name that is
+    # simply absent would grade the `lexists` half instead of askability.
+    assert os.path.lexists(inner / ".git") and not (inner / ".git").exists(), (
+        "the premise: `lexists` sees ROOT's `.git` and `exists()` does not")
+    # PREMISE 2 — ROOT's REAL repository indexes AND commits the destination. Asked
+    # through the real gitdir, because ROOT is no longer a repository to git.
+    indexed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(inner), "ls-files"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert indexed.stdout.split() == ["docs/K.md"], (
+        "the premise: ROOT's DAMAGED repository must track the destination; got "
+        f"{indexed.stdout!r}")
+    committed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(inner),
+         "ls-tree", "--name-only", "HEAD", "--", "docs"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert committed.stdout.split() == ["docs"], (
+        "the premise: HEAD must name it too, so the write is restorable damage rather "
+        f"than an untracked file; got {committed.stdout!r}")
+    # PREMISE 3 — THE MECHANISM: git run AT ROOT skips the damaged entry and answers as
+    # the ENCLOSING repository, which does NOT hold the path — i.e. probe 1 permits.
+    enclosing = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(enclosing.stdout.strip()).resolve() == outer.resolve(), (
+        "the premise: git at ROOT must discover the ENCLOSING repository — that answer "
+        f"is what made ROOT's own probe a permit; got {enclosing.stdout!r}")
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/K.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT's own probe must answer 'untracked' (as the ENCLOSING "
+        f"repository); got rc={root_answer.returncode}")
+    outer_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/docs/K.md"],
+        cwd=outer, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert outer_answer.returncode == 1, (
+        "the premise: the ENCLOSING repository must NOT track it, or this arm could be "
+        f"satisfied by a provider other than ROOT's askability; got rc={outer_answer.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "docs/K.md"])
+    assert rc == 2, (
+        f"ROOT's own `.git` dangling must not permit the write, got {rc} — git answered "
+        "as the repository ABOVE ROOT, and that repository does not hold this path "
+        "while the damaged ROOT does")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unaskable ROOT; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "ROOT's tracked content was overwritten through a `.git` git answers from the "
+        "wrong repository")
+
+
 def test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE(tmp_path, monkeypatch, capsys):
     """…and the damage shapes `lexists` CANNOT see: `.git` present AND resolvable, git disowned.
 
@@ -5126,6 +5234,17 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # committed bytes at rc 0. Every in-ROOT arm stays green with the `spec is None`
         # branch deleted, which is why this one has to exist.
         "test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE",
+        # ⛔ AND THE SAME DAMAGE **AT ROOT ITSELF** (#14741 review, cycle 3, P2,
+        # measured): ROOT was the ONE provider that never passed an askability test —
+        # `add(ROOT, rel)` was unconditional and the walk stopped at ROOT, so with
+        # `ROOT/.git` dangling inside an enclosing repository the first probe skipped
+        # the entry and answered as the repository ABOVE (rc 1, a permit), `probe_dir`
+        # was deduped away, and `--render` replaced ROOT's committed bytes at rc 0.
+        # The arm above cannot see it: with no enclosing repository git answers `128 +
+        # not a git repository` and a DIFFERENT mechanism (the structural half of
+        # `_plainly_outside_any_repository`) refuses. Only nested does this arm grade
+        # ROOT's inclusion in the walk.
+        "test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE",
         # ⛔ AND THE SAME HOLE WHERE `.git` IS RESOLVABLE AND STILL DISOWNED (#14741
         # review, cycle 2, P1, measured): `lexists`/`exists` is a test of the NAME, and
         # three of the four damage shapes (HEAD removed, objects/ removed, a symlink to
@@ -5246,8 +5365,13 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # ⛔ AND THE METADATA-IN-PLACE BOUNDARY TAKES IT 58 -> 59: the bare-gitdir form had no
     # `.git` name, so the askability test skipped it and a DISOWNED bare gitdir was asked
     # about the repository above it — a permit (#14741 review, cycle 3, P2, measured).
-    assert len(split_arms) == 59, (
-        f"expected EXACTLY 59 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    # ⛔ AND ROOT'S OWN ASKABILITY TAKES IT 59 -> 60: ROOT was the one provider no
+    # askability test could reach (its `add` was unconditional and the walk stopped
+    # there), so the same dangling-`.git` damage AT ROOT, nested in a repository,
+    # overwrote ROOT's committed bytes at rc 0 (#14741 review, cycle 3, P2, measured).
+    # The code path is closed; this arm is what reds if ROOT is exempted again.
+    assert len(split_arms) == 60, (
+        f"expected EXACTLY 60 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -5324,8 +5448,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # a bare gitdir has no `.git` name, so the exemption skipped the askability test and
     # a DISOWNED one was asked about the repository above it at rc 0 (#14741 review,
     # cycle 3, P2 — measured against the real `main()`).
-    assert len(test_functions) == 118, (
-        f"expected EXACTLY 117 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND ROOT'S OWN ASKABILITY TAKES IT 118 -> 119 (`split_arms` 59 -> 60): the
+    # arm that pins ROOT as a boundary the unaskability test reaches — the one provider
+    # the `stop = ROOT` walk exempted by construction (#14741 review, cycle 3, P2).
+    assert len(test_functions) == 119, (
+        f"expected EXACTLY 119 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

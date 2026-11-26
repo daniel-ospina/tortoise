@@ -1317,6 +1317,20 @@ def _destination_probes(
         probes.append((cwd, spec, label))
 
     if rel is not None:
+        # ⛔ THIS `add` IS NOT AN ASKABILITY EXEMPTION — THE WALK BELOW IS WHAT DECIDES
+        # ROOT'S ASKABILITY (#14741 review, cycle 3, P2, measured). ROOT used to be the
+        # ONE provider no askability test could reach: this line was unconditional AND
+        # the walk stopped at ROOT, so with `ROOT/.git` dangling inside an enclosing
+        # repository the first probe skipped the entry and answered as the repository
+        # ABOVE it (rc 1, a permit), `probe_dir` WAS ROOT and the `seen` key deduped it,
+        # and `--render` replaced ROOT's committed bytes at rc 0, empty stderr. The walk
+        # now reaches and passes ROOT, so `_boundary_is_unaskable(ROOT)` records
+        # `(ROOT, None)` and refuses — MEASURED, and pinned by
+        # `test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE`, which reds
+        # alone when ROOT is exempted from the loop. Keep this line unconditional (it is
+        # the `rel is not None` provider on every healthy tree) and keep ROOT IN the
+        # walk; do not reintroduce a ROOT stop to "simplify" it — that stop is what
+        # created the exemption, and it protects nothing (round 12's measurement).
         add(ROOT, rel, rel)
     # ⛔ EVERY BOUNDARY ABOVE THE DESTINATION — AND NOT INSIDE THE `rel is not None`
     # BRANCH (#14625 review, round 11, P2, measured). This walk used to be built only
