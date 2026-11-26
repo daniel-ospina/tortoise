@@ -470,7 +470,7 @@ names its mutant in its own docstring:
 | `t6-score.json`'s own `A4_no_invention.quotes` block set to `50 / 0 / 0` | `test_the_committed_score_block_is_the_derivation` |
 | a **fabricated** row in `t6-quote-audit.json`'s `audited[]` | `test_the_quote_audit_artifact_is_re_derived_from_the_receipt` |
 | a door answer led by "No" and then reversed in the same cell | `test_each_door_finding_answer_states_the_artifacts_ANSWER` |
-| the fresh-graph refusal's **`if`** deleted (the predicate still measured clean) | `test_the_isolation_refusal_is_enforced_on_the_whole_overview` |
+| the fresh-graph refusal's **`if`** deleted (the predicate still measured clean) | `test_the_refusal_FIRES_on_the_run_path` |
 | the ownership probe's `call_failed` guard deleted (a failure with `reply: []` counted as an answer) | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
 | both `bare_kind_probes` rewritten to error envelopes, D3 still reported | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
 
@@ -493,6 +493,10 @@ Three content defects were corrected rather than re-pinned:
   counted and which would have refused every real run), and `audit.exit_code` (a diagnostic code —
   its content signals `node_count` and `summary.total_issues` are still counted). The exclusion is a
   path SUBTREE match, so a field that later becomes an object cannot silently start refusing runs.
+  ⚠️ That last exclusion is a **CONSTRUCTED** case, not a measurement: the receipt's own
+  `empty_before` carries `audit.exit_code: 0` and no committed artifact carries `3`, so the "measured"
+  wording an earlier revision used was falsified by checking. The falsifier drives the constructed
+  case directly.
 
 ⚠️ **One residual, stated rather than silently closed:** `run_readback.py`'s own `report["ok"]` still
 only inspects three `layers` calls, so it does not see a failed `bare_kind_probes` or
@@ -527,20 +531,20 @@ and **not** to the primary artifact, and the prose pins reached two headings out
 | the independent artifact's `witness_governance_door_returns_empty` / row counts / `advertised_tools` / `typed_nodes` rewritten | `test_the_second_measurements_CORROBORATION_fields_are_pinned` |
 | every `audited` quote row replaced with a sentence the receipt never recorded | `test_every_audited_quote_ROW_is_a_real_quote_of_a_real_document` |
 | §2's isolation block (the report claiming 15 entities before the first write), the A5 heading, §2's cost row, §3's counts, §7's pair/tool figures | `test_report_figures_across_the_sections_are_the_artifacts_figures` |
-| `if contamination:` → `if False:`, and an inserted filter making the branch INERT with every substring intact | `test_the_isolation_refusal_is_WIRED_into_the_ingest_runner` + `test_the_refusal_FIRES_on_the_run_path` |
+| `if contamination:` → `if False:`, and an inserted filter making the branch INERT with every substring intact | `test_the_refusal_FIRES_on_the_run_path` (the source-substring arm it replaced was retired — see §8.1's reconciliation note) |
 
 Two content fixes came with it: `managedBy` had `produces`'s two-way bug mirrored (an unreadable
-`dst_kind` graded the row `INVERTED`), now `UNCLASSIFIABLE` like its twin; and the PR body's A4/A3
-figures ("10 … overlap < 0.5", "5 `hasPart` parents") are corrected in a PR comment — the body is not
-edited after an attestation, and the artifacts say **12** at `< 0.6` and **2 parents / 5 children**.
+`dst_kind` graded the row `INVERTED`), now `UNCLASSIFIABLE` like its twin; and the PR body's A4 figure ("10 … overlap < 0.5") was corrected **in the body itself, before any
+clean attestation existed** — the artifacts say **12** at `< 0.6` (11 below 0.5). The A3 figure
+("5 `hasPart` parents") was corrected in a PR comment instead, because a record was already on the
+body and editing it would have wiped the proof: the artifacts say **2 parents / 5 children**.
 
 ⚠️ **One residual, unchanged and stated rather than silently closed:** `run_readback.py`'s own
 `report["ok"]` still inspects only three `layers` calls, so it does not see a failed
 `bare_kind_probes` / `expand_relationships` call. That file's bytes are the provenance binding of a
-committed 791 KB artifact, so the fix is on the CONSUMER side (`score_t6.rows_measured` +
-`_measured()`), where a failed call is no longer readable as an answered-empty one.
-
----
+committed 791 KB artifact, so the fix is on the CONSUMER side — `score_t6.is_error_reply` /
+`call_failed` / `measured_empty`, plus the test-side `_measured()` — where a failed call is no longer
+readable as an answered-empty one.
 
 ---
 

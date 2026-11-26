@@ -68,8 +68,12 @@ def verdict(receipt: dict) -> int:
 #:                         Its CONTENT signals (`node_count`, `edge_count`,
 #:                         `summary.total_issues`) are counted on their own; scoring
 #:                         this too reported a diagnostic code as "content" and
-#:                         refused a legitimate run with the wrong reason (measured:
-#:                         `{'audit.exit_code': 3}` on the receipt's own empty graph).
+#:                         refused a legitimate run with the wrong reason.
+#:                         ⚠️ CONSTRUCTED case, not a measurement: the receipt's own
+#:                         `empty_before` carries `exit_code: 0` and no committed
+#:                         artifact carries `3`. An earlier revision of this note
+#:                         said "measured", which an artifact check falsified; the
+#:                         falsifier drives the constructed case instead.
 #: Matched by PATH SUBTREE (`p == key or p.startswith(key + '.')`), so a field that
 #: later becomes an object does not silently start refusing every run.
 _NOT_CONTENT = ("namespaces", "status.connected", "stale.limit", "audit.exit_code")
