@@ -38,10 +38,12 @@ WHAT IS PINNED (each a MUTATION TARGET)
    refusal — otherwise typing the body would have exempted a real org failure
    from the dashboard's last-error state, AND inverting the predicate would have
    blacked out every genuine failure. The predicate's ARMS are pinned by a unit
-   row; the REST carve-out's POLARITY is pinned BEHAVIOURALLY (the write must be
-   skipped for this refusal and made for a real one), which no source-substring
-   assertion can discriminate (`hosted_api.py`'s `capture_session` is driven
-   through the app);
+   row; each carve-out's POLARITY (a call kept but inverted) is pinned
+   BEHAVIOURALLY, both ways: REST by the two rows below, MCP by
+   `test_the_in_flight_409_is_NOT_written_to_the_org_last_error_on_the_mcp_surface`
+   and `test_mcp_capture_renders_a_typed_detail_as_its_message` in
+   `tests/test_capture_session.py`. No source-substring assertion can
+   discriminate polarity, which is why neither arm relies on one;
 4. there is ONE predicate, imported by `mcp_server` — not a second copy;
 5. the WIRE body is `{"detail": {...}}` — the nested envelope FastAPI produces —
    so a client reading `resp.json()["detail"]["code"]` gets the code, and
@@ -181,11 +183,13 @@ def test_the_carve_out_recognises_the_typed_body_and_the_legacy_string() -> None
     CALL SITE reverted to the old equality compare: reverting `hosted_api.py`'s
     or `mcp_server.py`'s call site leaves `_is_capture_in_flight_refusal`
     untouched, so every assertion here stays green. That revert is caught by
-    `test_both_surfaces_use_the_one_predicate`; the REST arm's POLARITY (a call
-    kept but inverted) is caught by the two behavioural rows below. Stating a
-    mutant that does not red the row is how a later reader concludes a guard is
-    covered when it is covered elsewhere — or not at all (agent-infra#3442,
-    rule 2; #14700 review finding 4).
+    `test_both_surfaces_use_the_one_predicate`; each surface's POLARITY (a call
+    kept but inverted) is caught behaviourally — REST by the two rows below,
+    MCP by the pair in `tests/test_capture_session.py`
+    (`…_on_the_mcp_surface` for this refusal, `…_renders_a_typed_detail_as_its_
+    message` for a real one). Stating a mutant that does not red the row is how
+    a later reader concludes a guard is covered when it is covered elsewhere —
+    or not at all (agent-infra#3442, rule 2; #14700 review finding 4).
 
     MUTATION THAT REDS THIS (each on the predicate body):
     * `return False` for a dict            -> the typed body stops being exempt;
