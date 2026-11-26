@@ -3585,10 +3585,14 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
     # to read is the value TWO retirements earlier (the SDK traversal row took
     # 31 -> 30, `#11609` batch 1 another).
-    # ⛔ 21 -> 22 at `#14592`'s head (`cy-14593`): row 46 adds ONE cell occurrence (its
-    # own REST door), and `_door_reaches` accepts exactly one pair for it. This floor
-    # tracks §13's cell-occurrence count and moves WITH the table, as the note below
-    # requires. ⚠️ It is NOT a per-occurrence tripwire: the figure it bounds is
+    # ⛔ 21 -> 23 at `#14592`'s head (`cy-14593`), in TWO cell-occurrence moves: row 46
+    # carries ONE occurrence of its own (its REST door), already in `origin/main`'s
+    # table where `main` left this floor at 21, and row 45's cell HERE names its SECOND
+    # door (`MCP tortoise_search`) — 22 -> 23 — which `_door_reaches` accepts exactly
+    # one pair for. MEASURED over §13 with `_doors()` on both trees: `origin/main` 22,
+    # this head 23 (44 rows, 19 customer-callable, 16 distinct doors either way). This
+    # floor tracks §13's cell-occurrence count and moves WITH the table, as the note
+    # below requires. ⚠️ It is NOT a per-occurrence tripwire: the figure it bounds is
     # `total` (accepted PAIRS, 28 here) against 23, so it reds on a loss of 6 or more,
     # not on one. The one-occurrence tripwire is the sibling arm's
     # `attributed >= 23`, where `attributed` IS the occurrence count.
