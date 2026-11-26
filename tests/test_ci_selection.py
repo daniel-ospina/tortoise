@@ -10212,18 +10212,21 @@ _H_14544_CHANGE_VERB = (
 #: punctuation-only bound reached the object 38 characters later and refused the paragraph's own true
 #: claim (#14623 review round 8, P2). Both lists are read together wherever a gap must stay in one
 #: clause.
+#: ⛔ THE OBJECT OF THE CHANGE VERB DOES NOT USE THE SUBORDINATOR LIST AT ALL (#14623 review round
+#: 9-10, P2): an enumeration of subordinators is never complete, and MEASURED, `once`, `whilst`,
+#: `provided`, `till`, `now that`, `given that`, `the moment`, `every time`, `in case`, `supposing`,
+#: `lest` and `whereby` each refused the paragraph's own bin claim — one false red per missing word.
+#: The object is ANCHORED instead: a negated change takes the row as its object only when nothing
+#: but determiners stand between them, so no word list can decide it. The residue (an adjunct set off
+#: by commas inside the verb phrase) is R1 on #14715, declared.
 _H_14544_SUBORDINATOR = (
     r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
 _H_14544_SAME_CLAUSE = (
     r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)" + _H_14544_SAME_CLAUSE + r"{0,400}?" + _H_14544_NEGATION
-    + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB
-    # ⛔ THE OBJECT MUST BE IN THE VERB'S OWN CLAUSE (`[^,;.!?]`), not merely within 40 characters:
-    # measured at #14623 review round 7, "`#14544`'s cut does not move a bin, and the row in
-    # `durations` is that edit" reached `row` at 35 characters ACROSS the comma, so a negated change
-    # of a BIN — the paragraph's own true claim — was refused whenever the next clause named the row.
-    + r"(?:(?!\b" + _H_14544_SUBORDINATOR + r"\b)" + _H_14544_SAME_CLAUSE + r"){0,40}?"
+    + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
+    + r"(?:(?:the|that|this|its|their|his|her|a|an|any|which)\s+){0,3}"
     + r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
@@ -10270,6 +10273,23 @@ _H_14544_FOREIGN_AGENT_RE = re.compile(
     _H_14544_CHANGE_VERB
     + r"[a-z]{0,8}\s+by\s+`?(?!#14544|that\s+cut|the\s+cut)\w",
     re.IGNORECASE)
+#: What may sit between the claim's verb and its agent before the excuse applies: whitespace, or a
+#: comma plus one short adverb. Anything else — another clause, another verb — is not this verb's
+#: agent. Measured on the five shapes in `test_the_14544_exemption_paragraph_states_what_14544_did…`.
+_H_14544_FOREIGN_BEFORE_RE = re.compile(
+    r"^\s*(?:,?\s*(?:even|also|really)\s+)?\s*(?:at\s+any(?:\s+single)?\s+point\s+)?$",
+    re.IGNORECASE)
+#: Where an agent PHRASE ends: end punctuation, or a comma that opens a new clause. A bare comma does
+#: NOT end it — the appositive form "by the commit …, `#14544`" names the cut across one.
+_H_14544_AGENT_PHRASE_END_RE = re.compile(r"[;.!?]|,\s*(?:and|but|so)\b", re.IGNORECASE)
+#: An agent NOUN PHRASE: a backticked span in ANY case (this repo's convention, and requiring the
+#: closing backtick separates an identifier from a bare idiom), an issue ref, a capitalised name, or
+#: a determiner plus a noun. The stoplist is the idiom set, because `by the way` has the shape of an
+#: agent and is not one.
+_H_14544_AGENT_NP_RE = re.compile(
+    r"^\s*(?:`[A-Za-z][\w./-]*`|`?#\d+|`?[A-Z][\w.-]*|(?:the|a|an|its|their|his|her|this|that)\s+"
+    r"(?!way\b|design\b|construction\b|default\b|hand\b|then\b|now\b|contrast\b|definition\b"
+    r"|time\b|far\b|mistake\b|accident\b)\w)")
 
 
 def _h_14544_foreign_agent(sentence: str, match: "re.Match[str]") -> bool:
@@ -10285,10 +10305,33 @@ def _h_14544_foreign_agent(sentence: str, match: "re.Match[str]") -> bool:
     # Stopping at the comma shipped that claim GREEN (#14623 review round 8, F2); allowing the whole
     # rest of the sentence would re-open the round-7 false block, where the cut is named in a LATER
     # clause after a `;`.
-    by = re.search(r"\bby\s+([^;.!?]{0,100})", sentence[match.end():])
-    if by is None:
+    #: ⛔ PLUS THREE THINGS, each measured (#14623 review rounds 9-10):
+    #:   • THE PHRASE ENDS AT A COMMA THAT OPENS A NEW CLAUSE (`, and|but|so`) — otherwise "even by the
+    #:     reaper, and `#14544`'s cut is separate" reads the cut out of the NEXT clause and refuses a
+    #:     TRUE sentence (measured RED before this; the appositive above is unaffected because it has
+    #:     no coordinator).
+    #:   • THE AGENT MUST BE AN AGENT NOUN PHRASE. Without that, `by design`, `by construction`,
+    #:     `by default` and `by the way` all read as FOREIGN and shipped the retired claim CLEAN.
+    #:   • A PHRASE MUST START WHERE A PHRASE CAN: whitespace or a comma-plus-adverb after the verb,
+    #:     so a `by` belonging to a later clause is never reached.
+    # ⛔ THE MATCH ENDS AT THE VERB STEM (`touch` in `touched`), so the position is advanced past the
+    # rest of that word before the agent is read — otherwise `ed by …` is not a phrase start and
+    # EVERY agent sentence is refused (#14623 review round 10, measured on nine fixtures).
+    pos = match.end()
+    while pos < len(sentence) and (sentence[pos].isalnum() or sentence[pos] in "_'\u2019-"):
+        pos += 1
+    tail = sentence[pos:]
+    first_by = re.search(r"\bby\s+", tail)
+    if first_by is None or first_by.start() > 40:
         return False
-    return _H_14544_ACTOR_RE.search(by.group(1)) is None
+    if _H_14544_FOREIGN_BEFORE_RE.match(tail[:first_by.start()]) is None:
+        return False
+    rest = tail[first_by.end():]
+    end = _H_14544_AGENT_PHRASE_END_RE.search(rest)
+    agent = rest[:end.start()] if end else rest
+    if _H_14544_AGENT_NP_RE.match(agent) is None:
+        return False
+    return _H_14544_ACTOR_RE.search(agent) is None
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     # ⛔ ONE CLAUSE PER GAP (`[^,;.!?]`), not `[\s\S]`: measured at #14623 review round 7, the
     # clause-bridging form read the REGISTRATION's adjective as the ROW's — "The `durations` row is
@@ -10298,15 +10341,17 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     # (F4) on the TRUE "the `durations` entry … is unchanged SINCE `#14544`" — a temporal relation
     # asserts the opposite of "that cut did not change it", so only the agent preposition is graded.
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:untouched|unchanged)[^,;.!?]{0,40}?\bby\s+(?:`?#14544|that\s+cut|the\s+cut)"
+    r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read))"
+    r"[^,;.!?]{0,40}?\bby\s+(?:`?#14544|that\s+cut|the\s+cut)"
     r"(?!\s*\w)"
     r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"left\s+alone\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
+    r"left\s+(?:alone|un\w+)\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
     # ⛔ …AND THE ATTRIBUTION FORM, where the agent arrives after a comma as an ascription rather than
     # as the `by`-agent: "the `durations` row is unchanged, as that cut's own note records" states the
     # claim, while the temporal "unchanged since" does not. Measured GREEN at #14623 review round 8.
     r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:untouched|unchanged|left\s+alone)\s*,\s*(?:as|per|according\s+to)\b"
+    r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
+    r"|left\s+(?:alone|un\w+))\s*,\s*(?:as|per|according\s+to)\b"
     r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
     # neither … nor, in EITHER conjunct order: the round-8 reviewer swapped the two nouns of this
     # very fixture and the claim shipped GREEN.
@@ -10651,7 +10696,19 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
             # false, and refusing it is the guard working (the alternative, dropping the row-first
             # arm, leaves “the weight never moved when that cut landed” GREEN).
-            "the row's weight was never re-read, and `#14544` cut its cases"):
+            "the row's weight was never re-read, and `#14544` cut its cases",
+            # ⛔ THE `un-` FAMILY OF EVERY CHANGE VERB states this claim: reading only
+            # `untouched|unchanged` shipped each of these CLEAN (#14623 review rounds 9-10, P1).
+            "The `durations` row is unaltered by `#14544`.",
+            "The row's weight was unaffected by `#14544`.",
+            "The `durations` row was left unmodified by `#14544`.",
+            # ⛔ `by <idiom>` IS NOT A FOREIGN AGENT — read as one, it excused the claim.
+            "The `durations` row was never touched by design, and `#14544`'s cut is separate.",
+            "The `durations` row was never touched by the way, as `#14544`'s own note records.",
+            # ⛔ A PHRASE THAT DESCRIBES THE CUT IS THE CUT: the appositive crosses a comma, so an
+            # agent phrase that stopped at every comma read this as foreign (#14623 round 8, F2).
+            "The `durations` row was never touched by the commit that took the file off `core`, "
+            "`#14544`."):
         assert _h_14544_banned_claim(paraphrase) is not None, (
             f"the retired-claim ban misses the paraphrase {paraphrase!r} — it grades the pronoun "
             "rather than the claim, bounds it by a DISTANCE the fixture exceeds, reads only ONE "
@@ -10692,7 +10749,22 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The `durations` row is `#14544`'s own edit, and the `eval` registration was left "
             "alone by that cut.",
             "`#14544`'s cut does not move a bin, and the row in `durations` is that edit.",
-            "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
+            "`#14544`'s removal of the file from the `core` surface cannot move a bin",
+            # ⛔ THE SUBORDINATOR LIST IS NOT THE DECISION (#14623 review rounds 9-10, P2): the
+            # object is anchored to the verb, so a join by ANY subordinator — listed or not — leaves
+            # the paragraph's own bin claim alone. Four that were measured red are fixtures.
+            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin whilst the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin provided the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin in case the bin is held by the `durations` row.",
+            # ⛔ A LOWER-CASE BACKTICKED AGENT is this repo's own naming convention, and a comma or
+            # an adverb between the verb and its agent is still the VERB'S agent.
+            "The `durations` row was not touched by `pre-commit`; `#14544`'s cut is separate.",
+            "The `durations` row was not touched by `reaper`, and `#14544`'s cut is separate.",
+            "The `durations` row was never touched, even by the reaper, and `#14544`'s cut is "
+            "separate.",
+            "The `durations` row was not touched at any point by the reaper; `#14544`'s cut is "
+            "separate."):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
