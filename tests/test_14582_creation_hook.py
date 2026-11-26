@@ -2240,6 +2240,82 @@ def test_the_arming_remedy_for_log_cannot_drift_from_the_one_home():
         f"uncut_graph_remedy`: {got!r} != {rw.uncut_graph_remedy('org-14610')!r}")
 
 
+def test_the_default_row_handler_survives_an_unimportable_record_seam(
+        monkeypatch, caplog):
+    """⛔ F1's OTHER direction: the helper must not raise on the arm it is for.
+
+    `test_the_uncut_remedy_names_the_whole_arming_chain` pins the SHAPE (the
+    handler names `_arming_remedy_for_log`, and that helper names the ONE
+    builder) and `test_the_arming_remedy_for_log_cannot_drift_from_the_one_home`
+    pins the TEXT. Neither grades the property those two exist for — that this
+    handler CANNOT raise on the arm it was written for, "the record seam is
+    unimportable" — so a `_arming_remedy_for_log` that lost its `try/except`
+    keeps both of them GREEN (measured: the two hops are still present with the
+    guard removed) while the ERROR line never reaches an operator.
+
+    The consequence is not cosmetic: the exception escapes into
+    `_mint_default_graph_row_best_effort`, which then reports "row NOT minted"
+    over a row that exists (every call site runs after the id is durable) and
+    starts that org's `_DEFAULT_ROW_MINT_RETRY_S` suppression window — i.e. the
+    one line that makes an uncut row visible is replaced by the opposite fact.
+
+    NON-VACUITY, measured both ways at the head that carries this arm:
+
+    * `_arming_remedy_for_log` reduced to `from … import uncut_graph_remedy;`
+      then `return uncut_graph_remedy(org_id)` (both hops intact, so the AST pin
+      and the drift pin stay green) → this arm REDS, and only this arm;
+    * the pre-F1 shape in the handler (`from tortoise.record_writer import
+      provision_graph_record, uncut_graph_remedy` inside the failing `try`) →
+      this arm AND the AST pin red.
+    """
+    import logging
+    import sys
+    from types import ModuleType
+
+    from tortoise import supabase_control
+
+    org, graph = "org-14610-f1", "graph-14610-f1"
+    expected = rw.uncut_graph_remedy(org)
+
+    # The healthy arm first: while the seam is readable the helper reads the ONE
+    # builder. Without this half the arm below could pass over a helper that
+    # stopped reading the seam at all.
+    assert supabase_control._arming_remedy_for_log(org) == expected, (
+        "the log helper no longer names the seam's own remedy while the seam IS "
+        "readable, so the two formatters of one command have already drifted")
+
+    # Then the arm this handler exists for: the module is present but a SHELL,
+    # which is what its own failed import leaves behind — nothing it would have
+    # exported is bound.
+    monkeypatch.setitem(sys.modules, "tortoise.record_writer",
+                        ModuleType("tortoise.record_writer"))
+
+    # The fallback is the seam's OWN text, so the literal cannot drift by an edit
+    # to one of the two copies — this is the HALF of the drift pin the drift pin
+    # cannot see, because it only ever runs with the seam readable.
+    assert supabase_control._arming_remedy_for_log(org) == expected, (
+        "with the record seam unimportable the log fallback stopped naming the "
+        "whole arming chain, so the line an operator reads on the worst arm "
+        "sends them to a command that seeds and cuts nothing over")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.supabase_control"):
+        try:
+            supabase_control._provision_default_graph_record(org, graph)
+        except BaseException as exc:  # noqa: BLE001, RUF100
+            raise AssertionError(
+                "the default-row handler raised while BUILDING its message, so "
+                "the one line that makes an uncut row visible was never emitted "
+                "and the caller sees the opposite fact: "
+                f"{type(exc).__name__}: {exc}") from exc
+
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert graph in line and org in line, (
+        f"the emitted line must name the graph and its org — got {line!r}")
+    assert "--arm" in line and "--acknowledge-cutover" in line, (
+        "the line must publish the ARMING chain: a bare `backfill` only seeds "
+        f"the row, and a `seeded` row allocates nothing — got {line!r}")
+
+
 def _modes():
     """The allocator's own mode spellings, read rather than transcribed."""
     from tortoise import record_allocator as ra

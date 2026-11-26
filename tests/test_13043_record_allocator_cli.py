@@ -66,6 +66,50 @@ def test_arm_refuses_without_the_acknowledgement(capsys) -> None:
     assert "arm" in out
 
 
+def test_the_acknowledgement_states_each_verbs_own_blast_radius(capsys) -> None:
+    """⛔ ONE SHARED SENTENCE CANNOT DESCRIBE BOTH VERBS (#14610 review F2).
+
+    `CUTOVER_ACK_TEXT` was shared verbatim by `arm` and by `backfill --arm`, and
+    its blast-radius sentence read *"This command arms ONE graph; every other
+    graph in the org stays uncut"* — true of `arm`, the OPPOSITE of `backfill
+    --arm`, which arms the whole sweep population in one run. An acknowledgement
+    whose scope sentence is false for the verb the operator ran is not an
+    acknowledgement: the scope is precisely what they are being asked to accept.
+    `#14610`'s review closed this there; this branch carried the pre-fix shared
+    text, so it is pinned here.
+
+    NON-VACUITY: with the shared text restored, the population refusal contains
+    `arms ONE graph; every other graph in the org` (the assertion below reds on
+    its presence) and contains no `EVERY UNCUT GRAPH IN ITS POPULATION`, so both
+    directions red rather than one.
+    """
+    assert cli.main(["arm", "--org-id", "o", "--graph-id", "g"
+                     ]) == cli.EXIT_REFUSED
+    single = capsys.readouterr().err
+    assert cli.main(["backfill", "--org-id", "o", "--arm"
+                     ]) == cli.EXIT_REFUSED
+    population = capsys.readouterr().err
+
+    assert "ONE GRAPH" in single.upper(), (
+        "`arm`'s acknowledgement no longer states its single-graph scope:\n" + single)
+    assert "EVERY UNCUT GRAPH IN ITS POPULATION" in population.upper(), (
+        "`backfill --arm`'s acknowledgement does not state the population scope — "
+        "it is telling a population operator about one graph:\n" + population)
+    # ⛔ The failure this pin exists for: the single-graph sentence surviving into
+    # the population verb's text. `arm`'s phrasing, verbatim, must NOT be there.
+    assert "arms ONE graph; every other graph in the org" not in population, (
+        "`backfill --arm` printed `arm`'s single-graph blast radius — the text is "
+        "shared verbatim instead of interpolated per verb:\n" + population)
+    # …and the header must name the verb the operator actually ran.
+    assert "`arm` changes" not in population, (
+        "`backfill --arm`'s header names the WRONG verb, so an operator reading a "
+        "population refusal believes they ran the single-graph command:\n"
+        + population)
+    assert "`backfill --arm` changes" in population, (
+        "`backfill --arm`'s header must name the verb the operator ran:\n"
+        + population)
+
+
 def test_the_acknowledgement_is_only_a_gate_not_a_DSN_bypass(monkeypatch) -> None:
     """With the ack, `arm` gets PAST the gate and then fails on what it lacks.
 
