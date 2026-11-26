@@ -9175,13 +9175,18 @@ _HISTORICAL_LETTERS_RE = re.compile(
 _HISTORICAL_POOL_CENSUS_RE = re.compile(
     r"\u26d4 HISTORICAL-POOL-CENSUS-BEGIN.*?\u26d4 HISTORICAL-POOL-CENSUS-END", re.DOTALL)
 #: A pool census stated as a LIVE claim. Anchored on the size word (`holds`/`held`/`carries`/
-#: `carried` + `N files`), not on the phrase `fast_pool()`, because the block mentions `fast_pool()`
+#: `carried` + `N files|entries`), not on the phrase `fast_pool()`, because the block mentions
+#: `fast_pool()`
 #: many times to state RULES ("`fast_pool()` drops every carve-out member") — a pattern that flagged
 #: those would red on the block's own reasoning and get narrowed into silence, which is the
 #: no-op-gate class. The past tense is read on purpose: a fenced history is written in it ("held
 #: 1335 files"), so a pattern that read only the present would let the history's own spelling look
-#: unread and invite a re-spelling that drifts from the arm.
-_POOL_CENSUS_RE = re.compile(r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\d+\s+files")
+#: unread and invite a re-spelling that drifts from the arm. ⛔ `entries` is read as well as
+#: `files` because the census that actually arrived at the `bbef0b88` fold was written with
+#: `entries` (`fast_pool()` holds 1340 entries …), so a `files`-only unit left the live claim
+#: invisible to this guard while it sat outside the fence (#14587 review P2, measured).
+_POOL_CENSUS_RE = re.compile(
+    r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\d+\s+(?:files|entries)")
 #: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
@@ -10247,6 +10252,15 @@ def test_the_pool_census_guard_is_not_vacuous():
     assert _POOL_CENSUS_RE.findall(
         "`fast_pool()` carries 1336 files at this head"), (
         "the `carries` spelling of the same claim was not read")
+    # The unit is not always `files`: the census that arrived at the `bbef0b88` fold read
+    # `fast_pool()` holds 1340 entries …, and a `files`-only unit called that live claim READ.
+    assert _POOL_CENSUS_RE.findall(
+        "`fast_pool()` holds 1340 entries here against 1339"), (
+        "the `entries` unit of the same claim was not read — a live census in that spelling is "
+        "invisible to the guard, which is a false PASS and not a wording preference")
+    assert _POOL_CENSUS_RE.findall(
+        "`fast_pool()` held 1335 entries where `main` held 1334"), (
+        "the past tense of the `entries` unit was not read")
     # …and the block's many RULE statements about `fast_pool()` must NOT read as a census: a guard
     # that reds on the block's own reasoning is a guard that gets deleted.
     for safe in (
