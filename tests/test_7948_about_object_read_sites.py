@@ -245,12 +245,14 @@ WHAT THIS PINS
 22. `test_the_attribution_predicate_does_not_swallow_the_whole_table` — (8)'s
    relation is a BOUND, so the COUNT it accepts is pinned as its own number: at
    most `_ACCEPTED_PAIRS_AT_THIS_HEAD` of the (row, table-door) pairs and at
-   most `_WORST_ROW_AT_THIS_HEAD` for any one row, with a floor at the cell
-   occurrences §13 states, so a predicate that breaks the other way also reds.
-   The counts live in those constants and in §13; restating them here is how this
-   paragraph came to cite 63 pairs of 340 with a floor of 29 after the table grew
-   to 19 rows over 22 doors (measured at this head). The
-   inputs are the TABLE's twenty-two doors, not the 99-tool registry, so adding a tool
+   most `_WORST_ROW_AT_THIS_HEAD` for any one row, and a floor naming the SAME
+   accepted-pair constant, so a predicate that breaks the other way also reds.
+   ⛔ The floor is the ACCEPTED-PAIR count and NOT §13's cell-occurrence figure:
+   measured at this head the arm accepts 28 pairs over 19 x SIXTEEN distinct table
+   doors (304 pairs), while §13 states 22 cell OCCURRENCES. Collapsing those two into
+   one number is how this paragraph came to cite 63 pairs of 340 with a floor of 29
+   after the table grew. The
+   inputs are the TABLE's sixteen distinct doors, not the 99-tool registry, so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
@@ -3418,9 +3420,15 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
     )
 
 
-#: Measured at this head: how many of the table's own TWENTY-TWO doors the attribution
-#: predicate accepts, summed over the nineteen customer-callable rows, and the
-#: worst single row. Inputs are the TABLE (whose doors change only when the
+#: Measured at this head: how many of the table's own `(row, door)` pairs the
+#: attribution predicate accepts — 28, out of 19 x SIXTEEN distinct table doors = 304
+#: pairs — summed over the nineteen customer-callable rows, plus the worst single row.
+#: ⛔ THE `22` IN §13 IS NOT THIS NUMBER AND MUST NOT BE USED AS A DENOMINATOR HERE.
+#: §13 states 22 CELL OCCURRENCES over those 16 doors — the doors each row's own reach
+#: cell NAMES — while these constants pin the ACCEPTED PAIRS, which is a different and
+#: larger quantity: four rows accept more doors than their own cell names, and one of
+#: those four (row 45) is a documented OVER-COUNT rather than a door the cell omits.
+#: Inputs are the TABLE (whose doors change only when the
 #: document does) rather than the 99-tool registry, so a new tool does not move
 #: these — which is what makes them pinnable.
 #: Re-derived 2026-10-21 when rows 34-37 landed: 63 -> 69. The added
@@ -3477,25 +3485,11 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: `_rows()` / `_doors()` / `_door_reaches()` rather than assumed. ⚠️ The worst-row
 #: ceiling is deliberately NOT moved with it: its note below says it is a BOUND, and the
 #: measured worst row is 3 against that ceiling of 4.
-#: ⛔ 27 -> 28 at `#14592`'s head (`cy-14593`), and this RISE is TABLE GROWTH, not a
-#: loosened relation — verified rather than assumed, because the arm's rule says a rise
-#: means the relation loosened and the relation, not the ceiling, is what gets fixed.
-#: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, `#14592`'s
-#: relations preview, which walks every relationship type) and ONE door (its own
-#: `REST GET /v1/entities/{entity_id}/relations`), so 19 CUSTOMER-CALLABLE rows x 16
-#: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
-#: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
-#: filters `_rows()` to `_reach(row) == "customer-callable"` and counts the doors over
-#: THAT set, so quoting the whole table here (44 x 18) would state a denominator no arm
-#: measures — an earlier cut of this note did, and another read 45 in a third frame.
-#: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
-#: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved
-#: (the 18 older customer-callable rows still account for 27 of the 28). Worst row is
-#: UNCHANGED at 3 — rows 2, 17 and 24 sit at three ACCEPTED doors each (see the
-#: 17 -> 4 note below), while the rows whose CELL declares more than one door are 22,
-#: 24 and 45 (rows 1, 2 and 17 declare ONE door each; a cell door and an accepted pair
-#: are different measurements and this note used to conflate them) — so the 4-ceiling is
-#: untouched.
+#: 27 -> 28 at `#14671`'s head (`c1c8df1a3817`), and the RISE is the TABLE: row 46
+#: (`entity_reads.py::entity_relations`) arrived naming ONE door (REST
+#: `GET /v1/entities/{entity_id}/relations`), so the accepted population grew by one
+#: pair and no existing row's accepted set changed. Measured against `_rows()` /
+#: `_doors()` / `_door_reaches()` at this head: 28 of 304 pairs.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 28
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
@@ -3579,27 +3573,32 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     )
     # The tripwire must not be satisfied by a predicate that accepts NOTHING:
     # every true attribution is inside this set by construction.
-    # ⛔ #13899 moved this floor with the table (29 -> 21): the batch retired ten
-    # SDK-door occurrences and re-pointed two, and this figure IS that count.
-    # MEASURED at the pre-#13899 tree (`127294ccadf9^`) the §13 table carried 29
-    # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
-    # to read is the value TWO retirements earlier (the SDK traversal row took
-    # 31 -> 30, `#11609` batch 1 another).
-    # ⛔ 21 -> 23 at `#14592`'s head (`cy-14593`), in TWO cell-occurrence moves: row 46
-    # carries ONE occurrence of its own (its REST door), already in `origin/main`'s
-    # table where `main` left this floor at 21, and row 45's cell HERE names its SECOND
-    # door (`MCP tortoise_search`) — 22 -> 23 — which `_door_reaches` accepts exactly
-    # one pair for. MEASURED over §13 with `_doors()` on both trees: `origin/main` 22,
-    # this head 23 (44 rows, 19 customer-callable, 16 distinct doors either way). This
-    # floor tracks §13's cell-occurrence count and moves WITH the table, as the note
-    # below requires. ⚠️ It is NOT a per-occurrence tripwire: the figure it bounds is
-    # `total` (accepted PAIRS, 28 here) against 23, so it reds on a loss of 6 or more,
-    # not on one. The one-occurrence tripwire is the sibling arm's
-    # `attributed >= 23`, where `attributed` IS the occurrence count.
-    assert total >= 23, (
-        f"only {total} pairs are accepted although §13's cells name 23 door "
-        "occurrences (the count the table arm pins) — the predicate has broken the "
-        "other way"
+    # ⛔ `total` IS THE ACCEPTED-PAIR COUNT, NOT §13's CELL-OCCURRENCE FIGURE, and
+    # the comment this replaces said "this figure IS that count" for as long as it
+    # stood. Measured at this head through this arm's own path: `total` = 28 accepted
+    # (row, table-door) pairs; §13's 22 is the OCCURRENCE count, which `expected` in
+    # the door arm below is what actually grades. They differ on exactly four rows,
+    # and in TWO different ways — do not read the second as the first:
+    #   rows 1, 2 and 17 accept MORE doors than their cell names (cell count ->
+    #     accepted count): row 1 adds `SDK search_knowledge` (1 -> 2), rows 2 and 17
+    #     add `MCP tortoise_search` AND `SDK search_knowledge` (1 -> 3 each);
+    #   row 45 is the OVER-COUNT, not a missing door: its cell DOES name
+    #     `MCP tortoise_search`, precisely to refuse it ("naming it would be a FALSE
+    #     door … existence is not attribution"), and the predicate attributes it anyway
+    #     because a reference chain runs from the tool to the reader. Do NOT "fix"
+    #     that by adding the door the cell forbids.
+    # So the floor names the CEILING's own constant: the arm is then exact in both
+    # directions with ONE numeral to move when the table changes, and neither
+    # direction can drift from the other. At the `21` this line carried on `main`,
+    # SEVEN of the 28 accepted pairs could vanish before anything redded.
+    # (History, kept beside its measurement rather than deleted: `#13899`
+    # (`127294ccadf9`) moved THIS line 31 -> 21, and the door arm's occurrence floor
+    # `attributed` 29 -> 21 in the SAME commit. The 29 is the other quantity — a
+    # reader who reconciles the two will otherwise take it as this variable's value.)
+    assert total >= _ACCEPTED_PAIRS_AT_THIS_HEAD, (
+        f"only {total} (row, table-door) pairs are accepted but this head pins "
+        f"{_ACCEPTED_PAIRS_AT_THIS_HEAD} — the predicate has broken the other way, "
+        "so attributions it should find go missing"
     )
 
 
@@ -3711,8 +3710,9 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It is 29
-    # at this head: the table lost its SDK traversal row when that method was retired
+    # a derived floor would inherit exactly the blindness it is here to catch. It IS 22
+    # at this head, and the chain that produced it starts here: the table lost its SDK
+    # traversal row when that method was retired
     # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
     # MCP door with it (30 -> 29), #12901 retired the row's surviving SDK door
     # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
@@ -3758,10 +3758,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         "exists AND reaches the row's own reader:\n  " + "\n  ".join(broken)
     )
     # ⛔ EVERY EXCEPTION BUDGET IS EXACT, not a ceiling (`#14249` review P2-2).
-    # `distance <= hops` above is satisfiable by a budget that GROWS: measured on this
-    # head, raising `ranking.py::fetch_entity_signals`'s budget 4 -> 5 left every arm in
-    # this file green — including the 27-pair pin and the falsifiability arm — and it
-    # moved NO row's accepted set (re-measured: total 27 -> 27, and rows 17 and 24 both
+    # `distance <= hops` above is satisfiable by a budget that GROWS: measured when this
+    # note was written, raising `ranking.py::fetch_entity_signals`'s budget 4 -> 5 left
+    # every arm in this file green — including the accepted-pair pin and the
+    # falsifiability arm — and it moved NO row's accepted set (re-measured there:
+    # total 27 -> 27, and rows 17 and 24 both
     # stay at 3 doors). So the loosening is invisible to the reach arms rather than
     # visible through a widened row: there is no widened row to see. What it breaks is
     # the budget's own claim. The budget's own text says
