@@ -2614,6 +2614,54 @@ def test_the_ingest_refusal_cannot_be_starved_of_its_overview():
                 "graph — the premise would rest on no measurement at all")
 
 
+def test_a_CARRIED_but_empty_overview_section_is_not_a_MEASUREMENT():
+    """Reds if a PRESENT-but-NULL section satisfies the freshness guard — P3-8.
+
+    ⛔ #14691 review, 8th cycle, P3. `refuse_if_not_fresh` required only the KEYS
+    (`set(_OVERVIEW_KEYS) <= set(before)`), so a section that was CARRIED but
+    never measured passed the one guard the isolation premise rests on. Measured
+    at `bf7c610a`, both ACCEPTED:
+
+    * `{"taxonomy": {}, "structure": {"total": 0}, "status": None}`
+    * `{"taxonomy": {}, "structure": {"total": 0}, "status": {}}`
+
+    The real reply's `status` is
+    `{"connected": true, "counts": {...}, "total_entities": 0}`
+    (`out/ingest-receipt.json` → `empty_before.status`), so neither is a
+    legitimate shape — they are "absent is not empty", one level down from the
+    6th-cycle finding this same arm exists to close.
+    """
+    spec = importlib.util.spec_from_file_location("t6_ingest_carried",
+                                                  BUNDLE / "run_ingest.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # non-vacuity in the OTHER direction: the receipt's own overview measures all
+    # three sections, so the guard must not refuse a real run.
+    assert module._unmeasured_sections(_receipt()["empty_before"]) == [], (
+        "the receipt's own empty_before no longer measures every required "
+        "section, so this arm would refuse a legitimate run")
+    module.refuse_if_not_fresh(_receipt()["empty_before"])
+
+    for carried in ({"taxonomy": {}, "structure": {"total": 0}, "status": None},
+                    {"taxonomy": {}, "structure": {"total": 0}, "status": {}},
+                    {"taxonomy": None, "structure": {"total": 0},
+                     "status": {"total_entities": 0}},
+                    {"taxonomy": {"Point": 0}, "structure": {},
+                     "status": {"total_entities": 0}},
+                    {"taxonomy": {"Point": 0}, "structure": [],
+                     "status": {"total_entities": 0}}):
+        try:
+            module.refuse_if_not_fresh(carried)
+        except SystemExit as exc:
+            assert "NOT FRESH" in str(exc), (carried, str(exc))
+        else:
+            raise AssertionError(
+                f"an overview that CARRIES a section without measuring it "
+                f"({carried!r}) was accepted as a fresh graph — the isolation "
+                "premise would rest on a field nobody read")
+
+
 def test_the_corroboration_declaration_and_pairs_are_the_CORPUS_ones():
     """Reds if the peer lane's declaration or pair DIRECTION is rewritten — P2-5.
 
