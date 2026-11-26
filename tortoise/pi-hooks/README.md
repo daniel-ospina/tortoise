@@ -292,15 +292,21 @@ from this section is the false claim, not a stale measurement.
 - **A TOCTOU window** remains between the digest comparison and the
   `unlink()` in the re-assert arm; the farm never writes the retired path, so
   the window needs a concurrent writer on the same box.
-- **A symlink at a producer path pointing at a DIRECTORY** is loaded by Pi as a
-  file attempt (which fails), yet retiring it renames the LINK to
-  `*.ts.disabled`, which Pi then resolves as a directory and loads. Both arms
-  fail closed rather than reporting a retirement that did not retire: the
-  second producer is renamed aside and the install REFUSES (the renamed link is
-  checked, not just the path it came from), and a loaded link at
-  `PI_DISABLED_DIRNAME` is refused BEFORE any rename, so every re-run sees the
-  same shape instead of the second run finding the name vacated and going
-  green. Neither is converged — a human moves it aside.
+- **A symlink at a producer path pointing at a DIRECTORY** is a genuinely
+  awkward shape, and the earlier sentence here ("loaded by Pi as a file attempt
+  (which fails)") was WRONG — measured against real Pi in round 20: a
+  `*.ts`-named link to a directory IS registered when the target carries
+  `index.ts`/`index.js` **or** a `package.json` `main`, and is ignored when the
+  target carries only `pi.extensions` or nothing. Retiring it renames the LINK
+  to `*.ts.disabled`, which is NON-suffixed, so Pi then resolves it through
+  `resolveExtensionEntries` (manifest, else index) and **not** through `main`:
+  an index-bearing target is therefore STILL loaded, the installer REFUSES
+  (the renamed link is checked, not just the path it came from), and a
+  `main`-only target becomes inert, so that install legitimately succeeds. A
+  loaded link already at `PI_DISABLED_DIRNAME` is refused BEFORE any rename, so
+  every re-run sees the same shape instead of the second run finding the name
+  vacated and going green. The `index`-bearing form is not converged — a human
+  moves it aside.
 - **The loader rule is TRANSCRIBED, not executed, and nothing pins it to Pi's
   version.** `_pi_entry_is_loadable` (`tortoise/capture_install.py:1901-1946`)
   models `dist/core/extensions/loader.js`, and the test helper

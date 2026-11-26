@@ -1315,21 +1315,38 @@ def _registered_producers(ext_dir: Path) -> list[str]:
 
     Pi pushes the path (``isFile() || isSymbolicLink()``) and then resolves the
     directory by NODE resolution (``main``, else ``index.ts``/``index.js``) —
-    the npm-manifest path, not ``resolveExtensionEntries``. An instrument that
+    the npm-manifest path, NOT ``resolveExtensionEntries``. An instrument that
     under-counts is LENIENT, which is the false-PASS direction, so this oracle
-    must never be stricter than Pi: it counts the target's ``index.ts``/
-    ``index.js`` here and accepts that a ``pi.extensions``-declaring target is
-    an OVER-count (a spurious red, the safe side).
+    must never be stricter than Pi. It models both halves — ``main`` and the
+    index names — and it does NOT take the ``pi.extensions`` branch for a
+    suffix-named link, which is exactly where it agrees with Pi.
     """
     found: list[str] = []
     for entry in ext_dir.iterdir():
         suffix_ok = entry.name.endswith((".ts", ".js"))
         if entry.is_dir():
+            # ⛔ A SUFFIX-NAMED SYMLINK IS RESOLVED BY NODE, NOT BY
+            # `resolveExtensionEntries` (#14342 round 20, finding 2 — MEASURED:
+            # a `main`-only target IS registered by real Pi and this oracle
+            # counted nothing, which is the LENIENT/false-PASS direction).
+            # `main` first, else the index names; `pi.extensions` is not
+            # consulted on that path. Kept in step with
+            # `capture_install._pi_entry_is_loadable`.
+            if entry.is_symlink() and suffix_ok:
+                main, unreadable = capture_install._pi_package_main(entry)
+                if not unreadable and main is not None \
+                        and (entry / main).exists():
+                    found.append(f"{entry.name}/{main}")
+                    continue
+                for index in ("index.ts", "index.js"):
+                    if (entry / index).is_file():
+                        found.append(f"{entry.name}/{index}")
+                continue
             entries, unreadable = capture_install._pi_manifest_entries(entry)
             if not unreadable and entries:
                 resolved = [name for name in entries
                             if (entry / name).exists()]
-                if resolved and not (entry.is_symlink() and suffix_ok):
+                if resolved:
                     found.extend(f"{entry.name}/{name}" for name in resolved)
                     continue
             for index in ("index.ts", "index.js"):
@@ -1796,7 +1813,7 @@ def test_oracle_counts_a_ts_named_symlink_to_a_directory_that_pi_loads(home):
     direction: a regression leaving ``reflect-hook.ts`` as a link to a directory
     would then pass ``test_pi_install_leaves_exactly_one_registered_capture_
     producer`` while Pi registered two. The oracle must never be stricter than
-    Pi; the ``pi.extensions``-only target stays an accepted OVER-count.
+    Pi, and the ``pi.extensions``-only target is NOT counted (Pi ignores it too).
 
     Mutation: skip a `*.ts`-named link to a directory (the round-18 cut) — this
     row REDs.
@@ -2015,6 +2032,119 @@ def test_assert_not_loadable_says_unverified_for_an_unreadable_entry(home):
     assert "could not be VERIFIED" in msg, msg
     assert "STILL an extension Pi loads" not in msg, msg
     assert "both capture producers stay live" not in msg, msg
+
+
+def test_install_refuses_a_main_resolving_js_producer_link(home):
+    """THE ROUND-20 P1 (#14342): a `.js`-named SYMLINK to a directory whose
+    ``package.json`` resolves via ``main``.
+
+    MEASURED before the fix: ``install_capture("pi")`` returned ``ok=True`` and
+    real Pi registered ``['reflect-hook.js', 'tortoise-capture.ts',
+    'tortoise-volunteer.ts']`` — two live producers, GREEN. Two things had to be
+    right for this to be caught: ``_pi_entry_is_loadable`` had to learn that node
+    resolution honours ``main`` (it only modelled ``resolveExtensionEntries``),
+    AND the ``PI_SECOND_PRODUCER_OTHER_NAMES`` sweep had to exist.
+
+    Mutation: either half alone — restore the manifest-else-index-only dir
+    branch, or drop the sweep — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    link = ext_dir / "reflect-hook.js"
+    link.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+    # ⛔ AND THE PREVIEW MUST NOT CLAIM THE WRITE IT NEVER MADE (#14342 round
+    # 20, finding 3): the message opened with a hard-coded "the capture seam is
+    # installed" beside a `changed_artifacts=()` and its own "WOULD be in place".
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not res.ok, (
+        f"a main-resolving `reflect-hook.js` link was reported GREEN: "
+        f"{res.actions}")
+    assert "reflect-hook.js" in (res.error or ""), res.error
+    assert not dry.ok, dry.actions
+    assert "WOULD be in place" in (dry.error or ""), dry.error
+    assert "seam is installed" not in (dry.error or ""), (
+        f"a dry run claimed a write: {dry.error!r}")
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    # The link and its target survive; the installer displaces nothing here.
+    assert link.is_symlink()
+    assert (target / "hook.js").exists()
+
+
+def test_a_main_resolving_ts_producer_link_is_retired_not_reported_green(home):
+    """The .ts sibling, and WHY it is not the same case (#14342 round 20,
+    finding 1 — checked, because the reviewer's report named both).
+
+    `_retire_pi_entry` renames the LINK to `reflect-hook.ts.disabled`; that name
+    is non-suffixed, so Pi resolves it through `resolveExtensionEntries`, which
+    does not read `main`. MEASURED on the post-install tree with real Pi: it
+    loads ONLY the seam. So the install is legitimately green, and this row pins
+    the end state rather than the receipt.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not os.path.lexists(link), "the live name was left in place"
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).is_symlink()
+    # The safety property, through the oracle: ONE producer registers.
+    assert _registered_producers(ext_dir) == [capture_install.PI_EXTENSION_NAME], (
+        f"the retired name must be inert; got {_registered_producers(ext_dir)}")
+
+
+def test_oracle_counts_a_main_resolving_target_behind_a_suffix_link(home):
+    """Node resolution honours ``package.json`` ``main`` (#14342 round 20,
+    finding 2 — the oracle skipped the manifest branch AND never read `main`, so
+    it counted nothing where real Pi registers the producer).
+
+    Mutation: drop the `_pi_package_main` branch from the oracle — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    for name, entry in ((capture_install.PI_SECOND_PRODUCER_NAME, "hook.js"),
+                        ("reflect-hook.js", "hook.js")):
+        target = home / "checkout" / f"t-{name}"
+        target.mkdir(parents=True)
+        (target / entry).write_text("export default function () {}\n")
+        (target / "package.json").write_text('{"main": "%s"}' % entry)
+        (ext_dir / name).symlink_to(target, target_is_directory=True)
+        assert f"{name}/{entry}" in _registered_producers(ext_dir), (
+            f"real Pi registers `{name}` through its `main`; the oracle must "
+            f"agree: {_registered_producers(ext_dir)}")
+
+
+def test_legacy_obstacle_mirrors_the_js_producer_refusal(home):
+    """The hint predicate must not name a command that refuses (#14342 round
+    20, finding 5). ``legacy_extension_obstacle`` is documented as "a
+    human-readable sentence when install_capture would REFUSE"; the new `.js`
+    refusal had no mirror, so `hooks status` stayed silent over a refusing box.
+
+    Mutation: drop the `PI_SECOND_PRODUCER_OTHER_NAMES` loop from the predicate
+    — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "reflect-hook.js").write_text("// a .js copy\n")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle, "a refusing box reported no obstacle"
+    assert "reflect-hook.js" in obstacle, obstacle
+    assert not install_capture("pi", home=home).ok, (
+        "the predicate and the installer disagree")
 
 
 def test_registered_producers_helper_models_the_manifest_branch(home):

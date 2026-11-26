@@ -1395,6 +1395,15 @@ def legacy_extension_obstacle(harness: str,
     # obstacle and naming it here would withhold a command that works.
     active = root_path / PI_SECOND_PRODUCER_NAME
     retired = root_path / PI_SECOND_PRODUCER_DISABLED_NAME
+    # ⛔ THE SAME PRODUCER UNDER THE OTHER NAME PI LOADS (#14342 round 20,
+    # finding 5). The installer refuses a loadable `reflect-hook.js`
+    # (`PI_SECOND_PRODUCER_OTHER_NAMES`), so a hint that stays silent about it
+    # names a command that refuses — the drift this predicate exists to stop.
+    for other_name in PI_SECOND_PRODUCER_OTHER_NAMES:
+        if _pi_entry_is_loadable(root_path / other_name):
+            return (f"a second copy of the second capture producer is "
+                    f"registered at {other_name} — move it out of the "
+                    f"extensions directory")
     if (os.path.lexists(active) and os.path.lexists(retired)
             and _pi_entry_is_loadable(active)):
         live = _sha256_file(active) if active.is_file() else None
@@ -1866,6 +1875,42 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
+def _pi_package_main(path: Path) -> tuple[str | None, str | None]:
+    """The directory's npm ``main`` entry point, as NODE resolution reads it.
+
+    ⛔ THIS IS A DIFFERENT FIELD FROM ``pi.extensions`` AND A DIFFERENT CODE
+    PATH (#14342 round 20, finding 1). A ``*.ts`` / ``*.js`` SYMLINK TO A
+    DIRECTORY is pushed by ``discoverExtensionsInDir`` as a direct entry, and
+    the loader then resolves the directory the way node does — ``package.json``
+    ``main`` first, else ``index.ts`` / ``index.js``.
+    ``resolveExtensionEntries`` (which owns ``pi.extensions``) is NOT consulted
+    on that path, so a `main`-resolving producer was invisible to this module
+    and the install reported GREEN with two live producers.
+
+    Returns ``(main, error)`` with the same three-way shape as
+    :func:`_pi_manifest_entries`:
+
+    * ``("hook.js", None)`` — a readable ``main`` string;
+    * ``(None, None)`` — no ``package.json``, or none Pi would honour (an
+      unparseable file, or a non-string ``main``) — the loader falls through to
+      the index names;
+    * ``(None, "<reason>")`` — the file exists but cannot be READ, so no
+      assumption is safe and the caller must fail closed.
+    """
+    manifest = path / "package.json"
+    if not manifest.is_file():
+        return None, None
+    try:
+        # `utf-8-sig`, matching `readPiManifest`'s BOM strip.
+        declared = json.loads(manifest.read_text("utf-8-sig"))
+    except ValueError:
+        return None, None
+    except OSError as e:
+        return None, f"{manifest}: {e.__class__.__name__}: {e}"
+    main = declared.get("main") if isinstance(declared, dict) else None
+    return (main, None) if isinstance(main, str) else (None, None)
+
+
 def _pi_manifest_entries(path: Path) -> tuple[list[str] | None, str | None]:
     """The ``pi.extensions`` entries Pi's own manifest reader would ACCEPT.
 
@@ -1933,11 +1978,34 @@ def _pi_entry_is_loadable(path: Path) -> bool:
     absent path registers nothing, while a path this reader cannot read may
     register anything, and a retired entry that might still load must fail
     closed (:func:`_assert_pi_entry_not_loadable`).
+
+    ⛔ A ``*.ts`` / ``*.js`` SYMLINK TO A DIRECTORY IS RESOLVED BY **NODE**, NOT
+    BY ``resolveExtensionEntries`` (#14342 round 20, finding 1 — MEASURED). Pi
+    pushes such a path as a direct entry (``isFile() || isSymbolicLink()``) and
+    the loader then resolves it the way node resolves a directory: the
+    ``package.json`` ``main`` field first, else ``index.ts`` / ``index.js``.
+    ``main`` is NOT in ``resolveExtensionEntries``' vocabulary, so modelling only
+    the manifest-else-index rule reported a `main`-resolving producer as NOT
+    loadable — and the install then went GREEN with two live producers (real Pi
+    registered ``['reflect-hook.js', 'tortoise-capture.ts', 'tortoise-volunteer.ts']``
+    on exactly that tree). Only the SYMLINK takes this path: a real directory
+    named `foo.ts` is not a direct entry at all, so it keeps the
+    ``resolveExtensionEntries`` rule.
     """
     try:
         if not os.path.lexists(path):
             return False
         if path.is_dir():
+            suffix = path.name.endswith((".ts", ".js"))
+            if path.is_symlink() and suffix:
+                # node resolution, as the loader does for a pushed direct entry
+                main, unreadable = _pi_package_main(path)
+                if unreadable:
+                    return True  # may resolve anything; never guess it away
+                if main is not None:
+                    target = path / main
+                    return os.path.lexists(target) or target.is_dir()
+                return (path / "index.ts").is_file() or (path / "index.js").is_file()
             entries, unreadable = _pi_manifest_entries(path)
             if unreadable:
                 return True  # may declare entries; never guess it away
@@ -2254,18 +2322,22 @@ def _disable_pi_second_producer(
         # design, so the count may not be asserted on that branch.
         if _pi_loadability_is_guessed(other):
             return False, [], (
-                f"the capture seam is installed, but {other} could not be "
+                # ⛔ OPEN WITH `seam_state`, NEVER WITH THE LITERAL "is installed"
+                # (#14342 round 20, finding 3): under `--dry-run` the literal
+                # claimed a write the same sentence then denied, and the clause
+                # that exists for exactly this was appended later.
+                f"{seam_state}, but {other} could not be "
                 f"VERIFIED — Pi loads `{other_name}` exactly as it loads "
                 f"`{PI_SECOND_PRODUCER_NAME}`, so it may still register as a "
                 f"second producer and every session could be captured twice. "
-                f"{seam_state}. Move {other} out of the extensions directory "
+                f"Move {other} out of the extensions directory "
                 f"by hand and re-run.")
         return False, [], (
-            f"the capture seam is installed, but a second copy of the second "
+            f"{seam_state}, but a second copy of the second "
             f"capture producer is registered at {other}: Pi loads "
             f"`{other_name}` exactly as it loads `{PI_SECOND_PRODUCER_NAME}`, "
             f"and this installer only retires the `{PI_SECOND_PRODUCER_NAME}` "
-            f"name. {_duplication_consequence(dry_run=dry_run)} {seam_state}. "
+            f"name. {_duplication_consequence(dry_run=dry_run)} "
             f"Move {other} out of the extensions directory by hand and "
             f"re-run.")
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
