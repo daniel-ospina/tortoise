@@ -314,14 +314,16 @@ test('#10156: the panel source never reintroduces the blanket imperative', () =>
 })
 
 test('#14686: the `flagged` badge points at the surface that exists', () => {
-  // The badge read "Suspicious activity detected — see security alerts" from #983
-  // until #14687/#14702 replaced it with "…see recent activity" (2026-11-26, just
-  // before this branch's fix). So a pin against "see security alerts" could not
-  // catch a regression to the wording the badge actually carried — which is the
-  // string this test now pins absent. A pointer to a surface that no longer exists
-  // is how a reader learns the dashboard is stale.
+  // The badge carried "Suspicious activity detected — see security alerts" from
+  // #983 (`4e2b9f4bb7f8:main.jsx:1104`), then "…see recent activity" (#14687), and
+  // this branch replaced that with "Unusual activity measured — see notifications"
+  // because #14686 removed the block the older wording pointed at. A pointer to a
+  // surface that no longer exists is how a reader learns the dashboard is stale, so
+  // BOTH removed wordings are pinned absent: a revert to either one is a regression,
+  // and pinning only the newest would let the oldest back in.
   const main = readFileSync(join(here, 'main.jsx'), 'utf8')
   assert.doesNotMatch(main, /see recent activity/i)
+  assert.doesNotMatch(main, /see security alerts/i)
   assert.match(main, /see notifications/i)
   // ⛔ The other half of the requirement, and the one that can regress silently:
   // #14687/#14702 retired "Suspicious activity detected" because the measurement

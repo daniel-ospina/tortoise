@@ -208,10 +208,22 @@ function actionName(action, entry) {
  *
  * Same message as the main list renders, and the same guard: a message equal to
  * the label is not repeated (the row already says it).
+ *
+ * ⛔ IT CARRIES ITS OWN SEPARATOR, because the muted row renders it INLINE. The
+ * main list paints `.notif-message` as a block, so the line break separated the two
+ * halves for free; inside `.notif-snoozed-text` the rule is `display: inline`
+ * (`index.css`), and JSX DISCARDS the newline+indent between the `<strong>` and this
+ * node — so there is no whitespace text node between two inline runs, and every row
+ * with a message read `High activity rateActivity reached 9 units in the last 1 h …`
+ * (labels end on a word by construction: `abuse.py` `EVENT_FLAG: "High activity
+ * rate"`, `EVENT_AUTH_IP: "New location"`; messages begin on one). The `' — '` is
+ * the same separator `actionName` uses at the same junction, so the name and the
+ * rendered line agree (#14694 review P1). It lives HERE, in the only helper that
+ * produces the node, so no call site can render it unsuffixed.
  */
 function mutedMessageOf(entry) {
   if (!entry || !entry.message || entry.message === entry.label) return null
-  return <span className="notif-message">{entry.message}</span>
+  return <span className="notif-message">{' — '}{entry.message}</span>
 }
 
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {

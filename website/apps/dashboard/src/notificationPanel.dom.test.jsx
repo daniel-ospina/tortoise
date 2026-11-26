@@ -1682,8 +1682,14 @@ test('#14694: the MUTED lists are visible too — they are the only route back',
   // (#14694 round-10 review P2). Those rows are the ONLY route back for a snooze or a
   // dismissal ("a snooze with no way back is a delete"), so hiding them is hiding the
   // undo — the evasion #4915 exists to catch.
+  // A THIRD row stays in the main list on purpose: the `display: block` half of the
+  // rule below is asserted on it, and a fixture where every row is muted could not.
   const { container } = renderBell({
-    alerts: [alert({ message: 'snooze me' }), alert({ message: 'dismiss me', episode: 'flag||two' })],
+    alerts: [
+      alert({ message: 'snooze me' }),
+      alert({ message: 'dismiss me', episode: 'flag||two' }),
+      alert({ message: 'stays in the list', episode: 'flag||three' }),
+    ],
   })
   fireEvent.click(bell(container))
   const byText = (text) => [...container.querySelectorAll('.notif-list .notif-row')]
@@ -1708,7 +1714,27 @@ test('#14694: the MUTED lists are visible too — they are the only route back',
     const style = window.getComputedStyle(row)
     assert.notEqual(style.display, 'none', 'a reversible row must be VISIBLE — it is the way back')
     assert.notEqual(style.visibility, 'hidden')
+    // ⛔ AND ITS MESSAGE IS INLINE. `.notif-message` is `display: block` for the main
+    // list, where the message sits UNDER the label; a muted row puts it between the
+    // label and the note INSIDE `.notif-snoozed-text`, where a block child forces a
+    // break on both sides and strands the note's leading `' · '` at the start of a
+    // line. Scoping the block rule to the main list fixed that — and NOTHING PINNED
+    // IT: the fix's own commit claimed "jsdom does not apply stylesheet layout", while
+    // this very loop has been reading computed `display` off the real stylesheet
+    // (`css: true` in `vite.config.js`) since it was written. jsdom computes the
+    // cascade; it draws no line boxes. Reverting the scoped rule restores the stranded
+    // separator with every suite green — the "green while broken" shape this section
+    // exists to prevent (#14694 review P2).
+    const msg = row.querySelector('.notif-message')
+    assert.ok(msg, 'precondition: the row renders its message')
+    assert.equal(window.getComputedStyle(msg).display, 'inline',
+      'a muted row\'s message must stay INLINE, or the separator it sits between strands')
   }
+  // The other half of the same rule: the MAIN list still stacks its message.
+  const mainMsg = container.querySelector('.notif-list:not(.notif-list-muted) .notif-message')
+  assert.ok(mainMsg, 'precondition: a main-list row with a message is rendered')
+  assert.equal(window.getComputedStyle(mainMsg).display, 'block',
+    'the main list keeps the message on its own line — scoping must not flatten it too')
 })
 
 // ── 8. Renders and signals that had no assertion at all (review round 6) ────
@@ -2176,6 +2202,16 @@ test('#14694: a MUTED row carries the payload\'s identifying half, not only the 
   for (const [country, label] of [['ES', 'snoozed'], ['US', 'dismissed'], ['MX', 'acknowledged']]) {
     assert.match(muted.map((m) => m.textContent).join(' | '), new RegExp(country),
       `the ${label} row must name its COUNTRY — the label alone is shared by all three`)
+    // ⛔ AND THE TWO HALVES MUST BE SEPARATED. The muted row renders the message
+    // INLINE beside `<strong>{label}</strong>`, and JSX discards the whitespace
+    // between two adjacent expressions — so with no separator in the helper the row
+    // painted `New locationAccess from a new location: ES`, and `textContent`
+    // (which concatenates regardless) kept every assertion here green. The `' — '`
+    // lives in `mutedMessageOf`; this pins the junction it exists for (#14694
+    // review P1).
+    assert.match(muted.map((m) => m.textContent).join(' | '),
+      new RegExp(`New location\\s*—\\s*Access from a new location: ${country}`),
+      `the ${label} row must SEPARATE the label from the message, not glue them`)
   }
 })
 
