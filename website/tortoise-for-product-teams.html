@@ -712,9 +712,16 @@
       /* ⛔ DO NOT touch `#beat-hero`'s padding-top here. The 5rem is the hero's
          ONLY clearance from the fixed Login pill (`top:0; padding:18px 24px`,
          so the button occupies y 18–54.4). Short viewports (≤820px tall) fire
-         the escape hatch two blocks down, which top-aligns the beat, so the
-         padding IS the clearance at every phone height — reducing it to 2rem
-         put the h1 at y=33 and painted the first line UNDER the button
+         the escape hatch two blocks down, which CENTRES the beats whose copy
+         fits and starts an overflowing one at its own padding-top — so the
+         padding below is the floor at every phone height, and the hero is the
+         beat that reaches it first. Measured at this head: at 375x764 its
+         687.95px of copy overflows a 652px box, so its auto margins resolve to
+         zero and the h1 rides the padding at y=80; at 375x812 the same copy
+         FITS a 700px box, the margins share 6.03px a side and the h1 sits at
+         y=86.03. Both clear the button's 54.4.
+         Reducing it to 2rem put the h1 at y=33 and painted the first line
+         UNDER the button
          (26.7x21.4px overlap at 375x812, and only +1.0px clearance at 390x844
          against +25.0px before). The vertical room this beat needs is taken
          from the video below instead, which is the block that makes the
@@ -753,13 +760,78 @@
        video alone is 398px — so the hatch is widened from product.html's 520px
        (`test_each_tall_beat_declares_the_css_escape_hatch` only floors it at
        480px) and extended to every beat whose copy can exceed a landscape
-       phone's viewport. `justify-content: flex-start` + `overflow-y: auto` lets
-       the stack scroll instead of clipping. */
+       phone's viewport. `overflow-y: auto` is what lets the stack scroll
+       instead of clipping.
+
+       ⛔ THE GROUND IS CENTRED BY AUTO MARGINS, NOT BY THE HATCH'S `flex-start`.
+       A bare `flex-start` aligned EVERY beat to `padding-top` whenever this
+       breakpoint fired — not only the beats that overrun it — and the
+       breakpoint fires on essentially every phone in portrait, because 820px is
+       measured against the CSS viewport AFTER browser chrome (a 390x844 phone
+       reports ~675px once the address bar is up). So the hatch was choosing the
+       layout for the whole page.
+
+       Measured before this at 375x812 (the hatch's own arm), content riding at
+       y=32 in a box with 748px of room: #beat-onboard 169.2px of copy with
+       590.8px empty below it, #beat-ingest 153.9px with 606.1px empty, and every
+       beat's title box at y=32 — 22.4px UNDER the fixed Login pill's bottom edge
+       (`padding: 18px 24px`, so its button ends at 54.4), i.e. 567-1750px² of
+       painted overlap on five of the seven beats. The intro tween
+       (`gsap.fromTo(el, { opacity: 0, y: 20 })`) then carries the title to y=52
+       mid-animation, which is the 2.4px / 61-187px² frame the screenshots
+       captured; both are measured, and the at-rest one is the worse of the two. That is the owner's "title+body
+       appears too high … looks weirdly cropped … instead of centre on the
+       screen": not clipping, top-alignment plus the radial `#vignette`, which
+       is transparent only inside its central 55% and therefore dimmed the copy
+       it pushed into the top band.
+
+       WHY NOT `justify-content: safe center` HERE, which is what the base
+       `.beat` rule uses. Because `safe` cannot express this on a browser that
+       does not really support it, and the ORDER trick does not rescue that:
+       Chrome before 115 RECOGNISES the value but ignores the modifier (MDN
+       BCD: `version_added` 115, note "Before version 115, this value is
+       recognized, but has no effect"; Safari has no `safe` support before
+       17.6, and on a phone-facing page that is the larger exposure), so it
+       KEEPS the declaration, applies it as a plain `center`, and the
+       `flex-start` written above it never runs. On that band the hero would be
+       centred unsafely: the copy start is pulled 78.47px ABOVE its content box
+       ((687.95 - 531) / 2, measured 78.47) into the 80px `padding-top`, the h1
+       lands at y=1.53 and paints 2844px² under the Login pill at 375x643, and
+       the BOTTOM 46.5px is what is cut off at `scrollTop 0` — the overflow goes
+       both ways, which is worse than the bug being fixed. Auto margins have no support band: they absorb the
+       free space when there is any and resolve to zero when there is not, which
+       IS `safe center`'s predicate, in every engine.
+
+       The hero keeps its `padding-top: 5rem` clearance in BOTH arms of the
+       auto-margin predicate, and the margins are what decide which arm you get.
+       Where the copy OVERFLOWS the margins resolve to zero and the h1 rides the
+       padding: measured at 375x764, 687.95px of copy in a 652px box,
+       `margin-top/bottom` 0px, h1 top 80. Where it FITS the margins share the
+       free space instead: at 375x812 the same copy is 687.95px in a 700px box,
+       margins 6.03/6.02, h1 top 86.03. Both clear the Login pill's 54.4; the
+       difference is only that the copy is centred rather than top-pinned. */
     @media (max-height: 820px) {
       #beat-hero, #beat-intro, #beat-compute, #beat-ingest, #beat-organize,
       #beat-reason, #beat-onboard {
-        justify-content: flex-start; overflow-y: auto;
+        justify-content: flex-start;
+        overflow-y: auto;
       }
+      /* Centred when the copy FITS, `start` when it OVERFLOWS — without the
+         `safe` keyword. Chrome before 115 RECOGNISES `safe center` but ignores
+         the modifier (MDN BCD: `version_added` 115, note "Before version 115,
+         this value is recognized, but has no effect"), keeping the declaration
+         and aligning unsafely — so the `flex-start` written above it never runs
+         and the ORDER trick is dead on that band, which is the whole argument
+         against it. (Safari is a different case: it has no `safe` support before
+         17.6 and DROPS the declaration, so there the fallback WOULD work — and
+         the base rule's plain `center` is what an unguarded `safe center` would
+         leave behind for an over-flowing beat. The auto margins need neither
+         engine's behaviour to be right.) Auto margins
+         have no such band — they absorb the free space when there is any and
+         resolve to zero when there is not, which is exactly `safe center`'s
+         predicate. */
+      #beat-hero > :first-child, #beat-intro > :first-child, #beat-compute > :first-child, #beat-ingest > :first-child, #beat-organize > :first-child, #beat-reason > :first-child, #beat-onboard > :first-child { margin-top: auto; }
+      #beat-hero > :last-child, #beat-intro > :last-child, #beat-compute > :last-child, #beat-ingest > :last-child, #beat-organize > :last-child, #beat-reason > :last-child, #beat-onboard > :last-child { margin-bottom: auto; }
       /* The video is 398 px tall at its 224 px width — taller than a landscape
          phone's whole viewport, so on a short window it is what pushes the CTA
          out of reach first. Capping it here keeps the copy on the first screen

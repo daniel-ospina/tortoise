@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -79,7 +80,7 @@ from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 from urllib.parse import urljoin, urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
@@ -3544,7 +3545,14 @@ class TestProductRootMarkerContract:
 HEADING_TAG_RE = re.compile(r"<h([1-6])\b[^>]*>", re.I)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 STYLE_OR_SCRIPT_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
-MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{")
+#: ⛔ `re.IGNORECASE` because at-rule names are ASCII case-insensitive: an
+#: `@MEDIA (max-height: 820px)` hatch is the SAME query to the browser, and a
+#: case-sensitive reader classified it as unmodelled — which, on the enabling
+#: side, is the difference between a stray `auto` being credited and not
+#: (#14683 review cycle 3, P2).
+MEDIA_PRELUDE_RE = re.compile(
+    r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{",
+    re.IGNORECASE)
 
 
 #: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
@@ -3609,6 +3617,39 @@ def _css_blanked(css: str) -> str:
     """
     css = re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), css, flags=re.S)
     return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), css, flags=re.S)
+
+
+#: Conditional at-rules — the ones whose block may or may not apply. `@keyframes`
+#: / `@font-face` / `@property` / `@page` are deliberately NOT in this set: their
+#: bodies are not conditional wrappers around a rule, they are the rule.
+_CONDITIONAL_AT_RULE_RE = re.compile(
+    r"@(media|supports|container|layer|scope|starting-style)\b[^{;]*\{",
+    # ⛔ AT-RULE NAMES ARE ASCII CASE-INSENSITIVE, and this regex was not: an
+    # `@MEDIA (max-height: 400px)` block holding the auto pair was classified
+    # "not a condition", ranked as BASE, and the guard reported GREEN over a
+    # page the browser top-aligns — the exact fail-open the asymmetry above
+    # exists to close, reachable by pressing Shift (#14683 review cycle 3, P2).
+    re.IGNORECASE)
+
+
+def _conditional_at_rule_spans(css: str) -> list[tuple[int, int]]:
+    """Every conditional at-rule block as a `(start, end)` character span.
+
+    The counterpart of `_media_block_spans` for conditions that are NOT media
+    queries (`@supports`, `@container`, `@layer`, `@scope`). Added for #14683
+    review cycle 2 (P1): the margin reader has to tell "no at-rule ancestor" from
+    "an at-rule ancestor I cannot evaluate", and the second set is every
+    conditional block — not only the media ones.
+
+    Comment-blanked like its sibling, so a `@supports` named in a comment cannot
+    make a rule look conditional.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int]] = []
+    for m in _CONDITIONAL_AT_RULE_RE.finditer(blanked):
+        inner = _brace_block(blanked, m.end() - 1)
+        spans.append((m.start(), m.end() + len(inner) + 1))
+    return spans
 
 
 def _media_block_spans(css: str) -> list[tuple[int, int]]:
@@ -4813,7 +4854,7 @@ def _css_tokens(value: str) -> list[str]:
 #: against `auto` (a fail-open); `margin-top: auto !important` — the pinned
 #: intent, only stronger — reads as a COMPETING declaration to the slack row;
 #: and `display: flex !important` reads as not `flex` (both false REDs).
-_CSS_IMPORTANT = re.compile(r"!\s*important\s*$")
+_CSS_IMPORTANT = re.compile(r"!\s*important\s*$", re.IGNORECASE)
 
 
 def _without_important(value: str) -> str:
@@ -5569,16 +5610,959 @@ def _beat_tween_var_objects(html: str) -> list[list[str]]:
             for match in re.finditer(r"gsap\.(?:to|fromTo)\(\s*el\s*,", html)]
 
 
+
+
+#: The two ends of a beat's ground, and the pair of spellings each is written
+#: in: the physical property and its logical alias are the same declaration to
+#: the layout engine, so grading only one of them would false-red a correct edit.
+GROUND_ENDS = (
+    ("first-child", ("margin-top", "margin-block-start")),
+    ("last-child", ("margin-bottom", "margin-block-end")),
+)
+
+
+def _beat_section_ids(html: str) -> list[str]:
+    """The ids of the page's `.beat` sections, in document order.
+
+    ⛔ READ FROM THE ATTRIBUTES, not from one fixed spelling (#14683 review F1,
+    measured). This used to be `BEAT_SECTION_RE.findall(html)` over the RAW
+    page, which got the beat list wrong in BOTH directions — and the beat list
+    is the thing the row's own docstring says is "DERIVED from the page so a
+    new beat cannot silently escape the hatch's group":
+
+      FAIL-OPEN — the regex required the literal characters
+      `<section id="beat-x" class="beat`, so `<section class="workflow beat"
+      id="beat-new">` and `<section id='beat-new2' class='beat'>` (single
+      quotes) did not match. A new beat written either way was INVISIBLE to
+      the list and escaped the hatch's group silently: measured `beats=7`,
+      row GREEN, with the new section live on the page.
+
+      FALSE RED — it read the raw page, so a `<section …>` parked in an HTML
+      comment (dead to the browser, and commenting a tag out is the natural way
+      to disable it) was counted as a beat and the row demanded a hatch arm for
+      something that does not exist: measured `beats=8`, RED naming the
+      commented-out id. That is verbatim the #14020 failure `_css_blanked`
+      fixed for CSS — reintroduced for markup, two functions above
+      `_beat_ground_elements`, which does strip comments.
+
+    `_beat_section_spans` is the shared reader, so the beat LIST and the beat
+    GROUNDS cannot disagree about what the page contains.
+    """
+    return [beat for beat, _start, _end in
+            _beat_section_spans(_without_html_comments(html))]
+
+
+def _max_height_media_spans(css: str) -> list[tuple[int, int, int]]:
+    """Every `@media (max-height: Npx) { … }` block as `(N, start, end)`.
+
+    `_max_height_media_blocks` answers "what does each block say"; this answers
+    "WHERE is it", and that is the question PR #14683's review P2 turns on: a
+    `margin-*: auto` rule can only be attributed to the block it LIVES IN (or
+    to the base sheet) if its position is known, and "does the centring fire
+    where the alignment fires?" cannot be asked without that attribution.
+
+    Spans are into `_css_blanked(css)`, which is SAME-LENGTH as `css`, so they
+    are valid indexes into the real sheet too.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int, int]] = []
+    for match in MEDIA_PRELUDE_RE.finditer(blanked):
+        start = match.end() - 1
+        body = _brace_block(blanked, start)
+        spans.append((int(match.group(1)), match.start(), start + len(body) + 2))
+    return spans
+
+
+#: `@media (min-height: Npx) {` — the OTHER half of the height axis. A
+#: `min-height` block fires on TALL viewports, so a rule inside it is a cascade
+#: candidate only ABOVE its threshold; without this reader a
+#: `@media (min-height: 500px) { #beat-hero > :first-child { margin-top: 0 } }`
+#: fires at the 820px arm, wins the cascade there, and is invisible to the
+#: guard — #14697 residual 1, one query family over (measured GREEN before this
+#: reader existed).
+MIN_HEIGHT_MEDIA_RE = re.compile(
+    r"@media\s*\(\s*min-height:\s*(\d+)\s*px\s*\)\s*\{",
+    re.IGNORECASE)  # at-rule names are ASCII case-insensitive, as above
+
+
+def _min_height_media_spans(css: str) -> list[tuple[int, int, int]]:
+    """Every `@media (min-height: Npx) { … }` block as `(N, start, end)`.
+
+    The mirror of `_max_height_media_spans` on the same axis, with the same
+    same-length indexing into `_css_blanked(css)`.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int, int]] = []
+    for match in MIN_HEIGHT_MEDIA_RE.finditer(blanked):
+        start = match.end() - 1
+        body = _brace_block(blanked, start)
+        spans.append((int(match.group(1)), match.start(), start + len(body) + 2))
+    return spans
+
+
+def _compact_selector(selector: str) -> str:
+    """`selector` with its whitespace collapsed and `>` tight on both sides.
+
+    The combinator is the SAME selector however it is spaced, so grading the
+    authored spacing grades formatting rather than behaviour (#14683 review N3:
+    a comment-free `#beat-hero>:first-child` false-RED with a message claiming
+    the rule was missing).
+    """
+    return re.sub(r"\s*>\s*", ">", " ".join(selector.split()))
+
+
+#: A beat's GROUND as the MARKUP declares it: `(tag, classes, ids)`.
+GroundElement = tuple[str, frozenset[str], frozenset[str]]
+
+#: Tags that never have a closing tag (HTML §13.1.2), so a direct-child walk
+#: must not count them as leaving an element open.
+_HTML_VOID_ELEMENTS = frozenset((
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+))
+
+#: One tag: `(closing, name, attrs)`. The attribute group steps over quoted
+#: `>` characters, so `<a title="a > b">` is one tag rather than two.
+_HTML_TAG_RE = re.compile(
+    r"<(/?)([a-zA-Z][\w-]*)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+
+
+def _element_attribute(attrs: str, name: str) -> frozenset[str]:
+    """The whitespace-separated tokens of one attribute, `"`/`'`/bare."""
+    match = re.search(
+        rf"\b{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))",
+        attrs, re.I)
+    if not match:
+        return frozenset()
+    return frozenset(
+        (match.group(1) or match.group(2) or match.group(3) or "").split())
+
+
+def _element_facts(tag: str, attrs: str) -> GroundElement:
+    return (tag.lower(), _element_attribute(attrs, "class"),
+            _element_attribute(attrs, "id"))
+
+
+def _element_body(markup: str, start: int, tag: str) -> str:
+    """`markup` from `start` to the `</tag>` that CLOSES it, depth-matched."""
+    pattern = re.compile(rf"<(/?)({tag})\b", re.I)
+    depth = 1
+    for match in pattern.finditer(markup, start):
+        depth += -1 if match.group(1) else 1
+        if depth == 0:
+            return markup[start:match.start()]
+    return markup[start:]
+
+
+def _direct_child_elements(body: str) -> list[GroundElement]:
+    """Every DIRECT child element of `body`, in document order."""
+    out: list[GroundElement] = []
+    depth = 0
+    for match in _HTML_TAG_RE.finditer(body):
+        closing, tag, attrs = match.group(1), match.group(2).lower(), match.group(3)
+        # A void element, or the XHTML-style `<div/>` spelling, closes itself.
+        if tag in _HTML_VOID_ELEMENTS or attrs.rstrip().endswith("/"):
+            if not closing and depth == 0:
+                out.append(_element_facts(tag, attrs))
+            continue
+        if closing:
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            out.append(_element_facts(tag, attrs))
+        depth += 1
+    return out
+
+
+def _beat_section_spans(markup: str) -> list[tuple[str, int, int]]:
+    """`[(beat_id, body_start, body_end)]` for each `.beat` section.
+
+    `markup` must already be comment-blanked (`_without_html_comments`); the
+    returned indices are into THAT string, so a caller that needs the body must
+    pass, and slice, the same one. Comment-blanking is not length-preserving,
+    which is why the blanked string is threaded through instead of re-derived.
+
+    "`.beat`" means the word `beat` among the element's CLASS tokens and an `id`
+    that starts with `beat-` — the attribute reader `_element_facts` already
+    provides — rather than a fixed `<section id="…" class="…` spelling.
+    """
+    out: list[tuple[str, int, int]] = []
+    for match in _HTML_TAG_RE.finditer(markup):
+        if match.group(1) or match.group(2).lower() != "section":
+            continue
+        _tag, classes, ids = _element_facts(match.group(2), match.group(3))
+        if "beat" not in classes:
+            continue
+        beat_id = next((element_id for element_id in sorted(ids)
+                        if element_id.startswith("beat-")), "")
+        if not beat_id:
+            continue
+        start = match.end()
+        out.append((beat_id, start, start + len(
+            _element_body(markup, start, "section"))))
+    return out
+
+
+def _beat_ground_elements(
+        html: str) -> dict[str, dict[str, GroundElement | None]]:
+    """Each beat's FIRST and LAST direct child, read from the MARKUP.
+
+    ⛔ The ground is an ELEMENT, not a selector (#14697 residual 2). The reader
+    used to accept a simple selector of any kind before `:first-child` on the
+    grounds that they "all address the same ELEMENT" — true of the combinator,
+    false of a TYPE selector, which addresses a possibly-empty set: the first
+    child of `#beat-ingest` is an `<h2>`, so `#beat-ingest > p:first-child
+    { margin-top: auto }` matches NOTHING and the beat stays top-aligned,
+    while the guard reported the centring intact (measured at 375x812: 0.0 /
+    574.1, #14677 verbatim). Reading the child removes the guess.
+
+    HTML comments are stripped first: this page's own hero comment QUOTES
+    `<video>`/`<div>`, and a raw tag scan would read those as children.
+    """
+    markup = _without_html_comments(html)
+    out: dict[str, dict[str, GroundElement | None]] = {}
+    for beat, body_start, body_end in _beat_section_spans(markup):
+        children = _direct_child_elements(markup[body_start:body_end])
+        out[beat] = {
+            "first-child": children[0] if children else None,
+            "last-child": children[-1] if children else None,
+        }
+    return out
+
+
+def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool:
+    """Does the simple selector between `>` and `:{side}` address `element`?
+
+    `""`/`*` address whatever the ground is, and an element this reader could
+    not resolve (`None`) is accepted rather than red — the combinator already
+    says it is the beat's direct child.
+
+    Attribute selectors and any pseudo-class other than the end under test are
+    DROPPED rather than modelled: this stays a shape check on the tag/class/id
+    a rule names, not a selector engine (the docstring of
+    `_beat_ground_margin_candidates` states the same boundary for the cascade).
+    """
+    if element is None or simple in ("", "*"):
+        return True
+    tag, classes, ids = element
+    stripped = re.sub(r"\[[^\]]*\]", "", simple)
+    stripped = re.sub(r"::?[\w-]+(?:\([^)]*\))?", "", stripped)
+    for token in re.findall(r"[.#]?[\w-]+", stripped):
+        if token.startswith("#"):
+            if token[1:] not in ids:
+                return False
+        elif token.startswith("."):
+            if token[1:] not in classes:
+                return False
+        elif token.lower() != tag:
+            return False
+    return True
+
+
+#: The positional pseudo-classes that name one END of a box, spelled the ways
+#: CSS lets you spell it. Each alias is exactly true of the first/last child the
+#: markup declares, so accepting them grades BEHAVIOUR, not spelling (#14683
+#: independent review: `:nth-child(1)` was a fail-open, and its `-of-type`,
+#: case and `an+b` twins were the same fail-open one table row over).
+#:
+#: The `nth-*` arms CAPTURE their argument and are judged by
+#: `_nth_includes_index_one`, not by a regex for "1": `:nth-child(2n+1)`,
+#: `:nth-child(-n+3)`, `:nth-child(2n-1)` and the `odd` keyword all include index
+#: 1, while `:nth-child(2)` and `even` do not.
+_SIDE_PSEUDO_ALIASES = {
+    "first-child": (
+        r"(?i:first-child)", r"(?i:first-of-type)",
+        r"(?i:nth-child)\(([^)]*)\)",
+        r"(?i:nth-of-type)\(([^)]*)\)"),
+    "last-child": (
+        r"(?i:last-child)", r"(?i:last-of-type)",
+        r"(?i:nth-last-child)\(([^)]*)\)",
+        r"(?i:nth-last-of-type)\(([^)]*)\)"),
+}
+
+
+def _nth_includes_index_one(argument: str) -> bool:
+    """Does this `an+b` argument select the child at index 1? PURE.
+
+    The CSS rule is "there is an integer `k >= 0` with `a*k + b == 1`", which is
+    what makes `odd`(`2n+1`), `2n+1`, `2n-1`, `-n+3` and a bare `1` all match
+    while `2` / `even` do not. Deciding it arithmetically is what closes the
+    `:nth-child(2n+1)` / `:nth-child(-n+3)` fail-open that a `b = 1` regex left
+    (#14683 independent review, measured).
+    """
+    # An `of S` FILTER narrows which children are counted but does not change
+    # that index 1 is still index 1, so it is stripped before parsing: reading
+    # `1 of .doc-grid` as unparseable left a real reset of the ground
+    # uncollected (#14683 independent review, measured).
+    text = "".join(argument.split(" of ")[0].split()).lower()
+    if not text:
+        return False
+    if text == "odd":
+        return True
+    if text == "even":
+        return False
+    step = re.fullmatch(r"([+-]?\d*)n([+-]\d+)?", text)
+    if step is None:
+        try:
+            return int(text) == 1
+        except ValueError:
+            return False
+    coefficient = step.group(1)
+    a = 1 if coefficient in ("", "+") else (-1 if coefficient == "-"
+                                           else int(coefficient))
+    b = int(step.group(2) or "+0")
+    if a == 0:
+        return b == 1
+    k = (1 - b) / a
+    return k.is_integer() and k >= 0
+
+
+#: The `justify-content` values that TOP-ALIGN a column flex container. `start`
+#: is the same alignment as `flex-start` (the beats are `display: flex;
+#: flex-direction: column`), and a trailing `!important` sets priority, never
+#: the value — grading the raw text false-RED both with a message claiming the
+#: hatch sets no alignment at all (#14683 independent review, measured).
+_TOP_ALIGNING_JUSTIFY = frozenset({
+    "flex-start", "start",
+    # `space-between` pins the first item to main-start, so it does not centre
+    # either — the auto-margin pair is what centres, and it is required here
+    # exactly as under `flex-start` (#14683 independent review: classifying it
+    # as "does not top-align" silenced the grading, and classifying it as
+    # unclassifiable RED a page that HAS the pair).
+    "space-between",
+    # css-align-3 §4.1: `left`/`right` behave as `start` when the property's
+    # axis is not parallel with the left-right axis — "currently, the only case
+    # ... is in a column flexbox", which is the only context this reader grades.
+    "left", "right",
+})
+
+#: The values this reader can POSITIVELY say do not top-align a column flex box.
+#: Anything outside both of these sets is UNCLASSIFIED (`normal`, `initial`,
+#: `stretch`, `left`, a future value) and must not be treated as "the hatch does
+#: not align this beat": that verdict silences the margin grading, so an
+#: unclassified arm with no `auto` margins returned `[]` over a top-aligned page
+#: (#14683 independent review, measured). Unclassified falls back to the old
+#: path — the absence problem, i.e. RED — which is the same fail-closed doctrine
+#: `_beat_ground_margin_candidates` states for unmodelled conditions.
+_NOT_TOP_ALIGNING_JUSTIFY = frozenset({
+    "center", "safe center", "unsafe center", "end", "flex-end",
+    "space-around", "space-evenly",
+})
+#: ⛔ `space-between` is NOT in the set above, and must not be: it pins the
+#: FIRST item to main-start (the top) in a column flex, so it is not centring and
+#: its free space is not shared out. Classifying it as "does not top-align"
+#: silenced the margin grading over a hatch that leaves the copy spread and
+#: pinned (#14683 independent review, measured: `space-between` with the two
+#: `auto` rules deleted returned `[]`). Unclassified -> the absence path -> RED.
+
+
+def _justify_content_top_aligns(value: str) -> bool:
+    """Is this `justify-content` value the top-aligning arm?"""
+    return value.split("!")[0].strip().lower() in _TOP_ALIGNING_JUSTIFY
+
+
+def _justify_content_classified(value: str) -> bool:
+    """Is this value POSITIVELY known to be non-top-aligning?
+
+    Only then may the caller say "the hatch reaches this beat, it just does not
+    top-align it". An unknown value is not evidence of anything.
+    """
+    return value.split("!")[0].strip().lower() in _NOT_TOP_ALIGNING_JUSTIFY
+
+
+def _beats_whose_ground(
+        selector: str, side: str,
+        grounds: dict[str, dict[str, GroundElement | None]]) -> list[str]:
+    r"""The beats whose GROUND — the DIRECT child of `#beat-x` / `.beat` — is `side`.
+
+    ⛔ The combinator is anchored to the beat's OWN compound selector rather
+    than "a `>` somewhere before the pseudo" (#14683 review B2, measured both
+    ways on the head page):
+
+        `#beat-hero .doc-copy > :first-child`  ->  a NESTED child, NOT the
+            ground. Accepting it left every phone in portrait top-aligned with
+            the guard GREEN — #14677 restored, silently.
+        `#beat-hero > .doc-grid:first-child`   ->  IS the ground (`.doc-grid`
+            is the hero's only child). Rejecting it false-RED an edit that is
+            behaviourally identical to the shipped one, with a message saying
+            the rule was missing.
+
+    So: the beat's compound must be followed DIRECTLY by the child
+    combinator — no qualifier in between (#14683 review F1, measured) — and the
+    simple selector between the combinator and the pseudo must ADDRESS the
+    child the markup declares (`_ground_selector_matches`, #14697 residual 2).
+    `(?<![-\\w])` keeps `#beat-hero-copy` from satisfying `#beat-hero`.
+
+    ⛔ `[^\s>]*` on the SUBJECT side was a fail-open in the OTHER direction from
+    the one the child check closes: a qualifier there NARROWS the element set,
+    yet was delivered here as though it were the bare beat. Six of this page's
+    seven beats carry `workflow` and the hero does not, so
+
+        `.beat.workflow > :first-child { margin-top: auto }`
+
+    was recorded as a centring home for ALL SEVEN — GREEN while the hero kept
+    the hatch's bare `flex-start` with no auto margins of its own. At any
+    short-and-wide window (height <= 820 with the hero's two-column `.doc-grid`
+    fitting the box — e.g. 1440x800) that is #14677 verbatim, on the one beat
+    whose 5rem is also the owner's recorded pill clearance.
+
+    ⛔ AND NOT CREDITING IT IS NOT "FAIL-CLOSED", which an earlier version of
+    this paragraph claimed (#14683 review cycle 2, P2 — measured). Ignoring a
+    rule is fail-closed only when the rule would ENABLE the mechanism (`auto`);
+    for a rule that DISABLES it (`margin-top: 0`, `all: initial`) the browser
+    still applies what this reader never collected, so the guard is GREEN over
+    the top-aligned page. That is why a rule naming the ground WITHOUT the
+    `:first-child`/`:last-child` pseudo is collected too: `#beat-intro >
+    p.lead { margin-top: 0 }` and `#beat-hero > .doc-grid { margin-top: 0 }`
+    name the very element the markup declares, need no `!important` and no
+    functional pseudo, and both re-rendered #14677 with the row GREEN before
+    this arm existed (#14683 review cycle 3, P2). `_ground_selector_matches`
+    decides it against the ELEMENT, so a rule naming some other child does not
+    qualify.
+
+    Still NOT collected: a subject carrying a functional pseudo (`:has()`,
+    `:is()`), extra qualification (`.beat.workflow`), a DESCENDANT combinator
+    (`#beat-hero .doc-grid`), or an inline `style=` attribute. Two of those
+    directions differ in kind and are recorded as #13837 R-C with the evidence:
+    `:has()`/`.beat.workflow`/inline-`style=` hide a DISABLING rule (fail-open —
+    measured GREEN over a page rendering #14677), while an `:is()` subject
+    written for the ENABLING pair is a false RED only (measured: a page that
+    renders identically to the shipped one). Every in-idiom spelling this page
+    uses is collected.
+    """
+    compact = _compact_selector(selector)
+    out: list[str] = []
+    for beat, sides in grounds.items():
+        for subject in (f"#{beat}", ".beat"):
+            subject_re = rf"(?<![-\w]){re.escape(subject)}(?![-\w])>"
+            # ⛔ THE END IS NAMED BY ANY OF ITS ALIASES, not one spelling
+            # (#14683 independent review, measured at `18741101`). Requiring the
+            # literal `:{side}` left the two canonical respellings of the same
+            # end uncollected — `:nth-child(1)` for the first child,
+            # `:nth-last-child(1)` for the last, and the `-of-type` forms —
+            # while the browser applied them:
+            #
+            #     `#beat-hero > :nth-child(1) { margin-top: 0 }`  ->  guard `[]`
+            #
+            # over the hero, which that rule top-aligns (identical specificity,
+            # later in source). Each alias is exactly true of the first/last
+            # child this reader already reads from the markup, and the OTHER
+            # end's aliases stay out of this side.
+            aliases = "|".join(_SIDE_PSEUDO_ALIASES[side])
+            match = re.search(
+                rf"{subject_re}([^\s>]*?):(?:{aliases})(?![\w-])", compact)
+            # The `nth-*` arms CAPTURE their argument (groups 2 and 3 — one per
+            # alternative, whichever matched) and the index-1 question is
+            # decided arithmetically, so `odd`, `2n+1`, `2n-1` and `-n+3` are
+            # collected while `2` and `even` are not.
+            if match:
+                argument = (match.group(2) if match.group(2) is not None
+                            else match.group(3))
+                if argument is not None and not _nth_includes_index_one(
+                        argument):
+                    match = None
+            if match and _ground_selector_matches(match.group(1),
+                                                  sides.get(side)):
+                out.append(beat)
+                break
+            # The same rule written WITHOUT the structural pseudo — the shape a
+            # reset actually takes (`#beat-hero > .doc-grid { margin-top: 0 }`).
+            # Its simple selector is resolved against the element the markup
+            # ⛔ THE COMPOUND MUST BE THE WHOLE SUBJECT, and the class EXCLUDES
+            # `:` — one rule at both ends, each a measured fail-open or false RED
+            # (#14683 review cycles 4 and 6):
+            #   * excluding `:` means a pseudo is never attributed to the WRONG
+            #     end (`:first-child` is the primary arm's business; letting it
+            #     fall through credited `margin-bottom: auto` on the first child
+            #     to the last child's home — the swapped-pair discriminator went
+            #     GREEN);
+            #   * the tail after the compound must contain NO non-space
+            #     character. Accepting a SPACE accepted the DESCENDANT
+            #     combinator: `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`
+            #     was collected as a reset OF the ground and won the modelled
+            #     cascade on the WHOLE selector's specificity — RED over a page
+            #     that renders identically to the shipped one (measured: the
+            #     ground keeps `margin-top: auto`, 18.03px of shared slack,
+            #     off-centre 0.02), and the mirror image was worse: the same shape
+            #     carrying `margin-top: auto` was CREDITED as the ground's
+            #     centring home, GREEN over a hero that renders exactly like the
+            #     pair-removed control this same reader REDs. A child-combinator
+            #     sibling (`> .doc-grid > .doc-copy`) was already not collected,
+            #     which is what shows the space acceptance was accidental rather
+            #     than a deliberate trade. `> .doc-grid:hover` is dropped by the
+            #     same rule;
+            #   * `_ground_selector_matches` then decides it against the ELEMENT,
+            #     so `> .doc-grid` IS the ground and `> h2` is not.
+            match = re.search(rf"{subject_re}([^\s>{{:]+)", compact)
+            if match and not re.search(r"\S", compact[match.end():]) \
+                    and _ground_selector_matches(match.group(1),
+                                                 sides.get(side)):
+                out.append(beat)
+                break
+    return out
+
+
+class _GroundMargin(NamedTuple):
+    """One declaration that can set a ground end, with its CASCADE weight.
+
+    `height`/`min_height` are the `max-height`/`min-height` bounds of the media
+    block the rule lives in (`math.inf` / `-math.inf` for a BASE rule), so the
+    rule is ACTIVE at viewport height H when `min_height <= H <= height` — a
+    base rule is active everywhere.
+    """
+
+    value: str
+    important: bool
+    specificity: tuple[int, int, int]
+    order: int
+    height: float
+    min_height: float = -math.inf
+
+
+#: The shorthands that also set a ground end, and the value each END takes out
+#: of them: `margin: <top> [<right> [<bottom> [<left>]]]` (so the bottom is the
+#: third value, or the first when fewer than three are written) and
+#: `margin-block: <start> [<end>]` (the same rule on the logical axis).
+_MARGIN_SHORTHANDS = ("margin", "margin-block")
+
+
+def _shorthand_end_value(value: str, side: str, shorthand: str) -> str | None:
+    """The value `shorthand` gives `side`'s end — `None` when it sets nothing.
+
+    Reuses `_css_block_end`, which already carries the positional rule for the
+    block-END axis (and is shared with the padding reader); block-START is the
+    first token for both shorthands, the rule `SLACK_PROPS` documents.
+    """
+    if not _css_tokens(value):
+        return None
+    if side == "last-child":
+        return _css_block_end(shorthand, value)
+    return _css_tokens(value)[0]
+
+
+def _ground_end_declaration(body: str, side: str) -> tuple[str, bool] | None:
+    """The declaration that WINS **inside this rule** for `side`'s end.
+
+    Returns `(value, important)`. Three properties of the cascade are modelled
+    here and each was a measured fail-open of the previous reader (#14683
+    review cycle 2 finding 2, #14697 residuals 1-2, #13837 R2/R3):
+
+    * the LONGHAND/alias pair (`margin-top`, `margin-block-start`) is one
+      declaration to the layout engine, so a logical spelling between the
+      `auto` and nothing else still centres;
+    * a declaration that appears LATER wins, which is how `margin-top: auto;
+      margin-top: 0` disables the centring;
+    * `!important` beats an ordinary declaration wherever it is written, and
+      the `margin`/`margin-block` SHORTHANDS set the end (`margin: 0` is the
+      ordinary way to reset one).
+    """
+    props = dict(GROUND_ENDS)[side]
+    winner: tuple[str, bool] | None = None
+    for declaration in _css_blanked(body).split(";"):
+        name, separator, value = declaration.partition(":")
+        if not separator:
+            continue
+        name = name.strip().lower()
+        # ⛔ CSS values are ASCII case-insensitive (`AUTO` is `auto`), and this
+        # reader compared them literally: `margin-top: AUTO` was reported as a
+        # rule that "wins the cascade" with a non-`auto` value, i.e. a false RED
+        # over a page that IS centred (#14683 review cycle 3, P3). Lowercasing
+        # here is the single place both consumers (`== "auto"` and
+        # `_shorthand_end_value`) read.
+        value = " ".join(value.split()).lower()
+        important = bool(_CSS_IMPORTANT.search(value))
+        if important:
+            value = _without_important(value)
+        if name in props:
+            candidate: tuple[str, bool] | None = (value, important)
+        elif name == "all":
+            # ⛔ `all: initial|unset|revert|revert-layer` resets EVERY property,
+            # margins included, so it disables the centring on both ends. It was
+            # invisible (the reader looked only at the margin longhands and
+            # shorthands), leaving the guard GREEN over a beat that renders
+            # top-aligned — `all: initial` on the hero's ground measured
+            # off-centre −56.56 at 375x812 (#14683 review cycle 4, P3). No `all`
+            # value is `auto`, so every one of them is a candidate.
+            candidate = (value, important)
+        elif name in _MARGIN_SHORTHANDS:
+            end = _shorthand_end_value(value, side, name)
+            candidate = None if end is None else (end, important)
+        else:
+            continue
+        if candidate is None:
+            continue
+        if winner is not None and winner[1] and not candidate[1]:
+            continue
+        winner = candidate
+    return winner
+
+
+def _beat_ground_margin_candidates(
+        html: str) -> dict[str, dict[str, list[_GroundMargin]]]:
+    """Every rule that can set a ground end, as CASCADE CANDIDATES.
+
+    `{beat: {"first-child": [_GroundMargin, …], "last-child": [...]}}` — one
+    list per end, in source order — so `_winning_ground_margin` can answer
+    "which of these owns the end at viewport height H?", which is the only
+    question that decides whether the centring actually fires.
+
+    ⛔ THE CASCADE IS COMPUTED HERE, ACROSS RULES (#14697 residual 1). Grading
+    the winning declaration *within* a body — what the previous reader did — is
+    green with an ordinary override APPENDED after the `auto` rule, which is
+    exactly how a later edit disables a declaration: measured with
+    `#beat-ingest > :first-child { margin-top: 0 }` appended inside the same
+    `@media (max-height: 820px)` block, the rendered beat top-aligned again
+    (0.0 / 574.1 at 375x812, #14677 verbatim) and the guard reported the
+    mechanism intact. Order is W3C css-cascade-4 §6: importance, then
+    specificity, then source order — the same ranking `_css_block_end_cascade`
+    applies to the pricing card's insets.
+
+    A rule inside a media condition this reader does NOT model is ranked
+    ASYMMETRICALLY, and the asymmetry is the whole point (#14683 review cycle 2,
+    P1 — measured):
+
+    * a DISABLING value (anything that is not `auto`) inside an unmodelled
+      condition is treated as BASE, i.e. active at every height — so it can
+      never hide a reset;
+    * an ENABLING value (`auto`) inside an unmodelled condition is NOT
+      collected — because "I could not classify this condition" is not "this
+      condition is always true", and crediting it is exactly how the guard
+      reported GREEN over a page that top-aligned every beat.
+
+    Ranking an `auto` as base was the fail-open: with the centring pair moved
+    into `@media (orientation: landscape)`, into `@media screen and (max-height:
+    400px)` or into `@media (max-height: 820px) and (min-width: 500px)`, the
+    reader still claimed the pair fired at 820px while the rendered page was
+    top-aligned at 375x812 (#14677 verbatim, titles back at y=52). The earlier
+    version of this reader SKIPPED unmodelled conditions, which was the same
+    fail-open for the DISABLING side — `@media (max-width: 760px)` and
+    `@media (max-height: 820px)` both fire at 375x812, so a `margin-top: 0` in
+    this page's own `max-width` block was invisible. Two opposite directions,
+    one root: an unmodelled condition is not a verdict, and the two sides of
+    the cascade must fail towards `RED` in BOTH.
+
+    ⛔ BOTH height families are read. Leaving out `min-height` was the same
+    residual one query family over: `@media (min-height: 500px) { #beat-hero >
+    :first-child { margin-top: 0 } }` fires at the 820px arm, wins the cascade
+    there, and a max-only reader cannot see it at all.
+
+    Stated, because a guard is trusted for what it claims: a selector whose
+    specificity cannot be modelled (`:is()`/`:where()`/`:not()`/`:has()`) is
+    ranked MAXIMALLY specific by `_css_specificity`, i.e. fail-closed, ONCE THE
+    RULE IS COLLECTED; the RANGE syntax (`height >= 400px`) is not modelled
+    (this page uses none). ⛔ Collection is a separate gate, and it is NOT
+    fail-closed on the disabling side: a rule whose SUBJECT is qualified
+    (`.beat.workflow > :first-child`), carries `:has()`, or sets the end through
+    an inline `style=` is not attributed to any beat, so a `margin-top: 0`
+    written that way is followed by the browser and never seen here (measured:
+    row GREEN over a page rendering #14677 on six beats). Recorded as #13837
+    R-C rather than chased: every in-idiom reset — the spellings this page
+    actually uses — is caught, and closing that class needs a real selector
+    engine, which is the scope #14697's ruling excludes.
+
+    ⛔ THE PRICE OF THAT FAIL-CLOSED ARM, named so it is not discovered as a
+    surprise: an unmodelled condition that provably cannot apply on screen is
+    treated as base too, so `@media print { #beat-hero > :first-child {
+    margin-top: 0 } }` reds this reader even though it cannot affect the
+    rendered phone page (measured: RED). That is an OVER-block, which is the
+    arm this guard deliberately sits on — the alternative, exempting media
+    TYPES by parsing them, is a modelled predicate with its own fail-open band
+    (`@media not print`, `@media screen and …`, a future `@media tty`), and the
+    residual it would buy back is a red on a print stylesheet this page does
+    not have. If a print block ever lands, exempt the `print`/`speech` TYPES
+    here and keep every unmodelled FEATURE fail-closed.
+    """
+    blanked = _css_blanked(html)
+    height_spans = _max_height_media_spans(html)
+    floor_spans = _min_height_media_spans(html)
+    grounds = _beat_ground_elements(html)
+    # The conditions this reader can EVALUATE, plus every conditional at-rule it
+    # cannot. The difference is what the asymmetric ranking below is keyed on —
+    # see the docstring. `_max_height_media_spans` / `_min_height_media_spans`
+    # match the single-condition spellings only, so a compound prelude
+    # (`screen and (max-height: 400px)`, `(max-height: 820px) and (min-width:
+    # 500px)`) lands in `all_conditions` and NOT in `modelled` — which is the
+    # honest classification: this reader cannot say whether it fires at the
+    # hatch's height.
+    modelled = ({(start, end) for _h, start, end in height_spans}
+                | {(start, end) for _h, start, end in floor_spans})
+    all_conditions = _conditional_at_rule_spans(html)
+    out: dict[str, dict[str, list[_GroundMargin]]] = {}
+    for match in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = " ".join(match.group(1).split())
+        if not prelude or prelude.startswith("@"):
+            continue
+        body = _brace_block(blanked, match.end() - 1)
+        declarations = {side: _ground_end_declaration(body, side)
+                        for side, _props in GROUND_ENDS}
+        if not any(declarations.values()):
+            continue
+        height = math.inf
+        enclosing = [block_height for block_height, start, end in height_spans
+                     if start <= match.start() < end]
+        floors = [block_height for block_height, start, end in floor_spans
+                  if start <= match.start() < end]
+        if enclosing:
+            # ⛔ INNERMOST, not first (#14683 review F1, measured). Nested
+            # at-rules are valid CSS and the effective condition is the
+            # INTERSECTION, so `@media (max-height: 820px) { @media
+            # (max-height: 400px) { … } }` fires at <=400 and must not be
+            # credited with 820 — which the first-match read did, leaving the
+            # guard GREEN over a page top-aligned at 375x812.
+            height = float(min(enclosing))
+        floor = -math.inf
+        if floors:
+            # The same intersection on the OTHER bound: `height >= 500` nested
+            # inside `height >= 400` is `height >= 500`, so the LARGEST floor
+            # is the one that applies.
+            floor = float(max(floors))
+        unmodelled = any(
+            start <= match.start() < end
+            for start, end in all_conditions
+            if (start, end) not in modelled)
+        for part in (p for p in prelude.split(",") if p.strip()):
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for side, declaration in declarations.items():
+                if declaration is None:
+                    continue
+                value, important = declaration
+                candidate_height, candidate_floor = height, floor
+                if unmodelled:
+                    if value.strip().lower() == "auto":
+                        # An ENABLING declaration this reader cannot prove fires
+                        # must not certify the centring (#14683 review cycle 2,
+                        # P1 — measured GREEN over a landscape-only pair while
+                        # portrait top-aligned).
+                        continue
+                    # A DISABLING declaration it cannot prove false is assumed
+                    # to apply — the other half of the same rule.
+                    candidate_height, candidate_floor = math.inf, -math.inf
+                for beat in _beats_whose_ground(part, side, grounds):
+                    out.setdefault(beat, {}).setdefault(side, []).append(
+                        _GroundMargin(value, important, specificity,
+                                      match.start(), candidate_height,
+                                      candidate_floor))
+    return out
+
+
+def _winning_ground_margin(candidates: list[_GroundMargin],
+                          height: int) -> str | None:
+    """The value that OWNS the end at viewport height `height`, or `None`.
+
+    A candidate fires only inside the height band its block declares, so the
+    candidates ACTIVE at `height` compete; among those the winner is decided by
+    importance, then specificity, then source order.
+    """
+    active = [c for c in candidates if c.min_height <= height <= c.height]
+    if not active:
+        return None
+    return max(active, key=lambda c: (c.important, c.specificity,
+                                      c.order)).value
+
+
+def _first_unaligned_height(candidates: list[_GroundMargin],
+                            arm_height: int) -> tuple[float, str | None] | None:
+    """The first height in `[0, arm_height]` the centring does NOT hold at.
+
+    ⛔ THE HATCH FIRES FOR EVERY HEIGHT UP TO `arm_height`, so probing only at
+    `arm_height` was a fail-open one `min-height` away (#14683 review cycle 3,
+    P1 — measured): a centring pair inside `@media (min-height: 800px)` is
+    active at 820 and reads as "fires at least as often as the hatch", while
+    every phone below 800 — including the 375x764 one the hatch exists for —
+    top-aligns. Rendered on that mutant: `topGap 0`, titles back at 32, pill
+    overlap 1180-1750px², row GREEN.
+
+    So the interval is PROBED, not sampled once: every candidate edge inside the
+    arm's band is a boundary, and each boundary plus each midpoint between
+    consecutive boundaries is evaluated. Two candidates can change owner only at
+    an edge, so if the winner is `auto` at every such point it is `auto`
+    throughout.
+    """
+    edges = {0.0, float(arm_height)}
+    for candidate in candidates:
+        for edge in (candidate.min_height, candidate.height):
+            if math.isfinite(edge) and 0 <= edge <= arm_height:
+                edges.add(float(edge))
+    points = sorted(edges)
+    probes = set(points) | {(a + b) / 2 for a, b in itertools.pairwise(points)}
+    for probe in sorted(probes):
+        value = _winning_ground_margin(candidates, probe)
+        if value != "auto":
+            return probe, value
+    return None
+
+
+def _base_beat_justify_values(html: str) -> list[str] | None:
+    """The base `.beat` rule's `justify-content` values, or `None` if absent.
+
+    Reads the COMMENT-BLANKED sheet, and here that is LOAD-BEARING: the raw
+    scan this replaces was a fail-open measured by #14683's review (F2). With
+    the live `justify-content: safe center` commented out — the ≤320px pill
+    clearance GONE from the page — the raw regex still matched the text inside
+    `/* … */` and the row stayed GREEN, so the one regression this assertion
+    exists to catch could ship with CI green. Blanking makes a commented
+    declaration invisible (red) while a comment merely QUOTING one no longer
+    leaks a bogus value into the list (no false red).
+
+    `None` and `[]` are kept distinct on purpose: an absent rule and a rule
+    with no live `justify-content` are different defects and get different
+    messages.
+
+    ⛔ The WINNING value of the LAST base rule that declares it — not the first
+    `.beat {` block on the sheet and not `[-1]` over everything (#14683 review
+    cycle 2, finding 3). An appended `.beat { justify-content: center; }` — the
+    ordinary cascade shape, and what `_css_declarations` exists for — won the
+    cascade while a first-match reader still reported `safe center`, so the
+    ≤320px pill clearance could be deleted with the row green (measured: h1 top
+    80.0 → 55.8 against a pill bottom of 54.4 at 320x821). The old pattern's
+    exact `\n    ` indent was also a false red on any reformat, reported with a
+    message claiming no base rule existed.
+    """
+    if _css_declarations(html, ".beat") is None:
+        return None
+    declaring = _css_last_declaring_body(html, ".beat", "justify-content")
+    if declaring is None:
+        return []
+    value = _effective_decl(declaring, "justify-content")
+    return [value] if value is not None else []
+
+
+def _beats_addressed(selector: str, beat_ids: list[str]) -> list[str]:
+    """The beats a rule ADDRESSES: by id, or all of them through `.beat`.
+
+    ⛔ The class spelling is not a different rule (#14683 review cycle 2, P3):
+    `.beat { justify-content: flex-start }` inside the hatch aligns every beat
+    exactly as the seven-id list does — the base rule it overrides is
+    `.beat`-scoped — and a reader that only collected ids reported "no
+    `max-height` rule sets its `justify-content`, so the hatch never reaches
+    it" over a rule that was right there.
+    """
+    named = set(re.findall(r"#(beat-[\w-]+)", selector))
+    if re.search(r"(?<![\w-])\.beat(?![\w-])", selector):
+        named |= set(beat_ids)
+    return [beat for beat in beat_ids if beat in named]
+
+
+def _short_viewport_centring_problems(html: str) -> list[str]:
+    """Beats whose auto-margin centring does not fire where the hatch top-aligns.
+
+    The hatch is a `max-height` query that switches a beat to
+    `justify-content: flex-start`; the auto margins are what still centre the
+    copy when it FITS. Those two halves are only a centring mechanism if they
+    are active TOGETHER — so for every block that sets a beat's alignment to
+    `flex-start`, that beat needs a `margin-top: auto` on its first
+    child and a `margin-bottom: auto` on its last child in a block that fires
+    at least as often (a WIDER `max-height`, or the base rule).
+
+    Empty means the mechanism is intact; anything else is #14677 returning.
+    This is the grading half of the row below, kept as a function so the
+    discriminators can be exercised on synthetic sheets (see
+    `TestShortViewportCentringIsGradedPerBlock`) instead of only being asserted
+    against the one committed page.
+    """
+    arms: dict[str, set[int]] = {}
+    #: Beats some hatch rule NAMES with an alignment this reader POSITIVELY knows
+    #: does not top-align. A `center` arm is the neighbour row's finding, and
+    #: reporting it here as "no `max-height` rule sets its `justify-content`"
+    #: claimed absence of a rule that is right there (#14683 independent review).
+    named: set[str] = set()
+    #: Beats whose only hatch alignment is UNCLASSIFIED, with the values seen:
+    #: they keep a problem (fail-closed) but are not told that no rule exists.
+    unclassified: dict[str, set[str]] = {}
+    beat_ids = _beat_section_ids(html)
+    for height, body in _max_height_media_blocks(html):
+        for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body):
+            prelude = " ".join(rule.group(1).split())
+            if "#beat-" not in prelude and not re.search(
+                    r"(?<![\w-])\.beat(?![\w-])", prelude):
+                continue
+            values = [" ".join(v.split()) for v in re.findall(
+                r"justify-content\s*:\s*([^;}]+)", rule.group(2))]
+            # Only an arm that actually TOP-ALIGNS needs centring under it; a
+            # `center`/`safe center` here is the other row's finding, not this
+            # one's.
+            top_aligns = bool(values) and _justify_content_top_aligns(
+                values[-1])
+            # Only a value POSITIVELY known to be non-top-aligning may be
+            # recorded as "the hatch reaches it" — an unclassified value
+            # (`normal`, `stretch`, `left`) keeps the fail-closed absence
+            # problem, because "it does not top-align" was a false PASS over a
+            # page with no auto margins (#14683 independent review, measured).
+            named_only = bool(values) and _justify_content_classified(
+                values[-1])
+            for beat in _beats_addressed(prelude, beat_ids):
+                if named_only:
+                    named.add(beat)
+                elif values and not top_aligns:
+                    unclassified.setdefault(beat, set()).add(values[-1])
+                if top_aligns:
+                    arms.setdefault(beat, set()).add(height)
+
+    candidates = _beat_ground_margin_candidates(html)
+    problems: list[str] = []
+    for beat in beat_ids:
+        if beat not in arms:
+            if beat in named:
+                # The hatch reaches it, it just does not top-align it — the
+                # neighbour row owns that grading.
+                continue
+            seen = unclassified.get(beat)
+            if seen:
+                # A rule IS there; it is the READER that cannot classify it.
+                # Saying "no rule sets its justify-content" was a false diagnosis
+                # over a value that may well top-align (#14683 review, measured).
+                problems.append(
+                    f"{beat}: the hatch sets `justify-content: "
+                    f"{'/'.join(sorted(seen))}`, which this reader cannot "
+                    f"classify — on a column flex it may top-align, so the "
+                    f"`margin-*: auto` pair is required under it")
+                continue
+            problems.append(
+                f"{beat}: no `@media (max-height: …)` rule sets its "
+                f"`justify-content`, so the hatch never reaches it")
+            continue
+        for height in sorted(arms[beat]):
+            for side, props in GROUND_ENDS:
+                # ⛔ The WINNER of the CASCADE across the WHOLE BAND the hatch
+                # covers, not "some rule says `auto`" (#14697 residual 1), not
+                # "some rule on the ground says auto" (#14697 residual 2), and
+                # not "`auto` wins AT the arm's own height" (#14683 review
+                # cycle 3, P1 — a `min-height: 800px` pair is active at 820 and
+                # absent at every phone below it). Both of those were measured
+                # green over a page that renders #14677.
+                failure = _first_unaligned_height(
+                    candidates.get(beat, {}).get(side, ()), height)
+                if failure is None:
+                    continue
+                failing_height, value = failure
+                where = (f"where the hatch switches it to `flex-start` "
+                         f"(all heights <= {height}px)")
+                if value is None:
+                    problems.append(
+                        f"{beat} > :{side}: no `{props[0]}: auto` fires at "
+                        f"`max-height: {height}px` {where}")
+                else:
+                    problems.append(
+                        f"{beat} > :{side}: `{props[0]}` resolves to `{value}` "
+                        f"at `max-height: {height}px` {where} — it is "
+                        f"`{value}` at a {int(failing_height)}px viewport, so "
+                        f"a later or more specific rule wins the cascade and "
+                        f"the free space is not shared out")
+    return problems
+
+
 class TestShortViewportBeatsScrollInsteadOfClipping:
     """The escape hatch is DECLARED (here) and REACHABLE (next test).
 
     Scope, stated plainly: this reads the committed markup and script. It does
     not open a browser, so it cannot observe clipping pixel-for-pixel — what it
     can do is pin the conditions without which the hatch provably cannot work:
-    the `@media (max-height: ...)` rule with both declarations at a breakpoint
-    that fires on a landscape phone, the visibility-gated pointer-events rule,
-    and the per-tween wiring that keeps that class in step with the opacity. A
-    change that drops any of them stops being a silent regression.
+    the `@media (max-height: ...)` rule with its declarations at a breakpoint
+    that fires on a landscape phone, the `margin-*: auto` pair that keeps that
+    hatch from top-aligning the beats whose copy FITS, the visibility-gated
+    pointer-events rule, and the per-tween wiring that keeps that class in step
+    with the opacity. A change that drops any of them stops being a silent
+    regression.
     """
 
     def test_each_tall_beat_declares_the_css_escape_hatch(self):
@@ -5618,6 +6602,186 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"(~390-430 px tall) never reaches — {what} stays clipped on "
                 f"the very viewport this rule exists for. Keep the breakpoint "
                 f"at {MIN_SHORT_VIEWPORT_PX}px or wider.")
+
+    def test_the_hatch_centres_copy_that_fits_instead_of_top_aligning_it(self):
+        """A bare `flex-start` must not BE the alignment: auto margins centre it.
+
+        The hatch is a `max-height` query, so it cannot tell a beat whose copy
+        OVERRUNS the window from one that comfortably fits — and it fires on
+        nearly every phone in PORTRAIT, because the breakpoint is measured
+        against the CSS viewport AFTER browser chrome (a 390x844 phone reports
+        ~675px once the address bar is up). A bare `flex-start` therefore chose
+        the layout for the page's whole reading column rather than for the
+        beats that overrun it, and pinned every one of them to `padding-top`.
+
+        That is #14677, measured rather than inferred — `origin/main`'s page,
+        Chromium at 375x812, the hatch firing. Columns: the children's summed
+        height, the off-centre skew `(topGap-padT) - (bottomGap-padB)` (0 =
+        centred), and the gap between the last child and the beat's bottom
+        edge (which includes the beat's own 32px `padding-bottom`):
+
+            beat             copy    off-centre   gap below
+            #beat-ingest     153.9    -574.1      606.1px
+            #beat-onboard    169.2    -558.8      590.8px
+            #beat-reason     177.0    -551.0      583.0px
+            #beat-organize   246.4    -481.6      513.6px
+            #beat-intro      338.5    -353.5      385.5px
+            #beat-compute    339.3    -356.7      388.7px
+
+        (Four of these six reproduce the figures an earlier version of this
+        docstring carried to 0.1px; `#beat-intro` and `#beat-organize` did not,
+        and are re-measured here rather than inherited — #14683 review cycle 3,
+        P3.)
+
+        and every titled beat's box at y=32 — 22.4px UNDER the fixed Login
+        pill, whose button ends at y=54.4 — for 567-1750px² of painted overlap
+        on five of the seven beats. (The hero is the exception and cannot be at
+        32: its own `padding-top: 5rem` puts its h1 at 80 in this arm, so it
+        clips no pill at all.) The intro tween (`gsap.fromTo(el, { opacity: 0, y: 20 })`)
+        carries the title to y=52 mid-animation, which is the 2.4px / 61-187px²
+        frame the screenshots captured (#14683 review cycle 3: an earlier version
+        of this paragraph quoted ONLY that frame while also saying y=52 and y=32,
+        which cannot both be the resting position).
+
+        ⛔ AND WHY THE HATCH CANNOT SAY `justify-content: safe center`, although
+        the base `.beat` rule does: `safe` cannot express this on a browser that
+        does not honour it, and declaration ORDER does not rescue that. Chrome
+        before 115 RECOGNISES the value but ignores the modifier (MDN BCD:
+        `version_added` 115, note "Before version 115, this value is recognized,
+        but has no effect"), so it keeps
+        the declaration, applies a plain `center`, and any `flex-start` written
+        above it never runs — on that band the hero is centred unsafely, top
+        clipped and h1 under the pill, which is worse than the bug being fixed.
+        Auto margins have no support band: they absorb the free space when there
+        is any and resolve to zero when there is not. So this row pins the
+        MECHANISM (a `flex-start` alignment plus `margin-*: auto` on the
+        ground's first and last child), not the spelling of a keyword that a
+        browser may accept and ignore.
+
+        It is also what keeps the ≤320px pill clearance intact, in BOTH arms of
+        the auto-margin predicate — the margins decide which arm, not whether
+        the clearance holds. Measured at this head (Chromium, hero box =
+        viewport − 80px top − 32px bottom padding):
+
+            375x764   copy 687.95 in a 652px box  → overflows; margins 0px;
+                      h1 top 80.0
+            375x812   copy 687.95 in a 700px box  → fits;     margins
+                      6.03/6.02; h1 top 86.03
+
+        Both clear the Login pill's 54.4; the fit arm differs only in that the
+        free space is shared instead of the copy being top-pinned on the
+        padding. An earlier version of this paragraph said the hero "overflows
+        at every phone width measured (722.5px in a 700px box at 375x812)" —
+        false at the viewport it names, and corrected by measurement (#14683
+        independent review, P2).
+        """
+        text = PRODUCT_TEAMS_HTML.read_text(encoding="utf-8")
+        beat_ids = _beat_section_ids(text)
+        blocks = _max_height_media_blocks(text)
+        assert blocks, (
+            f"{PRODUCT_TEAMS_HTML.name} declares no `@media (max-height: ...)` "
+            "rule, so the short-viewport hatch this row grades does not exist.")
+        # Rules that actually SET the alignment, however the selector list is
+        # spelled: one shared declaration block or one per selector are
+        # semantically identical (see `_max_height_media_blocks`), so grading
+        # only the shared shape would false-red a correct refactor. Rules that
+        # merely name a beat — a `padding-top` tweak in a shorter query, say —
+        # are not alignment rules and must not be graded here.
+        hatch_rules = [
+            (selector.group(1), selector.group(2))
+            for _height, body in blocks
+            for selector in re.finditer(r"([^{}]+)\{([^{}]*)\}", body)
+            # ⛔ THE SAME PREDICATE THE HELPER USES (`_beats_addressed`), not
+            # `"#beat-" in prelude` (#14683 review cycle 2, P2 — measured). The
+            # helper was taught the `.beat` spelling this PR declares
+            # legitimate, and this gate kept rejecting it: an alignment arm
+            # written `.beat { justify-content: flex-start }` — behaviourally
+            # identical to the seven-id list, and the spelling the base rule it
+            # overrides already uses — failed here with "the hatch this row
+            # grades does not exist" before the helper ever ran.
+            if _beats_addressed(selector.group(1), beat_ids)
+            and re.search(r"justify-content\s*:", selector.group(2))
+        ]
+        assert hatch_rules, (
+            f"{PRODUCT_TEAMS_HTML.name}: no `@media (max-height: ...)` rule "
+            "sets `justify-content` for a beat, so the hatch this row grades "
+            "does not exist.")
+        for selector, decls_block in hatch_rules:
+            values = [" ".join(d.split()) for d in re.findall(
+                r"justify-content\s*:\s*([^;}]+)", decls_block)]
+            assert "safe center" not in values, (
+                f"{PRODUCT_TEAMS_HTML.name}: the short-viewport hatch for "
+                f"{' '.join(selector.split())} declares "
+                f"`justify-content: safe center` ({values!r}). A browser that "
+                "recognises `safe` but ignores the modifier KEEPS that "
+                "declaration and applies a plain `center` before Chrome 115, so "
+                "the alignment it is ordered after never runs: an over-flowing "
+                "beat is pulled above its content box with its heading painted "
+                "under the Login pill. Centre the beat with `margin-*: auto` "
+                "instead — it has no such support band, on any engine.")
+            assert values[-1] == "flex-start", (
+                f"{PRODUCT_TEAMS_HTML.name}: the hatch for "
+                f"{' '.join(selector.split())} ends its `justify-content` at "
+                f"{values[-1]!r} (all: {values!r}). It must be `flex-start`: "
+                "that is the alignment the sibling row above also requires, "
+                "the one the auto margins below have to be able to override, "
+                "and the one an over-flowing beat needs so its copy starts at "
+                "`padding-top` and can be scrolled from the top rather than "
+                "clipped above it.")
+
+        # …AND THE CENTRING ITSELF, graded PER BLOCK (#14683 review P2). Auto
+        # margins on the ground's first and last child absorb the free space
+        # between them when the copy fits, and resolve to zero when it overflows
+        # — `safe center`'s predicate in every engine. Without both ends the copy
+        # is not centred; without either, the hatch is back to the bare
+        # `flex-start` that caused #14677.
+        #
+        # ⛔ SCOPE IS THE POINT, not a detail. This used to flatten every
+        # `max-height` block into one list and ask "does SOME block centre this
+        # beat?" — which answered GREEN with the auto margins moved into a
+        # `@media (max-height: 400px)` block, because the 820px hatch still
+        # fired and the 400px block could not: every phone in portrait
+        # top-aligned, titles under the Login pill, and the guard reporting the
+        # mechanism intact. A guard whose failure mode is "green while the
+        # mechanism is gone" is a false PASS (#14683 review P2, measured).
+        # `_short_viewport_centring_problems` pairs each `flex-start` arm with a
+        # centring home that fires AT LEAST AS OFTEN; a base rule counts, so the
+        # behaviourally identical hoist to `.beat > :first-child`/`:last-child`
+        # stays green instead of being false-RED as "missing".
+        problems = _short_viewport_centring_problems(text)
+        assert not problems, (
+            f"{PRODUCT_TEAMS_HTML.name}: the short-viewport hatch's centring "
+            "does not fire where its alignment does, so #14677 is back — the "
+            "beat sits at `padding-top` with the dead space under it:\n  - "
+            + "\n  - ".join(problems)
+            + "\nThe `justify-content: flex-start` that makes an overflowing "
+            "beat scrollable is per-block, and the `margin-top`/`margin-bottom` "
+            "`auto` pair that centres copy WHICH FITS has to be in a block that "
+            "fires at least as often as the block that sets that alignment — "
+            "the same `@media (max-height: …)` block, a WIDER one, or the base "
+            "rule. A narrower block cannot do it: the hatch fires on nearly "
+            "every phone in portrait and the narrower query never runs there.")
+        # …and the group has to COVER the page's beats, derived from the markup
+        # rather than hard-coded, so a new beat cannot silently escape it. The
+        # per-beat pairing with the block that aligns it lives in
+        # `_short_viewport_centring_problems` above (`beat_ids` is derived at the
+        # top of this row, because the `hatch_rules` gate reads it too).
+        assert beat_ids, f"{PRODUCT_TEAMS_HTML.name}: no `.beat` sections found."
+        # The base rule is what still protects the beats the hatch does NOT
+        # cover (a viewport 821px or taller). Those arms rely on `safe center`
+        # for the ≤320px pill clearance, and nothing else pins it.
+        # Read off the BLANKED sheet: a commented-out declaration is not on
+        # the page, and a comment quoting one is not a declaration (#14683
+        # review F2 — the raw scan was green with the live rule commented out).
+        base_values = _base_beat_justify_values(text)
+        assert base_values is not None, (
+            f"{PRODUCT_TEAMS_HTML.name}: no base `.beat` rule found.")
+        assert base_values and base_values[-1] == "safe center", (
+            f"{PRODUCT_TEAMS_HTML.name}: the base `.beat` rule's "
+            f"`justify-content` is {base_values!r}, not a trailing "
+            "`safe center`. Above the hatch's breakpoint that declaration is "
+            "the only thing keeping an overflowing beat's padding — and so the "
+            "hero's 5rem pill clearance — intact (#14677's ≤320px arm).")
 
     def test_the_beat_can_receive_the_scroll_gesture_while_visible(self):
         """`overflow-y: auto` on a `pointer-events: none` box does nothing.
@@ -5696,6 +6860,880 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                     "auto }}` companion. The id selector out-ranks "
                     "`.beat.pe-on`, so the visibility-gated rule is defeated "
                     "and the beat can never receive the scroll gesture.")
+
+
+class TestShortViewportCentringIsGradedPerBlock:
+    """The centring guard must be graded in the block that ALIGNS, not anywhere.
+
+    PR #14683's review (P2, `origin: diff`) measured the row above going GREEN
+    with the fix reverted: the two `margin-*: auto` rules moved out of
+    `@media (max-height: 820px)` into a `@media (max-height: 400px)` block left
+    the 820px hatch top-aligning every beat on every phone in portrait — #14677
+    verbatim — while the guard, which flattened every `max-height` block into
+    one list and asked "does SOME block centre this beat?", reported the
+    mechanism intact. It also false-RED the behaviourally identical hoist to
+    `.beat > :first-child` / `.beat > :last-child`, whose message asserted the
+    centring was ABSENT from a page that had it.
+
+    These cases are the discriminators, on synthetic sheets, so the grading
+    rule is exercised directly instead of only being trusted against the one
+    committed page — the shape #14683's review had to replicate by hand in a
+    scratch script. Each case below was run against the PRE-FIX row by that
+    review: the narrower-block case was GREEN there (the fail-open) and the
+    hoist case RED (the over-block), so every assertion here is a behaviour
+    that changed rather than one re-stated.
+    """
+
+    ALIGNED_HATCH = (
+        "      #beat-hero { justify-content: flex-start; overflow-y: auto; }")
+    AUTO_MARGINS_HATCH = (
+        "      #beat-hero > :first-child { margin-top: auto; }\n"
+        "      #beat-hero > :last-child { margin-bottom: auto; }")
+    CENTRED_HATCH = ALIGNED_HATCH + "\n" + AUTO_MARGINS_HATCH
+
+    HERO_SECTION = ('<section id="beat-hero" class="beat">'
+                    '<div class="doc-grid">copy</div></section>')
+
+    @staticmethod
+    def _page(*, hatch: str, base: str = "", extra: str = "",
+              markup: str = HERO_SECTION) -> str:
+        return (
+            "<!doctype html>\n<html><head><style>\n"
+            "    .beat { justify-content: safe center; }\n"
+            f"{base}\n"
+            "    @media (max-height: 820px) {\n"
+            f"{hatch}\n"
+            "    }\n"
+            f"{extra}\n"
+            "</style></head><body>\n"
+            # The ground carries `.doc-grid` so a class-qualified selector
+            # addresses it; the guard reads the ELEMENT, not the selector text
+            # (#14697 residual 2).
+            f"{markup}\n"
+            "</body></html>\n"
+        )
+
+    def test_the_shipped_shape_is_clean(self):
+        page = self._page(hatch=self.CENTRED_HATCH)
+        assert _short_viewport_centring_problems(page) == []
+
+    def test_centring_in_a_narrower_block_is_red(self):
+        """The fail-open: a 400px block never fires on the phones the 820px one does."""
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            extra=(
+                "    @media (max-height: 400px) {\n"
+                "      #beat-hero > :first-child { margin-top: auto; }\n"
+                "      #beat-hero > :last-child { margin-bottom: auto; }\n"
+                "    }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "the centring moved into a 400px block was reported CLEAN — this is "
+            "the fail-open #14683's review measured: the 820px hatch top-aligns "
+            "every beat on every phone in portrait and the 400px block cannot "
+            "run there.")
+        assert "beat-hero > :first-child" in problems[0], problems
+        assert "820" in problems[0], problems
+
+    def test_the_equivalent_hoist_to_the_base_rule_is_accepted(self):
+        """Auto margins on `.beat > :first-child` subsume the alignment — legal."""
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            base=(
+                "    .beat > :first-child { margin-top: auto; }\n"
+                "    .beat > :last-child { margin-bottom: auto; }"))
+        assert _short_viewport_centring_problems(page) == []
+
+    def test_centring_in_an_unmodelled_condition_is_red(self):
+        """The ENABLING-side fail-open: `auto` inside a condition we cannot read.
+
+        Mutants named, each measured GREEN-and-broken against the reader before
+        this arm existed (#14683 review cycle 2 P1 and cycle 3 P2): the pair
+        moved into `@media (orientation: landscape)`, into `@media screen and
+        (max-height: 400px)`, into `@media (max-height: 820px) and (min-width:
+        500px)`, into `@supports (display: grid)`, and into an `@MEDIA
+        (max-height: 400px)` spelled in upper case — every one of them leaves
+        375x812 top-aligned (titles back at y=52, 574px of dead space on
+        `#beat-ingest`) while the reader reported the mechanism intact.
+
+        "Could not classify this condition" is not "this condition is always
+        true": ranking an `auto` as a BASE candidate was the fail-open, and the
+        widening case below is what stops the fix from over-blocking.
+        """
+        for wrapper in (
+            "@media (orientation: landscape) {\n%s\n}",
+            "@media screen and (max-height: 400px) {\n%s\n}",
+            "@media (max-height: 820px) and (min-width: 500px) {\n%s\n}",
+            "@supports (display: grid) {\n%s\n}",
+            "@MEDIA (max-height: 400px) {\n%s\n}",
+            "@SUPPORTS (display: grid) {\n%s\n}",
+        ):
+            page = self._page(
+                hatch=self.ALIGNED_HATCH,
+                extra=wrapper % (self.AUTO_MARGINS_HATCH))
+            problems = _short_viewport_centring_problems(page)
+            assert problems, (
+                f"the centring pair inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN — a condition this reader cannot evaluate was "
+                "credited as firing at the hatch's height, so the guard "
+                "certifies a page that top-aligns every beat")
+
+    def test_centring_in_a_min_height_block_is_red(self):
+        """Mutant: the pair moved into `@media (min-height: 800px)`.
+
+        The hatch fires for EVERY height up to 820, so a pair that only exists
+        from 800 upward leaves every phone below it top-aligned. Probing the
+        cascade only at the arm's own height credited `min-height: 800` as
+        "fires at least as often as the hatch" (it IS active at 820) and
+        reported the row GREEN — measured on the rendered page: `topGap 0`,
+        titles back at 32, pill overlap 1180-1750px² at 375x764, 390x675 and
+        375x643 while 375x812 alone looked centred. That is #14683 review
+        cycle 3, P1, and this case pins the two-ended probe that closes it.
+        """
+        for wrapper in ("@media (min-height: 800px) {\n%s\n}",
+                        "@media (min-height: 700px) and (max-height: 820px) {\n%s\n}"):
+            page = self._page(hatch=self.ALIGNED_HATCH,
+                              extra=wrapper % (self.AUTO_MARGINS_HATCH))
+            problems = _short_viewport_centring_problems(page)
+            assert problems, (
+                f"a centring pair inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN: it is active at the arm's own height but "
+                "absent at every shorter one, where the hatch still fires")
+            assert "820" in problems[0], problems
+
+    def test_centring_in_a_WIDER_unmodelled_condition_is_accepted(self):
+        """The over-block the asymmetric ranking must NOT buy.
+
+        Mutant: the pair moved into a WIDER `max-height` (`900px`), which does
+        fire wherever the 820px hatch does. Ranking an unmodelled condition as
+        never-active would false-RED this legitimate edit; ranking a MODELLED
+        one by its band keeps it green. Measured GREEN at this head.
+        """
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            extra=(f"@media (max-height: 900px) {{\n"
+                   f"{self.AUTO_MARGINS_HATCH}\n}}"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a centring pair in a WIDER max-height block was false-RED: the "
+            "block fires wherever the hatch does, so the mechanism is intact")
+
+    def test_a_descendant_subject_is_not_the_ground(self):
+        """Mutant: `#beat-hero > .doc-grid .doc-copy { margin-top: auto }`.
+
+        A rule addressing a DESCENDANT of the ground is not a centring home for
+        the ground. The pseudo-free arm's lookahead accepted whitespace after the
+        compound, so the compound was attributed to `.doc-grid` anyway and the
+        row went GREEN over a hero that renders EXACTLY like the pair-removed
+        control this same reader REDs (#14683 review cycle 4, P1-adjacent P2 —
+        measured `top=80, offCentre=-12.05`, bit-identical to the control).
+        `> .doc-grid:hover` was the same shape.
+
+        The control is the legitimate case that must stay GREEN: a reset on the
+        ground's own child (`.doc-copy`) touches no margin the centring uses.
+        """
+        for subject in ("#beat-hero > .doc-grid .doc-copy",
+                        "#beat-hero > .doc-grid:hover"):
+            page = self._page(
+                hatch=self.ALIGNED_HATCH,
+                extra=(f"    {subject} {{ margin-top: auto; "
+                       f"margin-bottom: auto; }}"))
+            assert _short_viewport_centring_problems(page), (
+                f"{subject!r} addresses something other than the ground and was "
+                "credited as its centring home")
+        control = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > .doc-copy { margin-top: 0; }")
+        assert _short_viewport_centring_problems(control) == [], (
+            "a reset on the ground's descendant red the guard")
+
+    def test_the_disabling_half_of_the_asymmetry_is_pinned(self):
+        """Mutant: skip every rule inside an unmodelled condition (the cycle-2 reader).
+
+        The asymmetric ranking has two halves, and only the ENABLING one was
+        pinned. Replacing the whole `if unmodelled:` block with `continue` — the
+        cycle-2 behaviour — left every test in this class passing, while
+        `@media (max-width: 760px) { #beat-hero > :first-child { margin-top: 0 } }`
+        (which fires at 375 wide and top-aligns the hero, measured `top=80,
+        offCentre=-12.05`) was reported CLEAN: #14677 verbatim with CI green
+        (#14683 review cycle 4, P3). This case is that mutant's detector.
+
+        `@media print` is the same half in its weakest form: it cannot affect the
+        screen at all, and it is deliberately treated as a disabling candidate —
+        the declared over-block the docstring names.
+        """
+        for wrapper in ("@media (max-width: 760px) {\n%s\n}",
+                        "@media print {\n%s\n}"):
+            page = self._page(
+                hatch=self.CENTRED_HATCH,
+                extra=wrapper % (
+                    "      #beat-hero > :first-child { margin-top: 0; }"))
+            assert _short_viewport_centring_problems(page), (
+                f"a `margin-top: 0` inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN — a disabling rule in an unmodelled condition "
+                "must be assumed to apply")
+
+    def test_an_all_reset_is_a_disabling_declaration(self):
+        """Mutant: `all: initial` on the ground — it resets the margins too.
+
+        Measured `offCentre=-56.56` on the hero at 375x812 with the row GREEN:
+        the reader looked only at the margin longhands and shorthands, so a
+        declaration that resets EVERY property was invisible (#14683 review
+        cycle 4, P3). `all: unset` / `revert` are the same.
+        """
+        for value in ("initial", "unset", "revert"):
+            page = self._page(
+                hatch=self.CENTRED_HATCH,
+                extra=(f"      #beat-hero > :first-child {{ all: {value}; }}"))
+            assert _short_viewport_centring_problems(page), (
+                f"`all: {value}` on the ground was not seen: it resets the "
+                "margins the centring depends on")
+
+    def test_a_reset_that_names_the_ground_without_the_pseudo_is_red(self):
+        """Mutant: `#beat-hero > .doc-grid { margin-top: 0 }` — #14677 on the hero.
+
+        The ground is addressed by its own class, with no `:first-child`, which
+        is how a reset is actually written. Measured before this arm existed:
+        rendered h1 top back to 80 (from 86.03 centred) with the reader GREEN,
+        and the same shape on `#beat-intro > p.lead` top-aligned that beat
+        (353.5px of dead space below) — #14677 with no `!important`, no
+        functional pseudo and no inline style (#14683 review cycle 3, P2).
+
+        The control below is what keeps this from becoming a false RED on every
+        rule that merely names a child: `> h2` addresses a DIFFERENT element,
+        so it neither centres nor disables the ground's margin.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > .doc-grid { margin-top: 0; }")
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a `margin-top: 0` addressed to the ground by its own class was "
+            "not seen: the reader only credited selectors carrying "
+            "`:first-child`/`:last-child`")
+        control = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > h2 { margin-top: 0; }")
+        assert _short_viewport_centring_problems(control) == [], (
+            "a rule naming some OTHER child red the guard: the ground's own "
+            "margin is untouched")
+
+    def test_an_uppercase_auto_value_is_still_auto(self):
+        """Mutant: `margin-top: AUTO` — valid CSS, and it centres.
+
+        CSS values are ASCII case-insensitive, and the reader compared them
+        literally, so the correct page was reported as a beat whose margin "is "
+        "not `auto`" — a false RED over content that is centred (#14683 review
+        cycle 3, P3).`!IMPORTANT` is matched case-insensitively too.
+        """
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            extra=("@media (max-height: 900px) {\n"
+                   "  #beat-hero > :first-child { margin-top: AUTO; }\n"
+                   "  #beat-hero > :last-child { margin-bottom: AUTO; }\n}"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "`AUTO` was not recognised as `auto`, so a centred page was "
+            "reported as uncentred")
+
+    def test_a_reset_on_a_DESCENDANT_is_not_a_reset_of_the_ground(self):
+        """Zeroing a descendant's margin cannot unshare the ground's margin.
+
+        #14683 review cycle 6, measured. The no-pseudo arm's lookahead ended the
+        selector at a SPACE, i.e. it accepted the DESCENDANT combinator, so
+
+            `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`
+
+        was collected as a reset OF the ground and won the modelled cascade on
+        the WHOLE selector's specificity — RED over a page that renders
+        identically to the shipped one (measured in Chromium: ground margin
+        `auto`, 18.03px of shared slack, off-centre 0.02). The child-combinator
+        sibling (`> .doc-grid > .doc-copy`) was already not collected, which is
+        what shows the space acceptance was accidental rather than a deliberate
+        fail-closed trade.
+        """
+        page = self._page(hatch=self.CENTRED_HATCH, extra=(
+            "    #beat-hero > .doc-grid .hero-sub { margin-top: 0; }\n"
+            "    #beat-hero > .doc-grid :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a reset on a DESCENDANT of the ground was graded as a reset of the "
+            "ground — that refuses a behaviourally correct page")
+
+    def test_a_reset_on_the_ground_itself_is_still_red(self):
+        """The control for the row above: the GROUND's own reset must still RED."""
+        page = self._page(hatch=self.CENTRED_HATCH, extra=(
+            "    #beat-hero > .doc-grid { margin-top: 0; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a reset on the ground itself was reported CLEAN — the descendant "
+            "fix above must not cost the catch it exists for")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_the_other_spellings_of_an_end_are_collected(self):
+        """`:nth-child(1)` names the same end as `:first-child` (P1).
+
+        The primary arm required the literal `:first-child`/`:last-child`, so
+        the canonical respellings of the SAME end were never collected while
+        the browser applied them. Measured at `18741101`:
+        `#beat-hero > :nth-child(1) { margin-top: 0 }` returned `[]` over the
+        hero it top-aligns (identical specificity to the shipped `auto`, later
+        in source).
+        """
+        for selector, declaration, side in (
+                ("#beat-hero > :nth-child(1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-last-child(1)", "margin-bottom: 0", "last"),
+                ("#beat-hero > .doc-grid:nth-child(1)", "margin-top: 0", "first"),
+                ("#beat-hero > div:first-of-type", "margin-top: 0", "first"),
+                ("#beat-hero > div:nth-of-type(1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-of-type(1)", "margin-top: 0", "first"),
+                ("#beat-hero > div:nth-last-of-type(1)", "margin-bottom: 0",
+                 "last"),
+                ("#beat-hero > :nth-child(+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(0n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(-n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(2n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(2n-1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(-n+3)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(odd)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(1 of .doc-grid)", "margin-top: 0",
+                 "first"),
+                ("#beat-hero > :FIRST-CHILD", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-LAST-child(1)", "margin-bottom: 0", "last"),
+                ("#beat-hero > :nth-child( 1 )", "margin-top: 0", "first")):
+            page = self._page(hatch=(
+                self.CENTRED_HATCH + f"\n      {selector} {{ {declaration}; }}"))
+            problems = _short_viewport_centring_problems(page)
+            assert any(f"beat-hero > :{side}-child" in p
+                       and "resolves to `0`" in p for p in problems), (
+                f"a reset on `{selector}` was reported CLEAN — that selector "
+                f"addresses the same ground element the shipped `auto` does:",
+                problems)
+
+    def test_start_and_important_are_the_same_top_alignment(self):
+        """`start` ≡ `flex-start`, and `!important` sets priority only (P2).
+
+        The hatch's arm was detected by comparing the raw declaration text, so
+        `justify-content: start` (identical on a column flex container) and
+        `justify-content: flex-start !important` both fell out of `arms`, and
+        every beat was reported as "no `max-height` rule sets its
+        `justify-content`" — a false RED claiming absence of a present rule
+        (#14683 independent review, measured at `18741101`).
+        """
+        for spelling in ("start", "flex-start !important"):
+            page = self._page(hatch=self.CENTRED_HATCH.replace(
+                "justify-content: flex-start", f"justify-content: {spelling}"))
+            assert _short_viewport_centring_problems(page) == [], (
+                f"`justify-content: {spelling}` IS the top-aligning arm, but "
+                "the hatch was reported as absent")
+
+    def test_a_non_top_aligning_hatch_is_not_called_absent(self):
+        """`center` in the hatch is the neighbour row's finding, not absence (P2).
+
+        The arm filter `continue`d before recording that a rule NAMED the beat,
+        so a hatch that sets `justify-content: center` produced seven
+        "no `max-height` rule sets its `justify-content`" messages over a block
+        that visibly does (#14683 independent review, measured). The absence
+        claim is reserved for a beat no hatch rule reaches at all.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH.replace(
+                "justify-content: flex-start", "justify-content: center"))
+        problems = _short_viewport_centring_problems(page)
+        assert not any("the hatch never reaches it" in p for p in problems), (
+            "a `center` hatch was reported as no hatch at all:", problems)
+
+        # The absence claim still fires when NOTHING in a hatch names the beat.
+        unreached = self._page(hatch=(
+            "      #beat-intro { justify-content: flex-start; }"),
+            markup=self.HERO_SECTION)
+        assert any("the hatch never reaches it" in p
+                   for p in _short_viewport_centring_problems(unreached)), (
+            "a beat no hatch rule names was not reported as unreached")
+
+        # …and an UNCLASSIFIED value (`normal`, `stretch`, `left`) may not be
+        # promoted to "the hatch reaches it": that silence is a false PASS over
+        # a page with no auto margins. It keeps a problem of its own — and NOT
+        # the absence claim, which would be a false diagnosis over a rule that
+        # is right there.
+        unclassified = self._page(hatch=self.ALIGNED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: normal"))
+        problems = _short_viewport_centring_problems(unclassified)
+        assert any("cannot classify" in p for p in problems), (
+            "`justify-content: normal` silenced the margin grading — an "
+            "unclassified value is not evidence that the hatch aligns it:",
+            problems)
+        assert not any("never reaches it" in p for p in problems), (
+            "an unclassified hatch was reported as no hatch at all:", problems)
+
+    def test_space_between_is_not_treated_as_non_aligning(self):
+        """`space-between` pins the first item to the top — it is not centring (P2).
+
+        It was in the "positively non-top-aligning" set, which skipped the
+        margin grading, so `justify-content: space-between` with the two `auto`
+        rules deleted returned `[]` over a page whose copy is spread and pinned
+        at the top. Classifying it as UNCLASSIFIABLE instead was the opposite
+        error — it RED a page that has the pair, because the unclassified arm
+        reports unconditionally. It belongs with `flex-start`: the arm does not
+        centre, the pair does (#14683 independent review, both directions
+        measured).
+        """
+        without_pair = self._page(hatch=self.ALIGNED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: space-between"))
+        problems = _short_viewport_centring_problems(without_pair)
+        assert problems, (
+            "`space-between` left no problem at all — the margin grading was "
+            "skipped for an arm that top-pins its first item")
+        assert "no `margin-top: auto` fires" in problems[0], problems
+
+        with_pair = self._page(hatch=self.CENTRED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: space-between"))
+        assert _short_viewport_centring_problems(with_pair) == [], (
+            "`space-between` WITH the auto pair reds — the auto margins absorb "
+            "the free space, so that page centres exactly like the shipped one")
+
+    def test_a_commented_out_beat_section_is_not_a_beat(self):
+        """A comment is dead to the browser, so it is not a beat (#14683 F1).
+
+        The beat list used to be read off the RAW page, so a `<section …>`
+        parked in an HTML comment was counted and the row demanded a hatch arm
+        for an element that does not exist — measured `beats=8`, RED naming the
+        commented-out id, with no edit able to clear it but deleting the
+        comment. That is verbatim the #14020 failure `_css_blanked` fixed for
+        CSS, and this page is comment-dense (its hero comment quotes
+        `<video>`/`<div>`).
+        """
+        markup = (self.HERO_SECTION
+                  + '\n<!-- <section id="beat-oldbit" class="beat">'
+                    "<p>retired</p></section> -->")
+        page = self._page(hatch=self.CENTRED_HATCH, markup=markup)
+        assert _beat_section_ids(page) == ["beat-hero"], (
+            "a beat section inside an HTML comment was derived as a live beat")
+        assert _short_viewport_centring_problems(page) == [], (
+            "the row demanded a hatch arm for a commented-out section")
+
+    def test_a_new_beat_is_derived_whatever_the_attributes_spell(self):
+        """The `derived from the page` guarantee, in the spellings that exist.
+
+        The beat list is documented as "DERIVED from the page so a new beat
+        cannot silently escape the hatch's group", but it was regexed from one
+        fixed spelling — `<section id="…" class="beat`. A new beat written
+        CLASS-FIRST or with SINGLE-QUOTED attributes was invisible to the list
+        and escaped the group silently: measured `beats=7`, row GREEN, with the
+        new section live on the page (#14683 review F1).
+        """
+        for spelling in (
+            '<section class="workflow beat" id="beat-new"><p>x</p></section>',
+            "<section id='beat-new' class='beat'><p>x</p></section>",
+        ):
+            page = self._page(hatch=self.CENTRED_HATCH,
+                              markup=self.HERO_SECTION + "\n" + spelling)
+            assert "beat-new" in _beat_section_ids(page), (
+                f"a new beat spelled {spelling!r} was invisible to the "
+                "derived beat list")
+            problems = _short_viewport_centring_problems(page)
+            assert any("beat-new" in problem for problem in problems), (
+                f"the new beat {spelling!r} escaped the hatch's group with the "
+                f"row GREEN: {problems!r}")
+
+    def test_a_qualified_subject_is_not_the_bare_beat(self):
+        """`.beat.workflow > …` NARROWS the set; it is not a home for every beat.
+
+        #14683 review F1, measured: six of the page's seven beats carry
+        `workflow` and the hero does not, so the shorter spelling of the
+        shipped rule credited the hero with centring it never receives — GREEN
+        while the hero, whose 5rem is also a recorded pill clearance, kept the
+        hatch's bare `flex-start` alone. Rejecting a qualified subject is NOT
+        uniformly fail-closed (see `_beats_whose_ground`: for a DISABLING rule
+        the browser applies what this reader never collected), which is why the
+        residual is recorded on #13837 as R-C instead of claimed as safe here.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      .beat.workflow > :first-child { margin-top: auto; }"
+            + "\n      .beat.workflow > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a `.beat.workflow`-qualified centring rule was credited to a beat "
+            "that does not carry `workflow`")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_a_nested_narrower_block_does_not_credit_the_outer_height(self):
+        """Nested at-rules intersect: a 400px block inside 820 fires at ≤400.
+
+        #14683 review F1, measured: taking the FIRST enclosing `max-height`
+        credited the inner centring with 820, so the page was top-aligned at
+        375x812 with the guard GREEN.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      @media (max-height: 400px) {\n"
+            "        #beat-hero > :first-child { margin-top: auto; }\n"
+            "        #beat-hero > :last-child { margin-bottom: auto; }\n"
+            "      }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a nested `max-height: 400px` block was credited with the outer "
+            "820px hatch's height")
+        assert any("820" in p for p in problems), problems
+    def test_selector_spacing_and_a_type_selector_are_accepted(self):
+        """`>` spacing and `div:first-child` are the same element, not a miss."""
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero>:first-child { margin-top: auto; }"
+            + "\n      #beat-hero > div:last-child { margin-bottom: auto; }"))
+        assert _short_viewport_centring_problems(page) == []
+
+    def test_a_nested_child_is_not_the_ground(self):
+        """`#beat-hero .doc-copy > :first-child` centres a DESCENDANT, not the ground.
+
+        The pre-fix regex accepted any `>` upstream of the pseudo, so moving the
+        centring off the beat's ground onto a nested child left the guard GREEN
+        with #14677 restored — and this page has the natural shape for it
+        (`.outcomes > :first-child` inside `#beat-compute`).
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero .doc-copy > :first-child { margin-top: auto; }"
+            + "\n      #beat-hero .doc-copy > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a rule centred on a NESTED child was accepted as the ground — the "
+            "beat itself keeps no auto margins, which is #14677 verbatim.")
+        assert "beat-hero > :first-child" in problems[0], problems
+        assert _beats_whose_ground(
+            "#beat-hero .doc-copy > :first-child", "first-child",
+            _beat_ground_elements(page)) == []
+
+    def test_a_class_qualified_ground_is_still_the_ground(self):
+        """`#beat-hero > .doc-grid:first-child` IS the hero's ground.
+
+        The fixture's ground carries the class the rule names, because the
+        guard now reads the ELEMENT (#14697 residual 2): a rule naming a class
+        no child has addresses nothing, and grading it as centring is the
+        fail-open that residual measured.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > .doc-grid:first-child { margin-top: auto; }"
+            + "\n      #beat-hero > .doc-grid:last-child { margin-bottom: auto; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "the class-qualified ground selector was reported missing — it "
+            "addresses the same element as `#beat-hero > :first-child`.")
+
+    def test_a_longer_id_is_not_the_beat(self):
+        """`#beat-hero-copy` must not satisfy `#beat-hero`'s ground."""
+        page = self._page(hatch=self.CENTRED_HATCH)
+        assert _beats_whose_ground(
+            "#beat-hero-copy > :first-child", "first-child",
+            _beat_ground_elements(page)) == []
+
+    def test_a_class_scoped_alignment_arm_reaches_every_beat(self):
+        """`.beat { justify-content: flex-start }` IS a hatch arm for every beat.
+
+        The base rule it overrides is `.beat`-scoped, so the class spelling is
+        behaviourally identical to the seven-id list. The pre-fix reader only
+        collected ids and reported "no `max-height` rule sets its
+        `justify-content`, so the hatch never reaches it" — asserting the
+        absence of a rule that is right there (#14683 review cycle 2, P3).
+        """
+        page = self._page(hatch=(
+            "      .beat { justify-content: flex-start; overflow-y: auto; }\n"
+            + self.AUTO_MARGINS_HATCH))
+        assert _short_viewport_centring_problems(page) == []
+
+    def test_a_wider_alignment_arm_needs_centring_too(self):
+        """Centring at 820 does not cover a hatch arm that fires at 1200."""
+        page = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra=("    @media (max-height: 1200px) {\n"
+                   "      #beat-hero { justify-content: flex-start; }\n"
+                   "    }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "an alignment arm at 1200px with no centring there was reported "
+            "CLEAN — between 821px and 1200px the beat would be top-aligned "
+            "with no auto margins, which is #14677 on a tablet-height window.")
+        assert "1200" in problems[0], problems
+
+    def test_a_missing_end_is_named_on_its_own_side(self):
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert any("beat-hero > :last-child" in p and "margin-bottom" in p
+                   for p in problems), problems
+        assert not any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_the_swapped_margin_pair_is_red(self):
+        """`margin-bottom: auto` on the FIRST child is not centring — measured.
+
+        #14683 review cycle 2, finding 1: the reader recorded the SIDE a rule
+        called and discarded which PROPERTY it set, so the pair swapped end for
+        end still read as the mechanism intact. Rendered at 375x812 the swap
+        puts every beat back at a 32px top gap (its own `padding`), i.e. #14677
+        — and the row said `[]`.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin-bottom: auto; }"
+            + "\n      #beat-hero > :last-child { margin-top: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "the swapped pair was reported CLEAN: `margin-bottom: auto` on the "
+            "first child absorbs the space BETWEEN the two, which is "
+            "`space-between`, not centring")
+        assert any("beat-hero > :first-child" in p and "margin-top" in p
+                   for p in problems), problems
+
+    def test_a_later_declaration_that_disables_the_auto_margin_is_red(self):
+        """The winning declaration, not the presence of `auto` (finding 2).
+
+        `margin-top: auto; margin-top: 0;` is the ordinary way an editor turns
+        the centring off, and it reproduced the PR body's own "before" column
+        (32px top gap, 606.1px of dead space under `#beat-ingest`) while the
+        substring scan stayed green.
+        """
+        page = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: auto; "
+              "margin-top: 0; }"
+            + "\n      #beat-hero > :last-child { margin-bottom: auto; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "`margin-top: 0` appended below `margin-top: auto` was ignored — "
+            "the reader graded the presence of a string, not the winning "
+            "declaration")
+        assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_an_appended_override_rule_wins_the_cascade(self):
+        """The cascade is resolved ACROSS rules, not inside one body only.
+
+        #14697 residual 1, measured on the shipped page: appending
+        `#beat-ingest > :first-child { margin-top: 0 }` after the auto rule
+        inside the same `@media (max-height: 820px)` block put the beat back at
+        0.0 / 574.1 at 375x812 — #14677 exactly — while this guard reported the
+        mechanism intact, because it took `any(rule says auto)` and never asked
+        which rule WINS. The pre-fix reader returned `[]` here.
+        """
+        page = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: 0; }"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a later same-specificity rule setting `margin-top: 0` was ignored "
+            "— the stale `auto` rule above it kept the guard green over a "
+            "beat the browser top-aligns")
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+    def test_a_rule_the_override_cannot_outrank_still_centres(self):
+        """Over-block guard: a WEAKER later rule does not win the cascade.
+
+        `.beat > :first-child` (0,1,0 + the pseudo) loses to
+        `#beat-hero > :first-child` (1,0,0 + the pseudo) however late it is, so
+        a page that narrows the centring with a class-level reset — and still
+        centres the beats — must stay GREEN. Grading "the last rule wins" by
+        source order alone would red it.
+        """
+        page = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      .beat > :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a LOWER-specificity rule was graded as the cascade winner, so a "
+            "correct page reds")
+
+    def test_an_important_reset_wins_and_an_important_auto_holds(self):
+        """`!important` is part of the cascade, in BOTH directions (#13837 R3).
+
+        A trailing `margin-top: 0 !important` beats the plain `auto` (measured
+        fail-open: the reader compared values and never looked at the marker),
+        and `margin-top: auto !important` survives a later plain `0` (otherwise
+        a correct page reds).
+        """
+        reset = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin-top: 0 !important; }"))
+        problems = _short_viewport_centring_problems(reset)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+        held = self._page(hatch=(
+            self.CENTRED_HATCH.replace(
+                "#beat-hero > :first-child { margin-top: auto; }",
+                "#beat-hero > :first-child { margin-top: auto !important; }")
+            + "\n      #beat-hero > :first-child { margin-top: 0; }"))
+        assert _short_viewport_centring_problems(held) == [], (
+            "an `!important` auto margin was overridden by a later ordinary "
+            "declaration, redding a page the browser still centres")
+
+    def test_a_margin_shorthand_resets_the_end_it_sets(self):
+        """`margin: 0` sets the end longhands, so it wins (#13837 R2).
+
+        `_effective_decl` is per-property, so the shorthand was invisible and a
+        `margin: 0` reset left the guard green — but the shorthand is exactly
+        how a reset is written. Both directions are pinned: the reset reds, and
+        `margin: auto` (which sets every side to auto) still centres.
+        """
+        reset = self._page(hatch=(
+            self.CENTRED_HATCH
+            + "\n      #beat-hero > :first-child { margin: 0; }"))
+        problems = _short_viewport_centring_problems(reset)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+        shorthand_auto = self._page(hatch=(
+            self.ALIGNED_HATCH
+            + "\n      #beat-hero > :first-child { margin: auto; }"
+            + "\n      #beat-hero > :last-child { margin-block: auto; }"))
+        assert _short_viewport_centring_problems(shorthand_auto) == [], (
+            "`margin: auto` sets the block-start end to `auto`, so the beat is "
+            "centred and the guard must not red it")
+
+    def test_a_type_selector_must_match_the_child_the_markup_declares(self):
+        """#14697 residual 2 — a type selector addresses a possibly EMPTY set.
+
+        Measured on the shipped page: `#beat-ingest`'s first child is an `<h2>`,
+        so `#beat-ingest > p:first-child { margin-top: auto }` matches nothing
+        and the beat renders top-aligned (0.0 / 574.1 at 375x812) while the
+        guard — which took any simple selector as "the same ELEMENT" — stayed
+        green. The pre-fix reader returned `[]` for the `p` page below.
+        """
+        def page(first_selector: str) -> str:
+            return (
+                "<!doctype html>\n<html><head><style>\n"
+                "    .beat { justify-content: safe center; }\n"
+                "    @media (max-height: 820px) {\n"
+                "      #beat-ingest { justify-content: flex-start; }\n"
+                f"      #beat-ingest > {first_selector}:first-child "
+                "{ margin-top: auto; }\n"
+                "      #beat-ingest > :last-child { margin-bottom: auto; }\n"
+                "    }\n"
+                "</style></head><body>\n"
+                '<section id="beat-ingest" class="beat">'
+                "<h2>Ingest</h2><p>copy</p></section>\n"
+                "</body></html>\n")
+
+        problems = _short_viewport_centring_problems(page("p"))
+        assert problems, (
+            "`#beat-ingest > p:first-child` was accepted as the ground — its "
+            "first child is an `<h2>`, so the rule matches NOTHING and the beat "
+            "top-aligns")
+        assert any("beat-ingest > :first-child" in p for p in problems), problems
+        assert _short_viewport_centring_problems(page("h2")) == [], (
+            "`#beat-ingest > h2:first-child` DOES name the first child")
+
+    def test_a_min_height_override_also_wins_the_cascade(self):
+        """The other half of the height axis: a `min-height` rule can override.
+
+        `@media (min-height: 500px)` fires at the 820px arm (a phone in portrait
+        is taller than 500px), so it overrides the `auto` there exactly as a
+        same-block rule does — and a max-height-only reader does not see the
+        block at all. Measured GREEN before that reader existed: the same
+        residual #14697 recorded, one query family over.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra=("    @media (min-height: 500px) {\n"
+                   "      #beat-hero > :first-child { margin-top: 0; }\n"
+                   "    }"))
+        problems = _short_viewport_centring_problems(page)
+        assert any("beat-hero > :first-child" in p and "resolves to `0`" in p
+                   for p in problems), problems
+
+    def test_the_ground_element_is_read_from_the_markup(self):
+        """The reader resolves the child's tag/class/id, not just the combinator."""
+        page = (
+            '<section id="beat-hero" class="beat">\n'
+            '  <div class="doc-grid" id="hero-grid"><p>nested</p></div>\n'
+            "</section>\n")
+        grounds = _beat_ground_elements(page)
+        assert grounds["beat-hero"]["first-child"] == (
+            "div", frozenset({"doc-grid"}), frozenset({"hero-grid"}))
+        # A descendant is not the ground: the `<p>` inside the `<div>`.
+        assert _beats_whose_ground(
+            "#beat-hero > p:first-child", "first-child", grounds) == []
+        assert _beats_whose_ground(
+            "#beat-hero > .doc-grid:first-child", "first-child", grounds) == [
+            "beat-hero"]
+
+
+class TestBaseBeatJustifyReaderSeesLiveDeclarationsOnly:
+    """The base `.beat` guard must read the LIVE sheet, not the comment text.
+
+    PR #14683's review (F2, `origin: diff`) measured the assertion above going
+    GREEN with the `safe center` that keeps the hero's 5rem pill clearance
+    commented out: the reader scanned the raw page, so a declaration parked in
+    `/* … */` — dead to the browser — still satisfied it. That is a false PASS
+    on the one arm the row exists to protect (#14677's ≤320px clearance), so it
+    is graded here in both directions: the fail-open, and the over-block where
+    a comment merely QUOTING the declaration invented a bogus value.
+
+    Both cases were run against the PRE-FIX reader and behaved as recorded in
+    the names below, so each is a behaviour that changed rather than a
+    restatement of the row.
+    """
+
+    @staticmethod
+    def _page(declaration: str) -> str:
+        return (
+            "<!doctype html>\n<html><head><style>\n"
+            # A leading rule on purpose: `_css_rules_with_scope` takes the text
+            # since the previous `{`/`}` as a rule's prelude, so without a
+            # closed rule in front of it the prologue glues onto `.beat`.
+            "    body { margin: 0; }\n"
+            "    .beat {\n"
+            f"{declaration}\n"
+            "      padding: 2rem;\n"
+            "    }\n"
+            "</style></head><body>\n"
+            '<section id="beat-hero" class="beat"><div>copy</div></section>\n'
+            "</body></html>\n"
+        )
+
+    def test_the_live_declaration_is_read(self):
+        values = _base_beat_justify_values(
+            self._page("      justify-content: safe center;"))
+        assert values == ["safe center"], values
+
+    def test_a_commented_out_declaration_is_NOT_read(self):
+        """The fail-open: dead CSS satisfied the reader and the row went GREEN."""
+        values = _base_beat_justify_values(
+            self._page("      /* justify-content: safe center; */"))
+        assert values == [], (
+            "a commented-out `justify-content` was read as live — the row stays "
+            "GREEN with the ≤320px pill clearance deleted from the page")
+
+    def test_a_comment_quoting_the_declaration_does_not_leak_a_value(self):
+        """The over-block: prose quoting the declaration must not add a value."""
+        values = _base_beat_justify_values(
+            self._page(
+                "      justify-content: safe center;\n"
+                "      /* the old rule was: justify-content: safe center */"))
+        assert values == ["safe center"], (
+            "a comment quoting the declaration invented a value, which reds a "
+            "correct page")
+
+    def test_the_absent_rule_is_None_not_empty(self):
+        assert _base_beat_justify_values("<html><style>.x{}</style></html>") is None
+
+    def test_a_later_base_rule_wins(self):
+        """The LAST base rule, not the first (finding 3) — the ordinary cascade.
+
+        Appending `.beat { justify-content: center; }` is how a later edit
+        overrides the declaration. A first-match reader still saw `safe center`
+        and stayed green while plain `center` governed at 320x821, putting the
+        h1 24.2px under the Login pill — the ≤320px clearance the assertion
+        itself claims to protect.
+        """
+        page = (
+            "<!doctype html>\n<html><head><style>\n"
+            "    body { margin: 0; }\n"
+            "    .beat { justify-content: safe center; }\n"
+            "    .beat { justify-content: center; }\n"
+            "</style></head><body>\n"
+            '<section id="beat-hero" class="beat"><div>copy</div></section>\n'
+            "</body></html>\n")
+        assert _base_beat_justify_values(page) == ["center"], (
+            "the FIRST base `.beat` rule was read, so an appended override won "
+            "the cascade with the guard still reporting `safe center`")
 
 
 class TestARenderedCodeElementGetsAMonoFace:
