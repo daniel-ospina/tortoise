@@ -388,7 +388,7 @@ async def run() -> int:
         # recorded verbatim, per node, so the asymmetry is measured from THIS
         # bundle rather than argued.
         report["link_witness"] = {}
-        for element_kind, name in (("product", "Lumen Core"),
+        for _element_kind, name in (("product", "Lumen Core"),
                                    ("person", "Amara Osei"),
                                    ("person", "Dana Whitlock"),
                                    ("person", "Tomas Ferreira"),

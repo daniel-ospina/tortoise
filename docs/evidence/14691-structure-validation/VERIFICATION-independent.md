@@ -52,7 +52,7 @@ is not.
 `MATCH (s:Subject) … MATCH (s)<-[:ownedBy]-(e)`, i.e. ownership in exactly the
 orientation ONTOLOGY §3.6 declares. Measured on the four owners the corpus names:
 
-```
+```text
 Amara Osei      → []
 Dana Whitlock   → []
 Tomas Ferreira  → []

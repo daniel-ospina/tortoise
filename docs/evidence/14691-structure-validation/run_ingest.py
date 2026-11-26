@@ -88,7 +88,7 @@ def main() -> int:
     # the vocabulary the graph actually installs (#5163 gates undeclared kinds).
     try:
         receipt["installed_packs"] = sdk.graph_overview("namespaces")
-    except Exception as exc:  # noqa: BLE001 — a read that fails is recorded
+    except Exception as exc:
         receipt["installed_packs"] = {"error": f"{type(exc).__name__}: {exc}"}
     print("\n=== installed packs ===")
     print(json.dumps(receipt["installed_packs"], indent=2, default=str)[:3000])
