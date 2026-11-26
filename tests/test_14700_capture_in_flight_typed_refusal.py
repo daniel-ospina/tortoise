@@ -160,20 +160,48 @@ def test_the_in_flight_code_is_not_the_policy_409() -> None:
     log) can tell the retryable one from the terminal one; if the in-flight code
     were ever shared with — or dropped in favour of — the policy shape, that
     branch collapses again.
+
+    ⛔ THE POLICY SIDE IS GRADED HERE, and it has to be graded at its RAISE SITE,
+    not by feeding the predicate a dict this row invented: no production raise
+    site emits `capture_recording_disabled`, so asserting that input as though
+    the route could emit it proved nothing (#14700 review). What the route
+    actually does is `raise HTTPException(status_code=409, detail=detail)` with
+    `detail` a `str` in BOTH branches, and THAT is the asymmetry a client
+    branches on — `detail["code"]` exists on one 409 and not the other.
+
+    MUTATION THAT REDS THIS (and reds nothing else — the behavioural rows drive
+    the carve-out, not this asymmetry): type the policy raise — replace
+    `detail=detail` with `detail=_capture_session_in_flight_body()` at
+    `_capture_session_impl`'s recording-disabled raise. The terminal 409 then
+    answers a `code` too, a client can no longer tell the two apart, and only
+    this row notices. Measured: restoring it reds this row alone; the control
+    run of the whole population is 10 passed.
+
+    Source assertion rather than a live call, for the same reason
+    `test_both_surfaces_use_the_one_predicate` reads sources: driving the real
+    `_capture_session_impl` to its recording-disabled branch needs a store, and
+    this file is deliberately DB-free so it runs in a fast shard.
     """
+    import inspect
+
     detail = _raise_in_flight().detail
     assert isinstance(detail, dict)
-    # The policy 409 answers a bare STRING and declares no delay: nothing about
-    # it should ever satisfy the in-flight predicate, and — the real asymmetry,
-    # read off the shape rather than off an invented literal — it carries no
-    # `code` at all, so a client cannot branch on one. ⛔ (No PRODUCTION raise
-    # site emits `capture_recording_disabled` — the only occurrence in the tree
-    # other than THIS comment is the rejection INPUT asserted below — so asserting it as though
-    # the route could emit it proved nothing about the production refusal,
-    # #14700 review.)
     policy = _POLICY_409_DETAIL
     assert not ha._is_capture_in_flight_refusal(policy)
     assert not ha._is_capture_in_flight_refusal({"message": policy})
+
+    impl_src = inspect.getsource(ha._capture_session_impl)
+    assert "detail=detail" in impl_src, (
+        "the recording-disabled 409 no longer raises its bare-string `detail` — "
+        "this row can no longer see the policy branch it exists to grade")
+    assert "_capture_session_in_flight_body" not in impl_src, (
+        "the policy 409 was TYPED too — it now answers a `code`, so a client "
+        "branching on `detail['code']` can no longer tell the retryable "
+        "in-flight refusal from the terminal recording-disabled one (#14700)")
+    assert ha._CAPTURE_SESSION_IN_FLIGHT_CODE == "capture_session_in_flight", (
+        "the in-flight 409's wire code moved off the name `docs/infra-runbook.md` "
+        "§4.1.1b publishes, so every client branching on the documented code "
+        "silently stops matching: " + repr(ha._CAPTURE_SESSION_IN_FLIGHT_CODE))
 
 
 def test_the_carve_out_recognises_the_typed_body_and_the_legacy_string() -> None:
