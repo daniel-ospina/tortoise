@@ -520,11 +520,15 @@ def appeal_url() -> str:
     The onboarding fact is recorded where it belongs (the guard's OWNERSHIP
     paragraph, and #12049's own scope), not here.
 
-    ⚠️ The fragment is DEAD and this function does not claim otherwise: the
-    docs page has no ``id="appeal"`` (and no occurrence of the word), so this
-    resolves to the top of the page. Filed as #11939 (the destination decision:
-    add the section, or point at ``/contact``) — deliberately NOT fixed here, so
-    that a host flip is not mistaken for a working appeal link.
+    ✅ The fragment is LIVE, and #11939 is what made it so: ``website/docs.html``
+    now carries the ``#appeal`` section this URL names (the destination decision
+    #11939 asked for — "add the section" rather than "point somewhere else",
+    because the sentence a suspended org reads already promises an appeal, not a
+    contact form). The section is guarded from regressing quietly:
+    ``tests/test_own_site_fragment_targets.py`` compares every fragment URL our
+    sources emit against the ids our pages declare, so deleting that id turns
+    the suite red instead of turning this link into a silent no-op (a fragment
+    is resolved by the browser, never sent to the server — no fetch can see it).
     """
     return os.environ.get(
         "TORTOISE_ABUSE_APPEAL_URL",
