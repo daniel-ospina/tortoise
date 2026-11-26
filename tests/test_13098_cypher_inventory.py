@@ -2,8 +2,10 @@
 
 WHAT THIS SUITE IS FOR
 ======================
-`docs/architecture/CYPHER-INVENTORY.md` publishes counts, and a published count
-without a gate is a number that rots the first time a statement is added. Two
+`docs/architecture/CYPHER-INVENTORY.src.md` publishes counts — the tracked SOURCE,
+whose 25 pins `--check` grades; `CYPHER-INVENTORY.md` beside it is `--render`'s
+gitignored output — and a published count without a gate is a number that rots the
+first time a statement is added. Two
 things are therefore pinned here:
 
 1. **The census reconciles and the doc matches it** — `tools/cypher_inventory.py
@@ -30,7 +32,11 @@ than report agreement.
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
+import io
+import itertools
+import json
 import os
 import re
 import shutil
@@ -49,10 +55,60 @@ from tools import cypher_diff_harness as harness  # noqa: E402
 from tools import cypher_inventory as census  # noqa: E402
 
 # --------------------------------------------------------------------------- #
+# THE DOCUMENT IS RENDERED, NOT COMMITTED (#13098)
+# --------------------------------------------------------------------------- #
+# `docs/architecture/CYPHER-INVENTORY.src.md` is the hand-authored SOURCE — the
+# prose, the 25 pins — and the only TRACKED file. `docs/architecture/
+# CYPHER-INVENTORY.md` is `--render`'s OUTPUT: the source plus one `file:line`
+# row per statement site, appended from the live tree, and it is GITIGNORED.
+#
+# ⛔ WHY. The appendix's rows carry a line number each, so any product commit
+# that moves a statement restamps every later row. While that output was
+# COMMITTED, every such PR had to carry its own regenerated copy —
+# measured 2026-11-24 at `939e37f664`: 8 of 11 open PRs held an edited copy, it
+# was in 6 of 6 then-conflicting PRs, and 3 of the last 20 commits on `main`
+# regenerated it. A committed generated artifact plus N open branches is a
+# guaranteed conflict on every merge round.
+#
+# ⛔ WHAT IS PRESERVED, EXACTLY. The pin/prose arms grade the SOURCE; the appendix
+# arms grade a freshly RENDERED document — the same prose, and the same rows a
+# committed copy carried — and `--check` still reads the same 25 pins. A census
+# that disagrees with the tree still reds (proved on this change: one added
+# statement site reds `--check` and the published-decomposition arm). What went
+# away is only the obligation to COMMIT a regenerated copy.
+DOC_SRC = ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.src.md"
+
+
+def _source_text() -> str:
+    """The tracked SOURCE: prose + the 25 pins, and NOT one census row."""
+    return DOC_SRC.read_text(encoding="utf-8")
+
+
+def _document_text() -> str:
+    """The DOCUMENT: the source + THIS run's appendix, rendered from the tree."""
+    return census.render(DOC_SRC, census.census(("tortoise",)))
+
+
+# ⛔ THE APPENDIX ARMS SLICE FROM THE TABLE'S OWN HEADER ROW, not from the heading's
+# newline. The tracked source carries a VISIBLE note under that heading (`#14625`
+# review, P2: the served file ended on a heading with nothing rendered under it), so
+# the table no longer starts immediately after the marker and a `+ len(marker) + 1`
+# slice would compare the note against the rows.
+APPENDIX_HEADER = "| file:line | fn | shape | role | verdict | statement |\n"
+
+# --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
 # --------------------------------------------------------------------------- #
-# The arms below marked `@requires_doc_pin` compare a COMMITTED census document
-# against the live tree. Any product commit can move those counts, so in the
+# The arms below marked `@requires_doc_pin` grade the census against the live tree,
+# and they split by WHAT they read (#13098): SIX read the tracked SOURCE — three the
+# 25 pins (`--check`, the drift arm, the `files_scanned` arm), three its published
+# prose (the decomposition, the narrative pin, the anchored-arm coverage) — and
+# THREE involve a render (the two appendix arms render to `tmp_path` through a
+# subprocess; the table-shape arm renders in-process). ⛔ NOT "the committed
+# document": after the split there is none, and the two SOURCE halves are not
+# interchangeable — `check()` reads only the HTML pins, so the prose arms are the
+# only grading §0/§1's prose tables get. Any product commit can move those counts,
+# so in the
 # pre-merge matrix (where this file is `core`-registered and rides the REQUIRED
 # `python-ci-gate`) each of them redded PRs that touched neither the census tool
 # nor its doc — #14296 reconciled NINE open PRs / 115 files over exactly this and
@@ -64,7 +120,7 @@ from tools import cypher_inventory as census  # noqa: E402
 # which is not a required context AND is already path-filtered to exactly the
 # diffs that can move a count (`tortoise/**`, `supabase/migrations/**`,
 # `tools/cypher_inventory.py`, `tools/cypher_diff_harness.py`,
-# `docs/architecture/CYPHER-INVENTORY.md`, this file). Nothing was deleted: the
+# `docs/architecture/CYPHER-INVENTORY.src.md`, this file). Nothing was deleted: the
 # arms, the tool and `cypher_inventory.py --check` all still run there, and a
 # genuinely wrong census still reds a job — just not somebody else's merge.
 #
@@ -87,7 +143,7 @@ requires_doc_pin = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 @requires_doc_pin
 def test_the_doc_counts_match_the_census():
-    """The pinned counts in CYPHER-INVENTORY.md are the census's own numbers."""
+    """The pinned counts in CYPHER-INVENTORY.src.md are the census's own numbers."""
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), "--check"],
         capture_output=True, text=True, cwd=ROOT,
@@ -96,7 +152,7 @@ def test_the_doc_counts_match_the_census():
 
 
 @requires_doc_pin
-def test_the_doc_appendix_is_the_tools_own_output():
+def test_the_doc_appendix_is_the_tools_own_output(tmp_path):
     """Appendix A is DERIVED from the tree, so the doc must carry the tool's output.
 
     ⛔ THIS ARM EXISTS BECAUSE THE PINS DO NOT REACH THE APPENDIX, and the gap is
@@ -120,12 +176,30 @@ def test_the_doc_appendix_is_the_tools_own_output():
     still carried the 6 stale rows.
     """
     marker = "## Appendix A — every statement site, by shape\n"
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
+    # ⛔ RENDERED IN A SEPARATE PROCESS FROM THIS ARM'S OWN CENSUS CALL, on
+    # purpose: the teeth here are that the FILE `--render` writes carries every
+    # row, in order, exactly once — a truncated, duplicated or mis-ordered write
+    # reds even though `markdown_table` itself is fine.
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, f"--render refused:\n{proc.stdout}\n{proc.stderr}"
+    doc = out.read_text(encoding="utf-8")
     assert marker in doc, (
-        "CYPHER-INVENTORY.md no longer carries Appendix A's heading — this arm\n"
+        "the rendered document no longer carries Appendix A's heading — this arm\n"
         "reads the table from that heading, so re-point it rather than deleting it")
-    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    # ⛔ AND THE SOURCE CARRIES NO ROW ITSELF. A row pasted back into the tracked
+    # file is the conflict this split removed, returning silently.
+    assert not census.CENSUS_ROW.search(_source_text()), (
+        f"{DOC_SRC.relative_to(ROOT)} carries a census row — the appendix is "
+        "GENERATED: delete the rows and let `--render` append them")
+    assert APPENDIX_HEADER in doc, (
+        "the rendered document no longer carries Appendix A's table header — this\n"
+        "arm slices the rows from it, so re-point it rather than deleting it")
+    appendix = doc[doc.index(APPENDIX_HEADER):]
     result = census.census(("tortoise/",))
     expected = census.markdown_table(result["sites"]) + "\n"
     if appendix == expected:
@@ -150,35 +224,2478 @@ def test_the_doc_appendix_is_the_tools_own_output():
         else:
             shown = "  same row count and every shared row matches — differs only in trailing bytes"
     raise AssertionError(
-        "Appendix A is not the census tool's own output — it is DERIVED from the\n"
-        "tree, so regenerate it at THIS head rather than editing rows by hand:\n"
-        "    python tools/cypher_inventory.py --markdown\n"
-        "then replace everything after the `## Appendix A` heading with that\n"
-        "output. This failure is what a stale `file:line` index looks like — the\n"
-        "pins cannot see it, because counts do not move when code moves within a\n"
-        "file that already carries sites (measured on #13223, twice).\n"
+        "the rendered Appendix A is not the census tool's own output — it is\n"
+        "DERIVED from the tree, so the RENDERER (or the source it appends to) is\n"
+        "what is wrong; no row is ever edited by hand:\n"
+        "    python tools/cypher_inventory.py --render\n"
+        "A row pasted back into `CYPHER-INVENTORY.src.md` is REFUSED — exit 2 by\n"
+        "`--render`, exit 1 (naming the rows) by `--check` — the rows belong to\n"
+        "the generator.\n"
         f"rows: doc={len(head_rows)} tool={len(tool_rows)}; "
         f"{len(stale)} row(s) differ.\n" + shown)
 
 
 @requires_doc_pin
-def test_the_doc_appendix_row_count_is_the_census_site_count():
+def test_the_doc_appendix_row_count_is_the_census_site_count(tmp_path):
     """The appendix's row count is §0's `sites` pin — one row per classified site.
 
     A cheap second angle on the same artifact: a truncated or duplicated appendix
-    that happens to keep the surviving rows byte-identical still reds here, and
-    the message names the number the document itself publishes.
+    still reds here, and the message names the number the document itself publishes.
+
+    ⛔ AND IT GRADES THE FILE `--render` WRITES, not an in-process re-render. The
+    first cut of this split read `_document_text()`, which assembles the table from
+    `markdown_table()` — one row per site BY CONSTRUCTION — so the arm could not
+    fail however broken the renderer was (the vacuity `#11859` names, caught in
+    review of this change rather than by it).
     """
-    marker = "## Appendix A — every statement site, by shape\n"
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
-    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, f"--render refused:\n{proc.stdout}\n{proc.stderr}"
+    doc = out.read_text(encoding="utf-8")
+    assert APPENDIX_HEADER in doc, (
+        "the rendered document no longer carries Appendix A's table header — this\n"
+        "arm slices the rows from it, so re-point it rather than deleting it")
+    appendix = doc[doc.index(APPENDIX_HEADER):]
     rows = [ln for ln in appendix.splitlines() if ln.startswith("| `")]
     result = census.census(("tortoise/",))
     assert len(rows) == len(result["sites"]), (
-        f"Appendix A carries {len(rows)} site rows, the census classifies "
-        f"{len(result['sites'])} — regenerate it with "
-        "`python tools/cypher_inventory.py --markdown` rather than hand-editing")
+        f"the rendered Appendix A carries {len(rows)} site rows, the census "
+        f"classifies {len(result['sites'])} — re-render it with "
+        "`python tools/cypher_inventory.py --render` rather than hand-editing")
+
+
+def test_the_source_does_not_end_on_an_appendix_heading_with_nothing_visible():
+    """Appendix A is EXPLAINED in the TRACKED file, not only inside an HTML comment.
+
+    ⛔ THE READER HERE IS NOT THE TEST SUITE. `CYPHER-INVENTORY.src.md` is the only
+    TRACKED half of this document — the rendered `CYPHER-INVENTORY.md` is gitignored —
+    so a person opening the path on a forge gets the SOURCE and nothing else. It used
+    to END on the `## Appendix A …` heading with the explanation of the missing rows
+    inside an `<!-- … -->` block, which a forge does not render: the last thing a
+    reader saw was a heading promising rows the file does not carry, with no visible
+    word about where they come from (`#14625` review, P2).
+
+    ⛔ WHY IT IS AN ARM AND NOT THE COMMENT: the note is the only visible statement of
+    the split's own contract in the artifact a reader reads, and prose added for a
+    reviewer is deleted by the next tidy-up precisely because nothing reds. This arm
+    reds on three separate ways to lose it — the note deleted, the note emptied of the
+    command that produces the rows, and the note left where `--render` drops it.
+    """
+    source = _source_text()
+    marker = "## Appendix A — every statement site, by shape\n"
+    assert marker in source, (
+        "the source no longer carries Appendix A's heading — the two appendix arms\n"
+        "and this one all anchor on it; re-point them rather than deleting it")
+    tail = source[source.index(marker) + len(marker):]
+    # ⛔ STRIP THE HTML COMMENTS FIRST: what is left is what a forge renders. Counting
+    # raw characters would pass on the comment block alone, which is the exact state
+    # this arm exists to refuse.
+    visible = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL).strip()
+    assert visible, (
+        f"{DOC_SRC.relative_to(ROOT)} ends on Appendix A's heading with nothing\n"
+        "VISIBLE under it — the note explaining why the rows are absent is inside an\n"
+        "HTML comment, which a forge does not render, so the tracked file reads as a\n"
+        "heading promising rows it does not carry. Put the note in the PROSE.")
+    assert "tools/cypher_inventory.py --render" in visible, (
+        "the visible note under Appendix A must name the COMMAND that produces the\n"
+        "rows (`tools/cypher_inventory.py --render`); a note that says 'generated' —\n"
+        "or only mentions the `--render` flag in some other clause — leaves the\n"
+        "reader with no way to get the rows. MEASURED: the weaker `\"--render\" in\n"
+        "visible` check stayed GREEN when the command was replaced, because the\n"
+        "note's closing sentence names the flag again.")
+    # ⛔ AND THE RENDERER KEEPS IT, above the table: the note is the source's own prose,
+    # so `--render` appends to it rather than replacing the tail. Rendered with an EMPTY
+    # site list on purpose — this arm is ungated (it rides the required gate) and a full
+    # tree walk would be the only cost it adds.
+    first_line = visible.splitlines()[0].strip()
+    rendered = census.render(DOC_SRC, {"sites": []})
+    assert first_line in rendered, (
+        "the note under Appendix A does not survive `--render` — it is the tracked\n"
+        "file's own prose, so the rendered document must carry it too")
+    assert rendered.index(first_line) < rendered.index(APPENDIX_HEADER), (
+        "the note must sit ABOVE the table in the rendered document, not below it —\n"
+        "a note under the rows explains nothing to the reader who is scrolling them")
+
+
+def test_the_renderer_refuses_a_source_that_carries_the_appendix(tmp_path, capsys):
+    """The split's guard: the appendix cannot be pasted back into the source.
+
+    ⛔ WITHOUT THIS THE CONFLICT ENGINE COMES BACK SILENTLY. The obvious way to
+    "refresh the census" is to copy `--markdown` into the tracked file — that is
+    what the tracked document WAS for eight PRs' worth of merges. `--render`
+    therefore REFUSES a source that already carries a census row rather than
+    appending a second copy, and `--check` refuses it too: a committed appendix
+    is the defect this split removed, and it must fail loudly, not render twice.
+    """
+    source = _source_text()
+    assert not census.CENSUS_ROW.search(source), (
+        "the shipped source carries a census row — the appendix is generated")
+    rowed = tmp_path / "rowed.src.md"
+    rowed.write_text(
+        source
+        + "| `tortoise/sdk.py:1` | `f` | plain | read | candidate:SQL-shaped | `RETURN 1` |\n",
+        encoding="utf-8",
+    )
+    # ⛔ NO CENSUS HERE, AND THAT IS THE POINT: both refusals return BEFORE they
+    # touch the result (verified — `render(rowed, None)` raises 2 and `check(rowed,
+    # None)` returns 1), so measuring the tree here would add a full walk (~8 s) to
+    # the REQUIRED `python-ci-gate` for a value nothing reads. Passing `None` is
+    # deliberate: if a future edit makes either path consult the census, this arm
+    # TypeErrors HERE rather than quietly re-adding the cost.
+    result = None
+    with pytest.raises(SystemExit) as refused:
+        census.render(rowed, result)
+    # 2 is this tool's "could not run" — never 1, which is the DRIFT verdict the
+    # `--check` arm above reserves (`SystemExit(<str>)` would have been 1).
+    assert refused.value.code == 2, (
+        f"the refusal must exit 2 (could not run), got {refused.value.code!r}")
+    assert "carries 1 census row" in capsys.readouterr().err, (
+        "the refusal must name the row it found on stderr")
+    assert census.check(rowed, result) == 1, (
+        "`--check` must refuse a SOURCE that carries the appendix (exit 1), not "
+        "grade its pins over a committed copy of the rows")
+
+
+def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
+    """`--render --all-surface` would write a document that contradicts its own pins.
+
+    The source's 25 pins are PRODUCT-surface counts, and `--render` appends one row
+    per site under them. The all-surface census is many times wider in rows as well as
+    in files, so the pair produced a
+    document whose §0 `sites` pin — a product-surface count — sat above an appendix
+    several times longer while `--render` printed success — a self-contradictory
+    artifact, which is the "false pass in prose" class this file exists to refuse.
+    The recorded measurement of the unguarded run — a historical observation, not a
+    live count: `render: wrote 10327 lines` when it was taken.
+
+    ⛔ A LOUD REFUSAL, NOT A SILENT SCOPE-NARROWING: a lane that asked for the wide
+    census and quietly got the product one would believe it had rendered the wide
+    table.
+    """
+    out = tmp_path / "wide.md"
+    for verb in ("--render", "--check"):
+        argv = [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+                verb] + ([str(out)] if verb == "--render" else []) + ["--all-surface"]
+        proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+        # ⛔ `--check --all-surface` IS THE SAME CONTRADICTION ONE VERB OVER: the
+        # pins are product counts, so the wide census can never satisfy them —
+        # measured before this guard, it exited 1 with 27 DRIFT keys, a guaranteed
+        # false RED reached through the documented verb.
+        assert proc.returncode == 2, (
+            f"`{verb} --all-surface` must exit 2 (could not run), got "
+            f"{proc.returncode}")
+        assert "--all-surface" in proc.stderr, (
+            f"the refusal must name the flag that contradicts `{verb}`; stderr was:\n"
+            + proc.stderr)
+        assert not out.exists(), (
+            "the refusal must write NOTHING — a half-written wide document is the "
+            "artifact the refusal exists to prevent")
+
+
+def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
+        tmp_path):
+    """`--check --render <path>` must not accept a write it then silently drops.
+
+    ⛔ THE NO-OP-GATE SHAPE, measured at #14625's round-4 review: `main()` returns
+    from the `--check` branch before the `--render` branch, so
+    `cypher_inventory.py --check --render /tmp/both.md` printed
+    `check: 25 pinned counts match`, exited **0**, and NEVER WROTE the file. Both are
+    independent optional flags and no §7 sentence declares a precedence, while §7's
+    procedure names both halves (item 1 renders, item 2 re-checks) — so running them
+    as one command is a plausible reading, and a green check beside a write that did
+    not happen is exactly the "gate that silently does nothing" class this module
+    exists to refuse. 2 (could not run) is the honest answer; 0 is not.
+    """
+    out = tmp_path / "both.md"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--check", "--render", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 2, (
+        "`--check --render` must exit 2 (could not run), got "
+        f"{proc.returncode}; a 0 here reads as 'checked and rendered' when the write "
+        f"never happened. stdout was:\n{proc.stdout}")
+    assert not out.exists(), (
+        "the refused command must write NOTHING — it was accepted and the write was "
+        "SILENTLY DROPPED instead")
+    assert "25 pinned counts match" not in proc.stdout, (
+        "the refusal must not print a check verdict; stdout was:\n" + proc.stdout)
+    assert "--check" in proc.stderr and "--render" in proc.stderr, (
+        "the refusal must name BOTH verbs so the lane knows what to split; stderr "
+        f"was:\n{proc.stderr}")
+
+    # ⛔ THE INVARIANT IS ABOUT THE SET, NOT THAT ONE PAIR (#14625 review, P2). The
+    # guard above tested `--check`+`--render` only, so every OTHER pair of output
+    # verbs was accepted and ran one verb while DISCARDING the other with rc 0 —
+    # measured on the shipped tree: `--check --json` printed `check: 25 pinned counts
+    # match` and emitted no JSON, `--check --markdown` the same line and no table, and
+    # `--json --markdown` returned the JSON payload to a caller who asked for the
+    # appendix table. Each is the same "gate that silently does nothing" shape, so
+    # each must answer 2 and name both verbs. `--all-surface` is a MODIFIER (not an
+    # output verb), so the two wide-census forms stay legal — asserted below, because
+    # a fix that refused them would break §1's own recipe.
+    for combo in (("--check", "--json"),
+                  ("--check", "--markdown"),
+                  ("--json", "--markdown"),
+                  ("--render", "--json")):
+        both = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *combo],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert both.returncode == 2, (
+            f"`{' '.join(combo)}` must exit 2 (could not run), got "
+            f"{both.returncode}; a 0 here reads as 'ran both' when one verb's output "
+            f"was SILENTLY DROPPED. stdout was:\n{both.stdout}")
+        for verb in combo:
+            assert verb in both.stderr, (
+                f"the refusal must name every verb in `{' '.join(combo)}` so the lane "
+                f"knows what to split; stderr was:\n{both.stderr}")
+
+    for legal in (("--markdown", "--all-surface"), ("--json", "--all-surface")):
+        ok = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *legal],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert ok.returncode == 0, (
+            f"`{' '.join(legal)}` must stay LEGAL — `--all-surface` is the modifier "
+            f"that widens the census, not a second output verb; got {ok.returncode} "
+            f"with stderr:\n{ok.stderr}")
+        # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). Asserting
+        # `rc == 0` alone cannot tell §1's WIDE census from the PRODUCT census — a
+        # regression that silently ignores `--all-surface` (exactly the
+        # scope-narrowing the sibling refusal arm exists to prevent) would stay
+        # green, and the two outputs differ by ~7,900 rows. Measured at this head:
+        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,239; the
+        # JSON form names its prefix set, which is the whole difference.
+        if "--json" in legal:
+            payload = json.loads(ok.stdout)
+            assert payload["prefixes"] == ["."], (
+                "`--json --all-surface` must report the ROOT prefix `.` (the wide "
+                f"census); got prefixes={payload['prefixes']!r} — `--all-surface` was "
+                "accepted and then ignored")
+        else:
+            assert len(ok.stdout.splitlines()) > 2000, (
+                "`--markdown --all-surface` must emit the WIDE table (thousands of "
+                f"rows at this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
+                "`--all-surface` was accepted and then ignored")
+
+
+def test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list():
+    """The one-verb-per-command guard must be complete over the CLASS, not a list.
+
+    ⛔ THE DEFECT THIS ARM GRADES IS THE ONE THE GUARD ITSELF KEEPS REPEATING. The
+    refusal was first written for `--check` + `--render` alone while its own comment
+    stated the invariant about the SET, so three more pairs exited **0** having run one
+    verb and dropped the other (`#14625` review, P2). The repair enumerated the four
+    verbs — and an enumeration is only a class as long as nothing is added to it, so
+    the SAME hole reopens the moment a fifth output verb reaches `build_parser()`:
+    it would run, the other verb's output would vanish, and every hand-written pair
+    list in this file would stay green. That is the shape this arm closes.
+
+    Two directions, because either alone is bypassable:
+
+    * the parser's flag set must be EXACTLY `OUTPUT_VERBS | MODIFIERS`, so a new flag
+      is a red that forces a classification rather than slack that rides;
+    * every verb's argparse `dest` must be the derived one (`--all-surface` →
+      `all_surface`), because `main()` counts a verb as selected by reading that dest
+      off the parsed namespace — a verb whose dest did not match would be listed in
+      `OUTPUT_VERBS` and silently never counted, i.e. the guard would name it and
+      still drop it;
+    * and EVERY pair is REFUSED with 2, swept from the tuple rather than typed, so
+      the coverage grows with the declaration.
+
+    `--all-surface` is a MODIFIER and is deliberately outside the sweep: the two wide
+    census forms must stay legal (the sibling arm asserts their payload, not only
+    their exit code), because refusing them would break §1's own recipe.
+    """
+    parser = census.build_parser()
+    # `--help` is argparse's OWN flag: it prints usage and exits before any verb runs,
+    # so it is neither an output verb nor a modifier and cannot be combined into a
+    # silent drop. Every other long flag is this module's own and must be classified.
+    declared = {flag for action in parser._actions
+                for flag in action.option_strings
+                if flag.startswith("--") and flag != "--help"}
+    assert declared == set(census.OUTPUT_VERBS) | set(census.MODIFIERS), (
+        "the parser declares a flag that this module has not classified. A flag that "
+        "produces output of its own MUST be in `OUTPUT_VERBS` (otherwise a command "
+        "selecting it plus another verb runs one and SILENTLY DROPS the other with "
+        "rc 0 — measured for three pairs at `#14625`); a flag that only modifies a "
+        "run belongs in `MODIFIERS`. Offending: "
+        f"{sorted(declared ^ (set(census.OUTPUT_VERBS) | set(census.MODIFIERS)))} "
+        f"(parser={sorted(declared)}, OUTPUT_VERBS={sorted(census.OUTPUT_VERBS)}, "
+        f"MODIFIERS={sorted(census.MODIFIERS)})")
+
+    dests = {flag: action.dest for action in parser._actions
+             for flag in action.option_strings}
+    for verb in census.OUTPUT_VERBS:
+        derived = verb.removeprefix("--").replace("-", "_")
+        assert dests.get(verb) == derived, (
+            f"`{verb}` has argparse dest {dests.get(verb)!r}, not the derived "
+            f"{derived!r}. `main()` counts a verb as SELECTED by reading that dest "
+            "off the parsed namespace, so a mismatched dest leaves the verb listed in "
+            "`OUTPUT_VERBS` and never counted — refused in name, dropped in fact")
+
+    for first, second in itertools.combinations(census.OUTPUT_VERBS, 2):
+        rc = census.main([first, second])
+        assert rc == 2, (
+            f"`{first} {second}` answered {rc} — a 0 here reads as 'ran both' when "
+            "one verb's output was SILENTLY DROPPED. Both verbs own their own "
+            "output stream, so the honest answer is 2 (could not run) and the "
+            "message must name both")
+
+
+def test_a_directory_destination_is_refused_AS_a_directory(tmp_path):
+    """A directory destination exits 2 with the TRUE cause, not "a TRACKED path".
+
+    ⛔ `git ls-files --error-unmatch -- <dir>` exits **0** for any directory that
+    merely CONTAINS tracked files, so the tracked-path probe claimed
+    `--render docs/architecture` and prescribed "Pick an untracked path" while the
+    real error is EISDIR — which the write guard names only for a directory holding
+    no tracked file (measured at #14625's round-4 review). Exit status was 2 in both
+    cases, so this arm grades the DIAGNOSIS: a reader sent to "pick an untracked
+    path" re-runs the same command on another directory and gets the same refusal.
+    """
+    untracked = tmp_path / "empty-dir"
+    untracked.mkdir()
+    for dest in (ROOT / "docs" / "architecture", untracked):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+             "--render", str(dest)],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        assert proc.returncode == 2, (
+            f"`--render {dest}` must exit 2 (could not run), got {proc.returncode}")
+        assert "DIRECTORY" in proc.stderr, (
+            f"the refusal for `{dest}` must name the DIRECTORY as the cause; stderr "
+            f"was:\n{proc.stderr}")
+        assert "TRACKED path" not in proc.stderr, (
+            f"`{dest}` was refused as a TRACKED path — the proven FALSE cause for a "
+            "directory that contains tracked files (the real error is EISDIR); "
+            f"stderr was:\n{proc.stderr}")
+
+
+def test_an_enumeration_failure_is_could_not_run_never_drift(monkeypatch, tmp_path):
+    """`--render`/`--check` answer 2 when the census cannot enumerate the tree.
+
+    `surface_files()` runs `git ls-files … check=True`, so a box with no `git` or no
+    index raises — and an uncaught exception exits the interpreter with **1**, the
+    code this tool reserves for the DRIFT verdict. `--render` has no drift verdict at
+    all, so a lane that could not enumerate would read "the census drifted" and re-cut
+    25 pins that were correct; `--check` would report drift about a box that could not
+    answer. The probe wrapper closes that for `git ls-files --error-unmatch`; this arm
+    closes it for the enumeration, which runs on EVERY path (measured: before the
+    guard, `PATH` without `git` gave `FileNotFoundError` and exit 1).
+
+    Both verbs are graded, and the target must not be written — the failure precedes
+    the render.
+    """
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError("No such file or directory: 'git'")
+
+    out = tmp_path / "never.md"
+    monkeypatch.setattr(census, "census", boom)
+    for argv in (["--render", str(out)], ["--check"], [], ["--markdown"], ["--json"]):
+        rc = census.main(argv)
+        assert rc == 2, (
+            f"`{' '.join(argv) or '(bare census)'}` must exit 2 (could not run), got {rc} — "
+            "1 is this tool's DRIFT verdict and would misreport an unreadable tree")
+    assert not out.exists(), "the failure precedes the write, so nothing is rendered"
+    monkeypatch.undo()
+
+    # ⛔ AND `--json` ENUMERATES TWICE: `rg_totals()` re-reads the index, so a PARTIAL
+    # failure (first walk fine, second refused) escaped the first guard and exited 1 —
+    # measured with a `git` shim that delegates the first `ls-files` and exits 128 on
+    # the second (#13098 review round 12, P2).
+    def boom_totals(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(128, ["git", "ls-files"])
+
+    monkeypatch.setattr(census, "rg_totals", boom_totals)
+    # ⛔ AND DO NOT WALK THE TREE TO GRADE THE SECOND CALL. This arm rides the REQUIRED
+    # `python-ci-gate`, and a real `census()` costs ~7 s, so two of them would add ~14 s
+    # to every PR to prove something that does not depend on the tree — the same reason
+    # the table-shape arm is kept out of the merge gate. The subject is `rg_totals`'s
+    # SECOND call, so the first is stubbed with the shape the verbs read.
+    monkeypatch.setattr(
+        census, "census",
+        lambda *_a, **_k: {
+            "sites": [], "prefixes": ("tortoise",), "files_scanned": 0,
+            "files_with_sites": 0, "non_cypher_door_calls": 0,
+            "partial": 0, "unparsed_files": [], "excluded_test_modules": 0,
+            "ast_door_calls": 0, "unresolved_files": [],
+        },
+    )
+    for argv in (["--json"], []):
+        assert census.main(argv) == 2, (
+            f"`{' '.join(argv) or '(bare census)'}` re-enumerates for `rg_totals` "
+            f"(directly, or through `report()`); that second call must answer 2 too")
+
+
+def test_the_json_verb_enumerates_rg_totals_once_and_emits_through_the_writer(
+        monkeypatch):
+    """`--json` must enumerate `rg_totals()` ONCE, and write its payload through `emit()`.
+
+    ⛔ NEITHER PROPERTY WAS GRADED (#13098 round 5, P2), and both are this change's own
+    invariant:
+      1. The eager `rg_totals()` call was moved INSIDE the enumeration guard, because a
+         SECOND walk that fails after the first succeeded escaped it and exited 1 — the
+         DRIFT code. A counting stub asserts exactly ONE call, so re-eager-ifying
+         `"rg_totals": rg` (calling it while building the payload) reds here;
+      2. the payload must go through `emit()`, or a stdout that cannot be written
+         answers 1 or 120 instead of 2 — the `emit` contract stated in its own docstring.
+    The tree walk is stubbed: the subject is the call COUNT and the writer, not the census.
+    """
+    calls = []
+
+    def counting_totals(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"door": 0, "bare": 0, "verb": 0}
+
+    monkeypatch.setattr(census, "rg_totals", counting_totals)
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert census.main(["--json"]) == 0, "a healthy `--json` run must answer 0"
+    assert len(calls) == 1, (
+        f"`--json` must enumerate `rg_totals()` exactly ONCE (the second walk is inside "
+        f"the guard, never repeated at payload build time); got {len(calls)} call(s)")
+    payload = json.loads(out.getvalue())
+    assert payload["rg_totals"] == {"door": 0, "bare": 0, "verb": 0}, (
+        "the payload must carry the ONE enumeration's totals")
+
+    class _Unwritable(io.StringIO):
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sys, "stdout", _Unwritable())
+    assert census.main(["--json"]) == 2, (
+        "a payload that cannot be written is 2 (could not run), never 1 (DRIFT) and "
+        "never 120 — `--json` must write through `emit()`")
+
+
+def test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift(monkeypatch, tmp_path):
+    """A closed pipe or a full disk is 2 (could not run), never 1 (DRIFT) and never 120.
+
+    ⛔ `--markdown` IS the appendix table — the verb a lane pipes (`| head`) or
+    redirects — and it is the one verb whose payload is far larger than the stdout
+    buffer. Measured before the guard: `--markdown | head -3` exited **1** with
+    `BrokenPipeError`, `--markdown >/dev/full` exited **1** with `OSError ENOSPC`, and
+    the smaller BARE verb exited **120**, because its bytes fit the buffer and the
+    failure landed at the interpreter's shutdown flush instead. Three statuses, none of
+    them "could not run", from the failure class a pipe reaches by accident — and a
+    lane reading `1` re-cuts 25 pins that were correct.
+
+    Graded on the writer, not through a subprocess: the point is the returned status,
+    and a subprocess would need a real census (~7 s) inside the REQUIRED gate.
+    """
+
+    class Failing:
+        def __init__(self, err):
+            self.err = err
+
+        def write(self, _text):
+            raise self.err
+
+        def flush(self):  # pragma: no cover - `write` raises first
+            raise self.err
+
+    class Recording:
+        def __init__(self):
+            self.text = ""
+            self.flushed = False
+
+        def write(self, text):
+            self.text += text
+
+        def flush(self):
+            self.flushed = True
+
+    class FailsOnFlush:
+        """A write that BUFFERS and fails at `flush` — the 120 case, and only it.
+
+        ⛔ WITHOUT THIS THE LOAD-BEARING HALF OF THE FIX IS UNGRADED (#13098 review):
+        `Failing` raises in `write`, so control never reaches `flush`, and deleting
+        `emit()`'s `out.flush()` left every assertion above green while the real
+        process regressed to exit **120** at interpreter shutdown (`--markdown >
+        /dev/full` measured). A write that appears to succeed and fails on flush is
+        exactly the smaller-payload case, so it gets its own double.
+        """
+
+        def write(self, _text):
+            pass      # buffered: this succeeds
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+    assert census.emit("x", Failing(OSError(28, "No space left on device"))) == 2, (
+        "a full disk on `--markdown`'s 1,327-row payload must answer 2 — 1 is DRIFT")
+    assert census.emit("x", Failing(BrokenPipeError(32, "Broken pipe"))) == 2, (
+        "`--markdown | head` must answer 2 — 1 is DRIFT")
+    # ⛔ AND THE `None` STREAM: with fd 1 closed at start CPython makes `sys.stdout`
+    # `None`, and `None.write` raises AttributeError — which exits 1, the DRIFT code.
+    # The bare `print()` this writer replaced was a NO-OP on a None stream, so the
+    # guard would otherwise have been the one path that INTRODUCED the misclassification
+    # it exists to remove (measured: `--markdown >&-` exited 0 before it, 1 after it).
+    monkeypatch.setattr(sys, "stdout", None)
+    assert census.emit("x") == 2, (
+        "a closed fd 1 (sys.stdout is None) must answer 2 — 1 is DRIFT")
+    monkeypatch.undo()
+
+    assert census.emit("x", FailsOnFlush()) == 2, (
+        "a write that buffers and fails at FLUSH must answer 2 — returning 0 lets the "
+        "shutdown flush become exit 120, which is neither 'could not run' nor DRIFT")
+    ok = Recording()
+    assert census.emit("row", ok) == 0 and ok.text == "row\n", (
+        "the writer still writes when it can")
+    assert ok.flushed, (
+        "emit() must FLUSH — an unflushed payload fails at interpreter shutdown as 120 "
+        "with no diagnostic, which is the regression the explicit flush() exists to stop")
+
+    # ⛔ AND THE TWO CALL SITES, not only the writer. Routing `check()`'s and
+    # `--render`'s success lines through `emit` is graded by NOTHING above — the arm
+    # calls `emit` directly — so reverting either call site to `print()` + `return 0`
+    # restored exit **120** with the whole suite green (measured: a bare
+    # `print("hello") >/dev/full` answers 120, because the buffered bytes re-raise at
+    # the interpreter's shutdown flush — which is also why the writer detaches fd 1).
+    # Drive the verbs themselves, on the cheap shapes: 8 zero-valued pins make
+    # `check()` reach its success line with no tree walk, and a stubbed census makes
+    # `--render` reach its write line the same way.
+    pins = "".join(
+        f"<!-- cypher-inventory:{key} = 0 -->\n"
+        for key in ("sites", "files", "files_scanned", "unresolved", "candidates",
+                    "non_cypher_door_calls", "ast_door_calls", "partial"))
+    src = tmp_path / "pins.src.md"
+    src.write_text(pins, encoding="utf-8")
+    empty = {"sites": [], "files_with_sites": 0, "files_scanned": 0,
+             "non_cypher_door_calls": 0, "partial": 0}
+    monkeypatch.setattr(
+        sys, "stdout", Failing(OSError(28, "No space left on device")))
+    assert census.check(src, empty) == 2, (
+        "`--check`'s success line must go through `emit`: a full disk on stdout is "
+        "2 (could not run), never 120 and never 1 (DRIFT)")
+    monkeypatch.setattr(
+        census, "census",
+        lambda *_a, **_k: {
+            "sites": [], "prefixes": ("tortoise",), "files_scanned": 0,
+            "files_with_sites": 0, "non_cypher_door_calls": 0, "partial": 0,
+            "unparsed_files": [], "excluded_test_modules": 0,
+            "ast_door_calls": 0,
+        },
+    )
+    assert census.main(["--render", str(tmp_path / "out.md")]) == 2, (
+        "`--render`'s `render: wrote …` line must go through `emit` for the same "
+        "reason: the document WAS written, but the tool still cannot report it")
+
+
+def test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_120():
+    """The `_detach_stdout()` half is graded END-TO-END on REAL file descriptors —
+    BOTH call sites, because they sit in DIFFERENT `except` branches.
+
+    ⛔ EVERY DOUBLE THE ARM ABOVE USES HAS NO `fileno()`, so `_detach_stdout()` is a
+    SUPPRESSED NO-OP in all of them — which means the two calls that make that arm's
+    2 survive the interpreter's teardown were graded by NOTHING (#13098 round 11,
+    P2). Measured with both calls deleted: `tools/cypher_inventory.py >/dev/full`
+    exited **120** (`Exception ignored … OSError: [Errno 28]`) while this suite still
+    read `97 passed / 15 skipped`, i.e. a guard the writer's own docstring calls
+    "load-bearing" was deletable in silence.
+
+    Graded on the FD, not through a `subprocess` with a real census: the failure this
+    protects against happens at TEARDOWN, so re-flushing the object after `emit()`
+    returns IS the shutdown flush, and it costs no tree walk inside the required gate.
+    """
+    if not Path("/dev/full").exists():  # pragma: no cover - Linux/BSD only
+        pytest.skip("this platform has no /dev/full to fail a write on")
+    with open("/dev/full", "w", encoding="utf-8") as stream:
+        assert census.emit("x", stream) == 2, (
+            "a full disk on a real FD must answer 2 — 1 is DRIFT")
+        # ⛔ THE DETACH ITSELF: without it the failed `flush()` leaves its bytes in
+        # the buffer and the interpreter's shutdown flush retries them, replacing the
+        # 2 with 120. A re-flush here is that retry, one frame earlier.
+        stream.flush()
+        assert os.fstat(stream.fileno()).st_rdev == os.stat(os.devnull).st_rdev, (
+            "the stream that could not be written was NOT re-pointed at devnull, so "
+            "the shutdown flush will re-raise and turn this 'could not run' into 120")
+    # ⛔ AND THE OTHER CALL SITE — `except BrokenPipeError` — which the `/dev/full`
+    # case above CANNOT reach (a full disk raises ENOSPC, a closed pipe the other
+    # exception, and they sit in different `except` branches). Measured: deleting
+    # ONLY that branch's `_detach_stdout(out)` left this suite at
+    # `98 passed / 15 skipped` while `--check | true` answered **120** on a real
+    # invocation, so without this half the arm's own claim that "both call sites"
+    # are graded would have been false (#13098 round 12, P2).
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    with os.fdopen(write_end, "w", encoding="utf-8") as pipe:
+        assert census.emit("x", pipe) == 2, (
+            "a closed pipe on a real FD must answer 2 — 1 is DRIFT")
+        pipe.flush()
+        assert os.fstat(pipe.fileno()).st_rdev == os.stat(os.devnull).st_rdev, (
+            "a closed pipe was NOT re-pointed at devnull, so the shutdown flush "
+            "re-raises BrokenPipeError and turns this 'could not run' into 120")
+
+
+def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
+    """A doc that exists but cannot be READ is 2 (could not run), never 1 (drift).
+
+    Same class as the enumeration wrap, in the same verb: an uncaught
+    `PermissionError`/`EIO` would exit 1, which this tool reserves for "the pins
+    drifted", so a lane would re-cut 25 correct pins over a file it never read.
+
+    ⛔ BOTH HALVES OF `except (OSError, UnicodeDecodeError)` ARE GRADED HERE WITHOUT A
+    `chmod` PREMISE — the decode half by the latin-1 document, the `OSError` half by the
+    directory. Neither may sit behind `_skip_if_chmod_does_not_deny`: on a root runner
+    (this repo's containers, `unshare -r`) that skip is the ONLY coverage for `OSError`,
+    so the keyword could be deleted with the file green.
+    """
+    doc = tmp_path / "src.md"
+    doc.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
+    # ⛔ THE DECODE HALF COMES FIRST, because the `chmod(0o000)` half can SKIP on a root
+    # runner and `pytest.skip` aborts the whole function — placed after it, this
+    # assertion would lose its only coverage exactly where the premise above fails.
+    # ⛔ AND NOT JUST AN `OSError`: `UnicodeDecodeError` is a ValueError, so it slipped
+    # past an `except OSError` in this very guard and exited 1 (measured on a latin-1
+    # byte). Same verb, same reserve of the DRIFT code.
+    latin1 = tmp_path / "latin1.md"
+    latin1.write_bytes(b"<!-- cypher-inventory:sites = 1327 -->\n" + b"\xff\xfe\n")
+    assert census.check(latin1, {"sites": []}) == 2, (
+        "a document that cannot be DECODED must answer 2 (could not run), not 1 (drift)")
+    # ⛔ AND THE `OSError` HALF NEEDS ITS OWN CHMOD-FREE ARM (#13098 round 4): the
+    # `chmod(0o000)` row below was the ONLY thing grading `except OSError` in
+    # `check()`, and it SKIPS on a root runner — so under `unshare -r` (or a root CI
+    # container) narrowing the guard to `except (UnicodeDecodeError,)` left the whole
+    # file green (`1 skipped, 109 deselected`, measured). A DIRECTORY is an `OSError`
+    # (`IsADirectoryError`) that needs no permission premise, so it grades the half on
+    # every runner — the same twin `render()`'s arm already carries.
+    assert census.check(tmp_path, {"sites": []}) == 2, (
+        "a DIRECTORY as the document must answer 2 (could not run), not 1 (drift)")
+
+    doc.chmod(0o000)
+    try:
+        _skip_if_chmod_does_not_deny(doc)
+        rc = census.check(doc, {"sites": []})
+    finally:
+        doc.chmod(0o600)
+    assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
+
+
+def test_check_REFUSES_a_duplicated_pin_instead_of_letting_the_last_win(
+    tmp_path, monkeypatch, capsys
+):
+    """A pin declared twice is "could not run" (2) — never a silent last-wins (0).
+
+    ⛔ THE FALSE PASS THIS CLOSES (#14625 review, round 3, P3): `pinned` was built with a
+    dict comprehension over `PINNED.findall`, so a REPEATED key kept only its LAST
+    occurrence — measured with a source that declares `sites` as 1339 and then 1332 (26
+    pin comments): `--check` printed "check: 25 pinned counts match" and exited **0**,
+    i.e. an author who edited the FIRST declaration got a green check for a number
+    nobody graded, from the one verb whose whole job is to refuse a wrong number. The
+    miscount is invisible by construction: 26 declarations still count as 25 pins.
+    """
+    src = _source_text()
+    assert '<!-- cypher-inventory:sites = ' in src, (
+        "the premise: the real source declares the `sites` pin this arm duplicates")
+    dup = tmp_path / "dup.md"
+    dup.write_text(
+        src.replace(
+            "<!-- cypher-inventory:sites = 1332 -->",
+            "<!-- cypher-inventory:sites = 1339 -->\n"
+            "<!-- cypher-inventory:sites = 1332 -->",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    rc = census.main(["--check", str(dup)])
+    assert rc == 2, (
+        f"a duplicated pin must answer 2 (could not run) — 0 is the last-wins false "
+        f"pass, 1 would send a lane to re-cut pins that are not the problem; got {rc}")
+    err = capsys.readouterr().err
+    assert "sites" in err and "more than once" in err, (
+        f"the refusal must name the duplicated pin so it can be found; stderr:\n{err}")
+
+
+def test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY(tmp_path, capsys):
+    """Both `exists()` refusals answer 2 AND name the path they never found.
+
+    ⛔ MESSAGE-ONLY COVERAGE, and that is the point: with either guard deleted the very
+    next `read_text()` raises `FileNotFoundError` (⊂ `OSError`), which the twin guard
+    below answers 2 for — so the VERDICT is redundantly covered and only the stderr
+    text changes. That is exactly why neither guard was graded by any arm (measured:
+    deleting each left 95 passed / 15 skipped): a run told "could not read" instead of
+    "no source at <path>" sends the lane looking for a permission problem that is not
+    there.
+    """
+    missing_src = tmp_path / "no-such-source.md"
+    with pytest.raises(SystemExit) as refused:
+        census.render(missing_src, {"sites": []})
+    assert refused.value.code == 2, (
+        f"a MISSING source must refuse with 2 (could not run), got {refused.value.code!r}")
+    assert f"no source at {missing_src}" in capsys.readouterr().err, (
+        "the refusal must NAME the missing path, not report it as a read failure")
+
+    missing_doc = tmp_path / "no-such-doc.md"
+    assert census.check(missing_doc, {"sites": []}) == 2, (
+        "a MISSING document must answer 2 (could not run), never 1 (drift)")
+    assert f"no doc at {missing_doc}" in capsys.readouterr().err, (
+        "the refusal must NAME the missing path, not report it as a read failure")
+
+
+def test_an_unresolvable_render_target_is_could_not_run(tmp_path):
+    """A destination that cannot be RESOLVED answers 2, never 1.
+
+    `Path.resolve()` raises `RuntimeError("Symlink loop …")` on ELOOP — a
+    `RuntimeError`, not an `OSError` — and the resolve happens before every guard, so
+    the traceback escaped and the interpreter exited 1 (this tool's DRIFT code) from
+    a verb with no drift verdict. Measured with two symlinks pointing at each other.
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    rc = census.main(["--render", str(a / "deep.md")])
+    assert rc == 2, (
+        f"an unresolvable render target must answer 2 (could not run), got {rc}")
+
+
+def test_the_renderer_reports_an_unreadable_source_as_could_not_run(tmp_path):
+    """`--render` on a source it cannot read answers 2, never 1.
+
+    `--render` has no drift verdict, so an uncaught `PermissionError` (chmod 000) or
+    `IsADirectoryError` (a path that exists and is a directory) exits 1 — "the pins
+    drifted" — and §7 tells every lane to run this verb. The twin of
+    `check()`'s guard, graded here because the two are separate reads.
+    """
+    unreadable = tmp_path / "src.md"
+    unreadable.write_text("<!-- cypher-inventory:sites = 1327 -->\n", encoding="utf-8")
+    # ⛔ THE DIRECTORY HALF COMES FIRST: the `chmod(0o000)` half can SKIP on a root runner
+    # and `pytest.skip` aborts the whole function, so an assertion placed after it would
+    # lose its only coverage exactly where that premise fails.
+    with pytest.raises(SystemExit) as refused_dir:
+        census.render(tmp_path, {"sites": []})   # exists, and is a directory
+    assert refused_dir.value.code == 2, (
+        f"a directory as the source must refuse with 2, got {refused_dir.value.code!r}")
+
+    # ⛔ AND NOT JUST AN `OSError` — the twin of `check()`'s pair. `UnicodeDecodeError` is
+    # a `ValueError`, so an `except OSError` guard alone let a non-UTF-8 source reach the
+    # traceback and exit 1 (the DRIFT code) from a verb that has NO drift verdict. Graded
+    # here because the other twin's decode half is graded by `check()`'s arm while this
+    # one was graded by NOTHING: dropping the keyword from `render()`'s guard otherwise
+    # leaves the whole suite green (measured: 95 passed / 15 skipped, and 110 passed with
+    # the doc pin armed, with the decode half removed).
+    latin1_src = tmp_path / "latin1-src.md"
+    latin1_src.write_bytes(b"# the source, with no pins and no rows\n" + b"\xff\xfe\n")
+    with pytest.raises(SystemExit) as refused_latin1:
+        census.render(latin1_src, {"sites": []})
+    assert refused_latin1.value.code == 2, (
+        "a source that cannot be DECODED must refuse with 2 (could not run), got "
+        f"{refused_latin1.value.code!r}")
+
+    unreadable.chmod(0o000)
+    try:
+        _skip_if_chmod_does_not_deny(unreadable)
+        with pytest.raises(SystemExit) as refused:
+            census.render(unreadable, {"sites": []})
+        assert refused.value.code == 2, (
+            f"an unreadable SOURCE must refuse with 2 (could not run), got "
+            f"{refused.value.code!r}")
+    finally:
+        unreadable.chmod(0o600)
+
+
+def test_the_renderer_refuses_to_write_over_the_source(tmp_path, monkeypatch, capsys):
+    """`--render <the source>` would corrupt the tracked file AND lock the tool.
+
+    `render()`'s own refusal guards the SOURCE'S CONTENT, never the DESTINATION, so
+    pointing `--render` at `CYPHER-INVENTORY.src.md` read the clean source, passed
+    that refusal, and wrote source + the appendix rows over the tracked file. That is
+    self-locking: `--check` then exits 1 (it carries rows) and `--render` exits 2 (it
+    refuses a rowed source), so the tool can neither grade nor repair the tree it
+    just wrote. §7 tells every lane to run this verb, so a mistyped path is the
+    plausible route to the conflict this split exists to remove.
+
+    ⛔ AND THE SOURCE IS BUILT IN A THROWAWAY GIT TREE, NOT IN THIS CHECKOUT: this arm
+    is graded by MUTATION, and the write it guards IS reachable — neutralise the source
+    branch, make the tracking probe answer "not tracked" (an UNTRACKED source, or an
+    empty index), and the pre-fix body wrote the appendix over the REAL
+    `docs/architecture/CYPHER-INVENTORY.src.md`, taking any uncommitted edit to the source
+    with it.
+
+    ⛔ WHICH IS WHY THE PRECONDITION IS STATED, NOT ASSUMED: with the source TRACKED the
+    probe refuses first and nothing is written (the path the comment below records), and
+    outside a work tree the census refuses before the write is ever reached. So the one
+    mutation that writes is the probe-answering-"not tracked" one, and that is the reason
+    this arm builds its source in a scratch tree rather than over the tracked file. The
+    scratch source is `git add`ed so the TRACKED-PATH branch stays reachable, which is
+    what keeps the stderr assertion below discriminating.
+
+    In-process and cheap: the guard sits BEFORE the census, so this never walks the
+    tree; the source is compared byte-for-byte to prove nothing was written.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", src.name], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    before = src.read_bytes()
+    rc = census.main(["--render", src.relative_to(repo).as_posix()])
+    assert rc == 2, f"`--render <source>` must exit 2, got {rc}"
+    assert src.read_bytes() == before, (
+        "the SOURCE was rewritten — the guard must refuse before writing")
+    # ⛔ ASSERT THE BRANCH, NOT JUST THE EXIT CODE (#13098 round 3): the source is
+    # ALSO tracked, so `git ls-files` refuses it too — an exit-2-only assertion
+    # therefore stays green if the `target == DOC_SRC` branch is DELETED, and that
+    # branch is the one that still holds where `git ls-files` cannot answer at all:
+    # an UNTRACKED source, or a tree with no index (exit 128). ⛔ NOT the
+    # modify/delete case — measured in a scratch repo, an index with a `UD` path
+    # makes `git ls-files --error-unmatch` print the path at both stages and exit 0,
+    # so THAT state is caught by the tracked-path branch above.
+    assert "refusing to render over the SOURCE" in capsys.readouterr().err, (
+        "refused, but by the TRACKED-PATH branch rather than the SOURCE branch — "
+        "the source-specific guard is then pinned by nothing")
+
+
+def test_the_renderer_refuses_to_write_over_a_tracked_path(tmp_path, monkeypatch):
+    """…and over ANY tracked path, not only the source.
+
+    ⛔ THE TRACKED-PATH BRANCH IS PINNED WITHOUT RISKING A REAL FILE — not even under
+    this arm's own mutant: the target is built inside a THROWAWAY git work tree, so a
+    regressed guard writes its document into `tmp_path` and never into this
+    repository. The tool's `git ls-files` probe is the thing under test, so it is the
+    thing replaced — a fake that reports "tracked" for a path that does not exist. If
+    the guard is present, nothing is written and the target stays absent; if it
+    regressed, this reds on the assertion below.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / "docs" / "architecture" / "refuse-me.md"
+    target.parent.mkdir(parents=True)
+    # ⛔ THE PREMISE IS THE ISOLATION, NOT "nothing is there yet": the scratch repo is
+    # created fresh by `_scratch_repo`, so a pre-existence check on the target could
+    # never fire — it is unfalsifiable. What IS load-bearing is that a REGRESSED guard
+    # writes inside the throwaway tree, so that is what is asserted.
+    assert repo in target.parents, (
+        "the target must live inside the SCRATCH repo: a regressed guard writes into "
+        "`tmp_path`, never into this checkout")
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(repo).as_posix()])
+    assert rc == 2, f"`--render <tracked path>` must exit 2, got {rc}"
+    assert not target.exists(), (
+        "the guard must refuse before writing — a rendered document over a tracked "
+        "path is the artifact this split exists to prevent")
+
+
+def test_the_renderer_refuses_to_write_over_git_metadata(tmp_path, monkeypatch, capsys):
+    """…and over GIT METADATA, which the tracked-path probe cannot see at all.
+
+    ⛔ THE TRACKED-PATH PROBE IS BLIND HERE BY CONSTRUCTION: it asks `git ls-files`
+    "is this path in the index", and `.git/config`, `.git/index`, `.git/HEAD` and
+    every ref are untracked, so all of them passed it. Measured before this arm was
+    written, in a scratch repo: `--render .git/config` exited **0** having read the
+    source and written 144,193 bytes over the 92-byte repository config — silent
+    destruction of git metadata that no git command can restore, from the verb §7
+    tells every lane to run (#14625 review, P2).
+
+    The target is a THROWAWAY repo's `.git/config`, so a regressed guard destroys
+    `tmp_path`'s config and never this checkout's; the assertion is that the bytes
+    are untouched, which is what "refused before anything was written" means.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / ".git" / "config"
+    assert target.is_file(), (
+        "the premise is that git metadata ALREADY exists at the target: \n"
+        "`git init` wrote it, and a pre-existence check on nothing would prove nothing")
+    before = target.read_bytes()
+    rc = census.main(["--render", ".git/config"])
+    assert rc == 2, f"`--render .git/config` must exit 2, got {rc}"
+    assert target.read_bytes() == before, (
+        "the guard must refuse before writing — `--render` over git metadata is "
+        "unrecoverable, and it exited 0 before this arm existed")
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err, (
+        f"the refusal must say WHICH class it hit, not 'pick an untracked path'; "
+        f"stderr:\n{err}")
+
+
+def test_the_renderer_refuses_a_linked_worktrees_dot_git_FILE(tmp_path, monkeypatch, capsys):
+    """…and the metadata path the `rev-parse` probe cannot see: a worktree's `.git` FILE.
+
+    ⛔ IN A LINKED WORKTREE `.git` IS A REGULAR FILE holding `gitdir: …`, AND IT IS NOT
+    INSIDE EITHER DIRECTORY `git rev-parse --git-dir --git-common-dir` REPORTS: from a
+    worktree those answer `<common>/worktrees/<name>` and `<common>`, while the link is
+    `<worktree>/.git`. So the probe-only guard above keeps the write for the one path a
+    lane in a worktree is most likely to type — measured at `037d0c68` before this arm
+    existed: `--render .git` printed `render: wrote 4 lines`, exited **0**, replaced the
+    file, and every later `git` call in that worktree answered **128**, i.e. the
+    worktree was detached from its repository and no `git` command restores it.
+
+    The worktree here is REAL (`git worktree add`) and the arm proves the link still
+    RESOLVES afterwards, so it cannot pass on a refusal that happened to leave a
+    half-written file behind.
+    """
+    main_repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    subprocess.run(
+        ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@e",
+         "commit", "-q", "--allow-empty", "-m", "seed"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(main_repo), "worktree", "add", "-q", str(wt)],
+                   check=True)
+    src = wt / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", wt)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", wt / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    link = wt / ".git"
+    assert link.is_file(), (
+        "the premise: in a linked worktree `.git` is a FILE, which is the shape a "
+        "probe over the reported git dirs cannot reach")
+    reported = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-dir", "--git-common-dir"],
+        capture_output=True, text=True, check=True)
+    assert all(
+        str(link.resolve()) != str((wt / line.strip()).resolve())
+        for line in reported.stdout.splitlines() if line.strip()
+    ), (
+        "the premise: the link is NOT one of the dirs the probe reports — if that ever "
+        "changes, the probe half covers this case and the component half is redundant")
+    before = link.read_bytes()
+    rc = census.main(["--render", ".git"])
+    assert rc == 2, f"`--render .git` in a linked worktree must exit 2, got {rc}"
+    assert link.read_bytes() == before, (
+        "the worktree's git LINK was overwritten — the worktree is now detached from "
+        "its repository and no `git` command restores it")
+    resolved = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-dir"],
+        capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        f"the worktree no longer resolves its git dir: {resolved.stderr}")
+    assert "GIT METADATA" in capsys.readouterr().err, (
+        "the refusal must name the class it hit, like its `.git/config` sibling")
+
+
+def test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree(tmp_path, monkeypatch):
+    """…and the half the `.git` COMPONENT cannot see: metadata living outside the tree.
+
+    ⛔ `git init --separate-git-dir=<abs>` puts the repository's metadata in a directory
+    whose name is not `.git` and which is NOT under the work tree, so the component half
+    of the guard keeps the write and the render lands in `<meta>/config` — the same
+    unrecoverable destruction, one layout over. This is the arm that makes the
+    `rev-parse` probe LOAD-BEARING rather than decorative: with it removed, this row is
+    the only one that reds (every other metadata destination carries a `.git`
+    component).
+    """
+    meta = tmp_path / "meta"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", f"--separate-git-dir={meta}", str(repo)],
+                   check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = meta / "config"
+    assert config.is_file(), (
+        "the premise: this layout's metadata lives OUTSIDE the work tree")
+    assert ".git" not in config.parts, (
+        "the premise: and it carries no `.git` component, so only the probe can see it")
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, f"`--render <separate git dir>/config` must exit 2, got {rc}"
+    assert config.read_bytes() == before, (
+        "the separate git dir's config was REWRITTEN — the probe half of the guard "
+        "is what refuses this layout")
+
+
+def test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a probe that CANNOT ANSWER is refused, never read as "not metadata".
+
+    ⛔ THE FAIL-OPEN THIS CLOSES (#14625 review, P1): the guard only acted when
+    `git rev-parse` exited 0, so a layout git could not read — or a broken git —
+    turned the whole metadata guard into a no-op. Measured at `bf0dbcf9` by forcing the
+    probe to exit 128 on a `--separate-git-dir` target: the render landed, rc=0, over a
+    repository config no git command can restore.
+
+    The destination is OUTSIDE `ROOT`, so the tracked-path probe does not run and the
+    only subprocess in this path is the one under test.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "doc.md"
+
+    def _unanswerable(cmd, **_k):
+        # ⛔ ONLY THE METADATA PROBE IS MADE UNANSWERABLE (#14625 review, P2). The
+        # TRACKED-path probe runs first and, since the fix this arm's neighbour names,
+        # refuses a non-zero exit of its own — so a blanket fake would be caught one
+        # guard EARLIER and this arm would grade the wrong refusal (it reds on the
+        # "GIT METADATA" message below). Answering that probe honestly is what keeps
+        # this arm the only executable assertion for the metadata guard's own
+        # could-not-answer path.
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="",
+                stderr="error: pathspec 'doc.md' did not match any file(s) known to git\n",
+            )
+        # ⛔ AND SINCE #14625's ROUND-6 REVIEW THERE IS A SECOND PROBE: an `ls-files`
+        # rc 1 is an answer about the INDEX, so `_path_in_HEAD` asks HEAD before it
+        # permits (an absent index says "not tracked" about a path a commit still names).
+        # This fake answered every other call at 128, so that second probe came back
+        # unreadable and the guard refused ONE SCREEN EARLIER — the arm then graded the
+        # TRACKING refusal instead of the metadata one, which is exactly the "caught one
+        # guard earlier" failure its own comment below names. Answering this probe
+        # honestly (an empty HEAD, so the path is not committed) keeps this the only
+        # executable assertion for the METADATA guard's could-not-answer path.
+        if list(cmd[:2]) == ["git", "ls-tree"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=128, stdout="",
+            stderr="fatal: unable to read repository\n",
+        )
+
+    monkeypatch.setattr(census.subprocess, "run", _unanswerable)
+    rc = census.main(["--render", str(target)])
+    assert rc == 2, (
+        f"an unanswerable metadata probe must exit 2 (could not run), got {rc}; "
+        "0 here is the fail-open that let a separate git dir's config be overwritten")
+    assert not target.exists(), (
+        "the write landed on a probe that never answered — 'cannot determine' must "
+        "not be read as 'not metadata'")
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err, (
+        f"the refusal must say the class it could not rule out; stderr:\n{err}")
+
+
+def test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard(
+    tmp_path, monkeypatch
+):
+    """…and the fail-closed arm above does not over-block a plain directory.
+
+    ⛔ THE COUNTERWEIGHT TO IT: treating EVERY non-zero probe as metadata refuses
+    `--render /tmp/x.md`, which is a legitimate destination (and what a lane running a
+    one-off comparison uses). git's own `not a git repository`, with no `.git` entry on
+    any ancestor, is the ONE answer that permits the write — so the pair fails closed
+    without turning a refusal (P2-shaped friction) into a wall on the common case.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    target = outside / "doc.md"
+    # ⛔ THE PERMIT HAS TWO HALVES AND ONLY ONE OF THEM IS STUBBED, so the other is
+    # ASSERTED rather than read from whatever filesystem the suite happens to run on
+    # (#14625 review, round 3, P3): the stub below names git's answer, while
+    # `plainly_outside` ALSO asks the real filesystem whether any ancestor carries git
+    # metadata — and an ambient `tmp_path` under such a directory would make this arm
+    # pass or fail for a reason it does not name. The premise is that it carries none.
+    assert not any(
+        census._looks_like_git_metadata(parent)
+        for parent in (outside, *outside.parents)
+    ), (
+        "the premise: this arm proves the PLAIN-directory permit, so no ancestor of "
+        "tmp_path may look like git metadata — the suite is running under a tree that "
+        "does, and the permit below would be graded for the wrong reason")
+
+    def _not_a_repo(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="",
+            stderr=("fatal: not a git repository (or any of the parent "
+                    "directories): .git\n"),
+        )
+
+    monkeypatch.setattr(census.subprocess, "run", _not_a_repo)
+    rc = census.main(["--render", str(target)])
+    assert rc == 0, (
+        f"a plain directory is a legitimate destination — an honest 'not a "
+        f"repository' must not be refused; got rc={rc}")
+    assert target.is_file(), "the document was not written to a legitimate destination"
+
+
+def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
+    tmp_path, monkeypatch, capsys
+):
+    """A git that never answers must REFUSE, not hang `--render` forever.
+
+    ⛔ THE COMMENT WAS A CLAIM WITH NO CODE BEHIND IT (#14625 review, P3). The refusal
+    block counted "a timeout" among the failures that refuse, but no `timeout=` was
+    passed, so a hung git hung the tool: measured at `9e477cdb` with a `git` that
+    sleeps, an external `timeout 40` returned **124** — no refusal printed, nothing
+    written, and no bound of the tool's own. A probe that never finishes protects
+    nothing; it just moves the fail-open from "wrote over the metadata" to "never
+    returned".
+
+    Pinned at the exception boundary rather than with a sleeping subprocess, so the
+    arm costs no wall clock: the subject is the `TimeoutExpired` exit path, and
+    `timeout=` being passed at all is asserted separately below.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "doc.md"
+    probe: dict = {}
+    real_run = subprocess.run
+
+    def _hangs(argv, *args, **kwargs):
+        # ⛔ ONLY THE METADATA PROBE. `census.subprocess` IS the module, so patching its
+        # `run` reaches EVERY subprocess in `main()` — including the tracked-path probe,
+        # which answers first. Delegating everything but `rev-parse` keeps this arm about
+        # the one bound it pins. ⛔ The tracked probe HAS its own bound and its own
+        # `TimeoutExpired` arm now (a later commit added both, after this arm was
+        # written), and neither is graded here: this fake delegates that call, so it
+        # cannot see whether a `timeout=` was passed. That gap is what
+        # `test_EVERY_git_probe_carries_the_modules_own_timeout_bound` closes.
+        if list(argv[:2]) == ["git", "rev-parse"]:
+            # ⛔ NOT `probe.update(kwargs)`. `python3 tools/sdk_privatise.py --check` is a
+            # RATCHET over untyped `.update(`/`.query(`/`.delete(` receivers and this
+            # arm's landing RAISED it (measured at this head: 11912 -> 11913 overall,
+            # `seen.update` 103 -> 104, `python-ci` step `run: python3
+            # tools/sdk_privatise.py --check` rc 0 -> 1). A test helper is not worth a
+            # ratchet exception, so the kwargs are stored under one key.
+            probe["passed_kwargs"] = kwargs
+            raise subprocess.TimeoutExpired(
+                cmd=argv, timeout=kwargs.get("timeout"))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", _hangs)
+    rc = census.main(["--render", str(target)])
+    passed = probe.get("passed_kwargs")
+    assert passed is not None, (
+        "the metadata probe passed no `timeout=` — the refusal below claims a timeout "
+        "REFUSES, so an unbounded probe lets a hung git hang `--render`")
+    assert passed.get("timeout") == census._GIT_PROBE_TIMEOUT_S, (
+        f"the probe's bound must be the module's own; got {passed.get('timeout')}")
+    assert rc == 2, (
+        f"a timed-out probe must exit 2 (could not run), got {rc} — `TimeoutExpired` "
+        "is not an `OSError`, so without its own arm it raises out of `main()`")
+    assert not target.exists(), "the write landed on a probe that never answered"
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err and "did not answer" in err, (
+        f"the timeout refusal must say what it could not rule out; stderr:\n{err}")
+
+
+def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkeypatch, capsys):
+    """A hung `git` anywhere in the pipeline answers 2 — never the DRIFT code 1.
+
+    ⛔ BOUNDING THE METADATA PROBE ALONE WAS NOT ENOUGH (#14625 review, P3, measured)
+    and this arm is why. `--render` runs the TRACKED-path probe first, and both
+    `--check` and the default verb run the census's own `git ls-files`, so a hung git
+    still hung the tool even after the metadata probe carried a `timeout=` — an
+    external `timeout 90` returned **124**. Worse, an uncaught `TimeoutExpired` is not
+    in the `(OSError, CalledProcessError)` tuples that guard the census, so it would
+    exit **1**, which this tool reserves for `the pins drifted`: a lane on a wedged box
+    would be told to re-cut 25 correct pins.
+
+    Every git call is made to hang at once; all three verbs must answer 2.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+
+    def _hangs(argv, *_a, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(census.subprocess, "run", _hangs)
+    target = tmp_path / "doc.md"
+    for argv, label in (
+        (["--check"], "--check"),
+        ([], "the default verb"),
+        (["--render", str(target)], "--render"),
+    ):
+        rc = census.main(argv)
+        assert rc == 2, (
+            f"{label} answered {rc} on a hung git; 1 is the DRIFT verdict, so anything "
+            "but 2 sends a lane to re-cut pins that a wedged box could not measure")
+    assert not target.exists(), "the write landed although no git call answered"
+    err = capsys.readouterr().err
+    assert "could not" in err.lower(), (
+        f"each refusal must read as 'could not run'; stderr:\n{err}")
+
+
+def test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and asking the DESTINATION's repository alone is not enough — ask BOTH.
+
+    ⛔ THE ROUND-7 FIX INVERTED TWO ROWS (#14625 review, round 8, P0). Following the
+    destination was right for a linked worktree, a nested repository and a submodule
+    gitlink — and wrong for a nested repository that does NOT name the path while ROOT
+    does: `git init` in a tracked subdirectory (or a nested repo whose commit predates
+    the file) answers `ls-files` rc 1 and `ls-tree` "not a valid object name", the guard
+    read both as permits, and `--render` replaced 12 bytes of ROOT-TRACKED content with
+    109 at **rc 0**, no stderr. The pre-fix code refused both of those rows, so the fix
+    traded two fail-opens for two others.
+
+    Neither repository is authoritative, so both are asked and either refusal wins. This
+    arm pins the composite: drop the ROOT half and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    inner = repo / "inner"
+    keeper = inner / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "inner/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ⛔ BOTH HALVES OF THE PREMISE MEASURED, because the arm is about two repositories
+    # disagreeing and a git that resolved differently would make it vacuous: ROOT must
+    # TRACK the path, and the nested repository must answer "not tracked" for it.
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/docs/DOC.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 0, (
+        "the premise: ROOT must TRACK the destination; got "
+        f"rc={root_answer.returncode} — without that, the ROOT half has nothing to refuse")
+    nested_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert nested_answer.returncode == 1, (
+        "the premise: the NESTED repository must not name the path; got "
+        f"rc={nested_answer.returncode} — if it tracked it the arm would grade the "
+        "nested half instead of the composite")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a nested repository must not permit what ROOT tracks, got {rc} — "
+        "following the destination alone reopens this")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "ROOT-tracked content was overwritten: the composite guard did not ask ROOT")
+
+
+def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
+    """The `timeout=` on every `subprocess.run` is graded at the CALL SITE, not only by
+    the exception it raises.
+
+    ⛔ THE HOLE THIS CLOSES (#14625 review, P3, OPENED AT 07:34 AND NOT CLOSED): the
+    arms above prove that when `subprocess.run` RAISES `TimeoutExpired` the verbs answer
+    2 — but a fake that raises unconditionally cannot see whether a bound was ever
+    passed, so `timeout=` could be deleted from a call site with the whole file green.
+    MEASURED before the arm existed, on the pre-rebase base (`137 passed, 15 skipped`
+    there — the figure belongs to THAT tree, not to this one): deleting
+    `timeout=_GIT_PROBE_TIMEOUT_S` from `surface_files`'s `git ls-files` stayed GREEN;
+    from `_tracked_destination_refusal`'s probe, GREEN again. Re-verified at this head by
+    mutation — every one of the four `subprocess.run` sites reds when its kwarg goes.
+    ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
+    deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
+    two sites this arm exists for are the other two. The artifact claimed the bound was
+    graded everywhere, which is the finding: an arm that grades a CONSEQUENCE is not an
+    arm that grades the CAUSE, and `_GIT_PROBE_TIMEOUT_S` is the cause.
+
+    So this arm reads the module's own AST: every `subprocess.run` in
+    `tools/cypher_inventory.py` is a git probe (asserted, not assumed), and every one of
+    them must pass the module constant — not a literal, so re-cutting the bound stays a
+    one-line edit and cannot leave a site pinned to a stale number.
+
+    ⛔ THE POPULATION IS PINNED TOO, and it is pinned EXACTLY — the same convention as
+    `len(test_functions)`/`len(split_arms)` in this file. Deleting a probe site whole
+    would otherwise shrink the population this arm walks and stay green; a NEW
+    `subprocess.run` that is not a git probe (a future `git apply`, a formatter) reds,
+    and the remedy is to classify it here rather than to widen the loop silently.
+    """
+    source = Path(census.__file__).read_text(encoding="utf-8")
+    calls = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+    ]
+    assert len(calls) == 4, (
+        f"expected EXACTLY 4 `subprocess.run` probe sites in the census; got "
+        f"{len(calls)} at lines {[c.lineno for c in calls]} — a probe site was removed "
+        "(its bound and its refusal went with it) or added (classify it here: this arm "
+        "asserts every site is a git probe and carries the module's bound)")
+    for call in calls:
+        argv = call.args[0] if call.args else None
+        assert isinstance(argv, ast.List) and argv.elts, (
+            f"the probe at line {call.lineno} does not pass a literal argv list, so this "
+            "arm cannot tell what it runs")
+        first = argv.elts[0]
+        assert isinstance(first, ast.Constant) and first.value == "git", (
+            f"the `subprocess.run` at line {call.lineno} is not a git probe "
+            f"(argv[0]={ast.dump(first)}); classify it here rather than leaving it "
+            "outside the bound")
+        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
+        assert "timeout" in kwargs, (
+            f"the git probe at line {call.lineno} passes NO `timeout=` — a hung git "
+            "hangs every verb that reaches it (measured pre-fix: external `timeout 90` "
+            "-> 124), and the raise-only arms above cannot see this")
+        bound = kwargs["timeout"]
+        assert isinstance(bound, ast.Name) and bound.id == "_GIT_PROBE_TIMEOUT_S", (
+            f"the git probe at line {call.lineno} carries a bound that is not the "
+            f"module's own (`{ast.dump(bound)}`); a literal here goes stale the moment "
+            "`_GIT_PROBE_TIMEOUT_S` is re-cut, and `timeout=None` is no bound at all")
+    assert census._GIT_PROBE_TIMEOUT_S > 0, "the bound must be a positive number of seconds"
+
+
+def test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR(
+    tmp_path, monkeypatch, capsys
+):
+    """…and neither guard may be answered by a repository the caller's env names.
+
+    ⛔ THE ROOT CAUSE THE ROUND-4 FINDINGS SHARE (#14625 review, P1): both `--render`
+    guards run `git` in the INHERITED environment, so an exported `GIT_DIR` makes the
+    probe describe a DIFFERENT repository — and git's answer is then read as
+    permission. Measured at `4019fa5` from the tool's own bytes: with
+    `GIT_DIR=<other>` and the destination an INTACT `--separate-git-dir` config,
+    `--render` exited **0** and wrote 145,745 bytes over 92, after which
+    `git -C <repo> rev-parse --git-dir` answered 128 ("bad config line 1"). The same
+    repository with a CLEAN env was refused (2, 92 bytes) — so the layout was
+    protected and only the environment was the hole. Git exports `GIT_DIR` into hooks
+    and wrappers/CI export it routinely.
+    """
+    meta = tmp_path / "meta"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", f"--separate-git-dir={meta}", str(repo)],
+                   check=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = meta / "config"
+    assert config.is_file(), "the premise: this layout's metadata lives outside the tree"
+    before = config.read_bytes()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    assert "GIT_DIR" not in census._git_env(), (
+        "the premise: the scrubber must drop the variable under test")
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, (
+        f"an inherited GIT_DIR must not retarget the metadata probe — pre-fix this "
+        f"exited 0 having overwritten the intact config; got {rc}")
+    assert config.read_bytes() == before, (
+        "the render landed on git metadata because the probe answered about the "
+        "repository `GIT_DIR` named instead of the destination's own")
+
+
+def test_the_tracked_path_guard_is_not_defeated_by_an_inherited_GIT_INDEX_FILE(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the TRACKED-path guard is defeated by the same root cause, not only that one.
+
+    ⛔ THE SAME EXPORTED-VARIABLE HOLE POINTS AT THE OTHER GUARD (#14625 review, P1).
+    `git ls-files --error-unmatch` reads the index `GIT_INDEX_FILE` names, so with it
+    pointed at a scratch index the probe answers "untracked" for a path this
+    repository TRACKS — measured at `4019fa5`: `--render <tracked doc>` exited **0** and
+    wrote 145,745 bytes over 14, while the same destination with a clean env was
+    refused (2, 14 bytes unchanged). That is the self-locking corruption the refusal
+    message describes: the document `--render` writes is never committed, so nothing
+    restores the tracked file it replaced.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (repo / "docs").mkdir()
+    tracked = repo / "docs" / "TRACKED.md"
+    tracked.write_text("# a tracked doc\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    before = tracked.read_bytes()
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "junk.idx"))
+    assert "GIT_INDEX_FILE" not in census._git_env(), (
+        "the premise: the scrubber must drop the variable under test")
+    rc = census.main(["--render", "docs/TRACKED.md"])
+    assert rc == 2, (
+        f"a tracked destination must be refused whatever index the caller's env "
+        f"names — pre-fix this exited 0 having overwritten it; got {rc}")
+    assert tracked.read_bytes() == before, (
+        "the tracked document was overwritten because the probe read a FOREIGN index")
+    assert "TRACKED path" in capsys.readouterr().err, (
+        "the refusal must still say WHICH class it hit")
+
+
+def test_a_damaged_git_directory_is_refused_without_any_help_from_git(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a metadata directory git can no longer resolve is still metadata.
+
+    ⛔ "NOT A REPOSITORY" IS NOT "NOT METADATA" (#14625 review, P1). A git directory
+    whose own `HEAD` was removed answers exactly like a plain directory, and the
+    permit for a plain directory asked only whether an ANCESTOR carried a `.git`
+    ENTRY — which a bare repository's metadata never does (there is no separate
+    `.git`, the directory IS the metadata). So the structural term is required: the
+    directory's own `objects/` plus one marker. Measured at `4019fa5` with NO
+    environment variable set at all: `--render <bare>/config` exited **0** and wrote
+    145,745 bytes over a 66-byte config (the same bare repo with `HEAD` intact was
+    refused, 2, 66 bytes) — a fail-open reachable by damage alone.
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (bare / "HEAD").unlink()
+    damaged = subprocess.run(["git", "-C", str(bare), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True)
+    assert damaged.returncode != 0, (
+        "the premise: git must no longer resolve this metadata, and this arm must not "
+        "set any GIT_* variable — the structural term is what has to catch it")
+    assert census._looks_like_git_metadata(bare), (
+        "the premise: the directory still HOLDS metadata (objects/ + refs/)")
+    config = bare / "config"
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, (
+        f"metadata that git cannot resolve is still metadata — pre-fix this exited 0 "
+        f"having overwritten the bare repository's config; got {rc}")
+    assert config.read_bytes() == before, (
+        "the write landed on metadata the probe could not be answered about")
+
+
+def test_a_git_directory_that_lost_objects_is_STILL_refused(tmp_path, monkeypatch, capsys):
+    """…and the damage does not have to be `HEAD`.
+
+    ⛔ THE FIRST VERSION OF THE STRUCTURAL TERM REQUIRED ``objects/``, and a round-5
+    reviewer falsified it in one command: `rm -rf <bare>/objects` leaves `HEAD`,
+    `refs/` and `config` intact, git still answers "not a git repository" (128), the
+    guard said "not metadata" — and `--render` wrote 145,745 bytes over the bare
+    repository's 66-byte config at exit 0 (measured by both the reviewer and again
+    here). A marker set that names ONE required file is a hole that moves when the
+    damage moves, so the predicate is now "a distinctive marker plus any second one".
+    """
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    shutil.rmtree(bare / "objects")
+    damaged = subprocess.run(["git", "-C", str(bare), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True)
+    assert damaged.returncode != 0, "the premise: git must no longer resolve this tree"
+    assert not (bare / "objects").exists(), "the premise: objects/ is what was removed"
+    assert (bare / "HEAD").exists() and (bare / "refs").is_dir(), (
+        "the premise: the other markers are INTACT, so a predicate that needs any one "
+        "of them must still see this directory")
+    assert census._looks_like_git_metadata(bare), (
+        "the structural term must recognise metadata through a missing objects/")
+    config = bare / "config"
+    before = config.read_bytes()
+    rc = census.main(["--render", str(config)])
+    assert rc == 2, f"a metadata directory is refused however it was damaged; got {rc}"
+    assert config.read_bytes() == before, (
+        "the write landed on a bare repository's config because the marker it happened "
+        "to check was the one that had been removed")
+
+
+def test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the tracked-path guard follows the DESTINATION, not just `ROOT`.
+
+    ⛔ THE PROBE USED TO ANSWER ONLY FOR A TARGET INSIDE `ROOT` (`rel` is not None), so
+    `--render` into ANOTHER checkout's tracked file never asked anybody and overwrote it
+    at exit 0 (measured by a round-5 reviewer and again here: 27 -> 145,745 bytes). The
+    guard's own message prescribes "pick an untracked path" — a global invariant — while
+    the code enforced it over one tree. A destination in no repository at all must
+    still be permitted, which is the second half of this arm.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    peer = tmp_path / "peer"
+    (peer / "docs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(peer)], check=True)
+    victim = peer / "docs" / "README.md"
+    victim.write_text("# tracked in the PEER checkout\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(peer), "add", "-A"], check=True)
+    before = victim.read_bytes()
+    rc = census.main(["--render", str(victim)])
+    assert rc == 2, (
+        f"a TRACKED destination is refused in whichever repository tracks it; got {rc}")
+    assert victim.read_bytes() == before, (
+        "a peer checkout's tracked file was replaced by a generated document")
+    assert "TRACKED path" in capsys.readouterr().err
+    fresh = peer / "docs" / "UNTRACKED.md"
+    assert census.main(["--render", str(fresh)]) == 0, (
+        "the same repository's UNTRACKED path is a legitimate destination — the guard "
+        "must not become a wall on the other checkout")
+    assert fresh.is_file()
+    # ⛔ AND A TRACKED PATH WHOSE PARENT DIRECTORIES ARE GONE (#14625 review, round 5,
+    # P3). The probe walks up to the nearest EXISTING ancestor, so asking about the
+    # destination's BASENAME in that directory answered "untracked" for
+    # `peer/sub/deep/x.md` once `sub/` was removed — and the render landed a generated
+    # document on a TRACKED path at rc 0. `git ls-files` matches an index entry whose
+    # work-tree file is absent, so the probe must name the whole remainder.
+    deep = peer / "sub" / "deep" / "x.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("# tracked deep\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(peer), "add", "-A"], check=True)
+    shutil.rmtree(peer / "sub")
+    tracked_deep = subprocess.run(
+        ["git", "-C", str(peer), "ls-files", "--", "sub/deep/x.md"],
+        capture_output=True, text=True)
+    assert tracked_deep.stdout.strip() == "sub/deep/x.md", (
+        "the premise: the path is still in the index while its work-tree copy is gone")
+    rc = census.main(["--render", str(deep)])
+    assert rc == 2, (
+        f"a tracked path stays tracked after its parent directories are removed — got "
+        f"{rc}")
+    assert not deep.exists(), (
+        "a generated document landed on a TRACKED path because the probe named only "
+        "the basename in an ancestor directory")
+
+
+def test_a_render_through_a_HARDLINK_to_git_metadata_is_refused(tmp_path, monkeypatch,
+                                                               capsys):
+    """…and metadata can also be reached by a SECOND NAME, which no path guard sees.
+
+    ⛔ THE LAST RESIDUAL OF THE DESTINATION GUARDS (#14625 review, P3). Every guard
+    above decides metadata-ness from the PATH: the tracked-path probe asks the index,
+    the metadata probe asks git where the metadata LIVES, and the `.git` component
+    test reads the destination's parts. A hardlink is ONE inode with TWO names, so
+    `ln -f <repo>/.git/config /tmp/x/doc.md` satisfies all three — the destination
+    carries no `.git` component, is untracked, and sits in no repository — and the
+    write lands THROUGH the link. Measured at `059a0382`, with every other guard in
+    place: rc **0**, `render: wrote 2451 lines`, and the repository's 92-byte config
+    became 391,249 bytes; `git -C <repo> rev-parse --git-dir` then answered 128 ("bad
+    config line 1") on a repository nothing restores. `Path.resolve()` cannot see it
+    — it follows symlinks, and a hardlink is not one — so the guard is the link COUNT.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = repo / ".git" / "config"
+    assert config.is_file(), "the premise: the scratch repo carries its own config"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    hard = outside / "doc.md"
+    os.link(config, hard)
+    assert hard.stat().st_nlink == 2, (
+        "the premise: ONE inode under TWO names, and the destination path carries no "
+        "`.git` component — the shape no path-based guard above can classify")
+    before = config.read_bytes()
+    rc = census.main(["--render", str(hard)])
+    assert rc == 2, (
+        f"`--render` must refuse a destination that is a second name for git metadata "
+        f"— pre-fix this exited 0 and the write landed THROUGH the link on a config "
+        f"git cannot restore; got {rc}")
+    assert config.read_bytes() == before, (
+        "the repository's config was overwritten through a hardlink: the write follows "
+        "the inode, so a path-based guard permits it while the bytes land on metadata")
+    err = capsys.readouterr().err
+    assert "hard" in err.lower() and "link" in err.lower(), (
+        f"the refusal must name the property it refused on (the link count); stderr:\n{err}")
+
+
+def test_a_second_name_for_a_PLAIN_destination_is_refused_too(tmp_path, monkeypatch):
+    """…and the refusal is about the LINK COUNT, not about metadata-ness.
+
+    ⛔ THE POINT OF THIS ARM IS WHAT THIS DESTINATION IS NOT: an ordinary file outside
+    every repository, hardlinked to another ordinary file. A guard phrased as a fourth
+    "is this metadata?" predicate would pass it — that is the shape three review rounds
+    of findings kept producing (a predicate naming one damage mode, then one file, then
+    one repository), so the invariant is stated over the NUMBER OF NAMES the destination
+    inode has. Two names means the generated document is written through to the other
+    one wherever it lives, which is the one thing `--render`'s output must never do.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    other = outside / "notes.md"
+    other.write_text("# somebody else's file\n", encoding="utf-8")
+    linked = outside / "doc.md"
+    os.link(other, linked)
+    assert linked.stat().st_nlink == 2, "the premise: two names, one inode"
+    assert not any(
+        part.lower() == ".git" for part in linked.parts
+    ), "the premise: no `.git` component, so only the link count can decide"
+    assert not census._looks_like_git_metadata(outside), (
+        "the premise: this directory is not metadata, so a metadata-shaped guard would "
+        "permit it — the link count is the only term that can refuse")
+    before = other.read_bytes()
+    rc = census.main(["--render", str(linked)])
+    assert rc == 2, (
+        f"a destination with a second name is written through to that name; pre-fix "
+        f"this exited 0; got {rc}")
+    assert other.read_bytes() == before, (
+        "the document was written through the hardlink onto an unrelated file")
+
+
+def test_an_UPPERCASE_dot_GIT_component_is_refused_too(tmp_path, monkeypatch, capsys):
+    """…and the component test is CASE-INSENSITIVE, which nothing used to grade.
+
+    ⛔ A ROUND-3 REVIEWER FOUND THIS ARM MISSING (#14625 review, P2): the guard matches
+    `part.lower() == ".git"` precisely so that `.GIT/config` — the same directory on a
+    case-insensitive filesystem, i.e. macOS's default — cannot slip past it, and
+    `grep -c '.GIT'` in this module answered **0**, so reverting `part.lower()` to
+    `part` left the whole suite green while re-opening the fail-open on every
+    case-insensitive checkout. On a case-SENSITIVE filesystem the arm is still exact:
+    the destination carries a `.GIT` component, the guard refuses it as metadata before
+    anything is written, and the directory is not created.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / ".GIT" / "config"
+    assert ".GIT" in target.parts and ".git" not in target.parts, (
+        "the premise: the component is upper-case, so only a case-insensitive test "
+        "can recognise it")
+    rc = census.main(["--render", ".GIT/config"])
+    assert rc == 2, (
+        f"a `.GIT` component is git metadata on a case-insensitive filesystem and is "
+        f"refused on every filesystem — got {rc}")
+    assert not target.exists(), (
+        "the render created `.GIT/config`: the component test is case-SENSITIVE, which "
+        "is the fail-open this arm exists to grade")
+    assert "GIT METADATA" in capsys.readouterr().err
+
+
+def test_the_retargeting_env_list_is_the_one_lane_stash_already_scrubs():
+    """The scrubber is ONE list, not a seventh copy of it.
+
+    ⛔ `tools/lane_stash.py` already carries `_RETARGETING_ENV` with the same reasoning
+    (inherited-from-a-hook variables "would silently make this tool write lane refs …
+    against a peer worktree"). Two hand-maintained copies of the same set drift the
+    moment git adds a variable or one list is extended, and this module's list decides
+    whether a DESTRUCTIVE guard can be retargeted — so the pair is pinned rather than
+    trusted.
+    """
+    from tools import lane_stash
+
+    assert set(census._GIT_RETARGETING_ENV) == set(lane_stash._RETARGETING_ENV), (
+        "the metadata/tracked-path guards and lane_stash must scrub the same GIT_* "
+        f"retargeting set; census={sorted(census._GIT_RETARGETING_ENV)} "
+        f"lane_stash={sorted(lane_stash._RETARGETING_ENV)}")
+
+
+def test_the_census_enumerates_ROOTS_repository_not_the_one_GIT_DIR_names(
+    tmp_path, monkeypatch
+):
+    """…and the CENSUS itself is one of the probes that env can retarget.
+
+    ⛔ THE THIRD SYMPTOM OF THE SAME ROOT CAUSE (#14625 review, P1), and the quietest:
+    `surface_files()` runs `git ls-files` in the inherited environment, so an exported
+    `GIT_DIR` enumerates a PEER repository's index — and the census then parses ROOT's
+    copy of those paths, silently DROPPING every file the other index does not list.
+    A truncation at exit 0 is worse than a refusal: the rendered document looks
+    normal, carries fewer rows, and nothing in the run says so. Measured at
+    `4019fa5`: with `GIT_DIR` naming a repo that tracks only one of ROOT's two
+    files, `--render` exited 0 and the appendix lost the other file's sites.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    (repo / "tortoise").mkdir()
+    for name in ("alpha.py", "beta.py"):
+        (repo / "tortoise" / name).write_text(
+            "def f(store):\n    return store.query('MATCH (p:Point) RETURN p')\n",
+            encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    other = tmp_path / "other"
+    (other / "tortoise").mkdir(parents=True)
+    (other / "tortoise" / "alpha.py").write_text(
+        "def f(store):\n    return store.query('MATCH (p:Point) RETURN p')\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(["git", "-C", str(other), "add", "-A"], check=True)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    out = repo / "rendered.md"
+    assert census.main(["--render", str(out)]) == 0
+    clean_rows = len(out.read_text(encoding="utf-8").splitlines())
+    out.unlink()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    rc = census.main(["--render", str(out)])
+    rows = len(out.read_text(encoding="utf-8").splitlines()) if out.exists() else 0
+    assert rc == 0, f"the plain render must still succeed; got {rc}"
+    assert rows == clean_rows, (
+        f"the census enumerated the repository `GIT_DIR` names and silently truncated "
+        f"the document ({rows} lines vs {clean_rows} clean) — a wrong document at "
+        f"exit 0 is the failure mode this scrub exists to prevent")
+
+
+def test_the_renderer_reports_a_write_failure_as_could_not_run(tmp_path, monkeypatch, capsys):
+    """A write that cannot happen exits 2 (could not run), never 1 (DRIFT).
+
+    ⛔ `--render` HAS NO DRIFT VERDICT AT ALL, so ANY exit 1 from it is a
+    misclassification by construction: 1 is what `--check` reserves for "the pins
+    drifted". The write path this split adds was unwrapped, so an OSError
+    (`IsADirectoryError`, a read-only mount, ENOSPC) terminated the interpreter with
+    status 1 — and §7 tells every lane to run `--render`, so a lane that happened to
+    render into a path it cannot write read "the census drifted" and re-cut 25 pins
+    that were correct (#13098 review, P2).
+
+    The failure is reached without a tree walk: `census()` is replaced, because the
+    subject here is the WRITE's status, not the enumeration. The parent is a regular
+    FILE, so `mkdir(parents=True, exist_ok=True)` answers `NotADirectoryError`.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    out = blocker / "CYPHER-INVENTORY.md"
+    monkeypatch.setattr(census, "census", lambda *a, **k: {"sites": []})
+    rc = census.main(["--render", str(out)])
+    assert rc == 2, (
+        f"a write failure must exit 2 (could not run), got {rc} — 1 is the DRIFT "
+        "verdict this verb never reports")
+    err = capsys.readouterr().err
+    assert "could not write" in err, f"the refusal must say what failed; stderr:\n{err}"
+    assert str(out) in err, f"the refusal must name the path; stderr:\n{err}"
+
+
+def test_the_renderer_reports_a_probe_failure_as_could_not_run(monkeypatch, capsys):
+    """…and neither does the `git ls-files` probe that guards a tracked target.
+
+    An absent `git` binary raises `FileNotFoundError` out of `subprocess.run`; left
+    uncaught it exits 1, which is indistinguishable from "the census drifted" — the
+    same misclassification as the write path, one call over (#13098 review, P2).
+    Refused BEFORE the census runs, so this arm costs no tree walk.
+    """
+    target = ROOT / "docs" / "architecture" / "probe-failure-me.md"
+    assert not target.exists(), "a real file sits at the probe path — pick another"
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(ROOT).as_posix()])
+    assert rc == 2, (
+        f"a failed tracking probe must exit 2 (could not run), got {rc} — 1 is the "
+        "DRIFT verdict this verb never reports")
+    err = capsys.readouterr().err
+    assert "could not probe" in err, f"the refusal must say what failed; stderr:\n{err}"
+    assert not target.exists(), "the refusal must happen before anything is written"
+
+
+def test_a_tracking_probe_that_cannot_answer_is_REFUSED_not_read_as_untracked(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a non-zero exit is NOT the permit: only git's own ANSWER is.
+
+    ⛔ THE SIBLING OF THE ARM ABOVE, AND THE ONE THAT WAS MISSING (#14625 review, P2).
+    `FileNotFoundError` was graded; a `git` that RUNS and CANNOT ANSWER was not — and
+    the guard read every non-zero exit as "this path is untracked". That is a different
+    statement from "git could not read the index": the documented non-match is exit
+    **1**, while three measured states answer **128** with neither 0 nor 1 — a corrupt
+    `.git/index`, an unreadable one, and an index that is a directory (git 2.43). So
+    `--render` over a TRACKED path in a peer checkout whose index is unreadable WROTE at
+    exit 0 — the self-locking corruption this refusal describes, from the verb §7 tells
+    every lane to run — while the metadata guard 300 lines down refused its own
+    unanswerable probe. The fake names `128` + a corrupt-index stderr, i.e. the class,
+    not the one state that happens to be reproduced here.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / "docs" / "unanswerable.md"
+    target.parent.mkdir(parents=True)
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="",
+                stderr="fatal: .git/index: index file smaller than expected\n",
+            )
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a tracking probe that cannot answer must exit 2 (could not run), got {rc} — "
+        "0 means it was read as 'untracked', which is how the write landed")
+    err = capsys.readouterr().err
+    assert "for tracking" in err and "could not probe" in err, (
+        f"the refusal must name the TRACKING probe that could not answer; stderr:\n{err}")
+    assert "exited 128" in err, (
+        f"the refusal must carry git's own exit code so a reader can tell 1 from 128; "
+        f"stderr:\n{err}")
+    assert not target.exists(), (
+        "the guard must refuse before writing — an unanswerable probe is not a "
+        "verdict, and the write it permits is unrecoverable when the path IS tracked")
+
+
+def test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe(
+    tmp_path, monkeypatch, capsys
+):
+    """…and `not a git repository` from a checkout git DISOWNS is not a permit either.
+
+    ⛔ THE STRING ALONE IS NOT AN ANSWER, which is the lesson the METADATA guard's first
+    P1 already recorded ("not a repository" is not the same as "not metadata") and the
+    tracked-path probe had not learned. Measured on git 2.43: a checkout whose
+    `.git/HEAD` was removed — index and object store INTACT — answers
+    `fatal: not a git repository (or any of the parent directories): .git` at **128**,
+    byte-identical in shape to a plain directory, while `docs-keep.md` is still in
+    `.git/index` and one `git checkout` would bring it back. A stderr-only permit
+    therefore reopens the same clobber from the other side, so the permit needs the
+    structural half the metadata guard already had.
+
+    ⛔ AND THE REFUSAL IS ASSERTED TO COME FROM THE TRACKING PROBE: with the structural
+    term removed, the metadata guard one screen later refuses this destination anyway,
+    so a code-only assertion would stay green while the tracking probe had permitted the
+    write. The message is what pins the branch.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    assert (repo / ".git" / "index").is_file(), (
+        "the premise is a DAMAGED repository, not a destroyed one: the index must still "
+        "be there holding the tracked path, or nothing could be restored and the arm "
+        "would grade an empty directory")
+    (repo / ".git" / "HEAD").unlink()
+    # ⛔ THE PREMISE IS MEASURED, NOT ASSUMED: this arm is about a repository answer that
+    # LOOKS like "no repository", so the real git must produce both halves — the code
+    # AND the string — or the arm would fail for a git-version reason it does not name.
+    damaged = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert damaged.returncode == 128 and "not a git repository" in damaged.stderr, (
+        "the premise: a disowned checkout answers 128 + 'not a git repository'; got "
+        f"rc={damaged.returncode} stderr={damaged.stderr!r} — the permit this arm "
+        "guards is not reachable on this git")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a git-disowned checkout must not permit the write, got {rc} — the path is "
+        "TRACKED in an index that is still there")
+    err = capsys.readouterr().err
+    assert "for tracking" in err, (
+        "the TRACKING probe must refuse this, not the metadata guard behind it — "
+        f"otherwise deleting its structural term reds nothing; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the tracked file was overwritten: 'not a git repository' from a repository "
+        "git merely disowns is could-not-answer, not a permit")
+
+
+def test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit(
+    tmp_path, monkeypatch, capsys
+):
+    """…and `not tracked` from a checkout with NO INDEX is not a permit either.
+
+    ⛔ `git ls-files --error-unmatch` ANSWERS ABOUT THE INDEX. Its rc 1 is the
+    documented non-match, but an ABSENT index answers 1 too, with an error line
+    byte-identical to the honest one, while HEAD still names the path — and the state
+    that produces it is not exotic: a fresh clone with `git read-tree` not yet run, a
+    checkout whose index was deleted, a damaged index a lane cleared to "fix" git. #14625
+    review round 7 measured `--render` overwriting a COMMITTED file at rc 0 that way, so
+    the permit now confirms the answer against HEAD, and this arm pins that: with the
+    HEAD probe reverted to the pre-fix `return None`, this reds.
+
+    The premise is MEASURED on the real git in front of it — both halves, the index's `1`
+    and HEAD's name — or the arm would fail for a git-version reason it does not name.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (repo / ".git" / "index").unlink()
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 1, (
+        "the premise: an ABSENT index answers 1 (not 128); got "
+        f"rc={answer.returncode} stderr={answer.stderr!r} — without this the arm grades "
+        "a different refusal than the one it describes")
+    in_head = subprocess.run(
+        ["git", "ls-tree", "--name-only", "HEAD", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert in_head.returncode == 0 and keeper.name in in_head.stdout, (
+        "the premise: HEAD still names the path after the index is gone; got "
+        f"rc={in_head.returncode} stdout={in_head.stdout!r}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"`not tracked` from an ABSENT index is not a permit for a COMMITTED path; got "
+        f"{rc} — an absent index answers the same thing about a file a commit names")
+    err = capsys.readouterr().err
+    assert "IS in" in err, (
+        "the refusal must name the second question it asked (HEAD), so reverting the "
+        f"HEAD probe reds this arm rather than being covered by a later guard:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the committed file was overwritten: an index-shaped answer is not content-shaped")
+
+
+def test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a `.git` that EXISTS but cannot be RESOLVED is a damage state, not a plain dir.
+
+    ⛔ THE STRUCTURAL HALF OF THE PERMIT USED `Path.exists()`, WHICH FOLLOWS THE LINK
+    (#14625 review, round 7). A `.git` that is a symlink to a gitdir on a volume that is
+    not mounted — `.git-real` intact, its index still tracking the destination — makes
+    git answer `fatal: not a git repository` at 128, which is the stderr half of the
+    permit, while `exists()` reads False. Measured: `--render` overwrote the TRACKED file
+    at rc 0. `lexists` asks the question that was meant, and this arm pins it: with
+    `lexists` reverted to `exists`, this reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    real_git_dir = repo / ".git-real"
+    (repo / ".git").rename(real_git_dir)
+    os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), repo / ".git")
+    assert (repo / ".git").exists() is False, (
+        "the premise: a DANGLING symlink makes `exists()` False while the entry is "
+        "present — without that, this arm would grade `lexists` on a name that is "
+        "simply absent")
+    assert os.path.lexists(repo / ".git"), "…and `lexists` sees it"
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 128 and "not a git repository" in answer.stderr, (
+        "the premise: git answers 128 + 'not a git repository' through a dangling "
+        f".git; got rc={answer.returncode} stderr={answer.stderr!r}")
+    assert (real_git_dir / "index").is_file(), (
+        "the premise: the real index is INTACT and still tracks the file, so the write "
+        "is restorable damage rather than an empty directory")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a dangling `.git` must not permit the write, got {rc} — the entry EXISTS, it "
+        "simply cannot be resolved, and that is a damage state")
+    err = capsys.readouterr().err
+    assert "for tracking" in err, (
+        f"the TRACKING probe must refuse this; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the tracked file was overwritten through a `.git` that git could not resolve")
+
+
+def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
+    """…and the fail-closed arm above does not over-block either honest permit.
+
+    ⛔ THE COUNTERWEIGHT, AND IT IS TWO-SIDED BECAUSE THE FIX HAS TWO PERMIT ARMS — git's
+    documented non-match (**1**, a path simply not in the index) and git's own `not a git
+    repository` (**128**) for a destination with no repository anywhere above it.
+    Refusing every non-zero probe reds the first half; refusing every 128 reds the second
+    — and the second is the shape §7's own one-off comparison uses (`--render /tmp/x.md`),
+    so over-blocking it turns a refusal into a wall on the common case.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # HALF 1 — git answered `1`: the path is in a repository and is NOT tracked.
+    inside = repo / "docs" / "untracked.md"
+    inside.parent.mkdir(parents=True)
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", inside.relative_to(repo).as_posix()],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 1, (
+        f"the premise: an untracked path answers 1, not {answer.returncode} — the "
+        "non-match arm of the permit cannot be graded on this git")
+    rc = census.main(["--render", inside.relative_to(repo).as_posix()])
+    assert rc == 0, f"an untracked path in a repository is a legitimate destination; got {rc}"
+    assert inside.is_file(), "the document was not written to a legitimate destination"
+    # HALF 2 — git answered `128` + `not a git repository`: no repository at all.
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert not any(
+        (parent / ".git").exists() or census._looks_like_git_metadata(parent)
+        for parent in (outside, *outside.parents)
+    ), (
+        "the premise: this half proves the NO-REPOSITORY permit, so no ancestor of "
+        "tmp_path may carry `.git` or look like git metadata")
+    target = outside / "doc.md"
+    rc = census.main(["--render", str(target)])
+    assert rc == 0, (
+        f"a plain directory is a legitimate destination — an honest 'not a "
+        f"repository' must not be refused; got rc={rc}")
+    assert target.is_file(), "the document was not written outside any repository"
+
+
+def test_a_PATTERN_shaped_destination_is_asked_about_LITERALLY(tmp_path, monkeypatch, capsys):
+    """A destination is a PATH, so neither probe may hand it to git as a PATHSPEC.
+
+    ⛔ THE OVER-BLOCK THE ROUND-8 REVIEW FOUND, AND THE CONFLATION BEHIND IT (#14625
+    review, P3). `git ls-files --error-unmatch -- docs/*.md` is a GLOB, so an UNTRACKED
+    destination shaped like one was refused whenever some tracked file happened to
+    match it — `--render 'docs/*.md'` answered 2 over a clean write path, and the file
+    the caller never named is what decided it. The premise is measured here, not read:
+    the bare argument MATCHES the tracked `notes.md` (rc 0) while `:(literal)` finds
+    nothing at the destination itself (rc 1), so the two spellings really do answer
+    about different things on this git.
+
+    ⛔ AND THE SECOND HALF IS WHY THE FIX IS NOT "ESCAPE THE WILD CARDS": a TRACKED
+    destination whose own name carries pathspec magic must still be REFUSED. Git's
+    literal fallback happens to refuse that shape even with the bare argument, so this
+    half is a counterweight rather than a mutant target — it reds for a fix that reads
+    the magic characters out of the path instead of telling git not to interpret them.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    docs = repo / "docs"
+    docs.mkdir()
+    tracked = docs / "notes.md"
+    tracked.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "docs/notes.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ⛔ BOTH HALVES OF THE PREMISE, on the git this suite is running against: the GLOB
+    # reading matches the tracked file, the LITERAL reading does not. Without the first
+    # the over-block could not reproduce; without the second the permit would be lucky.
+    globbed = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/*.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert globbed.returncode == 0 and "docs/notes.md" in globbed.stdout, (
+        "the premise: git must read the BARE argument as a pattern that matches the "
+        f"tracked file; got rc={globbed.returncode} out={globbed.stdout!r}")
+    literal = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", ":(literal)docs/*.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert literal.returncode == 1, (
+        "the premise: nothing is TRACKED at the literal destination, so the literal "
+        f"form must answer the documented non-match; got rc={literal.returncode}")
+    pattern = repo / "docs" / "*.md"
+    before = tracked.read_bytes()
+    rc = census.main(["--render", "docs/*.md"])
+    assert rc == 0, (
+        f"an untracked destination shaped like a pattern is writable, got {rc} — "
+        "a tracked file the caller never named must not decide it: "
+        f"{capsys.readouterr().err}")
+    assert pattern.is_file(), (
+        "the document must land at the LITERAL path, not be expanded onto a match")
+    assert tracked.read_bytes() == before, (
+        "the tracked file was written — the probe followed the pattern instead of "
+        "the destination")
+    # HALF 2 — a TRACKED destination that carries the magic itself is still refused.
+    magic = docs / "a[1].md"
+    magic.write_text("keep me too\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "docs/a[1].md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked-magic"],
+        check=True,
+    )
+    magic_before = magic.read_bytes()
+    rc = census.main(["--render", "docs/a[1].md"])
+    assert rc == 2, (
+        f"a TRACKED destination whose name carries pathspec magic must be refused, "
+        f"got {rc} — the fix must not read the magic out of the path")
+    assert magic.read_bytes() == magic_before, "the tracked file was overwritten"
+
+
+def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys):
+    r"""The guard matches the GENERATED row, not any table starting with `file:line`.
+
+    ⛔ THE BROAD PATTERN REFUSED CORRECT PROSE AND PRESCRIBED DELETING IT. A two-cell
+    prose row (`| `file:line` | what it is |`) matched `^\| `file:line` \|` exactly as
+    a six-cell generated row did, so a source that put a site address in a table's
+    first column was refused by `--render` (exit 2, "Delete the rows") and read by
+    `--check` as DRIFT (exit 1) — on a source whose 25 pins were all correct — and
+    `cypher-diff.yml` reads that 1 as "the doc's numbers are wrong" (#13098 review,
+    P2). Narrowing cannot blind the guard: the pattern still matches every row the
+    generator emits, graded here against `markdown_table`'s OWN output so a column
+    change reds instead of silently detaching the guard.
+    """
+    prose_row = "| `tortoise/sdk.py:1234` | the only place the ontology label is written |\n"
+    assert not census.CENSUS_ROW.search(prose_row), (
+        "a two-cell hand-authored row is not a census row — the appendix has SIX cells")
+    generated = census.markdown_table([
+        census.Site("tortoise/sdk.py", 1234, "f", "query", "plain", "read", "RETURN 1"),
+        # `unresolved` is the one row whose cells are not read/write — the shape and
+        # role of a statement the AST could not resolve. It must match too.
+        census.Site("tortoise/sdk.py", 1235, "g", "query", "unresolved", "unresolved",
+                    "<unresolved>"),
+    ])
+    assert census.CENSUS_ROW.search(generated), (
+        "the guard no longer matches the generator's own rows — a pasted appendix "
+        "would now pass; re-cut CENSUS_ROW with `markdown_table`")
+    assert len(census.CENSUS_ROW.findall(generated)) == 2, (
+        "every generated data row must match, not only the first")
+    # …and both consumers must now treat a prose-carrying source as CLEAN. The pins
+    # below are exactly what an empty census computes, so 0 means "no row refused and
+    # no pin drifted" — the pre-fix code answered 1 here, for the prose row.
+    src = tmp_path / "prose.src.md"
+    pins = "".join(
+        f"<!-- cypher-inventory:{key} = 0 -->\n"
+        for key in ("sites", "files", "files_scanned", "unresolved", "candidates",
+                    "non_cypher_door_calls", "ast_door_calls", "partial"))
+    src.write_text(pins + "\n" + prose_row, encoding="utf-8")
+    empty = {"sites": [], "files_with_sites": 0, "files_scanned": 0,
+             "non_cypher_door_calls": 0, "partial": 0}
+    assert census.check(src, empty) == 0, (
+        "`--check` refused a source whose only 'row' is hand-authored prose — the "
+        "guard must match the GENERATED shape")
+    assert "census row" not in capsys.readouterr().err
+    rendered = census.render(src, {"sites": []})
+    assert prose_row in rendered, (
+        "`--render` must append the appendix to a prose-carrying source unchanged")
+
+
+# --------------------------------------------------------------------------- #
+# THE NON-UTF-8 FIVE: every `surrogateescape`/`backslashreplace` arm, graded
+# --------------------------------------------------------------------------- #
+# ⛔ WHY THIS BLOCK EXISTS (#13098 round 7, P2). `tools/cypher_inventory.py` carries
+# five decode/encode tolerances — `surface_files()`'s `surrogateescape`, the
+# `--render` tracking probe's `surrogateescape`, the `--render` write's
+# `backslashreplace`, `main()`'s stdout `reconfigure`, and `--render`'s no-path
+# `const=` default — and at the previous head NONE of them was exercised by any arm:
+# each could be reverted with the whole suite green. They are all instances of this
+# PR's own invariant ("2 is could not run; 1 is the DRIFT verdict"), on the path a
+# lane reaches by accident (a non-UTF-8 filename, a strict locale), so they are graded
+# here against REAL bytes rather than assumed.
+#
+# ⛔ THE SCRATCH REPO IS LOAD-BEARING, not decoration: a stubbed `subprocess.run`
+# returning a `str` decodes nothing, so it would stay green with
+# `errors="surrogateescape"` deleted — exactly the vacuity the round-7 review named.
+# `git ls-files -z` emits RAW filename bytes (measured), which is what makes a strict
+# `text=True` decode raise, and `core.quotePath=false` makes the tracking PROBE's
+# stderr emit them too.
+
+
+def _skip_if_chmod_does_not_deny(path: Path) -> None:
+    """Skip the row when `chmod(0o000)` does not actually deny THIS runner's user.
+
+    ⛔ A ROOT RUNNER READS A `0o000` FILE, so the "cannot be read" premise those two
+    arms rest on silently becomes false and each would grade a READABLE file instead
+    (`check()` answers 0/raises, `render()` succeeds) — failing with an unrelated error
+    rather than reporting a premise it could not construct. The repo already solved
+    this the same way in `tests/test_12483_12487_spool_integrity.py`'s `_lock()`.
+    """
+    try:
+        path.read_bytes()
+    except OSError:
+        return
+    path.chmod(0o600)
+    pytest.skip(
+        "chmod(0o000) does not deny this runner's user (root): the 'cannot be read'"
+        " premise these rows rest on cannot be constructed here, so they would grade"
+        " a READABLE file")
+
+
+def _scratch_repo(tmp_path: Path, *, needs_non_utf8: bool = True) -> Path:
+    """A throwaway git work tree that can hold a non-UTF-8 filename.
+
+    `core.quotePath=false` is what puts RAW byte `0xe9` on the probe's stderr; with
+    git's default the path is quoted into ASCII and the decode arm would prove nothing.
+
+    ⛔ `needs_non_utf8=False` FOR THE ARMS THAT NEED A SCRATCH TREE BUT NOT A NON-UTF-8
+    NAME. Without it such an arm would inherit the premise skip below, and on a
+    filesystem that refuses those names it would lose its only coverage for an
+    unrelated reason (the tracked-path guard is graded by no other arm).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if needs_non_utf8:
+        # ⛔ THE PREMISE, ASSERTED WHERE THE PREMISE IS CONSTRUCTED: a name that is not
+        # valid UTF-8 is not accepted by every filesystem (macOS validates filenames as
+        # UTF-8). Without this probe the non-UTF-8 arms fail inside `write_text`/`git
+        # add` with an unrelated error instead of skipping, which is a red nobody can
+        # act on. Only EILSEQ means "this filesystem rejects the name" — anything else
+        # (ENOSPC, EROFS, EACCES) is a real failure of the fixture and must propagate.
+        probe = repo / os.fsdecode(b"caf\xe9.probe")
+        try:
+            probe.write_bytes(b"x")
+            probe.unlink()
+        except OSError as err:
+            if err.errno != errno.EILSEQ:
+                raise
+            pytest.skip("this filesystem rejects a non-UTF-8 filename (EILSEQ) — the"
+                        " premise these arms rest on cannot be constructed here")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "core.quotePath", "false"],
+                   check=True)
+    return repo
+
+
+def _stub_census(sites: list) -> dict:
+    """The `census()` shape `--render`/`--markdown` read — no tree walk, no git."""
+    return {
+        "sites": sites, "prefixes": ("tortoise",), "files_scanned": 0,
+        "files_with_sites": 0, "non_cypher_door_calls": 0, "partial": 0,
+        "unparsed_files": [], "excluded_test_modules": 0, "ast_door_calls": 0,
+    }
+
+
+def test_a_non_utf8_tracked_filename_is_enumerated_not_a_crash(tmp_path, monkeypatch):
+    """`surface_files()` tolerates a tracked filename that is not valid UTF-8.
+
+    ⛔ `git ls-files -z` EMITS RAW FILENAME BYTES, so `text=True` with strict UTF-8
+    raises `UnicodeDecodeError` — a `ValueError`, NOT an `OSError`, so it slipped past
+    both of `main()`'s guards and exited 1 (the DRIFT code) on the DEFAULT verb and on
+    `--check` (measured in a scratch repo with a tracked `caf\xe9.py`). This is the
+    enumeration path EVERY verb uses, and at the previous head no arm touched it.
+
+    Real git, real bytes: the mutant is deleting `errors="surrogateescape"` from
+    `surface_files()`'s `subprocess.run`, and it reds here as a traceback.
+    """
+    repo = _scratch_repo(tmp_path)
+    name = os.fsdecode(b"caf\xe9.py")          # a lone 0xe9 — not UTF-8 decodable
+    (repo / "tortoise").mkdir()
+    (repo / "tortoise" / name).write_text("RETURN 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", f"tortoise/{name}"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+
+    files = census.surface_files(("tortoise",))
+    assert files == [f"tortoise/{name}"], (
+        "a tracked non-UTF-8 filename must be ENUMERATED (surrogate-escaped), not "
+        f"raise a decode error from a verb that has no drift verdict; got {files}")
+    # …and the escaped form still addresses the file, which is the whole point of
+    # `surrogateescape` over dropping the name.
+    assert (repo / files[0]).read_text(encoding="utf-8") == "RETURN 1\n", (
+        "the surrogate-escaped path must still OPEN the file it came from")
+
+
+def test_the_renderer_tolerates_a_non_utf8_tracking_probe(tmp_path, monkeypatch):
+    """The `--render` tracking probe must not fail DECODING its own payload.
+
+    With `core.quotePath=false` in the user's config, `git ls-files --error-unmatch`
+    emits RAW filename bytes on stdout AND stderr, so a strict decode raised
+    `UnicodeDecodeError` — a `ValueError`, not the `OSError` the guard catches — and a
+    plain untracked destination became a traceback and exit 1 (measured with
+    `quotePath false` and a `caf\xe9.md`). The payload is unused, so decoding it must
+    never be able to change the status.
+    """
+    repo = _scratch_repo(tmp_path)
+    # The source/document globals are re-based onto the scratch repo with `ROOT`: the
+    # parser's `const=str(DOC_SRC.relative_to(ROOT))` is computed at `main()` time, so a
+    # `ROOT` that does not contain the real source reds before the probe is reached.
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    name = os.fsdecode(b"caf\xe9.md")
+
+    rc = census.main(["--render", name])
+    assert rc == 0, (
+        f"`--render` to an UNTRACKED non-UTF-8 path answered {rc} — 1 is the DRIFT "
+        "verdict this verb never reports, and the probe's payload is unused")
+    written = repo / name
+    assert written.exists(), "the render must still write its destination"
+    assert "| file:line |" in written.read_text(encoding="utf-8"), (
+        "the rendered document must carry the table header the tool appended")
+
+
+def test_the_renderer_writes_a_surrogate_escaped_path(tmp_path, monkeypatch):
+    """`--render` can WRITE a table row carrying a surrogate-escaped path.
+
+    ⛔ THE TABLE CARRIES A NON-UTF-8 TRACKED FILENAME STRAIGHT FROM THE CENSUS, which
+    strict UTF-8 cannot ENCODE: `write_text` raised `UnicodeEncodeError` — a
+    `ValueError` — leaving an EMPTY file behind. `backslashreplace` renders such a byte
+    as text, so the document is complete and the verb reports success. Reverting that
+    keyword reds here (`rc` becomes 2 and the document is not the table).
+    """
+    site = census.Site(os.fsdecode(b"tortoise/caf\xe9.py"), 12, "f", "query",
+                       "plain", "read", "RETURN 1")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([site]))
+    out = tmp_path / "out.md"
+
+    rc = census.main(["--render", str(out)])
+    assert rc == 0, (
+        f"a document carrying a surrogate-escaped path must still be WRITTEN, got {rc}")
+    text = out.read_text(encoding="utf-8")
+    assert "\\udce9" in text, (
+        "the surrogate byte must be rendered as an escape, not dropped from the row:"
+        f"\n{text[-400:]}")
+
+
+def test_a_strict_stdout_cannot_turn_a_success_into_drift(monkeypatch):
+    """A strict-locale stdout must not turn the tool's SUCCESS into exit 1 (DRIFT).
+
+    ⛔ THE LOCALE DECIDED THE EXIT STATUS. A non-UTF-8 tracked filename reaches the
+    report as a surrogate escape, and under a real UTF-8 locale (`en_US.UTF-8`, macOS's
+    default) `sys.stdout.errors` is `strict`, so the write raised `UnicodeEncodeError`
+    — uncaught, since `emit()` guards only `BrokenPipeError`/`OSError` — and the bare
+    verb exited **1**, the drift code, while the same run under `C.UTF-8` exited 0
+    (measured). `main()`'s `sys.stdout.reconfigure(errors="backslashreplace")` is the
+    fix; delete those two lines and this arm raises instead of returning 0.
+    """
+    site = census.Site(os.fsdecode(b"tortoise/caf\xe9.py"), 12, "f", "query",
+                       "plain", "read", "RETURN 1")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([site]))
+    buf = io.BytesIO()
+    stdout = io.TextIOWrapper(buf, encoding="utf-8", errors="strict", newline="\n")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    rc = census.main(["--markdown"])
+    assert rc == 0, (
+        f"a strict stdout is a LOSSY TERMINAL, not a census failure; got {rc} — 1 is "
+        "the DRIFT verdict, and a locale must never be able to produce it")
+    stdout.flush()
+    assert b"\\udce9" in buf.getvalue(), (
+        "the surrogate must reach the terminal as an escape, not abort the run: "
+        f"{buf.getvalue()[-200:]!r}")
+
+
+def test_the_default_render_target_is_the_gitignored_document(tmp_path, monkeypatch):
+    """`--render` with NO PATH writes `DOC_OUT` — the command §7 step 1 gives every lane.
+
+    ⛔ NO ARM RAN THE BARE `uv run python tools/cypher_inventory.py --render` that
+    `docs/architecture/CYPHER-INVENTORY.src.md` §7 instructs every lane to run: every
+    other `--render` invocation in this suite passes an explicit path, so the `const=`
+    default was pinned by nothing. Authored against `tmp_path` (never the repo) so the
+    REQUIRED gate cannot write into a gitignored path during a test run.
+    """
+    # The default is the GITIGNORED document beside the source — the identity the
+    # name of this arm claims, asserted on the real constants before they are stubbed.
+    assert census.DOC_OUT.relative_to(ROOT) == Path(
+        "docs/architecture/CYPHER-INVENTORY.md"), census.DOC_OUT
+    src = tmp_path / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    out = tmp_path / "CYPHER-INVENTORY.md"
+    monkeypatch.setattr(census, "ROOT", tmp_path)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", out)
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+
+    rc = census.main(["--render"])
+    assert rc == 0, f"`--render` with no path must succeed, got {rc}"
+    assert out.exists(), (
+        "`--render` with NO PATH did not write `DOC_OUT` — the default every lane is "
+        "told to run is then pinned by nothing; files here: "
+        f"{sorted(p.name for p in tmp_path.iterdir())}")
 
 
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
@@ -198,7 +2715,7 @@ NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 # ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
 # the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
-# per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
+# per arm makes that claim executable. A deleted row, a
 # DUPLICATED row and a row whose `what=` matches nothing are all reds
 # (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
 # why that test asserts multiplicity and arm-id uniqueness on top of set equality.
@@ -471,7 +2988,7 @@ def test_the_published_decomposition_names_the_measured_operands():
     --json` (`sites` / `files_with_sites`); see §7's "third place the same cut can
     leave stale".
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     result = census.census(("tortoise",))
     sites = len(result["sites"])
     non_cypher = result["non_cypher_door_calls"]
@@ -505,7 +3022,7 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
     `test_every_anchored_arm_refuses_a_duplicate`, which is where their proof lives
     (`#13458` review P2-3: this docstring used to claim "an arm", i.e. any arm).
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     result = census.census(("tortoise",))
     sites = len(result["sites"])
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
@@ -557,7 +3074,8 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
 
 @pytest.fixture(scope="module")
 def measured_census() -> dict[str, int]:
-    """The census, measured ONCE — the arm-coverage test grades seven mutants of ONE doc.
+    """The census, measured ONCE — the arm-coverage test grades one mutant per
+    `_GRADED_LOOKUPS` row against ONE doc.
 
     `census()` is a full tree walk (measured ~6 s at `#13458`), so measuring it per case
     would add ~40 s to prove what one measurement already settles.
@@ -628,9 +3146,10 @@ def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, meas
     """EACH ARM's uniqueness guard reds on its own duplicate (`#13458` review P2-3).
 
     The sibling mutant test proves arm (b) end to end, including the false PASS a first-match
-    search reproduces. That is one arm. `_grade_doc_text` makes SEVEN `_exactly_one` arms, and
-    a guard no test can redden is exactly the "quietly re-opened false PASS" the arms exist to
-    refuse — so this test drives the REAL grading path once per row of `_GRADED_LOOKUPS`:
+    search reproduces. That is one arm. `_grade_doc_text` makes one `_exactly_one` arm per
+    `_GRADED_LOOKUPS` row, and a guard no test can redden is exactly the "quietly re-opened
+    false PASS" the arms exist to refuse — so this test drives the REAL grading path once per
+    row of `_GRADED_LOOKUPS`:
 
       1. locate the line this arm binds, INSIDE the section it is scoped to;
       2. duplicate that line ABOVE itself — a CORRECT restatement, which is the decoy shape
@@ -642,8 +3161,7 @@ def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, meas
     ⛔ Step 4 is what makes this non-vacuous per arm: revert JUST that arm to `re.search` and
     only that arm's case reds, so the failure names the arm it belongs to.
     """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
+    doc_text = _source_text()
     section = re.search(bounds, doc_text, re.MULTILINE | re.DOTALL)
     assert section, f"arm ({arm}): its section bounds moved; re-cut this pin with them"
     section_text = section.group(0)
@@ -720,8 +3238,8 @@ def test_the_census_pin_can_report_drift(tmp_path):
     way the pin is supposed to fail.
     """
     result = census.census(("tortoise",))
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
-    assert census.check(ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md", result) == 0
+    doc_text = _source_text()
+    assert census.check(DOC_SRC, result) == 0
 
     def write(text: str):
         path = tmp_path / "doc.md"
@@ -1528,10 +4046,14 @@ def test_bootstrap_tolerates_a_partial_apply_that_does_build_the_record(monkeypa
 
 @requires_doc_pin
 def test_the_files_scanned_count_is_pinned_too(tmp_path):
-    """§0 publishes "295 files scanned", which `files` (the files WITH a site) is not.
+    """§0 publishes the scanned-file count as its own row, which `files` (the files
+    WITH a site) is not — a module can be scanned and carry no statement.
 
     `check()` compared only the keys it computed, so the doc's scanned count could
     drift by any amount while `--check` stayed green (`#13098` review P3).
+
+    ⛔ Neither figure is quoted here: this docstring said "295 files scanned" long
+    after §0 had stopped saying it, which is the rot a number beside a claim buys.
 
     ⛔ `@requires_doc_pin` (#2148/B1), and the NON-VACUITY assert is what makes
     that safe. This arm's mutation is a `str.replace` of the pin AT THE MEASURED
@@ -1544,7 +4066,7 @@ def test_the_files_scanned_count_is_pinned_too(tmp_path):
     document before it is graded.
     """
     result = census.census(("tortoise",))
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    doc_text = _source_text()
     assert "<!-- cypher-inventory:files_scanned = " in doc_text
     path = tmp_path / "doc.md"
     path.write_text(doc_text.replace(
@@ -1759,8 +4281,9 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
 
     The doc-vs-tree arms above skip unless `TORTOISE_CYPHER_DOC_PIN=1`, and the ONE
     place that sets it is a step of `cypher-diff.yml` — a workflow this module does
-    not control. Delete, rename or detach that `env:` entry and every gated arm
-    (7 single + the 7 parametrized duplicate-arm cases) goes back to SKIPPING in
+    not control. Delete, rename or detach that `env:` entry and every gated arm — each
+    single one plus each parametrized duplicate-arm case, counted from
+    `_GRADED_LOOKUPS` rather than typed here — goes back to SKIPPING in
     every job in the repo, with no red anywhere to notice: a pin that appears to
     protect the census and enforces nothing, which is the INERT-ENFORCER class the
     decoupling was allowed to create only because this pin closes it.
@@ -1795,21 +4318,47 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "the step that runs this file satisfies neither half of the session URI gate "
         f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
         "pytest errors in session setup and no census arm runs at all")
+    # ⛔ AND THE TRIGGER, not only the step. Everything above asserts that the step
+    # which RUNS this file is intact — but that step is reached only when the
+    # workflow's `paths:` filter fires, and this split is what rewrote that filter
+    # (`CYPHER-INVENTORY.md` -> `.src.md`). Deleting the source's entry left the whole
+    # suite GREEN (measured: `97 passed / 15 skipped` with the line removed), and the
+    # failure is silent in the other direction too: a source-only pin edit would run
+    # NO job at all, so every gated arm above would simply never be asked and
+    # `TORTOISE_CYPHER_DOC_PIN` would have no producer for that diff — the same
+    # inert-enforcer shape one level out from the `env:` entry this pin already grades.
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text())
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    paths = (triggers.get("pull_request") or {}).get("paths") or []
+    for required in (
+        "tortoise/**",
+        "tools/cypher_inventory.py",
+        "tools/cypher_diff_harness.py",
+        "docs/architecture/CYPHER-INVENTORY.src.md",
+        "tests/test_13098_cypher_inventory.py",
+    ):
+        assert required in paths, (
+            f"the `cypher-diff` trigger does not fire on {required!r} (its paths are "
+            f"{paths!r}) — that diff would run NO census job, so the gated arms this "
+            "pin protects are never asked, which is identical to their being absent")
     # …and the arms it produces for are still here. A structural count, not a
-    # reading of the file's content: the decorator is applied at 7 arms + 1
-    # parametrized one (7 cases), and an arm leaving this module is a diff a
-    # reviewer sees — what is invisible is the ENV disappearing, which is above.
+    # reading of the file's content: the decorator is applied at 8 arms + 1
+    # parametrized one (one case per `_GRADED_LOOKUPS` row) — 8 since #13098 split the
+    # table-shape arm, whose rendered half now renders a document — and an arm leaving
+    # this module is a diff a reviewer sees; what is invisible is the ENV disappearing,
+    # which is above.
     #
     # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
-    # is 15 at this head — the 8 decorator lines PLUS 7 prose/format mentions (the
-    # module docstring, the block comment above the imports, two arm docstrings, one
-    # f-string and the two literals of this very assertion). Measured, not assumed:
-    # under the previous `>= 8` form, deleting SEVEN of the eight gated arms left the
-    # count at `1 decorator + 7 prose = 8` and this row stayed GREEN, so the arm it
-    # claims to protect ("the arms this pin exists for are gone") did not fire until
-    # seven eighths of them were gone. The AST cannot see prose; `== 8` rather than
-    # `>= 8` means a NINTH gated arm is a red a reviewer reads instead of slack that
-    # a silently-deleted arm can absorb.
+    # is 18 at this head — 9 decorator lines PLUS 9 prose/format mentions: FIVE in
+    # four docstrings (one of them names it twice), TWO in block comments (this one
+    # included), ONE in an f-string and ONE in an assertion literal. ⛔ Re-measure
+    # rather than trusting these numbers: `#13098`'s own review rounds added mentions
+    # faster than the sentence describing them was re-read. Measured, not assumed: under the previous `>= 8` form, deleting SEVEN
+    # of the eight gated arms left the count at `1 decorator + 7 prose = 8` and this
+    # row stayed GREEN, so the arm it claims to protect ("the arms this pin exists for
+    # are gone") did not fire until seven eighths of them were gone. The AST cannot
+    # see prose; `== 9` rather than `>= 9` means a TENTH gated arm is a red a reviewer
+    # reads instead of slack that a silently-deleted arm can absorb.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     decorated = [
         node.name
@@ -1821,10 +4370,288 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
             for dec in node.decorator_list
         )
     ]
-    assert len(decorated) == 8, (
-        "expected EXACTLY 8 `@requires_doc_pin` arms (7 single + 1 parametrized); got "
+    assert len(decorated) == 9, (
+        "expected EXACTLY 9 `@requires_doc_pin` arms (8 single + 1 parametrized); got "
         f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
         "delete this pin with them, or restore them")
+    # AND THE UNGATED HALF. The count above sees only DECORATED arms; the arms that
+    # carry #13098's own split invariants are deliberately UNGATED (they cost no tree
+    # walk and must ride the required gate), so deleting one would leave no red
+    # anywhere — the invisible-deletion class this pin exists for, one set over.
+    # Pinned by NAME, because each name states the invariant it protects: the document
+    # is untracked, the appendix cannot be pasted back into the source, the render
+    # target cannot be the source or any other tracked path, a rendered document
+    # cannot contradict its own pins, a run that cannot read/probe/write answers 2
+    # rather than the DRIFT code 1, and the row guard matches the GENERATOR's shape
+    # rather than any table whose first cell is a `file:line`.
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    split_arms = {
+        "test_the_rendered_document_is_not_tracked",
+        "test_the_renderer_refuses_a_source_that_carries_the_appendix",
+        "test_the_renderer_refuses_to_write_over_the_source",
+        "test_the_renderer_refuses_to_write_over_a_tracked_path",
+        # ⛔ THE SIBLING THE TRACKED-PATH PROBE IS BLIND TO (#14625 review, P2):
+        # `.git/config` is untracked by construction, so the probe above passed it
+        # and `--render` exited 0 having overwritten git metadata it cannot restore.
+        "test_the_renderer_refuses_to_write_over_git_metadata",
+        # ⛔ AND THE HALF THAT PROBE CANNOT SEE (#14625 review, P2): in a LINKED WORKTREE
+        # `.git` is a regular FILE outside both dirs `rev-parse` reports, so the
+        # probe-only guard kept the write — measured at `037d0c68`, `--render .git`
+        # exited 0, replaced the link, and every later `git` call in that worktree
+        # answered 128. Deleting the `.git`-component half reds only this arm; deleting
+        # the probe half reds only the `--separate-git-dir` sibling BELOW (the
+        # `.git/config` sibling above is caught by the component half alone).
+        "test_the_renderer_refuses_a_linked_worktrees_dot_git_FILE",
+        # ⛔ AND THE PROBE HALF'S OWN ARM (#14625 review, P2): a `--separate-git-dir`
+        # checkout's metadata carries no `.git` component and sits OUTSIDE the work tree,
+        # so the component half cannot see it — with the probe removed, this is the only
+        # row that reds, which is what keeps that half from being inert.
+        "test_the_renderer_refuses_a_separate_git_dir_OUTSIDE_the_work_tree",
+        # ⛔ AND THE TWO ARMS THAT KEEP THE PROBE FROM BEING PROBE-ONLY (#14625 review,
+        # P1): an UNANSWERABLE probe must refuse (it used to no-op, and a
+        # `--separate-git-dir` config was overwritten), and an honest "not a
+        # repository" must still permit a plain directory — otherwise the fix trades a
+        # fail-open for a wall on the common `--render /tmp/x.md` case. Deleting the
+        # else-branch reds the first; refusing every non-zero probe reds the second.
+        "test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless",
+        "test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard",
+        # ⛔ AND THE THREE ARMS THAT CLOSE THE ROOT CAUSE BOTH GUARDS ABOVE SHARE
+        # (#14625 review, P1, round 5): every probe ran in the INHERITED git
+        # environment and read a non-positive answer as permission. An exported
+        # `GIT_DIR` retargeted the metadata probe (intact config overwritten, rc 0) and
+        # `GIT_INDEX_FILE` retargeted the tracked-path probe (tracked doc overwritten,
+        # rc 0); a DAMAGED metadata directory needed no variable at all. Deleting the
+        # `env=_git_env()` scrub reds the first two; deleting the structural term in
+        # `plainly_outside` reds the third; and the fourth pins the scrub list to the
+        # one `tools/lane_stash.py` already carries, so the two cannot drift apart.
+        "test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR",
+        "test_the_tracked_path_guard_is_not_defeated_by_an_inherited_GIT_INDEX_FILE",
+        "test_a_damaged_git_directory_is_refused_without_any_help_from_git",
+        "test_the_retargeting_env_list_is_the_one_lane_stash_already_scrubs",
+        "test_the_census_enumerates_ROOTS_repository_not_the_one_GIT_DIR_names",
+        # ⛔ AND THE TWO A ROUND-5 REVIEWER FALSIFIED, both measured here before they
+        # were fixed: the structural term's first version REQUIRED ``objects/`` (a bare
+        # repo with objects/ removed was still writable at rc 0, 66 -> 145,745 bytes),
+        # and the tracked-path probe answered only for destinations inside `ROOT` (a
+        # PEER checkout's tracked doc was overwritten at rc 0, 27 -> 145,745 bytes).
+        # Deleting `_looks_like_git_metadata`'s second marker reds the first; reverting
+        # `_tracked_destination_refusal` to the `rel is not None` gate reds the second.
+        "test_a_git_directory_that_lost_objects_is_STILL_refused",
+        "test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository",
+        # ⛔ AND THE LAST PATH-BLIND RESIDUAL (#14625 review, P3): a HARDLINK is one
+        # inode under two names, so it defeats every path-based guard at once — no
+        # `.git` component, untracked, in no repository — and the write lands through
+        # the link (measured at `059a0382`: rc 0, a 92-byte config became 391,249
+        # bytes). Deleting the `st_nlink > 1` branch reds the first arm; phrasing the
+        # guard as a fourth metadata predicate instead reds the second, which is
+        # deliberately a PLAIN file so that only the link count can refuse it.
+        "test_a_render_through_a_HARDLINK_to_git_metadata_is_refused",
+        "test_a_second_name_for_a_PLAIN_destination_is_refused_too",
+        # ⛔ AND THE COMPONENT TEST'S OWN CASE-INSENSITIVITY, which a round-3 reviewer
+        # found ungraded: `part.lower() == ".git"` is what stops `.GIT/config` on a
+        # case-insensitive filesystem, and reverting it to `part` reds nothing else.
+        "test_an_UPPERCASE_dot_GIT_component_is_refused_too",
+        # ⛔ AND THE GRADER'S OWN FALSE PASS (#14625 review, round 3, P3): a `sites` pin
+        # declared twice printed "25 pinned counts match" at rc 0 because the dict
+        # comprehension kept the last value. Deleting the duplicate check reds this arm.
+        "test_check_REFUSES_a_duplicated_pin_instead_of_letting_the_last_win",
+        # ⛔ AND THE BOUND THE REFUSAL COMMENT ALREADY CLAIMED (#14625 review, P3):
+        # "a timeout — REFUSES" had no `timeout=` behind it, so a hung git hung
+        # `--render` (measured at `9e477cdb`: external `timeout 40` -> 124, no refusal,
+        # no write). Deleting the `timeout=` kwarg reds this arm; deleting the
+        # `TimeoutExpired` arm makes it error rather than refuse.
+        "test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED",
+        # ⛔ AND THE BOUNDS THAT ARM ALONE DOES NOT COVER (#14625 review, P3): bounding
+        # the metadata probe left the TRACKED-path probe and the census's own
+        # `git ls-files` unbounded, so a hung git still hung `--render` (measured:
+        # external `timeout 90` -> 124) and an uncaught `TimeoutExpired` would exit 1,
+        # the DRIFT code. ⛔ THIS ARM GRADES THE REFUSAL PATH ONLY — and only ONE
+        # of the two census handlers: dropping `TimeoutExpired` from the ENUMERATION
+        # guard (`main()`, the first `surface_files` call) reds it; the `report()`
+        # guard is reached only after enumeration succeeds, and its fake hangs the
+        # FIRST call, so dropping the term there leaves this arm GREEN (measured in
+        # round 9 — no fake in this file raises `TimeoutExpired` from `rg_totals`).
+        # It does NOT grade that a
+        # `timeout=` was PASSED: its fake raises unconditionally, so dropping the kwarg
+        # left it GREEN (measured at this head, twice) — which is why the arm below
+        # exists, and why the sentence that used to stand here ("Deleting `timeout=`
+        # from `surface_files` or from the tracked probe reds this arm") was FALSE and
+        # carried a later review round to a wrong CLEAN verdict.
+        "test_a_git_that_never_answers_makes_could_not_run_not_drift",
+        # ⛔ AND THE CAUSE THE ARM ABOVE CANNOT SEE (#14625 review, P3, the finding two
+        # rounds left OPEN): every `subprocess.run` in the census must pass the module's
+        # own bound, read from the module's AST rather than from a consequence, because
+        # a fake that always raises is green whether or not a `timeout=` exists.
+        "test_EVERY_git_probe_carries_the_modules_own_timeout_bound",
+        "test_the_renderer_refuses_the_all_surface_combination",
+        # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
+        # the write, and a directory destination refused with a false cause. Both are
+        # message/precedence defects, so nothing else in the tree asserts them.
+        "test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish",
+        "test_a_directory_destination_is_refused_AS_a_directory",
+        "test_the_renderer_reports_a_probe_failure_as_could_not_run",
+        # ⛔ AND THE OTHER HALF OF THAT PROBE (#14625 review, P2, the finding this round
+        # was dispatched for): an absent `git` was graded, a `git` that RUNS and CANNOT
+        # ANSWER was not — the guard read every non-zero exit as "untracked", so a
+        # corrupt/unreadable peer index turned a refusal into a write at rc 0, in the one
+        # guard whose damage git CAN restore while its metadata sibling already failed
+        # closed. The first arm is the mutant's target (`return None` for any non-zero);
+        # the second pins the STRUCTURAL term that keeps a git-disowned checkout (HEAD
+        # removed, index intact, stderr says "not a git repository") from being read as a
+        # plain directory; the third is the counterweight, because a fix that refuses
+        # every non-zero probe passes the first two and walls off `--render /tmp/x.md`.
+        "test_a_tracking_probe_that_cannot_answer_is_REFUSED_not_read_as_untracked",
+        "test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe",
+        "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
+        "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
+        "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
+        # ⛔ AND THE DESTINATION IS A PATH, NOT A PATHSPEC (#14625 review, round 8, P3):
+        # handing it to `git ls-files`/`git ls-tree` bare made an UNTRACKED destination
+        # shaped like a pattern refuse whenever a tracked file matched it (measured:
+        # `--render 'docs/*.md'` answered 2 over a clean write path), and the question
+        # both probes mean to ask is "is THIS path tracked". Nothing else in the tree
+        # asserts the literal form, so deleting `_literal` from either argv reds this
+        # arm alone.
+        "test_a_PATTERN_shaped_destination_is_asked_about_LITERALLY",
+        "test_the_tracking_probe_still_PERMITS_both_honest_answers",
+        "test_the_renderer_reports_a_write_failure_as_could_not_run",
+        # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
+        # and the render-WRITE arm while its own comment claimed "a run that cannot
+        # read/probe/write answers 2", so deleting any of these three left BOTH
+        # structural pins GREEN — measured by removing each `def` block and re-running
+        # the pin's own AST logic. The stdout arm is the only thing in the tree that
+        # asserts `emit`'s 2-not-1 contract, so it is named here for the same reason.
+        "test_the_renderer_reports_an_unreadable_source_as_could_not_run",
+        "test_check_reports_an_unreadable_document_as_could_not_run",
+        "test_a_stdout_that_cannot_be_written_is_could_not_run_never_drift",
+        # ⛔ AND THE DETACH THAT MAKES THAT 2 SURVIVE TEARDOWN (#13098 round 11, P2):
+        # every double the arm above uses has no `fileno()`, so `_detach_stdout()` was
+        # a suppressed no-op under test and BOTH call sites were deletable with the
+        # suite green — measured, `>/dev/full` then exits 120 instead of 2.
+        "test_a_failed_stdout_write_is_DETACHED_so_the_shutdown_flush_cannot_return_120",
+        "test_a_hand_authored_prose_row_is_not_read_as_a_census_row",
+        # ⛔ THE NON-UTF-8 FIVE (#13098 round 7, P2). This set is the pin's answer to
+        # "an arm left the module and nothing noticed"; the five behaviours below were
+        # live with NO arm at all, so this set could not name them because they did not
+        # exist. Each is the only executable assertion for one decode/encode tolerance
+        # and for `--render`'s no-path default — the command §7 tells every lane to run.
+        "test_a_non_utf8_tracked_filename_is_enumerated_not_a_crash",
+        "test_the_renderer_tolerates_a_non_utf8_tracking_probe",
+        "test_the_renderer_writes_a_surrogate_escaped_path",
+        "test_a_strict_stdout_cannot_turn_a_success_into_drift",
+        "test_the_default_render_target_is_the_gitignored_document",
+        # ⛔ TWO ARMS THAT WERE THE SOLE COVERAGE OF THEIR GUARD AND WERE NOT NAMED
+        # (#13098 round 4, P2). Each is the ONLY arm that reaches the branch it grades:
+        # `main()`'s enumeration wrap, `report()`'s wrap, and the render target's
+        # `Path.resolve()` guard (`RuntimeError` on ELOOP, not an `OSError`).
+        # Measured by deleting each `def` block: BOTH structural pins stayed GREEN.
+        # These are undecorated, so the `len(decorated) == 9` pin above cannot see them
+        # — this set is their only pin, which is why its comment promises names.
+        "test_an_enumeration_failure_is_could_not_run_never_drift",
+        "test_an_unresolvable_render_target_is_could_not_run",
+        # ⛔ AND THE MESSAGE-ONLY PAIR: with either `exists()` guard deleted the twin
+        # `OSError` guard preserves the exit code, so nothing reds unless an arm reads
+        # the stderr text that names the missing path.
+        "test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY",
+        # ⛔ AND `--json`'s TWO PROPERTIES: one enumeration of `rg_totals()` (the eager
+        # second walk this change moved inside the guard) and a payload written through
+        # `emit()`. Reverting either left the suite green (#13098 round 5, P2).
+        "test_the_json_verb_enumerates_rg_totals_once_and_emits_through_the_writer",
+        # ⛔ THE UNGATED HALF OF THE TABLE-SHAPE PAIR (#14625 review, P2). Its gated
+        # twin below is counted by `len(decorated) == 9`; this one carries the arm the
+        # REQUIRED `docs` check actually grades (`CYPHER-INVENTORY.src.md` is the
+        # tracked file) and was the ONLY one of this change's 25 new arms neither pin
+        # named — measured: deleting its `def` block left the whole file green at
+        # `99 passed, 15 skipped`.
+        "test_the_source_tables_are_not_broken_across_physical_lines",
+        # ⛔ AND THE READER-FACING HALF OF THE SAME SPLIT (#14625 review, P2): the
+        # tracked file ended on Appendix A's heading with the explanation inside an
+        # HTML comment, which no forge renders, so the served file promised rows it
+        # does not carry. Deleting this arm leaves that state unpinned and silent.
+        "test_the_source_does_not_end_on_an_appendix_heading_with_nothing_visible",
+        # ⛔ AND THE CLASS-LEVEL PIN ON THE ONE-VERB-PER-COMMAND REFUSAL (#14625
+        # review, P2, twice): the guard was rewritten from one pair to a four-verb
+        # enumeration, and an enumeration is only a class while nothing is added to
+        # it — so the parser's flag SET is pinned, each verb's argparse dest is
+        # pinned to the name `main()` derives, and every pair is swept. Without this
+        # arm a fifth output verb would silently drop its neighbour with every
+        # hand-written pair list in this file still green.
+        "test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list",
+    }
+    # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
+    # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
+    # PRUNED from the literal, which leaves the arm that name protected silently
+    # deletable — the exact class this pin exists for (measured: removing one member
+    # left the file green at `100 passed, 15 skipped`). The other direction, a new
+    # ungated invariant arm nobody names, is the same hole from the other side, and
+    # `len(decorated) == 9` cannot see it either because these arms are ungated on
+    # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
+    # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
+    assert len(split_arms) == 52, (
+        f"expected EXACTLY 52 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+        "with nothing red) or a new ungated invariant arm was added without being "
+        f"named here: {sorted(split_arms)}")
+    missing = sorted(split_arms - defined)
+    assert not missing, (
+        f"the #13098 split's own invariant arms are GONE: {missing} — they are "
+        "ungated on purpose (so they ride the required gate) and NOTHING else "
+        "asserts what they carry; restore them")
+    # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
+    # `len(split_arms) == 52` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # all, because such an arm adds nothing to either set. MEASURED, which is why this
+    # is a pin and not a comment: a `def test_…(): assert True` appended to this file
+    # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
+    # the size pin closes "the same hole from the other side" — was false as written.
+    # The module's TEST population is therefore pinned EXACTLY, the same shape and for
+    # the same reason as `len(decorated) == 9`: an arm that arrives must either be named
+    # in `split_arms` (when it carries a #13098 split invariant) or bump this count
+    # deliberately — a red a reviewer reads rather than slack that a silently-added arm
+    # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
+    # 99 -> 103, in two landings that each ADDED arms rather than pruned a name: the
+    # round-6 timeout bound took it to 101 (with `split_arms` 40 -> 42), and this
+    # hardlink pair takes it to 103 (`test_a_render_through_a_HARDLINK_to_git_metadata_is_refused`
+    # and `test_a_second_name_for_a_PLAIN_destination_is_refused_too`, also named in
+    # `split_arms`, which moved 42 -> 44 with them).
+    # ⛔ AND THAT SENTENCE IS THE AUTHORITY, NOT THE COMMIT MESSAGE OF THE LANDING THAT
+    # MOVED THE SECOND PAIR. `865776d6ce`'s message states "`split_arms` (40 -> 42)" and
+    # "(99 -> 101)", which are its PARENT's (`4ee385ec10`'s) deltas: `git show
+    # 865776d6ce^:tests/test_13098_cypher_inventory.py` reads `== 42` and `== 101`, and
+    # `git show 865776d6ce -- tests/test_13098_cypher_inventory.py` moves them to `== 44`
+    # and `== 103`. Its stated suite count (118 passed / 15 skipped) is likewise the
+    # earlier landing's; at that commit's tree the suite reads **120 passed / 15
+    # skipped**, and those TWO ARMS are the whole 118 -> 120 delta — nothing else in
+    # this module's arm population differs between the two trees, and the only later
+    # non-comment change to it (`8a2a7d968a`'s helper body) adds no arm. A lane
+    # applying the message's delta to a tree at 44/103 lands on a self-inconsistent
+    # literal.
+    test_functions = {n for n in defined if n.startswith("test_")}
+    # ⛔ AND THE ROUND THAT CLOSED THE TRACKED PROBE'S COULD-NOT-ANSWER HOLE TAKES IT
+    # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
+    # arm that keeps a git-disowned checkout out of the permit, and the over-block
+    # counterweight. All three carry a #13098 split invariant and are named above.
+    # ⛔ AND THE ROUND-8 COSMETIC TAKES IT 110 -> 111 (`split_arms` 51 -> 52): both
+    # probes handed the DESTINATION to git as a bare argument, which git reads as a
+    # PATHSPEC — so an untracked destination shaped like a pattern was refused whenever
+    # a TRACKED file matched it (`--render 'docs/*.md'`, measured). `_literal` tells git
+    # not to interpret it; that arm is the only thing that reds if either argv loses it.
+    # ⛔ AND THE ROUND-8 P0's COMPOSITE GUARD TAKES IT 109 -> 110 (`split_arms`
+    # 50 -> 51): following the DESTINATION alone inverted two rows — a nested `git
+    # init` under ROOT answers "untracked" for a path ROOT tracks, and `--render`
+    # overwrote it at rc 0. The guard now asks BOTH repositories; that arm is the only
+    # thing that reds if the ROOT half is dropped again.
+    # ⛔ AND THE ARM THAT GRADES THE `timeout=` ITSELF TAKES IT 108 -> 109
+    # (`split_arms` 49 -> 50) — scoped to what was measured: with the kwarg deleted,
+    # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
+    # GREEN from the raise-only arms alone. The metadata probe's arm records
+    # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
+    assert len(test_functions) == 111, (
+        f"expected EXACTLY 111 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+        " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
+        "either way bump this count, so the addition is a decision rather than slack")
 
 
 def _psql_install_run() -> str:
@@ -2082,7 +4909,7 @@ def test_no_error_line_command_substitutes_a_backticked_word():
     )
 
 
-def test_the_docs_tables_are_not_broken_across_physical_lines():
+def _table_shape_offenders(text: str) -> list[str]:
     """A table row is ONE physical line — a hard wrap inside one reds the `docs` gate.
 
     ⛔ THIS IS NOT HYPOTHETICAL (`#14038`). A lane re-cut one prose cell of §1's
@@ -2111,14 +4938,22 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
 
     Measured non-vacuous: on the pre-fix blob (`a642d54b8678`) this fails at line
     69 with `no-trailing` AND `colcount` (4 pipes where the separator declares 5).
-    """
-    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
-    lines = doc.split("\n")
 
-    def pipes(text: str) -> int:
+    ⛔ WHY ONE CHECKER AND TWO ARMS (#13098 review). After the split, the PROSE
+    tables live in the TRACKED source (what `docs` lints) and the appendix lives in
+    a gitignored render that `docs` never sees. One arm reading `_document_text()`
+    therefore paid a FULL TREE WALK (`_document_text()` calls `census()`) inside the
+    REQUIRED `python-ci-gate` to grade rows no required check can red, and it added
+    ~22 s to every PR — the cost this file's own `@requires_doc_pin` block exists to
+    keep out of the merge gate. So: the source half is UNGATED (cheap, and it is the
+    half `docs` reads) and the rendered half is `@requires_doc_pin`.
+    """
+    lines = text.split("\n")
+
+    def pipes(line: str) -> int:
         # `\|` renders a literal pipe and does not delimit a cell — the doc uses
         # that spelling inside an inline `git ls-tree … | grep` command.
-        return re.sub(r"\\\|", "", text).count("|")
+        return re.sub(r"\\\|", "", line).count("|")
 
     offenders: list[str] = []
     i = 0
@@ -2147,8 +4982,86 @@ def test_the_docs_tables_are_not_broken_across_physical_lines():
                     )
         i = j
 
+    return offenders
+
+
+def test_the_source_tables_are_not_broken_across_physical_lines():
+    """The PROSE tables — the half a REQUIRED check actually reads.
+
+    Ungated on purpose: this is the text `docs` lints (`CYPHER-INVENTORY.src.md` is
+    the tracked file), it costs one `read_text`, and a wrapped cell here is exactly
+    the `#14038` break that redded a required context.
+    """
+    offenders = _table_shape_offenders(_source_text())
     assert not offenders, (
-        "a markdown table row in docs/architecture/CYPHER-INVENTORY.md is broken across "
-        "physical lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is "
-        "one line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
+        "a markdown table row in the tracked SOURCE is broken across physical "
+        "lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is one "
+        "line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
+    )
+
+
+@requires_doc_pin
+def test_the_rendered_tables_are_not_broken_across_physical_lines():
+    """The whole RENDERED document — prose plus Appendix A's generated rows.
+
+    ⛔ PINNED, not ungated: `_document_text()` runs a full census, and the appendix
+    it grades lives in a gitignored file that no required check ever sees — so it
+    belongs where the census already runs (`cypher-diff`, which sets
+    `TORTOISE_CYPHER_DOC_PIN=1`), not in the merge gate. An offender inside Appendix
+    A is a `markdown_table`/`_digest` bug rather than a row to re-join, because
+    every generated row is one line by construction.
+    """
+    offenders = _table_shape_offenders(_document_text())
+    assert not offenders, (
+        "a markdown table row in the RENDERED document is broken across physical "
+        "lines (MD055/MD056). ⛔ Inside Appendix A this is a `markdown_table` bug, "
+        "never a row to re-join — fix the generator:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_rendered_document_is_not_tracked():
+    """The split's OTHER half: `CYPHER-INVENTORY.md` must stay OUT of the index.
+
+    ⛔ WITHOUT THIS THE CONFLICT RETURNS BY THE RESOLUTION PATH, NOT THE EDIT PATH.
+    Every open PR that still holds a copy meets this change as a `CONFLICT
+    (modify/delete)`, and the standard "keep our version" resolution RE-STAGES the
+    file — `.gitignore` governs UNTRACKED paths, so it does not refuse a path that
+    already has an index stage. Nothing else would notice: `--check` reads the
+    source, the appendix arms render into `tmp_path`, and `docs` lints a re-added
+    copy and finds nothing wrong with it. The path is derived from `census.DOC_OUT`
+    so the assertion cannot drift from the constant `--render` writes.
+    """
+    rel = census.DOC_OUT.relative_to(ROOT).as_posix()
+    # ⛔ `env=census._git_env()` ON BOTH PROBES (#14625 review round 2, P3). Without it the
+    # arm answered about whichever index `GIT_INDEX_FILE` NAMED rather than the one in this
+    # worktree — the exact retargeting class `tools/cypher_inventory.py`'s
+    # `_GIT_RETARGETING_ENV` scrubs for every probe it ships, and which this file otherwise
+    # honours at ten call sites. Measured false pass: with the rendered doc `git add -f`-ed,
+    # `GIT_INDEX_FILE`
+    # pointing at a clean pre-add index made this arm PASS over a tracked document, which is
+    # the one state it exists to red. git sets that variable for hooks, and the fleet's own
+    # scratch-index tools set it too, so it is not a hypothetical.
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", rel],
+        cwd=ROOT, capture_output=True, text=True, env=census._git_env(),
+    )
+    # ⛔ `== 1`, NOT `!= 0` (#14625 review, P2). `--error-unmatch`'s documented NON-MATCH
+    # is exit 1; a non-zero exit ALSO covers git saying it could not read the index
+    # (128), so `!= 0` was half-blind on the one path whose whole job is to notice a
+    # re-staged copy — it passed just as happily for "this index is unreadable" as for
+    # "this path is not in it". The stderr assertion names the answer as well, so a git
+    # that fails for any other reason reds this arm instead of satisfying it.
+    assert tracked.returncode == 1 and "did not match any file(s) known to git" in tracked.stderr, (
+        f"{rel} is TRACKED again — or this probe could not answer (rc={tracked.returncode}); "
+        "it is `--render`'s output, not a source (#13098).\n"
+        f"    git rm --cached {rel}\n"
+        "A modify/delete conflict resolved by keeping the incoming copy re-stages "
+        "it, and no other arm in this suite reads the tracked path."
+    )
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", rel], cwd=ROOT, env=census._git_env(),
+    )
+    assert ignored.returncode == 0, (
+        f"{rel} is not gitignored — `--render`'s output must never be stageable; "
+        "re-add the path to `.gitignore`'s #13098 block"
     )
