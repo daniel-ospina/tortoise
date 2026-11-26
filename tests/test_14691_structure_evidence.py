@@ -2169,6 +2169,30 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
     `documents[1].ack_seconds` (14.58) → 99.9 — the ack column's own source.
 
     Each figure is read out of the artifact, never retyped.
+
+    ⛔ #14691 review (10th cycle — the 9th cycle's P2, swept as a CLASS): the 9th
+    cycle fixed two reads with no LEFT boundary. Four MORE reads in this arm had
+    the same shape, and each was measured here as a suite-level fail-open — the
+    mutant applied ALONE at `5d7eb15bd0ec`, whole file, restored byte-for-byte:
+
+    * §2 `5 agentSession sources` → `15` — **63 passed**. The read was
+      document-wide, so §8's own record of this mutant satisfied it as well.
+    * §3 `50 `quote` spans` → `150` — **63 passed** (same document-wide shape).
+    * §3/A4 `8 of 46 are not` → `18 of 46 are not` — **63 passed**; 18 is a
+      supported value, so the union net was silent.
+    * §3/A1 `11 Subjects is exactly …` → `111 Subjects is exactly …` — **63
+      passed**; 111 is supported.
+
+    Each is now anchored: the sources row is LINE-SCOPED to the overview line
+    that owns it (`^"sources":`) and the quote-span claim to the line that owns
+    it, and both are left-bound so a leading digit cannot satisfy them; the
+    sentence-scope and population figures require that no digit, comma or point
+    precedes them. The remaining bare-number reads in this arm are NOT
+    fail-opens of this class and stay as they are, measured: `1,074 tokens`,
+    `4,295 chars`, `809,812 bytes` and `32 element walks` each red the union net
+    when prefixed (the prefixed value is in no artifact), and the other reads
+    already begin with a literal (`**`, `(`, `·`, `|`) that a leading digit
+    cannot join.
     """
     score = _score()
     receipt = _receipt()
@@ -2188,7 +2212,12 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
                       for p in after["pointkinds"])
     assert f'"pointkinds": [{kinds}]' in report, ("§2 pointkinds", kinds)
     sources = len(after["sources"])
-    assert f"{sources} agentSession sources" in report, "§2 sources"
+    sources_row = _report_line(r'^"sources":')
+    assert sources_row, 'REPORT.md §2 has no "sources" row'
+    assert re.search(rf'^"sources":\s+{sources} agentSession sources\b',
+                     sources_row), (
+        f'§2\'s sources row is not the receipt\'s {sources} sources: '
+        f'{sources_row!r}')
 
     # ── §2: the per-document cost/ack rows, and the totals row
     docs = {d["doc_id"]: d for d in receipt["documents"]}
@@ -2218,8 +2247,16 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
         strict = len(strict)
     assert f"**{len(a4['relations_not_co_stated'])} of {score['edge_count']} " \
            "relations are" in report, "§3/A4 un-stated relations"
-    assert f"{strict} of {score['edge_count']} are not" in report, "§3/A4 strict"
-    assert f"{claim['quotes_total']} `quote` spans" in report, "§3 quote spans"
+    assert re.search(rf"(?<![\d.,]){strict} of {score['edge_count']} are not",
+                     report), (
+        f"§3/A4's sentence-scope count is not the artifact's {strict} of "
+        f"{score['edge_count']}")
+    quote_line = _report_line(
+        r"`quote` spans the product recorded as the source of a claim:")
+    assert quote_line, "REPORT.md has no §3 quote-span claim line"
+    assert re.match(rf"{claim['quotes_total']} `quote` spans ", quote_line), (
+        f"§3's quote-span claim is not the claim layer's "
+        f"{claim['quotes_total']}: {quote_line!r}")
     # ⛔ LINE-SCOPED, and the reason matters: `Examples of the invented 12` occurs
     # TWICE — here, and in §8.3's own record of this very mutant. A document-wide
     # `in report` read is therefore satisfied by the RECORD and stays green while
@@ -2250,13 +2287,16 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
     per_type = score["A1_type_coverage"]["per_type"]
     population = _report_paragraph(r"^`core:role`, people are")
     assert population, "REPORT.md has no kind-population paragraph"
-    assert (f"{after['taxonomy']['Object']} Objects and "
-            f"{after['taxonomy']['Subject']} Subjects") in population, (
+    kinds_arithmetic = (f"{after['taxonomy']['Object']} Objects and "
+                       f"{after['taxonomy']['Subject']} Subjects")
+    assert re.search(r"(?<![\d.,])" + re.escape(kinds_arithmetic), population), (
         "§3/A1's materialised population is not the receipt's")
-    assert (f"{after['taxonomy']['Subject']} Subjects is exactly "
-            f"{per_type['team']['present']} teams + "
-            f"{per_type['role']['present']} roles + "
-            f"{per_type['person']['present']} people") in population, (
+    subjects_arithmetic = (f"{after['taxonomy']['Subject']} Subjects is exactly "
+                           f"{per_type['team']['present']} teams + "
+                           f"{per_type['role']['present']} roles + "
+                           f"{per_type['person']['present']} people")
+    assert re.search(r"(?<![\d.,])" + re.escape(subjects_arithmetic),
+                     population), (
         "§3/A1's Subjects arithmetic is not the artifact's")
     # §7's corroboration states the two pair counts in its opening sentence
     same_pairs = _report_line(r"^It reaches the same numbers")
