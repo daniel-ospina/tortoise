@@ -87,19 +87,18 @@ version: 1
 # what is GRADED is the FORM rather than the value:
 # `test_the_fast_shards_header_states_no_live_pool_census` reds on a census stated OUTSIDE the
 # fence in the spelling it grades — a bare `fast_pool()` followed by `holds|held|carries|carried`
-# and `N files|entries`, with a comment wrap allowed between them. ⛔ SPELLINGS IT STILL CANNOT SEE:
-# a census with no `fast_pool()` in front of it in the same block (a QUOTED fragment such as the one
-# in the fourth-fold paragraph below is that shape — the quote has no `fast_pool()` of its own,
-# while the copy it quotes did, on the line above), another verb (`contains`, `numbers`), another
-# unit (`members`, `rows`). ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what
-# this clause did until #14587's review P2 measured it twice: the censuses that actually arrived at
-# the last folds were written in a QUOTED `holds N files … against N on main` (still ungated) and
-# in the `entries` unit, and at the `c1c8df1a` fold the census arrived WRAPPED — `fast_pool()` at
-# the end of one comment line, the count at the start of the next — which the `files`-only pattern
-# could not cross, so the gate was GREEN over a live census. Both now read; the quote does not. So
-# what kept this block honest across four folds was a READER, not the gate, and the gate now covers
-# the three spellings that shipped. No fold has to re-derive a census, and a fold that carries one
-# anyway is what the fence exists to catch.
+# and `N files|entries`. ⛔ SPELLINGS IT CANNOT SEE: a census with no `fast_pool()` in front of it
+# (a quoted fragment is that shape — the quote carries no `fast_pool()` of its own, while the copy
+# it was cut from did), another verb (`contains`, `numbers`), another unit (`members`, `rows`).
+# ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what this clause did until
+# the #14587 review measured it: the census that actually arrived at the `bbef0b88` fold read
+# `holds N entries`, which a `files`-only unit could not see, so the gate was green over a live
+# census until that unit was added. ⛔ A COMMENT WRAP IS NOT A GAP: `_emission_block_header` joins
+# the block's comment lines before the pattern reads them, so a census split across two lines is
+# read normally — an earlier cut of this repair widened the separator for the wrap and wrote that
+# the gate had missed one, and that reading was of the RAW blob rather than of the joined block the
+# guard is actually handed. No fold has to re-derive a census, and a fold that carries one anyway
+# is what the fence exists to catch.
 # ⛔ HISTORICAL-POOL-CENSUS-BEGIN
 # (measured at `06c10adb`: `fast_pool()` held 1335 files against `origin/main` `a29b5f24ce95`'s 1334,
 # and the ONE addition was `tests/test_14582_creation_hook.py` — this PR's own new suite. The earlier
@@ -129,13 +128,12 @@ version: 1
 # rather than to `main`, which the tree refutes (#13450 landed on `main` in `c1c8df1a` itself), and
 # **a LIVE pool census** (a `fast_pool()` file count stated as a live fact about that head, with
 # `main`'s count beside it as the comparison), which is the claim the fenced-history rule above
-# exists to keep out (the guard grades a bare `fast_pool()` + `N files|entries` spelling with a
-# comment wrap allowed — the `entries` alternative was added for `main`'s copy at the `bbef0b88`
-# fold, and the wrap for the `c1c8df1a` fold's — while the QUOTED fragment printed just above, with
-# no `fast_pool()` in front of it, is still outside what the guard can see), and what the fenced
-# HISTORY above exists to hold instead. Deleting the copy is therefore the repair, not a loss: the
-# census is a measurement of ONE tree that goes stale on the next fold, so it is not restated
-# anywhere as a live claim.
+# exists to keep out (the guard grades a bare `fast_pool()` + `N files|entries` spelling — the
+# `entries` alternative was added for `main`'s copy at the `bbef0b88` fold — while a QUOTED fragment
+# of that census, with no `fast_pool()` in front of it, is still outside what the guard can see),
+# and what the fenced HISTORY above exists to hold instead. Deleting the copy is therefore the
+# repair, not a loss: the census is a measurement of ONE tree that goes stale on the next fold, so
+# it is not restated here as a live claim.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
 # driver, the same failure — and there NEITHER copy described that tree: both stated the
 # 827.2/827.3 partition, against the 827.4/827.5 the verb emitted at that head. Neither copy was
