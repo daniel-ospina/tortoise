@@ -7590,15 +7590,8 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     #    one, so it is gone and the shape is graded.
     ("Confirm the tools are actually there. Then after saving the config, restart "
      "your client.", True),
-    #    …and the qualified-restart exception is spacing-bounded, not "nothing
-    #    between": a past event one noun over was a false RED, and `first` is not a
-    #    past event at all.
-    ("If you confirmed the tools before the last client restart, restart your "
-     "client, then confirm the tools are actually there.", False),
-    ("If you confirmed the tools before your previous IDE restart, restart your "
-     "client, then confirm the tools are actually there.", False),
-    ("If you confirmed the tools before the first restart, restart your client, "
-     "then confirm the tools are actually there.", True),
+    #    (the qualified-restart / `first` rows are in the block above, where the
+    #    arm's rule is stated — one row per sentence, not two)
     ("If you confirmed the tools in the last session, restart your client, then "
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
