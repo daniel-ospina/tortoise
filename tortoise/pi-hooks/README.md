@@ -310,15 +310,22 @@ from this section is the false claim, not a stale measurement.
   `index.ts`/`index.js` fallback are written twice, and
   `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py:2157`) grades
   the end state with the SAME function that decided the retirement, so it adds
-  no independent signal. ⛔ **The two also model the DIRENT differently, on
-  purpose:** the test oracle follows Pi's own order (``isFile() ||
-  isSymbolicLink()`` for a direct entry, only then ``isDirectory() ||
-  isSymbolicLink()``), so a ``*.ts``-named link to a directory is attempted as a
-  FILE and counted as nothing; `_pi_entry_is_loadable` follows the link and
-  answers loadable for it, which is the FAIL-CLOSED direction and is why the
-  residual below ("a symlink at a producer path pointing at a DIRECTORY")
-  refuses rather than retiring. Stricter oracle, safer module — do not "fix"
-  the divergence by making the oracle follow links. Both are correct against the Pi measured on 2026-11-26:
+  no independent signal. ⛔ **Measured against real Pi, not read off the source**
+  (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0): a ``reflect-hook.ts``
+  that is a SYMLINK TO A DIRECTORY is **registered** when the target carries
+  ``index.ts`` or a ``package.json`` ``main``, and is ignored when the target
+  carries only ``pi.extensions`` or nothing at all — Pi pushes the path
+  (``isFile() || isSymbolicLink()``) and then resolves the directory by NODE
+  resolution, NOT through ``resolveExtensionEntries``. An earlier revision of
+  this note claimed the opposite ("attempted as a file and counted as
+  nothing") and the test oracle was made stricter to match; that was WRONG, and
+  a stricter oracle is the LENIENT direction — it would let a regression that
+  leaves the producer as a link to a directory pass the one-producer assertion
+  while Pi registered two. **The oracle must never under-count.** The
+  `pi.extensions`-only target is therefore correctly NOT counted by the oracle
+  (it agrees with Pi there), while `_pi_entry_is_loadable` is deliberately
+  coarser still: it answers loadable for that shape too, which is why the
+  residual below refuses rather than retiring. Both are correct against the Pi measured on 2026-11-26:
   `isExtensionFile` is `endsWith('.ts') || endsWith('.js')`, and every
   subdirectory is resolved through `resolveExtensionEntries` (manifest, else
   `index.ts`/`index.js`) with **no dot-prefix filter** anywhere in

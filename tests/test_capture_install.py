@@ -1300,43 +1300,43 @@ def _registered_producers(ext_dir: Path) -> list[str]:
     fall-through: an UNREADABLE manifest is Pi's `catch { return null }`, so it
     is NOT a registration and the index files are consulted instead.
 
-    ⛔ AND IT TESTS THE DIRENT, NOT THE TARGET (#14342 round 18, finding 4).
-    ``loader.js:642-647`` tries ``isFile() || isSymbolicLink()`` for a DIRECT
-    entry (gated on ``isExtensionFile(name)``) and only then
-    ``isDirectory() || isSymbolicLink()`` for a subdirectory. So a
-    ``*.ts``-named SYMLINK TO A DIRECTORY is attempted as a FILE, that attempt
-    fails, and its target's index is NEVER resolved — following the link counted
-    a producer Pi does not load. That is an OVER-count (a spurious red), never a
-    false PASS, which is why no current row was affected; but this helper exists
-    precisely to model Pi's rule, so the axis is modelled rather than noted.
-    A link to a FILE still loads.
+    ⛔ AND IT TESTS THE DIRENT, BUT NOT BY SKIPPING THE TARGET (#14342 round 19,
+    finding 1 — the round-18 attempt was MEASURED WRONG). A previous cut skipped
+    every `*.ts`-named link to a directory on the theory that Pi "attempts it as
+    a file and fails". Executed against real Pi
+    (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0) that is false:
+
+    | ``reflect-hook.ts`` → dir containing …    | Pi registers it? |
+    |---|---|
+    | ``index.ts``                              | **YES** |
+    | ``package.json`` with ``main``            | **YES** |
+    | ``package.json`` with only ``pi.extensions`` | no |
+    | nothing                                    | no |
+
+    Pi pushes the path (``isFile() || isSymbolicLink()``) and then resolves the
+    directory by NODE resolution (``main``, else ``index.ts``/``index.js``) —
+    the npm-manifest path, not ``resolveExtensionEntries``. An instrument that
+    under-counts is LENIENT, which is the false-PASS direction, so this oracle
+    must never be stricter than Pi: it counts the target's ``index.ts``/
+    ``index.js`` here and accepts that a ``pi.extensions``-declaring target is
+    an OVER-count (a spurious red, the safe side).
     """
     found: list[str] = []
     for entry in ext_dir.iterdir():
         suffix_ok = entry.name.endswith((".ts", ".js"))
-        if entry.is_symlink() and entry.is_dir():
-            # A *.ts-named link to a directory: the direct-entry attempt reads it
-            # as a file and fails, so nothing registers. A NON-suffixed link to a
-            # directory (`.tortoise-capture.disabled`) is not a direct entry at
-            # all and IS resolved through `resolveExtensionEntries`.
-            if suffix_ok:
-                continue
-        elif suffix_ok and not entry.is_dir():
-            # a regular file, or a symlink to a file — both load
+        if entry.is_dir():
+            entries, unreadable = capture_install._pi_manifest_entries(entry)
+            if not unreadable and entries:
+                resolved = [name for name in entries
+                            if (entry / name).exists()]
+                if resolved and not (entry.is_symlink() and suffix_ok):
+                    found.extend(f"{entry.name}/{name}" for name in resolved)
+                    continue
+            for index in ("index.ts", "index.js"):
+                if (entry / index).is_file():
+                    found.append(f"{entry.name}/{index}")
+        elif suffix_ok:
             found.append(entry.name)
-            continue
-        if not entry.is_dir():
-            continue
-        entries, unreadable = capture_install._pi_manifest_entries(entry)
-        if not unreadable and entries:
-            resolved = [name for name in entries
-                        if (entry / name).exists()]
-            if resolved:
-                found.extend(f"{entry.name}/{name}" for name in resolved)
-                continue
-        for index in ("index.ts", "index.js"):
-            if (entry / index).is_file():
-                found.append(f"{entry.name}/{index}")
     # `lstrip(".")` because a dot-prefixed directory is still LOADED — the
     # stem match must not be defeated by the dot a guard adds.
     return [f for f in found
@@ -1675,6 +1675,11 @@ def test_a_guessed_loadability_behind_a_symlink_is_not_reported_as_measured(home
     # verify, so the guessed branch must not assert it either.
     assert "runs BOTH producers" not in error, error
     assert "may run both producers" in error, error
+    # ⛔ THE RECEIPT MUST ATTRIBUTE THE SEAM TO THIS RUN (#14342 round 19,
+    # finding 4 — mutant C3_5 reworded this branch to the already-current
+    # sentence and the whole suite stayed green).
+    assert "WAS installed" in error, error
+    assert "ALREADY in place" not in error, error
     # The link is untouched and the checkout it points at survives.
     assert disabled.is_symlink(), "the symlink was renamed or removed"
     assert (target / "main.ts").exists()
@@ -1773,37 +1778,73 @@ def test_legacy_symlink_already_current_guessed_arm_says_may(home):
     assert "second producer" not in error.lower(), error
 
 
-def test_oracle_does_not_count_a_ts_named_symlink_to_a_directory(home):
-    """Pi tests the DIRENT, not the target (#14342 round 18, finding 4).
+def test_oracle_counts_a_ts_named_symlink_to_a_directory_that_pi_loads(home):
+    """MEASURED against real Pi (#14342 round 19, finding 1 — the previous
+    version of this row asserted the opposite and was WRONG).
 
-    ``loader.js:642-647`` tries a DIRECT entry as ``isFile() ||
-    isSymbolicLink()``, gated on ``isExtensionFile(name)`` — so
-    ``reflect-hook.ts`` symlinked to a DIRECTORY is attempted as a FILE, fails,
-    and its target's ``index.ts`` is never resolved. Following the link counted
-    a producer Pi does not load (an over-count: a spurious red, never a false
-    PASS).
+    Executed (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0) on
+    ``reflect-hook.ts`` symlinked to a directory:
 
-    The MODULE still answers loadable for this shape on purpose, and fails
-    CLOSED on it — the README's documented residual ("a symlink at a producer
-    path pointing at a DIRECTORY is loaded by Pi as a file attempt (which
-    fails), yet retiring it renames the LINK …, which Pi then resolves as a
-    directory and loads"). So the oracle is stricter and the divergence is the
-    safe direction; asserting it here keeps the two from silently re-merging.
+    * target with ``index.ts``                          → **Pi registers it**
+    * target with ``package.json`` ``main``             → **Pi registers it**
+    * target with only ``pi.extensions``                → Pi ignores it
+    * empty target                                      → Pi ignores it
 
-    Mutation: drop the dirent branch (`if suffix_ok: continue`) — REDs.
+    Pi pushes the path (``isFile() || isSymbolicLink()``) and then resolves the
+    directory by NODE resolution — ``main``, else ``index.ts``/``index.js`` — so
+    an oracle that skips it UNDER-counts. Under-counting is the LENIENT
+    direction: a regression leaving ``reflect-hook.ts`` as a link to a directory
+    would then pass ``test_pi_install_leaves_exactly_one_registered_capture_
+    producer`` while Pi registered two. The oracle must never be stricter than
+    Pi; the ``pi.extensions``-only target stays an accepted OVER-count.
+
+    Mutation: skip a `*.ts`-named link to a directory (the round-18 cut) — this
+    row REDs.
     """
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
     target = home / "checkout" / "reflect-hook"
     target.mkdir(parents=True)
-    (target / "index.ts").write_text("// would resolve, but never reached\n")
+    (target / "index.ts").write_text("// Pi resolves this by node resolution\n")
     link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
     link.symlink_to(target, target_is_directory=True)
 
     assert link.is_symlink() and link.is_dir()
-    assert _registered_producers(ext_dir) == [], (
-        f"Pi attempts a *.ts-named link as a FILE and never resolves the "
-        f"target; got {_registered_producers(ext_dir)}")
+    assert _registered_producers(ext_dir) == [
+        f"{capture_install.PI_SECOND_PRODUCER_NAME}/index.ts"], (
+        f"Pi resolves a *.ts-named link through node resolution, so this IS a "
+        f"registered producer; got {_registered_producers(ext_dir)}")
+
+
+def test_oracle_does_not_count_a_pi_extensions_target_behind_a_ts_link(home):
+    """The one shape where following the link is NOT enough (#14342 round 19,
+    finding 1, measured against real Pi).
+
+    A ``*.ts``-named link to a directory whose ``package.json`` declares only
+    ``pi.extensions`` (no ``main``, no index) is NOT registered by Pi: the
+    direct-entry path resolves the directory by NODE resolution (``main``, else
+    ``index.ts``/``index.js``), never through ``resolveExtensionEntries``. So the
+    oracle must not take the manifest branch for a suffix-named link either —
+    it does not, and the two agree exactly on this shape rather than the oracle
+    over-counting it.
+
+    Mutation: drop the `not (entry.is_symlink() and suffix_ok)` guard so the
+    manifest branch applies — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("export default function () {}\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    counted = _registered_producers(ext_dir)
+    assert counted == [], (
+        f"Pi ignores a pi.extensions-only target behind a *.ts link, so the "
+        f"oracle must too; got {counted}")
 
 
 def test_legacy_symlink_measured_arm_names_the_manifest_branch_not_the_index(home):
@@ -1904,6 +1945,76 @@ def test_legacy_symlink_measured_already_current_says_both(home):
         f"a measured, already-current refusal must state the count, not "
         f"hedge: {error!r}")
     assert "may run both producers" not in error, error
+
+
+def test_pi_install_refuses_a_js_second_producer_rather_than_report_green(home):
+    """NAME-EXACT IS NOT LOADABLE (#14342 round 19, finding 6).
+
+    Pi's ``isExtensionFile`` accepts ``*.ts`` **or** ``*.js``, so
+    ``reflect-hook.js`` is the same second capture producer under a name the
+    guard never looked at. MEASURED before the fix: with it present,
+    ``install_capture("pi")`` returned ``ok=True`` with ``actions`` naming only
+    the seam and the ``.js`` copy untouched — a GREEN install with TWO producers
+    registered, which is precisely the failure this guard exists to report.
+
+    Mutation: drop the ``PI_SECOND_PRODUCER_OTHER_NAMES`` sweep — this row REDs
+    on ``ok``.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    other = ext_dir / "reflect-hook.js"
+    other.write_text("// a .js copy of the second producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"a loadable `reflect-hook.js` beside the seam was reported GREEN: "
+        f"{res.actions}")
+    error = res.error or ""
+    assert "second copy of the second capture producer" in error, error
+    assert "reflect-hook.js" in error, error
+    assert "captured twice" in error, error
+    # Non-destructive: the installer did not touch bytes it did not choose.
+    assert other.read_text() == "// a .js copy of the second producer\n"
+    # …and the oracle agrees the box has two producers, so the row is not
+    # asserting a state the manifest of the tree does not show.
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME, "reflect-hook.js"}, (
+        f"the tree really does carry two loadable producers: "
+        f"{_registered_producers(ext_dir)}")
+
+
+def test_assert_not_loadable_says_unverified_for_an_unreadable_entry(home):
+    """The guard's own PROOF must not report its fail-closed guess as a
+    measurement (#14342 round 19, finding 3).
+
+    ``_assert_pi_entry_not_loadable`` answers "is STILL an extension Pi loads —
+    … so both capture producers stay live" for a `.disabled` link whose target's
+    ``package.json`` cannot be read, a shape on which Pi registers nothing.
+
+    Mutation: drop the ``_pi_loadability_is_guessed`` branch — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    link.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        msg = capture_install._assert_pi_entry_not_loadable(link)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    assert msg, "an unreadable-but-guessed-loadable entry passed the assertion"
+    assert "could not be VERIFIED" in msg, msg
+    assert "STILL an extension Pi loads" not in msg, msg
+    assert "both capture producers stay live" not in msg, msg
 
 
 def test_registered_producers_helper_models_the_manifest_branch(home):

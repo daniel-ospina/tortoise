@@ -364,6 +364,18 @@ PI_SECOND_PRODUCER_NAME = "reflect-hook.ts"
 #: same non-destructive contract as the legacy guard above.
 PI_SECOND_PRODUCER_DISABLED_NAME = "reflect-hook.ts.disabled"
 
+#: ⛔ THE SAME PRODUCER UNDER THE OTHER NAME PI LOADS (#14342 round 19,
+#: finding 6). Pi's ``isExtensionFile`` accepts ``*.ts`` **or** ``*.js``, so a
+#: ``reflect-hook.js`` beside the seam is the second capture producer — and the
+#: guard, which is name-exact on ``reflect-hook.ts``, never looked at it.
+#: MEASURED: with ``reflect-hook.js`` present, ``install_capture("pi")``
+#: returned ``ok=True`` with ``actions`` naming only the seam and the ``.js``
+#: copy untouched — a GREEN install with TWO producers registered, which is
+#: precisely the failure this guard exists to report. Any other loadable suffix
+#: belongs here too; the check is driven off this tuple, never off a second
+#: name test.
+PI_SECOND_PRODUCER_OTHER_NAMES = ("reflect-hook.js",)
+
 # ── #3516 §B / #3515 piece 12 — the client-timestamp floor ───────────────
 # The store-proven check pairs with a FLOOR: the matched record's
 # CLIENT-recorded instant must be strictly after the install, less a skew
@@ -2161,12 +2173,25 @@ def _seam_state_clause(*, dry_run: bool, wrote: bool) -> str:
 
 
 def _assert_pi_entry_not_loadable(path: Path) -> str | None:
-    """Fail closed when the retirement did not achieve what it claims."""
-    if _pi_entry_is_loadable(path):
-        return (f"{path} is STILL an extension Pi loads — the guard renamed it "
-                "into a shape the loader registers, so both capture producers "
-                "stay live")
-    return None
+    """Fail closed when the retirement did not achieve what it claims.
+
+    ⛔ AND SAY WHICH IT IS (#14342 round 19, finding 3). `_pi_entry_is_loadable`
+    answers True for an UNREADABLE entry by design, so this assertion — which is
+    itself the guard's proof — reported that guess as "is STILL an extension Pi
+    loads — the guard renamed it into a shape the loader registers, so both
+    capture producers stay live". Measured on a `.disabled` link whose target's
+    `package.json` is unreadable: Pi registers NOTHING, so the sentence named a
+    state and a cause the predicate never established.
+    """
+    if not _pi_entry_is_loadable(path):
+        return None
+    if _pi_loadability_is_guessed(path):
+        return (f"{path} could not be VERIFIED — the guard renamed it into a "
+                "shape Pi MAY still register (the entry's package.json cannot "
+                "be read), so this box may run both capture producers")
+    return (f"{path} is STILL an extension Pi loads — the guard renamed it "
+            "into a shape the loader registers, so both capture producers "
+            "stay live")
 
 
 def _disable_pi_second_producer(
@@ -2177,6 +2202,13 @@ def _disable_pi_second_producer(
     Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the entry is
     RETIRED in place (:func:`_retire_pi_entry`), so its bytes survive and a
     user can put it back. Never a recursive delete.
+
+    ⛔ NAME-EXACT IS NOT THE SAME AS LOADABLE (#14342 round 19, finding 6). This
+    guard retires ``reflect-hook.ts``; Pi also loads ``reflect-hook.js``, and a
+    box carrying that one was reported GREEN with two producers registered. The
+    sibling names are checked FIRST, and a loadable one refuses — the installer
+    does not silently retire a file whose bytes it did not choose to, but it
+    must never call that install a success.
 
     Absent = nothing to do (never installed, or already retired). The FARM
     re-materializes this producer from agent-infra's ``manifest.json``, so the
@@ -2204,6 +2236,38 @@ def _disable_pi_second_producer(
     # no-op run does not claim a write it skipped and a preview does not claim
     # one it never made (#14342 round 13).
     seam_state = _seam_state_clause(dry_run=dry_run, wrote=seam_written)
+    # ⛔ NAME-EXACT IS NOT LOADABLE (#14342 round 19, finding 6). Pi's
+    # `isExtensionFile` accepts `*.ts` OR `*.js`, so `reflect-hook.js` is the
+    # same producer under a name this guard never looked at — MEASURED: with it
+    # present the install returned `ok=True`, `actions` naming only the seam,
+    # and the `.js` copy untouched, i.e. GREEN with two producers registered.
+    # Refuse rather than retire: these are not the bytes this installer chose to
+    # displace, and editing them would be a different mutation than the one the
+    # README documents. Fails CLOSED, so the duplication is reported, never
+    # certified.
+    for other_name in PI_SECOND_PRODUCER_OTHER_NAMES:
+        other = ext_dir / other_name
+        if not _pi_entry_is_loadable(other):
+            continue
+        # ⛔ A GUESS IS NOT A MEASUREMENT here either (#14342 round 19, finding
+        # 2): `_pi_entry_is_loadable` answers True for an unreadable entry by
+        # design, so the count may not be asserted on that branch.
+        if _pi_loadability_is_guessed(other):
+            return False, [], (
+                f"the capture seam is installed, but {other} could not be "
+                f"VERIFIED — Pi loads `{other_name}` exactly as it loads "
+                f"`{PI_SECOND_PRODUCER_NAME}`, so it may still register as a "
+                f"second producer and every session could be captured twice. "
+                f"{seam_state}. Move {other} out of the extensions directory "
+                f"by hand and re-run.")
+        return False, [], (
+            f"the capture seam is installed, but a second copy of the second "
+            f"capture producer is registered at {other}: Pi loads "
+            f"`{other_name}` exactly as it loads `{PI_SECOND_PRODUCER_NAME}`, "
+            f"and this installer only retires the `{PI_SECOND_PRODUCER_NAME}` "
+            f"name. {_duplication_consequence(dry_run=dry_run)} {seam_state}. "
+            f"Move {other} out of the extensions directory by hand and "
+            f"re-run.")
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
     # refusal that fires only in the run that performed the rename is not a
     # guard: run 1 renamed a SYMLINK TO A DIRECTORY and refused (a suffixed
@@ -2279,9 +2343,10 @@ def _disable_pi_second_producer(
             return False, [], (
                 f"cannot disable the second capture producer {active}: "
                 f"{retired} already exists and holds DIFFERENT bytes. Move one "
-                "of them aside and re-run. Both would otherwise stay "
-                "registered, so every session would be captured twice "
-                "(~/.tortoise/capture-spool and ~/.tortoise/session-events).")
+                "of them aside and re-run. The live copy would otherwise stay "
+                "registered beside the seam, so every session would be captured "
+                "twice (~/.tortoise/capture-spool and "
+                "~/.tortoise/session-events).")
         if dry_run:
             return True, [f"[dry-run] would re-assert the retirement of {active} "
                           f"(an identical copy of {retired})"], None
@@ -2328,11 +2393,19 @@ def _disable_pi_second_producer(
             return False, [], (
                 f"the capture seam would be in place, but the second capture "
                 f"producer could not be disabled ({active}): renaming the link "
-                f"to {retired} leaves a suffixed SYMLINK to a directory, which "
-                f"Pi resolves through `resolveExtensionEntries` (its "
-                f"`package.json` manifest, else its index file) — so both "
-                f"producers would stay registered. Nothing was written (a dry "
-                f"run); move "
+                f"to {retired} leaves a suffixed SYMLINK to a directory, and "
+                # ⛔ THIS ARM IS THE THIRD OF THREE AND WAS THE ONLY ONE WITH
+                # NO GUESS SPLIT (#14342 round 19, finding 2). Measured: the
+                # post-rename `.disabled` link to a target whose `package.json`
+                # is unreadable and which has no index registers NOTHING, while
+                # this sentence asserted the mechanism AND the count.
+                + (f"whether Pi still registers it COULD NOT be verified — it "
+                   f"may still load, so every session could be captured twice"
+                   if _pi_loadability_is_guessed(retired) else
+                   f"Pi resolves it through `resolveExtensionEntries` (its "
+                   f"`package.json` manifest, else its index file) — so both "
+                   f"producers would stay registered")
+                + f". Nothing was written (a dry run); move "
                 f"{active} out of the extensions directory by hand and re-run.")
         if active.is_dir() and not active.is_symlink():
             return True, [f"[dry-run] would retire the entry point inside "
