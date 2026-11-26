@@ -57,18 +57,19 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `1aef0b618bcf` folded in, carrying
-# `#14548`'s residue RATCHET (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
-# non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
-# `#14574`'s drift-reporter row, `#14552`'s point-vector-keys row, `#14592`'s operating-model
-# evidence row, `#14597`'s expansion-fusion row and `#14607`'s two `core` rows
-# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb packs the pool
-# into two bins: seven at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so
-# `ceil(827.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.3 = 2.0307), so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence.
+# reader of the prose can see. On THIS tree — every `origin/main` row at this base PLUS this
+# lane's own `tests/test_13450_ep_position_axis_participation.py` (`core`, the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and
+# two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than
+# by a hand re-read.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
+# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
+# figures stay on the commit that measured them. ⛔ NO FILE COUNT IS STATED HERE: the pool census
+# moves with every merge that adds a test file and "more than `main`" is zero the moment this
+# branch merges, so the count is a HISTORY bound to a sha inside the fence below rather than a
+# standing claim about this tree.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
 # `fast_pool()`'s FILE COUNT moves with every merge that adds a test file, so a live figure here
 # would red every such fold — and a figure that reds gets carried rather than re-derived, which is
@@ -92,26 +93,6 @@ version: 1
 # `#14559`'s, the `826.0`/`825.9` pair and the `826.4`/`826.3` pair this branch carried one fold
 # earlier — describe trees that no longer exist, and they are deleted rather than re-pointed. The
 # name lists are what the guard COMPARES against the live emission
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
-# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
-# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
-# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
-# name lists above are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
