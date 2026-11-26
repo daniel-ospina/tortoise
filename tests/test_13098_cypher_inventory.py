@@ -4064,8 +4064,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `git show 865776d6ce -- tests/test_13098_cypher_inventory.py` moves them to `== 44`
     # and `== 103`. Its stated suite count (118 passed / 15 skipped) is likewise the
     # earlier landing's; at that commit's tree the suite reads **120 passed / 15
-    # skipped**, because the two trees differ only in comment lines. A lane applying the
-    # message's delta to a tree at 44/103 lands on a self-inconsistent literal.
+    # skipped**, and those TWO ARMS are the whole 118 -> 120 delta — nothing else in
+    # this module's arm population differs between the two trees, and the only later
+    # non-comment change to it (`8a2a7d968a`'s helper body) adds no arm. A lane
+    # applying the message's delta to a tree at 44/103 lands on a self-inconsistent
+    # literal.
     test_functions = {n for n in defined if n.startswith("test_")}
     assert len(test_functions) == 103, (
         f"expected EXACTLY 103 test functions in this module; got "
