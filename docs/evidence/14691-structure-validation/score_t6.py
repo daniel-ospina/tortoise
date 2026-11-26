@@ -733,19 +733,47 @@ def a4_invention() -> dict:
     # (b) every emitted QUOTE that claims to be verbatim, checked verbatim
     corpus_sents = [_norm(s) for s in re.split(r"(?<=[.!?])\s+|\n",
                                                CORPUS_TEXT) if s.strip()]
+    #: The corpus's OWN paragraph unit. A turn is the smallest span the corpus
+    #: states one coherent thing in, so it is the widest unit a quote may borrow
+    #: support from.
+    corpus_turns = [_norm(t["content"])
+                    for d in CORPUS["documents"] for t in d["turns"]]
 
-    def best_overlap(quote: str) -> float:
-        """Share of the quote's words present in its best-matching corpus
-        sentence. A PARAPHRASE keeps the content words; a claim the text never
-        makes does not."""
+    def _best_overlap(quote: str, units: list[str]) -> float:
+        """Share of the quote's content words present in its best-matching UNIT."""
         words = set(re.findall(r"[a-z]{3,}", _norm(quote)))
         if not words:
             return 0.0
         best = 0.0
-        for sent in corpus_sents:
-            hit = sum(1 for w in words if w in sent)
+        for unit in units:
+            hit = sum(1 for w in words if w in unit)
             best = max(best, hit / len(words))
         return round(best, 3)
+
+    def sentence_overlap(quote: str) -> float:
+        """Share of the quote's words in its best-matching corpus SENTENCE."""
+        return _best_overlap(quote, corpus_sents)
+
+    def turn_overlap(quote: str) -> float:
+        """Share of the quote's words in its best-matching corpus TURN.
+
+        ⛔ THE DECIDER IS TURN-SCOPED, NOT SENTENCE-SCOPED (#14723 review, round
+        10, P2). A quote is a span the extractor attributed to ONE turn, and a
+        faithful MULTI-FACT summary can never put ≥60% of its words into a single
+        sentence: `Three teams exist: Platform (engineering), Product (product
+        management), and Customer (commercial).` scores 0.30 sentence-scoped and
+        0.80 against its own turn. Scoring the SENTENCE therefore graded a
+        correctly reported fact as `invented`, and the artifact's gloss — "the
+        corpus never says it" — asserted a property the measure could not
+        establish. MEASURED on the committed receipt: 12 rows fall below the
+        sentence band but only 9 are unsupported anywhere in the corpus; the
+        other 3 are multi-fact summaries the corpus does state (doc-02's three
+        teams, doc-03's seven-component list, doc-04's enterprise-renewals row).
+        The turn unit is BOUNDED on purpose: support cannot be assembled across
+        unrelated paragraphs, so a recombined claim still scores low (`invented`
+        stays 9, and the claim-layer FAIL direction is unchanged).
+        """
+        return _best_overlap(quote, corpus_turns)
 
     #: The paraphrase band: above it the content words survive and only the
     #: wording changed; below it the corpus does not state the thing at all.
@@ -754,6 +782,10 @@ def a4_invention() -> dict:
     #: never a count, so each list records when its cap bit.
     CAP = 10
     quotes = {"total": 0, "verbatim": 0, "paraphrase": 0, "invented": 0,
+              # ⛔ A THIRD BUCKET, because two could not describe the population
+              # (#14723 review, round 10, P2): a quote whose support exists only
+              # across a turn is neither a sentence paraphrase nor an invention.
+              "summary_in_one_turn": 0,
               # ⛔ `not_in_corpus` IS A COUNT, NOT A LIST (#14691 review, 5th
               # cycle, N5). It used to be a 10-row list of the BEST-ANCHORED
               # PARAPHRASES — the opposite bucket — so a consumer reading its
@@ -761,8 +793,14 @@ def a4_invention() -> dict:
               # the real figure is `invented`. The paraphrase rows it held are
               # preserved under `paraphrase_examples`; the name now carries the
               # number it promises.
+              # ⛔ AND ITS SCOPE IS SENTENCE-SCOPED, which equals the peer audit's
+              # own figure (`out/t6-quote-audit.json` `not_in_corpus`) because
+              # that probe made the same measurement — it is `below_sentence_band`
+              # here and it is NOT the invented count (#14723 review, round 10).
               "not_in_corpus": 0,
+              "below_sentence_band": 0,
               "paraphrase_examples": [], "invented_examples": [],
+              "summary_examples": [],
               # ONE FLAG PER LIST (#14691 review, 5th cycle, NEW-4): a single
               # shared boolean cannot say WHICH list's cap bit, so a consumer
               # still cannot tell which of the two samples is complete.
@@ -773,8 +811,16 @@ def a4_invention() -> dict:
               # `claim_layer.verbatim` (a disjoint bucket that also happens to be
               # 11). Any prose figure about the band now reads this.
               "bands": {"below_0_5": 0, "from_0_5_to_0_6": 0, "at_or_above_0_6": 0},
+              #: The same histogram over the DECIDER (turn scope), so the two
+              #: scopes are both readable and neither is inferred from the other.
+              "bands_turn_scope": {"below_0_5": 0, "from_0_5_to_0_6": 0,
+                                   "at_or_above_0_6": 0},
               "paraphrase_examples_truncated": False,
-              "invented_examples_truncated": False}
+              "invented_examples_truncated": False,
+              "summary_examples_truncated": False}
+    #: bucket -> its own example list (a shared name would make a cap ambiguous)
+    quotes["_EXAMPLES"] = {"paraphrase": quotes["paraphrase_examples"],
+                           "summary_in_one_turn": quotes["summary_examples"]}
     for doc in RECEIPT.get("documents") or []:
         for point in (doc.get("result") or {}).get("points") or []:
             props = point.get("props") or {}
@@ -785,9 +831,11 @@ def a4_invention() -> dict:
             if _squash(quote) in _squash(CORPUS_TEXT):
                 quotes["verbatim"] += 1
                 continue
-            ov = best_overlap(quote)
+            ov = sentence_overlap(quote)
+            t_ov = turn_overlap(quote)
             entry = {"doc": doc.get("doc_id"), "quote": quote[:200],
                      "best_sentence_overlap": ov,
+                     "best_turn_overlap": t_ov,
                      "point": str(point.get("text") or point.get("content"))[:140]}
             if ov < 0.5:
                 quotes["bands"]["below_0_5"] += 1
@@ -795,15 +843,26 @@ def a4_invention() -> dict:
                 quotes["bands"]["from_0_5_to_0_6"] += 1
             else:
                 quotes["bands"]["at_or_above_0_6"] += 1
-            if ov >= BAND:
-                quotes["paraphrase"] += 1
-                if len(quotes["paraphrase_examples"]) < CAP:
-                    quotes["paraphrase_examples"].append(entry)
+            if t_ov < 0.5:
+                quotes["bands_turn_scope"]["below_0_5"] += 1
+            elif t_ov < BAND:
+                quotes["bands_turn_scope"]["from_0_5_to_0_6"] += 1
+            else:
+                quotes["bands_turn_scope"]["at_or_above_0_6"] += 1
+            if ov < BAND:
+                quotes["below_sentence_band"] += 1
+                quotes["not_in_corpus"] += 1
+            if t_ov >= BAND:
+                # supported by the corpus — the only question is WHERE
+                bucket = "paraphrase" if ov >= BAND else "summary_in_one_turn"
+                quotes[bucket] += 1
+                examples = quotes["_EXAMPLES"][bucket]
+                if len(examples) < CAP:
+                    examples.append(entry)
                 else:
-                    quotes["paraphrase_examples_truncated"] = True
+                    quotes[f"{bucket}_examples_truncated"] = True
             else:
                 quotes["invented"] += 1
-                quotes["not_in_corpus"] += 1
                 if len(quotes["invented_examples"]) < CAP:
                     quotes["invented_examples"].append(entry)
                 else:
@@ -830,8 +889,9 @@ def a4_invention() -> dict:
     # component traces to text; nothing inferred from naming alone". Every
     # declared structure element does. The claim layer ABOVE the structure is a
     # different question, answered separately so the two are never conflated:
-    # 12 quoted spans state things the corpus never says, and that is a finding
-    # about extraction quality (the T1–T5 axis), not about the structure tree.
+    # quoted spans the corpus does not state are a finding about extraction
+    # quality (the T1–T5 axis), not about the structure tree — and the number is
+    # `a4_invention()["quotes"]["invented"]`, never the sentence-scope figure.
     # A relation is "stated by the text" when both endpoints are named in the
     # SAME DOCUMENT. Document scope, not sentence scope, is the right unit here:
     # a corpus legitimately connects two things across two adjacent sentences
@@ -917,7 +977,9 @@ def a4_invention() -> dict:
             "entity_names_checked": sum(len(v) for v in structural.values()),
             "relations_not_co_stated": invented_relations,
             "relations_not_co_stated_at_SENTENCE_scope": len(strict_relations),
-            "quotes": quotes, "warnings": warn,
+            # the bucket -> example-list map is an INTERNAL handle, never artifact
+            "quotes": {k: v for k, v in quotes.items() if not k.startswith("_")},
+            "warnings": warn,
             "relations_not_written": not_written,
             # ⛔ BOTH AXES, because the assertion names both (#14691 review, 2nd cycle).
             # The issue's target is "nothing inferred from naming alone", and the
@@ -1162,9 +1224,20 @@ def _door_findings() -> list[dict]:
             continue
         if rows(probe["reply"]) == []:
             owned[n] = w
-    asked_owners = [n for n in owned
-                    if n in {"Amara Osei", "Dana Whitlock", "Tomas Ferreira",
-                             "Jonas Bauer"}]
+    #: The owners asked, from the CORPUS's declared people — not a typed list.
+    #: ⛔ #14723 review, round 10, P3: this set used to be hardcoded
+    #: (`{"Amara Osei", "Dana Whitlock", "Tomas Ferreira", "Jonas Bauer"}`), so a
+    #: witness population that named anyone else would have made `asked_owners`
+    #: empty and SILENTLY WITHDRAWN the bundle's headline finding — the same
+    #: fail-open D2/D3/D4 were given guards against. The declared people are what
+    #: the corpus says the owners are, so they are the population the question is
+    #: about.
+    declared_owners = set(DECL["people"])
+    asked_owners = [n for n in owned if n in declared_owners]
+    #: The row count the answer quotes, from the WRITE RECEIPT (`EDGES`) — never
+    #: typed, or a re-run with a different population would emit a figure
+    #: contradicting the artifacts while the REPORT↔artifact arm drifted with it.
+    owned_rows = [e for e in EDGES if e["predicate"] == "ownedBy"]
     if len(asked_owners) >= 2:
         found.append({
             "id": "D6",
@@ -1173,8 +1246,9 @@ def _door_findings() -> list[dict]:
                         "what each person owns?",
             "answer_over_mcp": f"NO — it returns [] for all "
                                f"{len(asked_owners)} owners asked, on a graph "
-                               f"holding 6 ownedBy rows",
+                               f"holding {len(owned_rows)} ownedBy rows",
             "evidence": {"owners_asked": sorted(asked_owners),
+                         "owned_by_rows": len(owned_rows),
                          "rows_returned": {n: 0 for n in sorted(asked_owners)},
                          "code_path": "mcp_server.tortoise_get(type='governance') "
                                       "-> sdk._get_owned_entities: "
@@ -1212,9 +1286,19 @@ def _claim_layer() -> dict:
     """
     q = a4_invention()["quotes"]
     return {"quotes_total": q["total"], "verbatim": q["verbatim"],
-            "paraphrase": q["paraphrase"], "invented": q["invented"],
+            "paraphrase": q["paraphrase"],
+            #: quotes whose support exists only ACROSS a turn — a multi-fact
+            #: summary, not an invention (#14723 review, round 10, P2)
+            "summary_in_one_turn": q["summary_in_one_turn"],
+            #: the population the corpus does not state anywhere. THIS is the
+            #: claim-layer finding, and it is what `passes` is computed from.
+            "invented": q["invented"],
+            #: the stricter SINGLE-SENTENCE population (the peer audit's own
+            #: number). Recorded, never read as the invented count.
+            "below_sentence_band": q["below_sentence_band"],
             "not_in_corpus": q["not_in_corpus"],
             "bands": dict(q["bands"]),
+            "bands_turn_scope": dict(q["bands_turn_scope"]),
             "invented_examples": q["invented_examples"][:6],
             "passes": q["invented"] == 0}
 

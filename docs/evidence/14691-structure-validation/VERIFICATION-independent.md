@@ -104,12 +104,21 @@ structure element traces to corpus text. The point layer does not. Audit of the
 |---|---|
 | verbatim substring of the corpus | 11 |
 | faithful paraphrase (≥60% of the quote's words in one corpus sentence) | 27 |
-| **best corpus-sentence overlap < 60% — the corpus does not say it** | **12** |
+| **best corpus-sentence overlap < 60%** | **12** |
 
-⛔ The `12` is the artifact's own count at the scorer's `<60%` threshold
-(`out/t6-quote-audit.json` `not_in_corpus: 12`; `out/t6-score.json`
-`claim_layer.invented: 12`), and it is the number that governs. An earlier
-revision of this section said **"10 … overlap < 0.5"**, which was wrong twice:
+⛔ **CORRECTED (10th review, P2) — the row above used to read "best corpus-sentence overlap < 60%
+— the corpus does not say it", and that gloss is not what the number measures.** The `12`
+(`out/t6-quote-audit.json` `not_in_corpus: 12`, and `t6-score.json`'s `below_sentence_band`) is the
+population that falls below the band when support is looked for in ONE SENTENCE. A faithful
+multi-fact summary cannot clear that band — `Three teams exist: Platform (engineering), Product
+(product management), and Customer (commercial).` scores 0.30 against any single sentence and 0.80
+against its own turn — so **3 of the 12 are things the corpus does say** (doc-02's three teams,
+doc-03's seven-component architecture, doc-04's enterprise-renewals row). The primary record
+(`REPORT.md` §3/A4, `t6-score.json` `claim_layer.invented`) now decides the bucket on the TURN and
+carries **9** invented; the sentence-scope `12` is kept here because it is what this audit measured,
+and it is **not** the invented count.
+
+An earlier revision of this section said **"10 … overlap < 0.5"**, which was wrong twice:
 Its audited rows' overlaps are `0.636, 0.875, 0.958, 1.0, 1.0, 1.0, 0.941, 1.0, 1.0, 1.0`, so
 **no** audited row falls below 0.5, and `10` is the length of a **capped example
 array**, not a count under any threshold. Corrected rather than dropped, because
