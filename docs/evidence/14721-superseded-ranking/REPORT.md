@@ -196,7 +196,7 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_relationships_bo
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_13098_cypher_inventory.py \
     -q -p no:cacheprovider
-    → 77 passed, 14 skipped        (the census pins, after Appendix A was regenerated)
+    → 128 passed, 15 skipped       (the census pins — main's generated-source form, see §5.3 B5)
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_surface_manifest.py \
     -q -p no:cacheprovider
@@ -251,7 +251,7 @@ Every one was re-verified against the code before being applied; the disposition
 | B2 | the manifest's two new `response_fields` rows were added without re-rendering the generated surface doc | `tests/test_surface_manifest.py` red pre-fix | **fixed** — `tools/surface_manifest.py render` |
 | B3 | `ruff` red: three `RUF100`/`F401` in the new evidence scripts and the new test | CI `docs` job, quoted verbatim in the review | **fixed** — `ruff check` clean on every changed file (plus one `B905` this round's own edit introduced) |
 | B4 | `docs` red: six `MD040` fenced blocks with no language in this report | `markdownlint-cli2` → 6 MD040 | **fixed** — six fences given a language; `markdownlint-cli2` → 0 issues |
-| B5 | the census doc-vs-tree pins were not regenerated, so all 126 downstream pins drifted by the diff's own `+116` lines | `test_13098_cypher_inventory.py` red: `126 row(s) differ` | **fixed** — Appendix A regenerated from `tools/cypher_inventory.py --markdown` |
+| B5 | the census doc-vs-tree pins were not regenerated, so all 126 downstream pins drifted by the diff's own `+116` lines | `test_13098_cypher_inventory.py` red: `126 row(s) differ` | **obsolete, on main's authority** — `origin/main` `ff10fb328891` (#14625) stopped committing the rendered doc: the pins live in `CYPHER-INVENTORY.src.md` and the `.md` is `--render`'s gitignored output. The regeneration was correct under the old rule and is now unnecessary; the merge takes main's deletion. `test_13098_cypher_inventory.py` → 128 passed, 15 skipped on this head |
 | B6 | `surface-guard` red: the untyped-receiver ratchet rose by one on `row.update(extra)` | `tools/sdk_privatise.py --check` → `ROSE by 1` | **fixed** — the helper spreads `**extra` into the dict literal instead; the two test files' raw-write helpers were consolidated so the count is now 1 FEWER than the baseline |
 | C1 | the ordering pass was `O(n⁴)`: up to `n·(n-1)` passes, each re-indexing with `ids.count(rid)`; 10.2 s at 160 rows, 146 s at 320, against #3834's 10 s wait bound — and in the cycle shape it paid that and returned the input order | measured on the previous shape: 160-link chain 4.2 s (review: 67 s at 320) | **fixed** — chain-DEPTH placement: one `O(n)` walk computes each row's distance to a terminal successor, then one placement per row (`O(n²)` overall). 300-row chain: 0.018 s. A cycle is now STATED and left alone instead of burning a budget |
 | C2 | the id-injectivity test exercised only EMPTY ids, so it could not fail for the SHARED-id class its docstring names | ran the ungated map (`if rid`) against the test rows: `A, pt_s, A` | **fixed** — a shared non-empty id case added (reds on the ungated map) |
