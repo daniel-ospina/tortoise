@@ -3481,7 +3481,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: loosened relation — verified rather than assumed, because the arm's rule says a rise
 #: means the relation loosened and the relation, not the ceiling, is what gets fixed.
 #: The table gained ONE row (`entity_reads.py::entity_relations`, row 46, `#14592`'s
-#: relations preview, which walks every relationship type) and ONE door (its own)
+#: relations preview, which walks every relationship type) and ONE door (its own
 #: `REST GET /v1/entities/{entity_id}/relations`), so 19 CUSTOMER-CALLABLE rows x 16
 #: doors = 304 pairs. ⛔ The frame is the pin's own population, not the table's 44
 #: rows: `test_the_attribution_predicate_does_not_swallow_the_whole_table` below
@@ -3491,8 +3491,11 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: Measured with `_rows()` / `_doors()` / `_door_reaches()`: the new row accepts
 #: EXACTLY ONE pair — its own REST door — and no pre-existing row's accepted set moved
 #: (the 18 older customer-callable rows still account for 27 of the 28). Worst row is
-#: UNCHANGED at 3
-#: (rows 1, 2, 17, 22, 24, 45 hold the multi-door cells), so the 4-ceiling is untouched.
+#: UNCHANGED at 3 — rows 2, 17 and 24 sit at three ACCEPTED doors each (see the
+#: 17 -> 4 note below), while the rows whose CELL declares more than one door are 22,
+#: 24 and 45 (rows 1, 2 and 17 declare ONE door each; a cell door and an accepted pair
+#: are different measurements and this note used to conflate them) — so the 4-ceiling is
+#: untouched.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 28
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
@@ -4269,6 +4272,22 @@ def test_the_extractor_document_agrees_on_the_count():
         "customer-callable readers §13's table carries:\n  - " + "\n  - ".join(missing)
         + "\nA count is only as good as the list under it — the sibling is the "
         "second copy of this ruling, so it must enumerate the same readers."
+    )
+
+    # (c) the EXCLUSION sentence's numeral — the same fact, one sentence further on.
+    # ⚠️ Measured fail-open at `#14671`'s head `5a86688`: the count moved
+    # eighteen -> nineteen in four graded places while this sentence kept
+    # "NOT in this eighteen", so §13.8 contradicted itself two sentences apart
+    # and (a) and (b) both stayed GREEN. Neither can grade it — the sentence sits
+    # AFTER the enumeration's closing marker and names no reader — so the numeral
+    # is asserted here, against the same `word`. It is the SCOPE of the three
+    # exclusions, so it is the same fact as the count and cannot drift from it.
+    assert re.search(rf"\bNOT in this {word}\b", extractor, re.I), (
+        f"§13.8's exclusion sentence no longer reads 'NOT in this {word}' — the "
+        f"three readers it excludes are excluded FROM the {word} customer-callable "
+        "sites, so its numeral IS this count and must move with it. A repair that "
+        "moves the count and leaves this sentence reds here instead of contradicting "
+        "itself two sentences apart."
     )
 
 

@@ -2794,5 +2794,5 @@ the rot the paragraph before this one is about.
 **Gates at this change.** `tests/test_7948_about_object_read_sites.py` 61 passed ·
 `tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs`, `test_12184_shifted_cites`,
 `test_substrate_map`, `test_7949_capstone_measure`, `test_13098_cypher_inventory` (`TORTOISE_CYPHER_DOC_PIN=1`) and
-`test_ci_selection` 947 passed, 1 skipped · `tools/cypher_inventory.py --check` 25 pins ·
+`test_ci_selection` 948 passed, 0 skipped (measured at this head) · `tools/cypher_inventory.py --check` 25 pins ·
 `tools/hosted_api_cite_census.py --check` every stated figure · `tools/ci_selection.py --integrity` clean.
