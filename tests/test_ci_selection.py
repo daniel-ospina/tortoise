@@ -10808,11 +10808,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # constants actually implement them. ⛔ Each arm's cut-to-verb span is its TWO GAPS plus the
     # negation that sits between them, and the gaps are the pattern's own code — `{0,400}` then
     # `{0,80}` in the ACTIVE arm, `{0,20}` then `{0,40}` in the PASSIVE one. ⛔ NO DERIVED SPAN IS
-    # STATED HERE, deliberately: four successive rounds restated one and EACH was measurably wrong —
-    # the first held only for the shortest negation, the second dropped the negation itself out of
-    # the sum, and the third was off by one against the very gap quoted beside it. The span is
-    # arithmetic; this block's subject is prose that re-states arithmetic, so the gaps are named and
-    # the span is not. Read it off the pattern if you need the number.
+    # STATED HERE, deliberately: this family's span has been restated and measurably wrong in more
+    # than one round — each repair is on this line's git history, with the figure it corrected and
+    # the way it was wrong. The span is arithmetic; this block's subject is prose that re-states
+    # arithmetic, so the gaps are named and the span is not — and no COUNT of those rounds is stated
+    # either, because a count is a derived figure of the same kind. Read the span off the pattern if
+    # you need the number.
     # The one property that IS asserted: the ACTIVE bound is wide enough for the negated-change
     # verbs below and the PASSIVE one names the cut in the sentence at all, which the fixtures here
     # drive in BOTH orders rather than promise. The pronoun form is scoped by SUBJECT rather than by
