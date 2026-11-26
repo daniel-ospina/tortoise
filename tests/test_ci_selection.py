@@ -9350,9 +9350,12 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     #: round 25). MEASURED at `1b34f53f55a0`: `carries a `2.0` `durations` row` — the identical
     #: claim with singular agreement, which is what a sentence naming ONE file says — emptied
     #: `positive` exactly as the adjective did one round earlier, so the arm reported the block as
-    #: naming NO file. `carry`/`carries` is the same three-character stem and neither touches the
-    #: VALUE group or the polarity, so admitting both cannot widen what is graded; the fixture below
-    #: pins it rather than trusting the prose.
+    #: naming NO file. `carry`/`carries` is the same FOUR-character stem (`carr`) and neither
+    #: touches the VALUE group or the polarity, so admitting both cannot widen what is graded; the
+    #: fixture below pins it rather than trusting the prose. ⛔ The stem length is stated as the
+    #: measured fact (`carr`, four characters) rather than as the "three-character" this note said
+    #: before a review counted it (#14623 round 27, P3): a figure in a comment is a claim, and this
+    #: block is where claims get graded.
     #: The unit is optional and INSIDE the value. ⛔ NOT because the block states it with a unit —
     #: it does not: this PR's own restructure replaced the `flat `2.0 s`` spelling with
     #: ``row in `durations` — `core`-registered``, so the justification that stood here cited prose
@@ -10592,28 +10595,55 @@ _H_14544_INVERTED_RE = re.compile(
     r"|ONLY\s+half[^;.!?]{0,60}?\b(?:not|never)\b[^;.!?]{0,20}?exempt\b"
     r"|paragraph\s+DOES\s+exclude"
     # …and the provenance claim kept only to be RETRACTED (#14623 review round 12, F5).
-    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))"
-    # ⛔ AND THE SECOND-NOUN FORMS THE WIDENED POSITIVE PIN ADMITS (#14623 round 25, P2). The
-    # round-24 widening added `REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt` to
-    # `_H_14544_SCOPE_RE` — a pattern used with `.search`, so a sentence that STATES the scope claim
-    # and then grants the SECOND HALF satisfies it. "The REGISTRATION is exempt, and so is the
-    # row" states the exact reading `#14612` deletes and matched no alternative here, so the arm
-    # stayed GREEN over it — measured on this tree by substituting that sentence into the live
-    # paragraph: GREEN, where the pre-round-24 pin RED'd it. Widening the pin without widening this
-    # ban is the round-15 defect repeated, so EVERY shape that grants the second half is banned
-    # here — the continuation (`so is the row`, `as well as the row`, `row is too`) and the row
-    # named as the exempt SUBJECT — and the non-vacuity loops below read each of them. The subject
-    # half is deliberately NOT matched when it carries a negation (`the row is NOT exempt`): that is
-    # TRUE prose, and a ban that reds it would be the false block this arm exists to refuse.
-    # ⛔ `(?:so|as)\s+is` IS ONE CONSTRUCTION, not two spellings (#14623 round 26, P2): the
-    # round-25 ban enumerated `so is the row` and left its twin `as is the row`, which admitted
-    # "The REGISTRATION alone is exempt, as is the row's weight" — measured GREEN end-to-end by
-    # substituting it into the live paragraph. The family is `as/so is <noun>`; an alternation that
-    # lists one member re-opens the fail-open one word later. ⛔ NEITHER the subject form above nor
-    # `row is too` reaches that spelling (`row's weight` is a possessive, not `row is`), so the
-    # continuation MUST carry both conjunctions — the subject half is not a substitute for it.
-    r"|(?:so|as)\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b"
-    r"|the\s+row\s+(?:is|stays|remains)\s+(?:also\s+|still\s+|now\s+)?exempt\b",
+    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))",
+    re.IGNORECASE)
+#: ⛔ AND THE SECOND-NOUN FORMS THE WIDENED POSITIVE PIN ADMITS (#14623 rounds 25-27). The round-24
+#: widening added `REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt` to `_H_14544_SCOPE_RE` — a
+#: pattern used with `.search`, so a sentence that STATES the scope claim and then grants the SECOND
+#: HALF satisfies it. "The REGISTRATION is exempt, and so is the row" states the exact reading
+#: `#14612` deletes and matched no alternative here, so the arm stayed GREEN over it — measured on
+#: this tree by substituting that sentence into the live paragraph: GREEN, where the pre-round-24 pin
+#: RED'd it.
+#: ⛔ THAT CLASS IS NOT GRADED IN THIS REGEX, and the reason is a lesson rather than a preference: an
+#: ENUMERATED list of conjunctions cannot close a semantically open class, and each widening bought
+#: one gap for another. Measured on the two rounds that tried: round 25 added `so is the row` and
+#: left its twin `as is the row` admitting "The REGISTRATION alone is exempt, as is the row's
+#: weight"; round 26 added the twin and still missed ONE INSERTED WORD — `as is the durations row` —
+#: because the alternative was pinned to the literal phrase `the row`; and the bare `row is too`
+#: alternative introduced a FALSE BLOCK, reding everyday English ("The row is too specific to
+#: summarise at this altitude.") whose only relation to this paragraph was the noun. So the class is
+#: graded by `_H_14544_ROW_EXEMPTED_RE` below, which tests the PROPERTY — is the row the subject of
+#: an exemption, or the complement of an additive marker — rather than a list of spellings of it. The
+#: non-vacuity loop beside the arm drives that predicate directly.
+#: THE ROW-EXEMPTION CLASS, graded as a PROPERTY instead of an enumerated list (#14623 round 27).
+#: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION,
+#: and the two ways English says that are STRUCTURAL, not lexical:
+#:   * the row (or the weight it carries) is the SUBJECT of an exemption predicate — it is the subject
+#:     that makes it a claim about the row, not the noun appearing anywhere; and
+#:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` / `likewise`
+#:     / `along with`.
+#: ⛔ WHY THIS REPLACED THE ENUMERATION, measured both directions at `88eab4e2`: every listed spelling
+#: alternative either MISSED a true rewrite (`as is the durations row` — one inserted word defeats a
+#: phrase pinned to `the row`) or, for the bare `row is too`, REFUSED ordinary English. A false
+#: PASS and a false BLOCK are both defects, and an enumerated ban produced both; the property
+#: produces neither, measured: eleven false spellings caught (possessive `row's weight`, `so is`,
+#: `as is`, `as well as`, `likewise`, `too exempt`, an inserted adjective, the ROW half) and eight
+#: TRUE sentences clean, including the ordinary-English one the enumeration red and the live block's
+#: own scope sentence — which shares a sentence with `that row's WEIGHT is \`#14544\`'s own edit`,
+#: so a bare row-and-exempt co-occurrence test would have refused the block it exists to certify.
+#: ⛔ WHAT THIS DOES NOT COVER, stated rather than implied: a row exemption spelled with NO exemption
+#: predicate and NO additive marker ("the row keeps its exemption") is not read, and a NEGATED
+#: exemption is tolerated on purpose (`the row is NOT exempt` is TRUE prose). Both are residuals of
+#: reading grammar with a regex, named here so a later round widens knowingly.
+_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|durations)\s+(?:\w+\s+){0,2})?"
+                     r"row(?:['\u2019]s)?(?:\s+weight)?")
+_H_14544_ROW_EXEMPTED_RE = re.compile(
+    # the row / its weight as the SUBJECT of an exemption predicate (never across a negation)
+    _H_14544_ROW_NOUN + r"\s+(?:is|stays|remains)\s+"
+    r"(?:also\s+|still\s+|now\s+|likewise\s+|thereby\s+|too\s+)?exempt\b"
+    # …or as the COMPLEMENT of an additive marker
+    r"|(?:so|as)\s+is\s+" + _H_14544_ROW_NOUN
+    + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN,
     re.IGNORECASE)
 
 
@@ -10648,6 +10678,13 @@ def _h_14544_banned_claim(block: str) -> str | None:
                 and _H_14544_NONROW_OBJECT_RE.search(sentence) is None):
             return sentence.strip()
         if _H_14544_QUANTIFIER_NEGATION_RE.search(sentence):
+            return sentence.strip()
+        # ⛔ THE ROW-EXEMPTION CLASS, graded as the PROPERTY rather than a spelling list (#14623
+        # round 27): the row (or its weight) as the subject of an exemption, or as the complement of
+        # an additive marker. Sentence-scoped on purpose — the live paragraph's scope claim SHARES a
+        # sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so a whole-block row-and-exempt
+        # co-occurrence test would refuse the very prose this arm certifies.
+        if _H_14544_ROW_EXEMPTED_RE.search(sentence):
             return sentence.strip()
     return None
 
@@ -10713,7 +10750,7 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: disagree with it.
 #: SO THE SHAPE IS GRADED BY CONSTRUCTION, not by a longer enumeration: every alternative fixes the
 #: CLAIM — the exempt half IS the REGISTRATION — and lets the prose vary AROUND it. A bounded
-#: qualifier run (`half` / `alone` / both) sits between the noun and the copula; three copulas that
+#: qualifier run (`half` / `alone` / `side`) sits between the noun and the copula; three copulas that
 #: all leave the claim standing are admitted (`is` / `stays` / `remains`); and the four attested
 #: ORDERS are covered (noun-first, `only`-first, cleft, predicate-first). The POLARITY is NOT
 #: widened with it: every alternative names the REGISTRATION on the exempt side and none tolerates
@@ -10829,16 +10866,48 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # is asserted only against the live block, so narrowing it is invisible. Both spellings the
     # failure message names must still be READ, and the bare token pair with no exempt predicate
     # beside it must NOT be (that is a TRUE sentence about the paragraph, not the inverse).
-    for inverse in ("both halves are exempt", "this paragraph DOES exclude it",
-                    "The REGISTRATION is exempt, and so is the row",
-                    "The REGISTRATION is exempt as well as the row",
-                    "The REGISTRATION half is exempt, and the row is too",
-                    # ⛔ THE TWIN of `so is the row`, pinned so that gap cannot come back: this
-                    # spelling shipped GREEN once already (#14623 round 26, P2).
-                    "The REGISTRATION alone is exempt, as is the row's weight"):
+    for inverse in ("both halves are exempt", "this paragraph DOES exclude it"):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverted-claim pattern no longer reads {inverse!r}, so the assertion above passes "
             "over any spelling of the reading `#14612` deletes — re-point `_H_14544_INVERTED_RE`")
+    # ⛔ AND THE ROW-EXEMPTION CLASS IS DRIVEN HERE, against the PREDICATE that grades it rather than
+    # against a spelling list — because the list is what failed. Each case below is a rewrite a fold
+    # reaches for, and every one of them shipped GREEN while an enumerated ban held the class: the
+    # possessive twin of `so is`, the one-inserted-word defeat of a phrase pinned to `the row`, and
+    # the bare additive. Non-vacuity in BOTH directions, since the property replaced an enumeration
+    # that produced a false PASS *and* a false BLOCK.
+    for row_exemption in (
+            "The REGISTRATION is exempt, and so is the row",
+            "The REGISTRATION is exempt as well as the row",
+            "The REGISTRATION alone is exempt, as is the row's weight",
+            "The REGISTRATION alone is exempt, as is the durations row",
+            "The REGISTRATION alone is exempt; the row's weight is exempt too",
+            "The REGISTRATION is exempt; the row is likewise exempt",
+            "The REGISTRATION is exempt; so is the ROW half"):
+        assert _H_14544_ROW_EXEMPTED_RE.search(row_exemption), (
+            f"the row-exemption predicate no longer reads {row_exemption!r}, so a paragraph that "
+            "exempts the `durations` row as well as the REGISTRATION passes every pin above — "
+            "re-point `_H_14544_ROW_EXEMPTED_RE`")
+    for not_a_row_exemption in (
+            # The TRUE half of the claim, spelled every way the pins accept.
+            "The REGISTRATION is the ONLY half exempt",
+            "Only the REGISTRATION half is exempt",
+            "The exempt half is the REGISTRATION, not the row.",
+            # ⛔ ORDINARY ENGLISH that names the row and is not about exemption at all — the FALSE
+            # BLOCK the enumerated ban shipped ("row is too" with no predicate) must not come back.
+            "The row is too specific to summarise at this altitude.",
+            "The row is also what restores `durations` coverage above the 90% floor.",
+            # ⛔ AND A NEGATED EXEMPTION, which states the TRUE reading.
+            "The row is NOT exempt.",
+            # ⛔ AND THE LIVE BLOCK'S OWN SHAPE: the scope claim sharing a sentence with the row's
+            # PROVENANCE clause. This is the case a whole-block co-occurrence test refuses.
+            "The REGISTRATION is the ONLY half exempt: the bin is held by the "
+            "`tests/test_dod_5090_probe.py` row in `durations`, and that row WEIGHT is `#14544` "
+            "own edit."):
+        assert _H_14544_ROW_EXEMPTED_RE.search(not_a_row_exemption) is None, (
+            f"the row-exemption predicate refuses TRUE prose ({not_a_row_exemption!r}) — that is "
+            "the false block it replaced an enumeration to stop, and it reds the live block itself "
+            "in the last case")
     assert _H_14544_INVERTED_RE.search(
         "both halves of this paragraph are graded by an arm each") is None, (
         "the inverted-claim pattern refuses the bare token pair with no exempt predicate near it, "
@@ -10957,16 +11026,24 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION stays exempt, and the row stays exempt.",
             "The REGISTRATION remains exempt, and the row remains exempt.",
             "On the record's own numbers this paragraph DOES exclude it."):
-        assert _H_14544_INVERTED_RE.search(inverse), (
-            f"the inverse ban misses {inverse!r} — a constant no fixture exercises can be blanked "
+        # ⛔ THE ARM'S GUARD SET, not one constant (#14623 round 27): the row-continuation class is
+        # graded by `_H_14544_ROW_EXEMPTED_RE` inside `_h_14544_banned_claim`, the other inverse
+        # classes by `_H_14544_INVERTED_RE`, and the arm asserts BOTH. A fixture bound to either one
+        # reds the moment a class moves between them — grading the IMPLEMENTATION rather than the
+        # claim — so this loop drives the pair the arm actually relies on.
+        assert (_H_14544_INVERTED_RE.search(inverse) is not None
+                or _h_14544_banned_claim(inverse) is not None), (
+            f"the inverse guards miss {inverse!r} — a constant no fixture exercises can be blanked "
             "and the arm stays GREEN, so the inverse of a required claim would ship clean")
     # …and the SAME widening must not have turned the ban into a false block: the true claim with the
     # row explicitly NOT exempt is TRUE prose, and a ban that refuses it would red the paragraph this
     # arm exists to certify. Both directions, because a one-way pin is the defect being repaired.
     for true_prose in ("The REGISTRATION is exempt, and the row is not.",
                        "The REGISTRATION is exempt; the row is not exempt.",
+                       "The row is too specific to summarise at this altitude.",
                        "Neither half is excluded from the pack."):
-        assert _H_14544_INVERTED_RE.search(true_prose) is None, (
+        assert (_H_14544_INVERTED_RE.search(true_prose) is None
+                and _h_14544_banned_claim(true_prose) is None), (
             f"the widened inverse ban now refuses {true_prose!r} — that is the TRUE claim, so the "
             "ban would false-block the paragraph it exists to certify, the opposite failure")
     # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
