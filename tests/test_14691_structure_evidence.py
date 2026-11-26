@@ -763,8 +763,8 @@ def test_the_kind_word_table_is_DERIVED_from_the_declared_groups():
     module = _load_score_module()
     assert set(module._KIND_OF_GROUP) == module._DECLARED_GROUPS, (
         module._DECLARED_GROUPS, set(module._KIND_OF_GROUP))
-    assert module._KIND_WORDS == {module._squash(kind)
-                                  for kind in module._KIND_OF_GROUP.values()}, (
+    assert {module._squash(kind)
+            for kind in module._KIND_OF_GROUP.values()} == module._KIND_WORDS, (
         "the kind-word set is not the derivation of the table it claims to be")
     assert module._KIND_WORDS, module._KIND_WORDS
     with pytest.raises(ValueError, match="no kind word"):
