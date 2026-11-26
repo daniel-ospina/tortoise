@@ -1262,15 +1262,26 @@ def _door_findings() -> list[dict]:
         if "not found" in text:
             not_found[name] = w.get("id")
     if not_found:
+        # ⛔ "FOR EVERY NODE" IS A QUANTIFIER, SO IT MUST COUNT (#14691 review,
+        # round 12, P3-1). The sentence was a literal: with 5 of 7 `list_topics`
+        # replies rewritten `not found` → `was found`, the artifact claimed EVERY
+        # node failed while its own `reported_not_found` held two. The sentence is
+        # now derived from the two populations it quantifies over, and it says "for
+        # all N of the M asked about" rather than a bare "every".
+        asked_total = sum(1 for w in witness.values()
+                          if (w.get("graph_overview_topics") or {}).get("reply")
+                          is not None or "not found" in str(
+                              (w.get("graph_overview_topics") or {}).get("reply")))
         found.append({
             "id": "D5",
             "question": "does `graph_overview(section='topics', entity_id=…)` "
                         "resolve an entity that `get_entity` and "
                         "`explore_connections` both resolve?",
-            "answer_over_mcp": "NO — it answers 'Entity … not found' for every "
-                               "node asked about, including nodes those two doors "
-                               "return",
-            "evidence": {"reported_not_found": not_found},
+            "answer_over_mcp": (f"NO — it answers 'Entity … not found' for "
+                                f"{len(not_found)} of the {asked_total} nodes asked "
+                                f"about, including nodes those two doors return"),
+            "evidence": {"reported_not_found": not_found,
+                         "nodes_asked": asked_total},
         })
     return found
 

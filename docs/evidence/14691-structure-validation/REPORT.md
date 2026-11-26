@@ -342,7 +342,7 @@ Every one of these was measured through MCP; none was worked around.
 | **D1** | is this structural edge oriented `src → dst`? | **NO — the edge and its type are visible, its direction is not.** | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
 | **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **NO — it returns `[]` for a node that has edges, so a structurally-connected entity reads as isolated.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **NO — a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
-| **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for every node asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
+| **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for 7 of the 7 nodes asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
 | **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** | `out/readback.json` → `unresolved_elements` (2 rows) and `elements` (32 walks, `root_kind`); the *retrieval* half is a different artifact — `out/t6-score.json` → `A5_retrieval.probes[].walk_root_is_entity`, false on 5/5. ⚠️ The **walked** population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). ⚠️ An earlier revision wrote `elements[].walk_root_kind`, a field that exists in neither file. Re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
 
@@ -825,6 +825,27 @@ verified the CLAIM sentence, and filed four survivors — each byte-neutral:
 - **D5's "for every node asked about"** — a quantifier with no population beside it
   is unfalsifiable, so a claim about "every" now requires a non-empty node
   population in the evidence.
+
+### 8.14 What the twelfth round closed (a quantifier, a tally, a route, a query)
+
+Four survivors, each a claim that its arm verified one level too loosely:
+
+- **D5's "for every node asked about"** — a LITERAL sentence beside a derived
+  `reported_not_found`. With five of seven `list_topics` replies rewritten, the
+  artifact could claim every node failed while its own evidence held two. The
+  sentence is now derived: *"for N of the M nodes asked about"*, with both
+  populations in the evidence.
+- **D3's `namespaced_returned`** — bounded by positivity and the graph's edge total,
+  which let `product-strategy:product` 2 → 9 through beside a probe row saying 2, and
+  let a kind no pack defines (`foo:code`) through on a `":" in kind` test. Every
+  count is now the row count of its OWN namespaced probe.
+- **D1's route** — "some module's text contains it" admitted a PUT packs route at
+  the same character length, and admitted the right one on a docstring rather than
+  the decorator that serves it. The route must now match a served `@app.<verb>`
+  pattern.
+- **D6's citation range** — ending at the `def` line and its comments kept the suite
+  green while the `MATCH` the sentence quotes sat outside the cited range; the range
+  must carry the query.
 
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some

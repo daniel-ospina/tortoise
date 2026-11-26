@@ -4046,22 +4046,41 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
     assert route, d1["the_read_that_can"]
     # the route is real if the module that owns the read spells it — a fabricated
     # route would send a reader looking for an endpoint nothing serves.
-    owners = [path for path in (REPO / "tortoise").glob("*.py")
-              if route.group(1) in path.read_text(errors="ignore")]
-    assert owners, (
-        f"D1 names the route {route.group(1)}; no module under tortoise/ spells it")
+    # ⛔ AND IT MUST BE a SERVED ROUTE, spelling and all (#14691 review, round 12,
+    # P3-3). "some module's text contains it" admitted a PUT packs route at the same
+    # length, and admitted the right one on a DOCSTRING rather than the decorator
+    # that serves it.
+    served = {}
+    for path in (REPO / "tortoise").glob("*.py"):
+        for line in path.read_text(errors="ignore").splitlines():
+            hit = re.match(r"\s*@app\.(?:get|post|put|delete|patch)\(\"([^\"]+)\"",
+                           line)
+            if hit:
+                served[hit.group(1)] = path.name
+    assert served, "no @app route decorators found under tortoise/"
+    wanted = re.sub(r"\{[\w]+\}", lambda m: m.group(0), route.group(1))
+    match = [pattern for pattern in served
+             if re.fullmatch(re.sub(r"\{\w+\}", r"[^/]+", pattern), wanted)]
+    assert match, (
+        f"D1 names the route {route.group(1)}; the served routes are "
+        f"{sorted(served)[:6]}…")
 
-    # ── D3: the namespaced counts are the probes' own
+    # ── D3: the namespaced counts are the PROBES' OWN, kind by kind
     probes = readback["bare_kind_probes"]
     namespaced = findings["D3"]["evidence"]["namespaced_returned"]
     assert namespaced, "D3 records no namespaced hits at all"
-    total_edges = sum(score["edges_by_predicate"].values())
-    assert sum(namespaced.values()) <= total_edges, (
-        f"D3 claims {sum(namespaced.values())} namespaced hits on a graph with "
-        f"{total_edges} edges")
-    for kind, count in namespaced.items():
-        assert isinstance(count, int) and count > 0, (kind, count)
-        assert kind in (REPO / "tortoise" / "pack_registry.py").read_text() or ":" in kind
+    # ⛔ DERIVED FROM THE PROBE CALLS, NOT BOUNDED (#14691 review, round 12, P3-2).
+    # A positivity test plus an edge-total bound let `product-strategy:product`
+    # 2 → 9 through — while the very probe row beside it said 2 and REPORT §4 said
+    # "→ 2 rows" — and let a KIND no pack defines (`foo:code`) through on `":" in
+    # kind`. Each count is the number of rows its own namespaced probe returned.
+    tallies = {}
+    for section in ("object_kinds", "subject_kinds"):
+        for kind, call in (readback.get(section) or {}).items():
+            tallies[kind] = len(_rows(call.get("reply")))
+    derived = {kind: n for kind, n in tallies.items() if n}
+    assert namespaced == derived, (
+        f"D3's namespaced counts are not the probes': {namespaced} vs {derived}")
     assert all(call.get("ok") is not False for call in probes.values())
 
     # ── D6: the citation must name the read, not merely mention the predicate
@@ -4071,6 +4090,12 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
     assert re.search(r"(?:async )?def _get_owned_entities", lines), (
         f"D6 cites {path}:{start}-{end} for `_get_owned_entities`, and that range "
         f"does not define it: {lines[:120]!r}")
+    # ⛔ AND THE RANGE MUST CARRY THE QUERY IT IS CITED FOR (#14691 review, round
+    # 12, P3-4): a range ending at the `def` line and its comments kept 92 passed
+    # while the `MATCH` the sentence quotes was outside it.
+    assert "MATCH" in lines.upper(), (
+        f"D6 cites {path}:{start}-{end} for its MATCH pattern; those lines contain "
+        f"none: {lines[:160]!r}")
 
     # ── D5: "for every node asked about" must be the POPULATION it measured
     d5 = findings.get("D5")
