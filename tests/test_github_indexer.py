@@ -3364,7 +3364,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # above all four twice — `#14596` (+29 above all
     # four, and a further +9 above the `SET n += $props` row alone, at `3bbe5567df`) and `#14567`
     # (+40 on all four, at `939e37f664`) — so at `a29b5f24ce95` they read `23110` /
-    # `56446` / `56598` / `57113` at that base, and the table below is re-cut to those. The branch's own
+    # `56446` / `56598` / `57113`, and the table below is re-cut to those. The branch's own
     # `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
     # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
@@ -3394,28 +3394,6 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `git show <sha>:tortoise/sdk.py | grep -n` probes above name. Every row's SPAN is
     # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
     # than being re-pointed at neighbouring code.
-    # ⛔ RE-DERIVED AT THE `origin/main` MERGE THAT PUT THIS BRANCH BACK ON CURRENT `main`
-    # (#14587): `main` kept growing the module while this branch waited, and THIS branch
-    # carries one insert of its own BELOW three of the four rows, so the two regions moved by
-    # DIFFERENT amounts and a single offset would have re-pinned the wrong function. Measured
-    # at the MERGED tree, never carried from either side of the conflict:
-    #   `git diff --numstat origin/main...HEAD -- tortoise/sdk.py` -> `28  0`, ONE hunk at
-    #   `@@ -51573,0 +51574,28 @@` — so the delta is **0** above `update_knowledge` and
-    #   **+28** below it. The `+28` is the consistency check on this measurement, never its
-    #   input: each row below is exactly `+28` of `origin/main`'s own reading except
-    #   `update_knowledge`, which is unchanged because the insert sits below it.
-    # Each address was re-found here by its own pinned FIRST-line text — and, for the arm, by
-    # its own LAST-line text `continue`, because the arm's start text occurs TWICE in the
-    # module (the admission arm this row pins and a later hint-message expression that is NOT
-    # an arm), so the start text alone would admit either occurrence. Every row's SPAN is
-    # unchanged (176, 3, 10 and 1 lines), i.e. the addresses moved WITH the statements rather
-    # than being re-pointed at neighbouring code, and the prose citations in this file and in
-    # `tortoise/indexer/github_indexer.py` are re-cut to the same values.
-    # ⛔ THE `#13450` (`ov-14600`) PARAGRAPH BELOW IS KEPT AS HISTORY AND ITS FIGURES ARE
-    # SUPERSEDED HERE, not deleted: it measured `origin/main`'s OWN tree at the merge that
-    # carried `ov-14600` (`+6`/`+25` relative to ITS base), and `main` has moved this module
-    # again since. Its `56502`/`56654`/`23117`/`57169` readings are therefore the DELTA CHECK
-    # on the measurement above — `origin/main` at THIS merge — never the tree being pinned.
     # ⛔ RE-DERIVED ONCE MORE on the merge that carries #13450 (`ov-14600`): this branch's own
     # `sdk.py` docstring inserts sit at `:10784` (+6), `:29187` (+11) and `:37064` (+8), so the
     # two regions the rows live in moved by DIFFERENT amounts — **+6** above `update_knowledge`
@@ -3426,6 +3404,23 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # unchanged (176, 3, 10 and 1 lines), i.e. the addresses moved WITH the statements rather than
     # being re-pointed at neighbouring code, and the prose citations in this file and in
     # `tortoise/indexer/github_indexer.py` are re-cut to the same values.
+    # ⛔ RE-DERIVED AGAIN at the merge that carries `reconcile(14600)` (`c1c8df1a`, which is
+    # `main`'s own single-parent commit adding 25 `#13450` docstring lines at `:10784` / `:29187` /
+    # `:37064`). The paragraph above is `main`'s reading of ITS head and is superseded here, not
+    # wrong: its `56502`/`56654`/`56663`/`57169` and its `+6`/`+25` split all describe
+    # `HEAD == origin/main`, which is no longer what merges. Measured at THIS merged tree
+    # (`grep -n` on the file, each row located by its OWN first-line text and confirmed by its
+    # span): the four rows land at `56530` / `56682` / `23117` / `57197`, with the arm's `continue`
+    # at `56691`. Every span is unchanged (3, 10, 176 and 1 lines) — the addresses moved WITH the
+    # statements rather than being re-pointed at neighbouring code — and the split is `+28` below
+    # `update_knowledge` and `**+0**` above it (`23117` unmoved), which is the consistency check on
+    # the measurement and not its input: `git diff --numstat c1c8df1a -- tortoise/sdk.py` is
+    # `28  0` in ONE hunk (`@@ -51573,0 +51574,28 @@`), a pure insertion BELOW `update_knowledge` —
+    # this PR's own `#14582` block.
+    # ⛔ The un-supersede arm's start text still occurs TWICE at this merged head (`56682`, the
+    # admission arm this row pins, and `56721`, the hint-message condition — a string expression,
+    # not an arm), so the row keeps being located by its `continue` terminator (`56691`) and never
+    # by the start text alone.
     ("sdk.py", 56530, 56532): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56682, 56691): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

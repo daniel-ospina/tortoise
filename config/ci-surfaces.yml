@@ -70,6 +70,18 @@ version: 1
 # moves with every merge that adds a test file and "more than `main`" is zero the moment this
 # branch merges, so the count is a HISTORY bound to a sha inside the fence below rather than a
 # standing claim about this tree.
+# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a` folded in, carrying
+# `#14548`'s residue RATCHET (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
+# non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
+# `#14574`'s drift-reporter row, `#14552`'s point-vector-keys row, `#14592`'s operating-model
+# evidence row, `#14597`'s expansion-fusion row and `#14607`'s two `core` rows
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb packs the pool
+# into two bins: nine at 827.4 s (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so
+# `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.5 = 2.0302), so the two agree by construction rather than by a hand re-read.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
+# `main`'s own partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
 # `fast_pool()`'s FILE COUNT moves with every merge that adds a test file, so a live figure here
 # would red every such fold — and a figure that reds gets carried rather than re-derived, which is
@@ -102,7 +114,15 @@ version: 1
 # branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
 # describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
-# re-pointed.
+# re-pointed. ⛔ AND IT ARRIVED SPLICED A FOURTH TIME AT THE `origin/main` `c1c8df1a` FOLD, so the
+# same repair is applied again and recorded here: `merge=union` applied BOTH parents' hunks with no
+# marker, the second copy opening mid-sentence at "INTO, never carried from the branch…", and it
+# carried TWO things this deletion does not silently drop — a `#13450` row attributed to a lane
+# rather than to `main`, which the tree refutes (#13450 landed on `main` in `c1c8df1a` itself), and
+# **a LIVE pool census** ("holds 1339 files at this head against 1338 on `main`"), which is exactly
+# what `test_the_fast_shards_header_states_no_live_pool_census` reds on and what the fenced HISTORY
+# above exists to hold instead. Deleting the copy is therefore the repair, not a loss: the census is
+# a measurement of ONE tree that goes stale on the next fold, so it is not restated anywhere.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
