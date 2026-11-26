@@ -811,7 +811,13 @@ test('an alert with no recorded detail says so, in words, instead of showing an 
     'What', 'Kind', 'Newest', 'Age', 'Occurrences',
   ])
   assert.equal(detail.fields[1].value, 'Something happened on this Organization.')
-  assert.match(DETAIL_NO_DETAIL, /No further detail was recorded for this alert\./)
+  // ⛔ SCOPED TO THE FEED, never to the record. `_customer_details` strips every
+  // key outside its whitelist, so a row whose record holds `scope`/`id` (every
+  // `read_velocity` row) or `rule` arrives here as `{}` — "No further detail was
+  // RECORDED" would then be a false statement about the record, and the lead
+  // rendered directly beneath it says the opposite (round-5 review, P2).
+  assert.match(DETAIL_NO_DETAIL, /^The alert feed carries no further detail/)
+  assert.doesNotMatch(DETAIL_NO_DETAIL, /recorded/i)
 })
 
 test('an activity row explains in the detail view that nothing was DISABLED, not that nothing changed', () => {
@@ -910,11 +916,21 @@ test('the SHIPPED payload renders its measurements instead of claiming there are
   ])
   // `rule` is internal and `tier_relative` is a boolean about WHICH threshold
   // applied — neither may leak, even though both travel in the row.
+  //
+  // ⛔ PIN THE LABEL SET, not a substring of the serialized fields. The first
+  // version of this assertion greped for `'tier_relative'` and was INERT: the
+  // value renders as `true`, not as the key name, so adding
+  // `['tier_relative', 'Share of allowance']` to `DETAIL_FIELDS` leaked it and
+  // passed every suite (measured). A label set fails on that mutant and on any
+  // future key added to the allow-list without a decision.
   const full = detailOf(
     alert({ details: { ...shipped, rule: 'point_create', tier_relative: true } }), NOW,
   )
+  assert.deepEqual(full.extra.map((f) => f.label),
+    ['Measured', 'Measured count', 'Alert level', 'Over'])
   assert.ok(!JSON.stringify(full.extra).includes('point_create'))
-  assert.ok(!JSON.stringify(full.extra).includes('tier_relative'))
+  // Nothing renders as a bare boolean — the failure mode the label pin exists for.
+  assert.ok(!full.extra.some((f) => /^(true|false)$/.test(f.value)))
 })
 
 test('windowLabel speaks the same units as the row sentence it sits beside', () => {

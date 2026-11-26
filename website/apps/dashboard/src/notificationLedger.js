@@ -571,10 +571,15 @@ export function episodeOf(alert) {
  *     match to any row, and that the sentence was removed for exactly that
  *     reason. So two different keys crossing the same threshold in the same
  *     scope are ONE local identity;
- *   * the incident types — `suspend` / `auth_ip`, whose subject server-side is
- *     the RULE (`_alert_subject`) while the customer-facing message can repeat
- *     across rules. Two rules that render the same sentence are therefore one
- *     local identity.
+ *   * the incident types — `suspend` / `auth_ip`, for two different reasons:
+ *     `suspend`'s customer message is a CONSTANT, so every suspend row is one
+ *     local identity (server-side too — `_alert_subject` returns `()` for it, so
+ *     they are one episode); `auth_ip`'s subject IS its country, which its
+ *     message already names. Neither collides across rules; they collide by
+ *     REPEAT, which is why one identity can cover several bouts.
+ *
+ *     The collision-across-rules case belongs to the types whose subject is a
+ *     rule the message omits — see the ⚠️ note below.
  *
  *     ⚠️ `flag` / `review_needed` USED to be listed here. #14702 moved both to
  *     the ACTIVITY register (`EVENT_FLAG`/`EVENT_REVIEW: REGISTER_ACTIVITY`,
@@ -828,13 +833,21 @@ export const KIND_UNCLASSIFIED =
   'We could not classify this alert. Treat it as needing review.'
 
 //: The `details` keys this view renders, in the order a reader needs them: what
-//: was measured, against what level, over what period — then who/where, which
-//: only an `auth_ip` row carries.
+//: was measured, against what level, over what period.
 //:
 //: Mirrors `_CUSTOMER_DETAIL_KEYS` in `tortoise/abuse.py` MINUS `tier_relative`:
 //: that one is a boolean recording whether the alert level was a share of the
 //: Organization's own allowance, not a measurement — rendering `true` would be
 //: machine detail, and the row's own sentence already states it in words.
+//:
+//: ⛔ `country` / `ip` / `key_name` are RETAINED BUT NEVER SHIPPED. They predate
+//: #14702 and are NOT in `_CUSTOMER_DETAIL_KEYS`, so `_customer_details` strips
+//: them: `auth_ip` records the country as a COLUMN, which `_alert_dict` renders
+//: inside the message (`abuse.py`), never in `details`. They stay only because the
+//: API and this dashboard deploy INDEPENDENTLY — the same reverse race this module
+//: reasons about elsewhere — so a payload shaped by an older or newer server must
+//: not be silently dropped. If you are re-checking this list, re-check it against
+//: `_CUSTOMER_DETAIL_KEYS`, not against what looks plausible.
 const DETAIL_FIELDS = [
   ['surface', 'Measured'],
   ['count', 'Measured count'],
@@ -973,12 +986,14 @@ export function detailOf(alert, now = new Date()) {
     entry,
     fields,
     extra: shown,
-    // `'none'` — the row carries no further detail beyond what the view already
-    // shows, and the view must SAY so (the owner's "because I have no details it's
-    // just noise").
-    // `'undisplayable'` — a detail payload exists but none of it is customer-safe;
-    // claiming "nothing was recorded" there would be a false statement about the
-    // record, so it gets its own sentence.
+    // `'none'` — the FEED carries nothing further. Deliberately about the feed and
+    // not about the record: `_customer_details` strips every key outside its
+    // whitelist, so a `read_velocity` row (whose record holds `scope`/`id`) arrives
+    // here as `{}` — "nothing was recorded" would be false about a record that
+    // holds detail the server chose not to ship.
+    // `'undisplayable'` — a payload exists but none of it is renderable. Against
+    // the shipped feed this is now reachable only for a key no client knows yet: a
+    // `{rule: …}` shape cannot arrive (`rule` is stripped server-side).
     // `'shown'` — at least one customer-safe field is rendered.
     detailState: shown.length ? 'shown' : hasPayload ? 'undisplayable' : 'none',
   }
@@ -1050,7 +1065,8 @@ export const SAVE_FAILED =
 export const DETAIL_ACTION = 'Details'
 export const DETAIL_BACK = 'Back to notifications'
 export const DETAIL_TITLE = 'Notification detail'
-export const DETAIL_NO_DETAIL = 'No further detail was recorded for this alert.'
+export const DETAIL_NO_DETAIL =
+  'The alert feed carries no further detail for this alert.'
 export const DETAIL_UNDISPLAYABLE =
   'This alert carries machine detail that the dashboard does not display.'
 //: Scoped to the FEED on purpose. "Nothing else about this event was recorded"
