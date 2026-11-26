@@ -1491,9 +1491,6 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     for cwd, spec, label in _destination_probes(target, rel):
         if spec is None:
             # ⛔ A BOUNDARY THAT CANNOT BE ASKED IS "COULD NOT RUN" (2), never a permit
-            # (#14741 review, P2, measured). Naming the BOUNDARY, not the destination:
-            # the destination is fine, the repository entry on its path is the damage.
-            # ⛔ A BOUNDARY THAT CANNOT BE ASKED IS "COULD NOT RUN" (2), never a permit
             # (#14741 review, P2 + cycle 2 P1, measured). Naming the BOUNDARY, not the
             # destination: the destination is fine, the repository entry on its path is
             # the damage.
