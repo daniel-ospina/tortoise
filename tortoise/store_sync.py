@@ -443,11 +443,15 @@ def run_sweep(
 #: that is filed in the SAME sweep.
 #:
 #: ``409`` is deliberately NOT here. `POST /v1/sessions` answers 409 for TWO
-#: different things and the worker cannot tell them apart (`postCapture` keeps no
-#: headers, and its own rule forbids matching prose): the benign in-flight duplicate
-#: (`_CAPTURE_SESSION_IN_FLIGHT_DETAIL`, carries `Retry-After`) AND "Session
-#: recording is disabled for this team" — an org policy the user CAN reverse and
-#: which never clears by retrying. Treating the code as benign would report
+#: different things and the worker cannot tell them apart AT THIS DECISION POINT:
+#: `postCapture` keeps no headers, its own rule forbids matching prose, and although
+#: the in-flight 409's body carries a machine-readable `code` (#14700), nothing in
+#: this module CONSULTS one — `capture_spool.capacity_refusal` is
+#: `_parsed_refusal_code`'s only caller, and only for the 429. So the benign
+#: in-flight duplicate (`_CAPTURE_SESSION_IN_FLIGHT_DETAIL`, now the `message` of a
+#: typed body, carrying `Retry-After`) AND "Session recording is disabled for this
+#: team" — an org policy the user CAN reverse and which never clears by retrying —
+#: arrive indistinguishable. Treating the 409 as benign would report
 #: `capture: OK` for ever on a box whose recording is switched off, which is the
 #: exact false PASS this verdict exists to end. Surfacing it is the fail-CLOSED
 #: choice and it is self-clearing: an in-flight collision clears on the next sweep,

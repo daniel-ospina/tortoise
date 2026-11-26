@@ -475,10 +475,10 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
 # SIBLING "Session recording is disabled for this team/graph", an org policy no
 # amount of waiting clears — so only the `Retry-After` HEADER told them apart
 # (this sends `30`, the policy one none), and a log reader must KNOW that fact:
-# `reflect-hook` (`retryAfterS = headerRetry ?? bodyRetry`, no default) DOES
-# parse it, so `HTTP 409 retry_after=30s` names the raise site only to someone
-# holding that fact — nothing in the body could. The `code` is the branch key;
-# the message stays byte-identical so a legacy prose matcher keeps matching.
+# `reflect-hook` (`retryAfterS = headerRetry ?? bodyRetry`, no default) DOES parse
+# it, so `HTTP 409 retry_after=30s` names the raise site — nothing in the body
+# could. The `code` is the branch key. ⛔ That expression is agent-infra's hook
+# source, in NO tree of this repo; #14700 quotes it at `reflect-hook.ts:398-401`.
 _CAPTURE_SESSION_IN_FLIGHT_CODE = "capture_session_in_flight"
 _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S = 30
 
