@@ -3113,28 +3113,78 @@ _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNOR
 # and are the same instruction with a filler lead. So the class is closed at the
 # FRONT ("begins with a sequencer") and the object test is the bound — not
 # another filler word in the list below.
+#
+# ⛔ THAT OBJECT TEST IS A **PROXY**, AND A REVIEW SHOWED THE PROXY LEAKS. "Names a
+# determiner" is not "adds an action": the dominant English spelling of this
+# filler is a COPULAR FRAME that carries `the`/`your` and interposes nothing —
+# `then the only thing left to do is restart`, `then your only remaining step is
+# to restart`, `then on your machine restart` — all GREEN while genuinely
+# inverted (measured, #14679 review cycle 55). `_FILLER_FRAME_RE` is the second
+# bound: a remainder that is a copular frame, or that opens with a locative and
+# names no confirmation, is still the cue's own lead-in. And the LOCATIVE half is
+# why the object test no longer admits a bare `that` pronoun — `then all that is
+# left is to` and `then all that's left is to` are the same sentence, and the
+# hyphen-free twin was GREEN while its contraction is a pinned RED row.
+#
+# ⛔ AND THE FRONT IS A LIST TOO, SO IT CANNOT BE COMPLETE — stated plainly rather
+# than claimed closed: `later`, `thereafter`, `once more`, `at that point` and
+# `only at the end` were all GREEN before this cut (measured, same review) and are
+# members now, but the next unlisted sequencer re-opens exactly this. What the
+# pin DOES guarantee is that the plain forms below are graded, and every member
+# it gains takes a row with it; a member it lacks is a measured residual, not a
+# silent one.
 _SEQUENCER_LEAD_RE = re.compile(
     r"^(?:(?:and|but|so|only)\s+)?"
-    r"(?:then|next|afterwards?|subsequently|finally|lastly"
-    r"|after\s+that|after\s+which|which)\b", re.IGNORECASE)
+    r"(?:then|next|afterwards?|after\s+that|after\s+which|which"
+    r"|subsequently|finally|lastly|later|thereafter|once\s+more"
+    r"|at\s+that\s+point|only\s+at\s+the\s+end)\b", re.IGNORECASE)
 
 #: A determiner/possessive: the clause names something, so it is an instruction.
-#: `that` is excluded when it is the `that is` contraction (`that's left …`,
-#: which is filler, not an object).
+#: ⛔ A BARE `that` IS NOT ONE — it is the relative/pronoun spelling of the same
+#: filler, and admitting it made the UNCONTRACTED twin of a pinned RED row pass
+#: (`then all that is left is to restart` GREEN, `then all that's left is to …`
+#: RED). The `_FILLER_FRAME_RE` arm below is what closes that shape: a
+#: demonstrative reading of `that` is only an object when a word follows it, and
+#: a frame noun before it already routes the clause to the frame arm. Measured:
+#: re-admitting bare `that` changes **0** rows now that the frame arm exists, so
+#: a narrower `that <word>`-minus-frame-verbs form was written, measured at 0
+#: rows too, and DROPPED rather than shipped as unpinned dead weight.
 _OWN_OBJECT_RE = re.compile(
-    r"\b(?:the|a|an|this|these|those|your|our|its|their|my|his|her|that(?!['\u2019]s))\b",
+    r"\b(?:the|a|an|this|these|those|your|our|its|their|my|his|her"
+    r"|that(?!['\u2019]s))\b",
+    re.IGNORECASE)
+
+#: A COPULAR FILLER FRAME, or a locative lead-in — the clause is still the cue's
+#: own preamble. `the only thing left to do is restart` / `your only remaining
+#: step is to restart` / `on your machine restart`. Deliberately narrow: an
+#: ordinary imperative (`then save the file`, `then run a query`) matches none of
+#: these and stays gradable, which is the DECLARED residual.
+_FILLER_FRAME_RE = re.compile(
+    # a FRAME NOUN (`thing`, `step`, `left`, `remains`) introduces the frame —
+    # a bare `the … are` is not one: `confirm the tools ARE actually there`
+    # carries a determiner and a copula and is a CONFIRMATION, not filler. My
+    # first cut of this arm matched `the` … `are` and flipped FOUR declared-RED
+    # `Then confirm the tools …` rows to GREEN, which the table caught.
+    r"\b(?:the|your|only|last|remaining|all)\b[\w\s'\u2019-]{0,40}?"
+    r"\b(?:thing|step|left|remains?)\b"
+    # …or a `be to` infinitival lead-in (`the next move is to restart`)
+    r"|\b(?:is|are|was|were)\s+to\b"
+    # …or a clause that OPENS with a locative and names no confirmation
+    r"|^(?:on|in|at|inside|within|from|under)\b",
     re.IGNORECASE)
 
 
 def _is_continuation_fragment(clause: str) -> bool:
     """Is `clause` a sequencer continuation rather than an instruction of its own?
 
-    Two ways in: the whole clause is drawn from the filler/sequencer class
-    (`_SEQUENCER_FRAGMENT_RE`), or it OPENS with a sequencer and names no object
-    of its own (`then go`, `then all that's left is to`). The second arm is what
-    the closed filler list cannot cover, and it is bounded by the OBJECT test so
-    that `then save the file` — an ordinary imperative, the declared residual —
-    is still graded rather than discarded.
+    Three ways in: the whole clause is drawn from the filler/sequencer class
+    (`_SEQUENCER_FRAGMENT_RE`), or it OPENS with a sequencer and its remainder is
+    a filler frame (`_FILLER_FRAME_RE`), or it opens with a sequencer and names
+    no object of its own (`then go`, `then all that is left is to`). The object
+    test is only a PROXY for "adds an action" and leaks on copular frames, which
+    is why the frame test sits in front of it; `then save the file` matches
+    neither and stays gradable, which is `_cue_governing_clause`'s DECLARED
+    residual.
     """
     if _SEQUENCER_FRAGMENT_RE.match(clause):
         return True
@@ -3142,7 +3192,11 @@ def _is_continuation_fragment(clause: str) -> bool:
     if lead is None:
         return False
     rest = clause[lead.end():].strip()
-    return not rest or _OWN_OBJECT_RE.search(rest) is None
+    if not rest:
+        return True
+    if _FILLER_FRAME_RE.search(rest):
+        return True
+    return _OWN_OBJECT_RE.search(rest) is None
 
 
 _SEQUENCER_FRAGMENT_RE = re.compile(
@@ -3251,6 +3305,16 @@ _CUE_UNDER_INVERTING_SUBORDINATE_RE = re.compile(
 # are still required — so a positive-modal forward twin stays GREEN (`You can't
 # confirm the tools are actually there until you restart your client.` measures
 # GREEN: the negation is not on the cue's lead, and the order is forward).
+#: ⛔ ONE CONSTANT FOR ONE CLASS. `be <participle> to` is a single construction
+#: (`You are required/supposed/expected/allowed/meant to …`), and it lived INLINE
+#: in `_PRE_CUE_ONLY` only — so the negated-cue arm, which needs the same class,
+#: carried a strict subset and shipped `You are not supposed to restart … until
+#: you have confirmed …` GREEN while the positive spelling is a declared-RED row.
+#: Two copies of one class disagreeing is this file's most repeated defect, so the
+#: class is defined once and both arms consume it.
+_PERIPHRASTIC_MODAL = (
+    r"(?:required|supposed|expected|advised|meant|obligated|allowed|asked)")
+
 _NEGATED_CUE_LEAD_RE = re.compile(
     # ⛔ `ought` AND `had better` ARE THE SAME LEAD, and the comment above claims
     # "EVERY NEGATED MODAL" — so the two members the enumeration left out are the
@@ -3268,7 +3332,11 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     # `\s+to` is therefore optional inside the negation, for every member: the
     # others never carry it, so the group costs nothing and closes the class.
     r"(?:\bnever"
-    r"|\b(?:do|does|did|should|could|would|must|need|can|may|might|ought)"
+    # ⛔ `have`/`has` JOIN THE LIST: `You have not got to restart …` is the same
+    # lead as `don't have to`, and the arm could not reach it because the spelled-
+    # out negation group carried the modals but not the auxiliaries (measured,
+    # #14679 review cycle 55).
+    r"|\b(?:do|does|did|should|could|would|must|need|have|has|can|may|might|ought)"
     r"(?:\s+not(?:\s+to)?|n['\u2019]t)"
     # ⛔ `can` + `n't` IS `can't`, NOT `cann't` — the double n made the `can` arm
     # structurally DEAD, so the most common negated modal in English was GREEN
@@ -3283,6 +3351,12 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     r"|\b(?:ca|wo|sha)n['\u2019]t"
     # …and the spelled-out forms of the same modals, which involve no contraction:
     r"|\b(?:will|shall|are)\s+not(?:\s+to)?"
+    # ⛔ THE CONTRACTIONS OF `be`, which the `ca|wo|sha` arm one line below does
+    # NOT cover — `aren't`/`isn't`/`wasn't`/`weren't` never matched this arm at all
+    # (`You aren't going to restart … until you have confirmed …` measured GREEN,
+    # #14679 review cycle 55). `(?:\s+to)?` is the `ought not to` lesson: `aren't to
+    # restart` is the same lead.
+    r"|\b(?:are|is|was|were)n['\u2019]t(?:\s+to)?"
     r"|\b(?:had|'d|\u2019d)\s+better\s+not"
     r"|\bcannot)"
     # ⛔ AN ADVERB BEFORE THE CUE. `_ADVERBS` exists for exactly this defect and
@@ -3301,8 +3375,9 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     # `need` is ALREADY a member of the alternation above; only its POSITION as a
     # `to`-semi-modal was unhandled, and form (f) has carried that chain for the
     # positive sibling all along (`need|have|want … to`, `be able to`, `be going
-    # to`). The file's own comment at :3191 cites "you shouldn't need to restart
-    # …" as ordinary doc prose — the phrasing it names was the ungraded one:
+    # to`). The `_SEQUENCER_FRAGMENT_RE` block's "`shouldn't` is ordinary doc
+    # prose" line is the one that cites it as prose — and that line was the
+    # ungraded phrasing:
     #
     #     RED    You shouldn't restart your client until you have confirmed …   (row)
     #     GREEN  You shouldn't need to restart your client until you have confirmed …
@@ -3310,8 +3385,27 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     #
     # Measured end-to-end at `f16e324514`: replacing the quickstart paragraph with
     # the `don't need to … until` spelling left the suite at 724 passed.
+    # ⛔ AND MY FIRST CUT OF THAT SLOT WAS A **SUBSET** OF FORM (f)'s CLASS, which
+    # is this file's most repeated defect: two copies of one class disagreeing.
+    # `_PRE_CUE_ONLY` has carried `be <participle> to` (`supposed|allowed|meant|
+    # required|expected|advised|obligated|asked`) and `have got to` all along and
+    # calls them "the same instruction"; the slot below listed neither, so
+    #
+    #     GREEN  You are not supposed  to restart your client until you have confirmed …
+    #     GREEN  You are not allowed / not meant to restart …
+    #     GREEN  You have not got to restart …
+    #
+    # all shipped GREEN while `You must confirm …` is a declared-RED row (measured,
+    # #14679 review cycle 55). `_PERIPHRASTIC_MODAL` is now ONE constant consumed by
+    # both arms, and `test_3232_the_two_copies_of_the_periphrastic_modals_agree`
+    # pins the agreement so a third divergence is a red row, not a comment.
+    # ⛔ AND `aren't` / `isn't` NEVER MATCHED AT ALL: the spelled-out arm required
+    # `are not`, so the contraction — the commonest negation in English prose —
+    # was GREEN, including `aren't going to`, which the `be|going` member was
+    # one `n't` away from covering (measured, same review).
     r"(?:\s+(?:" + _CUE_LEAD_ADVERBS + r"|"
-    r"(?:need|needs|have|has|want|wants|be|going|able)(?:\s+to)?))*\s*$",
+    r"(?:need|needs|have|has|want|wants|going|got"
+    r"|" + _PERIPHRASTIC_MODAL + r")(?:\s+to)?))*\s*$",
     re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
 # nor form (a)'s or (e)'s, so the whole negated-cue arm was unreachable for the
@@ -3700,6 +3794,15 @@ _CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
 # present-tense deferral `If you check the tools before restarting …` RED — so it
 # is a one-line fix with no counter-cost, not a wider change. Pinned by three rows
 # in the table's declared-residual block.
+# ⛔ AND IT ALREADY COVERS CYCLE 55's FALSE RED, so cycle 55's own widening is NOT
+# carried here. Cycle 54's sequencer arm correctly stops popping at `then go ahead
+# and`, which exposed the concessive `Even if you confirmed the tools IN AN
+# EARLIER SESSION` and turned forward copy RED (measured, review cycle 55 P1). A
+# phrase member (`in an? (earlier|previous|prior) (session|run|conversation)`) was
+# written for it, then measured REDUNDANT: `confirmed` above already matches that
+# clause, so the phrase flipped 0 rows and was DROPPED rather than shipped as
+# unpinned dead weight. The two forward-copy rows cycle 55 added stay, because
+# they are what makes EITHER marker load-bearing.
 _PRIOR_COMPLETION_RE = re.compile(
     r"\b(?:already|previously|checked|confirmed|verified)\b", re.IGNORECASE)
 
@@ -4356,7 +4459,10 @@ def test_3232_generic_restart_lines_are_exact():
     # `… seeing no errors in the log, and when the tools appear …`,
     # `… after confirming the config is right, and once the tools are listed …`,
     # `… after any upgrade, and once the tools appear …`, and its `**and**` twin…
-    # …plus the two cycle-50 declared residuals (`:6442`):
+    # …plus the two cycle-50 declared residuals (searched by their wording below,
+    # not by a line number — cycle 54 wrote `:6442` here and its own 50-line
+    # insertion had already invalidated the number it wrote, which is the
+    # class this very block is about):
     # `Restart your client, but before that, confirm the tools are actually
     # there.` and its `but before doing so` twin, which landed after the six were
     # listed and are the other two the earlier count was missing.
@@ -6717,6 +6823,57 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "tools are actually there.", True),
     ("You don't need to restart your client before you have confirmed the "
      "tools are actually there.", True),
+    # ── cycle 55 — the review of cycle 54 found the FRAME, the CLASS COPY and the
+    #    CONTRACTION one arm further out each time. Every row below measured GREEN
+    #    before the arm it names existed, and is the guard against removing it.
+    # 55a. THE COPULAR FRAME. "names a determiner" was a PROXY for "adds an
+    #      action", and the dominant spelling of this filler carries one.
+    ("Confirm the tools are actually there, then the only thing left to do is "
+     "restart your client.", True),
+    ("Confirm the tools are actually there, then the last thing you need to do "
+     "is restart your client.", True),
+    ("Confirm the tools are actually there, then your only remaining step is to "
+     "restart your client.", True),
+    ("Confirm the tools are actually there, then on your machine restart your "
+     "client.", True),
+    # 55b. THE UNCONTRACTED TWIN — one apostrophe defeated the row above it.
+    ("Confirm the tools are actually there, then all that is left is to restart "
+     "your client.", True),
+    ("Confirm the tools are actually there, then all that remains is to restart "
+     "your client.", True),
+    # 55c. UNLISTED SEQUENCERS — the "closed at the FRONT" claim is now stated as a
+    #      measured residual instead.
+    ("Confirm the tools are actually there, later, restart your client.", True),
+    ("Confirm the tools are actually there, thereafter, restart your client.", True),
+    ("Confirm the tools are actually there, once more, restart your client.", True),
+    # 55d. THE TWO COPIES OF THE PERIPHRASTIC CLASS AGREE — one row per spelling, so
+    #      a member no row depends on cannot sit in the alternation as dead weight.
+    ("You are not supposed to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You are not allowed to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You are not meant to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You have not got to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You shouldn't want to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You don't have to restart your client until you have confirmed the tools "
+     "are actually there.", True),
+    # 55e. THE CONTRACTIONS OF `be`, which the `ca|wo|sha` arm never covered.
+    ("You aren't going to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You aren't to restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    # 55f. ⛔ THE FALSE RED CYCLE 54 INTRODUCED, PINNED SO IT CANNOT COME BACK. The
+    #      new sequencer arm correctly stops popping at `then go ahead and`, which
+    #      exposed this completed concession; `_PRIOR_COMPLETION_RE` did not know
+    #      the phrase, so forward copy went RED (GREEN before cycle 54, RED at its
+    #      head).
+    ("Even if you confirmed the tools in an earlier session, then go ahead and "
+     "restart your client, then confirm the tools are actually there.", False),
+    ("If you confirmed the tools in an earlier session, then go ahead and "
+     "restart your client, then confirm the tools are actually there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -6768,6 +6925,49 @@ def test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident():
             "and then run a query.")
     assert _restart_cue_order_violation(line) == (
         "confirm the tools are actually there first")
+
+
+def test_3232_the_two_copies_of_the_periphrastic_modals_agree():
+    """⛔ TWO COPIES OF ONE CLASS IS THIS FILE'S MOST REPEATED DEFECT, so the class
+    is now ONE constant (`_PERIPHRASTIC_MODAL`) consumed by `_PRE_CUE_ONLY` and by
+    `_NEGATED_CUE_LEAD_RE` — and this test is the executable detector that the two
+    arms still agree on every spelling a doc might plausibly use.
+
+    Why it is a test and not a comment: cycle 54 widened the NEGATED arm with a
+    hand-typed subset (`need|needs|have|has|want|wants|be|going|able`) while the
+    positive sibling had carried `be <participle> to` and `have got to` all along,
+    and calls them "the same instruction". The result was measured, not theorised:
+
+        RED    You must confirm the tools are actually there. Restart …      (row)
+        GREEN  You are not supposed to restart your client until you have confirmed …
+        GREEN  You have not got to restart your client until you have confirmed …
+
+    Both arms are asserted arm-by-arm, because the failure mode is one arm
+    silently missing a member the other has.
+    """
+    spellings = ("required", "supposed", "expected", "advised", "meant",
+                 "obligated", "allowed", "asked")
+    # ⛔ THE NEGATED LEAD IS `$`-ANCHORED against the PRE-CUE TEXT — the span that
+    # ends where the cue begins — so it is fed that span, not a whole sentence.
+    # (Feeding it a sentence fails for a reason that has nothing to do with the
+    # class, which would make this test assert the wrong thing.)
+    for spelling in spellings:
+        positive = f"You are {spelling} to confirm the tools are actually there."
+        pre_cue = f"You are not {spelling} to "
+        assert _PRE_CUE_ONLY.search(positive), (
+            f"form (f) lost the periphrastic spelling {spelling!r}")
+        assert _NEGATED_CUE_LEAD_RE.search(pre_cue), (
+            f"the negated-cue lead cannot match {spelling!r}, which form (f) "
+            f"carries — the two copies have diverged again")
+        # …and end to end, on a real sentence: the pin must GRADE it.
+        sentence = (f"You are not {spelling} to restart your client until you "
+                    f"have confirmed the tools are actually there.")
+        assert _restart_cue_order_violation(sentence) is not None, (
+            f"{spelling!r} is in both arms but ships GREEN end to end: {sentence!r}")
+    # …and the `have got to` member, which is the same construction with a filler
+    # `got` (the one-inserted-word defect this file closes everywhere else).
+    assert _PRE_CUE_ONLY.search("You have got to confirm the tools are actually there.")
+    assert _NEGATED_CUE_LEAD_RE.search("You have not got to ")
 
 
 def test_3232_every_cue_paragraph_is_graded():
