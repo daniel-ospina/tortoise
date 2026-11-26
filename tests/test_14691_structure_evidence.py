@@ -19,6 +19,7 @@ other is the failure mode this file exists to prevent.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -4081,11 +4082,53 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
         f"that verb and path")
     # …and the sentence must name the module whose route it is, so a route that
     # exists elsewhere cannot be borrowed
-    name, _, _ = matches[0][1], matches[0][2], matches[0][3]
-    assert matches[0][2].removesuffix(".py") in d1["the_read_that_can"] or \
-        "entity_reads" in d1["the_read_that_can"], (
-            f"D1 cites {name} but never names {matches[0][2]}, the module that "
-            "serves it")
+    # ⛔ AND THE MODULE MATCH IS NOT SATISFIED BY A SUBSTRING (#14691 review, round
+    # 14, P3): `… or "entity_reads" in sentence` was a TAUTOLOGY — the sentence
+    # begins `entity_reads.entity_relations` — so a PUT packs route at the same
+    # length passed, and so did a module that merely MENTIONS the route in a
+    # docstring (`navigation._resolve_root` does exactly that). Text is not reach.
+    # A route is MOUNTED in one module and IMPLEMENTED in another (`hosted_api`
+    # delegates to `entity_reads`), so the derivation is the CALL: every
+    # `module.attr` the sentence names must be one the served handler actually
+    # invokes. That is read off the handler's AST, so a docstring cannot stand in
+    # for a call and an import alias cannot stand in for a module.
+    server_module, handler = matches[0][2], matches[0][3]
+    handler_def = re.match(r"(?:async )?def (\w+)\s*\(", handler)
+    assert handler_def, (
+        f"cannot read the handler's name out of {handler!r}; the sentence \"{verb.group(1)} "
+        f"{route.group(1)}\" is served by {server_module} and the arm cannot check "
+        "what it delegates to")
+    module_tree = ast.parse((REPO / "tortoise" / server_module).read_text(
+        errors="ignore"))
+    handler_fn = next(
+        (node for node in ast.walk(module_tree)
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and node.name == handler_def.group(1)), None)
+    assert handler_fn is not None, (
+        f"{server_module} serves {route.group(1)} from `{handler_def.group(1)}`, "
+        "and that function is not in it")
+    callees = set()
+    for node in ast.walk(handler_fn):
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func
+        if isinstance(called, ast.Name):
+            callees.add((None, called.id))
+        elif isinstance(called, ast.Attribute):
+            base = called.value.id if isinstance(called.value, ast.Name) else None
+            callees.add((base, called.attr))
+    named = re.findall(r"\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b",
+                       d1["the_read_that_can"])
+    assert named, d1["the_read_that_can"]
+    unreached = [f"{module}.{attr}" for module, attr in named
+                 if (module, attr) not in callees
+                 and not ((None, attr) in callees
+                          and module == server_module.removesuffix(".py"))]
+    assert not unreached, (
+        f"D1 names {unreached} as the read that can {verb.group(1)} "
+        f"{route.group(1)}; that route's handler "
+        f"({server_module}:{handler_def.group(1)}) never calls it — it calls "
+        f"{sorted(f'{m}.{a}' if m else a for m, a in callees)}")
 
     # ── D3: the namespaced counts are the PROBES' OWN, kind by kind
     probes = readback["bare_kind_probes"]
@@ -4145,17 +4188,50 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
                                     ["graph_overview_topics"]["reply"])}
     reported = evidence.get("reported_not_found") or {}
     assert set(reported) == failed, (sorted(reported), sorted(failed))
-    assert reported == {name: readback["link_witness"][name]["id"]
-                        for name in failed}, (
-        "D5 attributes a 'not found' to the wrong node id")
+    # ⛔ THE ID IS THE ONE THE PROBE USED, IN THE SAME OBJECT (#14691 review, round
+    # 14, P3). Comparing `reported[name]` to `link_witness[name]["id"]` was `X == X`
+    # — both were derived from the same field — so swapping two witnesses' ids
+    # (24 = 24 chars) and re-deriving stayed green while the artifact reported one
+    # node's "not found" under another node's id. The probe's own arguments record
+    # which id it asked about, and THAT is what the evidence must echo.
+    for name, node_id in reported.items():
+        entry = readback["link_witness"][name]
+        assert node_id == entry["id"], (
+            f"D5 attributes a 'not found' to {node_id} under {name!r}, whose "
+            f"witness id is {entry['id']}")
+        probed = {arg for arg in (entry.get("graph_overview_topics") or {})
+                  .get("args", {}).values() if isinstance(arg, str)}
+        assert node_id in probed, (
+            f"D5 reports id {node_id} for {name!r}, but the probe asked about "
+            f"{sorted(probed)}")
     # the sentence's numerator and denominator must be those two populations
     nums = re.findall(r"(\d+) of the (\d+) nodes asked", d5["answer_over_mcp"])
     assert nums, d5["answer_over_mcp"]
     assert tuple(map(int, nums[0])) == (len(failed), len(asked)), (
         f"D5 says {nums[0]}; the evidence supports ({len(failed)}, {len(asked)})")
-    # …and its clause about the other two doors is a claim about THEM
-    if "two doors return" in d5["answer_over_mcp"]:
-        assert any((w.get("explore_neighbour_count") or 0) > 0
-                   for w in readback["link_witness"].values()), (
-            "D5 says the same nodes ARE returned by the other doors; no witness "
-            "records a single neighbour")
+    # ⛔ THE CLAUSE IS GUARDED BY WHAT IT SAYS, NOT BY ITS OWN WORDING (#14691
+    # review, round 14, P3). The arm was `if "two doors return" in answer`, so
+    # rewriting the clause to "…two doors reject" BOTH changed the claim and
+    # DISARMED the check — a self-gating guard. The clause is now read structurally
+    # (the verb after "two doors"), and the population it quantifies over is the
+    # witnesses' own neighbour counts.
+    clause = re.search(r"two doors (\w+)", d5["answer_over_mcp"])
+    neighbours = {n: (w.get("explore_neighbour_count") or 0)
+                  for n, w in readback["link_witness"].items()}
+    assert clause, d5["answer_over_mcp"]
+    clause_verb = clause.group(1).lower()
+    if clause_verb.startswith("return"):
+        assert all(neighbours[n] > 0 for n in failed), (
+            f"D5 says the other doors RETURN the nodes it failed on; their "
+            f"neighbour counts are {sorted(neighbours.items())}")
+    elif clause_verb.startswith("reject"):
+        # ⛔ THE CLAIM DECIDES THE DIRECTION OF THE CHECK (#14691 review, round 14,
+        # P3). "reject" is falsified by a witness that DOES see the node, so the
+        # arm is `== 0`, not `> 0` — the opposite sense was left in place here and
+        # the `two doors reject` mutant stayed GREEN until it was measured.
+        assert all(neighbours[n] == 0 for n in failed), (
+            "D5 says the other doors REJECT these nodes, and the witnesses record "
+            f"that they DO see them: {sorted(neighbours.items())}")
+    else:
+        raise AssertionError(
+            f"D5's clause names an operation nothing measured: {clause_verb!r}")
