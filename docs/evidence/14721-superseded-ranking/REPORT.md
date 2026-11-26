@@ -192,7 +192,7 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_14721_superseded
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_relationships_bounded.py \
     -q -p no:cacheprovider
-    → 44 passed
+    → 46 passed
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_13098_cypher_inventory.py \
     -q -p no:cacheprovider
@@ -206,12 +206,12 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_surface_manifest
     tests/test_belief_order_10137.py tests/test_11702_absent_belief_state.py \
     tests/test_ranking.py tests/test_2952_write_path_determinism.py \
     tests/test_retrieval_determinism_2952.py -q -p no:cacheprovider
-    → BELIEF_CLUSTER_RESULT
+    → 208 passed
 
 .venv/bin/python tools/test_lane.py run -- tests/test_search_engine.py \
     tests/test_pointsuperseded_rebuild.py tests/test_13557_13558_reachable_reads.py \
     tests/test_14033_state_cue_gap.py -q -p no:cacheprovider
-    → SEARCH_CLUSTER_RESULT
+    → 407 passed
 
 uv run python tools/surface_manifest.py check
     → OK — 39 tool rows, 73 retired, thirteen properties hold
