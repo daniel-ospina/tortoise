@@ -737,6 +737,81 @@ def _parse_iso(value) -> datetime | None:
 # ontology §4.3), so point signals are the CORRECT signals for it.
 
 
+def _superseded_below_successor(ann: list[dict]) -> list[dict]:
+    """Keep a REPLACED claim below the claim that replaced it (#14721).
+
+    THE DEFECT THIS CLOSES. A score is a statement about *relevance*, and a
+    claim's relevance does not fall when a later document refutes it — so a
+    superseded claim could outrank its own successor, and did. MEASURED on the
+    #14592 corpus (``docs/evidence/14721-superseded-ranking``): for the corpus's
+    contradiction question ("Did ColdPath fail its cold-chain audit, and what
+    did we do about it?"), the SUPERSEDED claim "ColdPath Logistics holds a
+    validated cold-chain certificate" came back at **rank 1** on FTS similarity
+    alone (5.0 against every current row's ≤ 3.0), and the refutation that
+    replaced it was **not in the top 8**. A reader asking what is true now was
+    told the refuted thing.
+
+    WHY A PAIRWISE CONSTRAINT AND NOT A GLOBAL "ended sorts last" TIER. A tier
+    was built first and MEASURED: it does fix the order, and it also pushes every
+    ended row past the page edge — on this corpus the superseded claim fell out
+    of a ``limit=20`` page entirely. That trades one silent omission for
+    another, and it breaks the read the history question is FOR ("what did we
+    originally decide, and what superseded it?"), where the replaced claim is
+    the thing the caller asked for. The issue's requirement is precisely the
+    pairwise one — *a superseded claim must not outrank the claim that
+    superseded it* — so that is the constraint applied, and nothing else moves:
+    every row keeps the position the score gave it relative to every row that is
+    not its successor.
+
+    WHAT DECIDES "SUPERSEDED". Nothing new, and nothing this module invents: the
+    row's own ``superseded_by`` carrier — ``{id, content_snippet, created_at,
+    superseded_at?, source?}`` — which ``search_engine.
+    fetch_point_epistemic_state`` builds from the Point's incoming ``CORRECTS``
+    edge, the same edge ``supersede_point`` writes. A row with no successor, or
+    whose successor is not in this result set, is untouched (there is nothing
+    for it to outrank). Retracted-correcting points are already excluded as
+    superseding authority at that source, so this does not re-decide it.
+
+    CHAINS AND DETERMINISM. ``A <- B <- C`` (A replaced by B, B by C) is
+    resolved by repeating the pass until no violation remains, bounded by
+    ``len(ann)`` — each pass strictly moves at least one row later, so the bound
+    is a proof of termination, not a guess. Rows are moved by STABLE insertion
+    after their successor, so rows that were never in violation keep their
+    relative order, and equal-scoring rows cannot reorder between runs.
+    """
+    if len(ann) < 2:
+        return ann
+    order = list(ann)
+    for _ in range(len(order)):          # bounded: one strict move per pass
+        index = {_row_id(r): i for i, r in enumerate(order)}
+        moved = False
+        for row in list(order):
+            succ = (row.get("superseded_by") or {})
+            succ_id = succ.get("id") if isinstance(succ, dict) else None
+            if not succ_id or succ_id == _row_id(row):
+                continue
+            here = index.get(_row_id(row))
+            there = index.get(succ_id)
+            if here is None or there is None or here > there:
+                continue                     # absent, or already correctly ranked
+            # Re-locate the successor by ID (the pop above shifted indices), and
+            # insert by POSITION — never by `list.index(row)`, which compares
+            # dicts by value and would land on a twin row with identical content.
+            order.pop(here)
+            target = next(i for i, r in enumerate(order) if _row_id(r) == succ_id)
+            order.insert(target + 1, row)
+            moved = True
+            break                            # indices are stale; re-index
+        if not moved:
+            break
+    return order
+
+
+def _row_id(row: dict) -> str:
+    """A result row's id under either spelling the read paths use."""
+    return str(row.get("id") or row.get("node_id") or "")
+
+
 class UnsupportedEntitySignals(ValueError):
     """No graph signal set exists for this ``entity_type`` — refuse, never guess.
 
@@ -1903,6 +1978,15 @@ class StateRanker:
             0 if r["recall_ranking"].get("belief_informed_order") else 1,
             -r["recall_ranking"]["final_score"],
         ))
+        # #14721: the score sort above does not know that a claim has been
+        # REPLACED, so nothing kept a superseded claim below the claim that
+        # superseded it. MEASURED on the #14592 corpus
+        # (docs/evidence/14721-superseded-ranking): for the very question that
+        # refutes it, the superseded "ColdPath Logistics holds a validated
+        # cold-chain certificate" landed at rank 1 on FTS similarity alone
+        # (5.0 vs every current row) while its successor was not in the top 8.
+        # `_superseded_below_successor` applies that one constraint.
+        ann = _superseded_below_successor(ann)
         return ann
 
     # ── Signal computation ────────────────────────────────────────────

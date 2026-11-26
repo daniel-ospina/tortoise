@@ -7699,7 +7699,20 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # #2350 (E-prec): the per-end precision declaration, appended
             # LAST so every index above is untouched. Read into the additive
             # precision block by ``window_read_fields`` below.
-            "  n.validFromPrecision, n.validToPrecision",
+            "  n.validFromPrecision, n.validToPrecision, "
+            # #14721: the SUCCESSOR's provenance, appended LAST so every index
+            # above is untouched (the #2294 / #1423 / #2350 rule this query
+            # already follows). The label contract is "what superseded it,
+            # WHEN, and FROM WHICH SOURCE"; `superseded_by.id` /
+            # `content_snippet` already answered the first, and the row's own
+            # window the second — but nothing readable named the source that
+            # established the correction. Read BOTH provenance spellings, the
+            # rule `ended._SUCCESSOR_PROPS` states for the successor carrier:
+            # the camel `sessionId` is what capture writes and the snake
+            # `session_id` is the spelling `create_point(session_id=…)` writes,
+            # so a read that looked at one would report no source for a record
+            # whose other spelling names it.
+            "  coalesce(new.sessionId, new.session_id)",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -7784,6 +7797,18 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                     "content_snippet": (new_content or "")[:120],
                     "created_at": new_created,
                 }
+                # #14721: WHEN it was superseded and FROM WHICH SOURCE, on the
+                # label itself rather than left for the caller to derive from
+                # two distant fields. `validTo` is the bound `supersede_point`
+                # CLOSES (E6 #1538 D2/D5), so it IS the supersession instant for
+                # this row; the successor's `sessionId` is the document the
+                # correction came from. PRESENT-ONLY, per the additive rule:
+                # an undated window or an unsourced successor emits no key, so
+                # a legacy decoration stays byte-identical.
+                if row[3] not in (None, ""):
+                    cand["superseded_at"] = row[3]
+                if len(row) > 23 and row[23]:
+                    cand["source"] = row[23]
                 # A retracted correcting point is NOT superseding authority.
                 if new_status == "retracted":
                     pass

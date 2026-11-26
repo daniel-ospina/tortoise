@@ -102,9 +102,22 @@ async def run(label: str) -> int:
             "tortoise_search", {"query": HISTORY_Q, "limit": 8})
         # The product's own "what ended, and how" read — the labelled half.
         report["ended"] = await call("tortoise_ended", {"limit": 20})
+        # #14721: the door that CAN serve a replaced claim. `include_superseded`
+        # is the product's own switch for the historical read; the pair below
+        # records whether the replaced claim outranks the claim that replaced it
+        # and whether it carries the label the issue requires.
+        report["recall_state"] = await call(
+            "tortoise_recall",
+            {"query": CURRENCY_Q, "mode": "state", "limit": 12})
+        report["recall_state_superseded"] = await call(
+            "tortoise_recall",
+            {"query": CURRENCY_Q, "mode": "state", "limit": 12,
+             "include_superseded": True})
 
     report["currency_rank"] = _brief(report["currency"])
     report["history_rank"] = _brief(report["history"])
+    report["recall_rank"] = _brief(report["recall_state"])
+    report["recall_superseded_rank"] = _brief(report["recall_state_superseded"])
 
     def landed(rows: list[dict], needle: str) -> dict:
         for r in rows:
