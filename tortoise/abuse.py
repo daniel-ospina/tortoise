@@ -348,7 +348,8 @@ def _ratio_env(name: str, default: float) -> float:
 #:   level. That LOWERS the level (a pro org drops from 25 000 to 500) and errs
 #:   toward alerting too. Deliberate: it is the shipped, more sensitive rule, and
 #:   ``tests/test_abuse.py`` pins it as "fail toward the SENSITIVE level on a COLD
-#:   START". Only the with-a-known-floor case errs toward silence.
+#:   START". Of the two READ-FAILURE cases, only the with-a-known-floor one errs
+#:   toward silence — a DOWNGRADE silences with no failure at all.
 _TIER_FLOOR_TTL_S = 300.0
 
 #: #14687: how long a FAILED allowance read is remembered before another attempt.
@@ -2445,14 +2446,15 @@ class AbuseEngine:
         had before the tier term existed), and remember the answer briefly so an
         outage does not cost one blocking ``organizations`` read per capture.
 
-        Never 0-as-a-tier: ``0`` is not an allowance, it is the ABSENCE of one,
-        so the answer is ``point_threshold_base()`` — the configured absolute
-        level. That LOWERS the level (a pro org drops from 25 000 to 500) and
-        errs toward ALERTING; it is DELIBERATE for the cold-start case and
-        declared in the ``_TIER_FLOOR_TTL_S`` note above, with
-        ``tests/test_abuse.py`` pinning it as "fail toward the SENSITIVE level on
-        a COLD START". Every failure WITH a known floor instead reuses that
-        floor, which is the direction that reduces alert volume.
+        Never 0-as-a-tier: ``0`` is not an allowance, it is the ABSENCE of one, so
+        this returns ``0`` and the CALLER (``point_threshold``'s ``max(base, …)``)
+        raises it to ``point_threshold_base()`` — the configured absolute level.
+        That LOWERS the level (a pro org drops from 25 000 to 500) and errs toward
+        ALERTING; it is DELIBERATE for the cold-start case and declared in the
+        ``_TIER_FLOOR_TTL_S`` note above, with ``tests/test_abuse.py`` pinning it
+        as "fail toward the SENSITIVE level on a COLD START". Every failure WITH a
+        known floor instead reuses that floor, which is the direction that reduces
+        alert volume.
         """
         with self._tier_lock:
             stale = self._tier_floor_cache.get(org_id)
