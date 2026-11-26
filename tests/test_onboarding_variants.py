@@ -1758,11 +1758,13 @@ _INVERSION_FORMS = (
     #     "… once the tools appear". The predicate is REQUIRED — a bare `once the
     #     tools` reddened "… once the tools stop appearing", a remedy with the
     #     restart first (measured). What is required is a COPULA or one of
-    #     appear|show|exist|load|listed|visible; the present-tense copulas `are`/`is`
-    #     admit any complement
+    #     appear|show|exist|load|visible; the present-tense copula `are` admits any
+    #     complement
     #     on purpose ("… once the tools are ready" is still a tool-state the
     #     reader must reach BEFORE restarting), so the claim here is that
-    #     predicate SET, not "a presence sense".
+    #     predicate SET, not "a presence sense". (`is` and `listed` are gone: after
+    #     `tools\s+` a singular `is` is unreachable, and `listed` was shadowed by
+    #     `are` — both measured as arms no row could depend on.)
     #     A determiner/modifier other than a bare `the` is the same shape:
     #     "once your tools appear" / "once all the tools appear" were GREEN
     #     (measured) while "once the tools appear" was RED — the modifier is
@@ -1776,7 +1778,7 @@ _INVERSION_FORMS = (
     #     is dead weight, and it was).
     _inversion_form(
         r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
-        r"(?:are|is|appear|show|exist|load|listed|visible)\b"
+        r"(?:are|appear|show|exist|load|visible)\b"
     ),
     _PRE_CUE_ONLY,
 )
@@ -1829,8 +1831,12 @@ _CONFIG_PREP_RE = re.compile(
 # (" - once"), a double hyphen that stands alone ("-- once"), and a leading one
 # ("-once"); a single hyphen followed by a non-space ("well-known", "-cask") and a
 # spaced long option ("--cask") are neither.
+# ⛔ …and a mid-string single hyphen needs WHITESPACE AFTER IT: `\s*` matches
+# empty, so `pytest -q` / `tail -f log` / `pip install -e .` each split the window
+# and put the inverting clause out of scope (measured: the `-q` twin of the
+# `--cask` row stayed GREEN at the pin level while its `--cask` twin was caught).
 _STATEMENT_BREAK_RE = re.compile(
-    r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s*|(?<=\s)--\s+|^-\s*)"
+    r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[]))")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
@@ -2314,6 +2320,12 @@ def test_3232_generic_restart_lines_are_exact():
      "actually there.", True),
     ("Restart your client, run `brew install --cask x`, then confirm the tools "
      "are there.", False),
+    # a single-dash SHORT FLAG must not split the window either (`\s*` after the
+    # hyphen used to match empty, so `-q` behaved like a dash — measured):
+    ("Restart your client, run `pytest -q`, once the tools are actually there.",
+     True),
+    ("Restart your client, run `pytest -q`, then confirm the tools are there.",
+     False),
     # the unspaced pre-cue dash twin, which was a false PASS before the break fix:
     ("Delete the old entry—but first confirm the tools are actually there. "
      "Restart your client, then confirm the tools are actually there.", True),
@@ -2368,7 +2380,7 @@ def test_3232_generic_restart_lines_are_exact():
     # are live but carry no row of their own: spelling variants, a few untested
     # pronoun/synonym/preposition alternatives (form (e)'s `visible|load`, form
     # (a)'s `when`, form (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and
-    # `from|inside|per|under`), and a handful that are REDUNDANT rather than
+    # `from|inside|per|under`, `_CONFIG_NOUN_RE`'s plural `configs?`), and a handful that are REDUNDANT rather than
     # untested (a `--` is caught by `^-\s*`, form (a)'s `having` by form (b), the
     # predicate's `list` by form (f)'s own verb list). The comments claim the
     # behaviour, not a row for every alternative ───────────────────────────────────
