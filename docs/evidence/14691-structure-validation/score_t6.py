@@ -60,6 +60,18 @@ CORPUS_NORM = _norm(CORPUS_TEXT)
 
 #: The product's own ruled table. Imported, never restated: a local copy would be
 #: a second opinion about a contract `pack_registry` owns (#11548's finding).
+# ⛔ THE IMPORT MUST NOT DEPEND ON THE CALLER'S `PYTHONPATH` (#14691 review, round
+# 6, finding 4). `--check` is run from the bundle directory, where the repo root is
+# two levels up but NOT importable by default — so `DIRECTIONS` silently became {}
+# and the derivation dropped `produces`, making `--check` disagree with a committed
+# artifact that was produced WITH the table. Measured: the same bundle, same files,
+# exit 1 under `python score_t6.py --check` and exit 0 under
+# `PYTHONPATH=../../.. python score_t6.py --check`. The repo root is put on
+# `sys.path` HERE, and an unavailable table is now FATAL rather than silent.
+_REPO_ROOT = next((parent for parent in Path(__file__).resolve().parents
+                   if (parent / "tortoise" / "pack_registry.py").is_file()), None)
+if _REPO_ROOT is not None and str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 try:
     from tortoise.pack_registry import SEMANTICS_DIRECTIONS as DIRECTIONS
     DIRECTIONS_SOURCE = "tortoise.pack_registry.SEMANTICS_DIRECTIONS"
@@ -953,6 +965,54 @@ def _door_findings() -> list[dict]:
     found = list(READBACK.get("door_findings") or [])
     witness = READBACK.get("link_witness") or {}
 
+    # ⛔ A PROSE FINDING MUST AGREE WITH ITSELF (#14691 review, round 6, P1).
+    # D1 and D5 arrive from `readback.json` entirely as prose — their
+    # `answer_over_mcp` was copied through unread. Measured on `ecf4fd5d92`:
+    # reversing D1's answer to "YES — … its direction is visible too" left 79
+    # passed, SELF-CONTRADICTING the `the_read_that_can` field beside it in the same
+    # object (that key exists *because* no MCP door reports direction). A prose
+    # finding therefore keeps its place only while its answer's polarity matches
+    # what its own evidence says, and D4 keeps its place only while a NON-ERRORED
+    # witness is still silent — the append path below only ever ADDS, so a stale
+    # prose D4 outlived the measurement that created it.
+    _EXPECTED_POLARITY = {
+        "D1": "NO",   # evidence names a read outside MCP as the only one that can
+        "D4": "NO",   # evidence lists witnesses that answered `[]`
+        "D5": "NO",   # evidence records "Entity … not found" from every probe
+    }
+
+    def _polarity(text) -> str:
+        head = str(text or "").lstrip("*` ").upper()
+        for word in ("NO", "YES", "PARTIAL"):
+            if head.startswith(word):
+                return word
+        return "UNKNOWN"
+
+    def _silent_witnesses() -> dict:
+        return {name: {"expand_rows": 0,
+                       "explore_neighbours": w.get("explore_neighbour_count")}
+                for name, w in witness.items()
+                if "reply" in (w.get("expand_relationships") or {})
+                and not rows((w.get("expand_relationships") or {}).get("reply"))
+                and not call_failed(w.get("expand_relationships"))
+                and (w.get("explore_neighbour_count") or 0) > 0}
+
+    kept = []
+    for finding in found:
+        fid = finding.get("id")
+        want = _EXPECTED_POLARITY.get(fid)
+        if want is None:
+            kept.append(finding)
+            continue
+        if _polarity(finding.get("answer_over_mcp")) != want:
+            continue
+        if not (finding.get("evidence") or {}):
+            continue
+        if fid == "D4" and not _silent_witnesses():
+            continue
+        kept.append(finding)
+    found = kept
+
     # ⛔ D3 RESTS ON `bare_kind_probes`, SO IT MAY NOT OUTLIVE THEM (#14691
     # review, 5th cycle, N1 — the D3 leg). D1/D2/D3/D5 arrive from
     # `readback.json` as prose, and until now nothing re-read the probes they cite:
@@ -1195,11 +1255,47 @@ def build_score() -> dict:
     return score
 
 
-def main() -> int:
-    score = build_score()
+def main(argv: list[str] | None = None) -> int:
+    """Write the score, or with `--check` compare and REFUSE to overwrite.
 
-    (OUT / "t6-score.json").write_text(json.dumps(score, indent=2,
-                                                  default=str) + "\n")
+    ⛔ `--check` WAS A NO-OP (#14691 review, round 6, finding 4). `sys.argv` was
+    never parsed: the scorer always rewrote `out/t6-score.json` and exited 0, so
+    "run the scorer `--check`" — the gate the review brief names — would happily
+    repair a corrupted artifact and report success. It now compares the committed
+    bytes to a fresh derivation and exits 1 on any difference, writing nothing.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    check = "--check" in argv
+    if not DIRECTIONS:
+        # ⛔ A DEGRADED DERIVATION IS NOT A DERIVATION. With the ruled table
+        # unavailable the scores silently lose every predicate's direction, so the
+        # artifact written (or the comparison made) would be wrong in a way nothing
+        # downstream can see.
+        print(f"⛔ the direction table is unavailable ({DIRECTIONS_SOURCE}) from "
+              f"{_REPO_ROOT}; refusing to score against a partial contract",
+              file=sys.stderr)
+        return 1
+    score = build_score()
+    rendered = json.dumps(score, indent=2, default=str) + "\n"
+    artifact = OUT / "t6-score.json"
+    if check:
+        # ⛔ COMPARE THE SCORE, NOT ITS FORMATTING. The committed file's byte
+        # layout belongs to whichever tool wrote it; the CLAIM is the parsed
+        # object. A byte comparison reds on a re-indent (measured: 29 bytes of
+        # whitespace here) and would teach the next lane to regenerate a 55 KB
+        # artifact to fix a space — the drift §8 exists to disclose.
+        try:
+            committed = json.loads(artifact.read_text()) if artifact.exists() else None
+        except ValueError as exc:
+            print(f"⛔ out/t6-score.json is not JSON: {exc}", file=sys.stderr)
+            return 1
+        if committed != json.loads(rendered):
+            print("⛔ out/t6-score.json is NOT the scorer's derivation",
+                  file=sys.stderr)
+            return 1
+        print("✅ out/t6-score.json is exactly what its inputs derive")
+        return 0
+    artifact.write_text(rendered)
 
     a1, a2, a3, a4, a5 = (score["A1_type_coverage"], score["A2_edges"],
                           score["A3_hierarchy"], score["A4_no_invention"],
