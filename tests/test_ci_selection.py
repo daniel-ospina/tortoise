@@ -11484,6 +11484,15 @@ ROWED_BY_THIS_FOLD = (
     # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main
     # runs, so a file a PR ADDS cannot have a junit figure yet (`#3400/#4348`).
     "test_14560_operator_vectors.py",
+    # #11939 (PR #14726) — the own-site fragment guard. A file this PR ADDED and registered
+    # DUAL, on `core` and on `onboarding`: every website-side tree it reads selects `onboarding`
+    # and a named-surface match REPLACES the `core` fallback, so the `core` row alone never ran it
+    # on the diffs that can delete the id it guards. Its `durations:` row is listed here for the
+    # reason every row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file
+    # nobody listed has no row and nothing reds — and its first cut shipped the row WITHOUT being
+    # named here, which a review caught. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local
+    # reading (`#3400/#4348`).
+    "test_own_site_fragment_targets.py",
 )
 
 

@@ -145,12 +145,24 @@ PATH_TO_PAGE = {
     "/dpa": "dpa.html",
 }
 
-#: The ``.html`` spelling of every row above, generated rather than enumerated.
-#: ``_redirects`` 301s each of them onto the clean path (fragment preserved), so
-#: they are the same page; listing them by hand only means one is forgotten and
-#: a working URL comes back `unmapped`.
+#: The ``.html`` spelling of every page FILE above, generated rather than
+#: enumerated — a hand list only means one is forgotten and a working URL comes
+#: back `unmapped`. `website/_redirects` lists most of them explicitly and Pages
+#: serves the rest as the same static asset, so both shapes reach one file.
+#: Three exclusions, each because the generated key would name a pair that serves
+#: NOTHING (`website/tortoise.html` does not exist, and `_middleware.ts` matches
+#: `PRODUCT_PREFIX` exactly or as `PRODUCT_PREFIX + "/"`, never `/tortoise.html`),
+#: and a false-green row is worse than a missing one:
+#:   * `/` — its "twin" would be `/.html`;
+#:   * `/tortoise` — the product document's clean address, not a file spelling;
+#:   * a row that already ends in `.html` — else `/docs.html.html` and its
+#:     siblings, which also serve nothing.
 PATH_TO_PAGE.update(
-    {f"{path}.html": page for path, page in list(PATH_TO_PAGE.items()) if path != "/"}
+    {
+        f"{path}.html": page
+        for path, page in list(PATH_TO_PAGE.items())
+        if path not in ("/", "/tortoise") and not path.endswith(".html")
+    }
 )
 
 #: Paths `_middleware.ts` serves under the ``/tortoise`` PREFIX for the retired
