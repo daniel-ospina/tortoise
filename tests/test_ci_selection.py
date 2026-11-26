@@ -10388,7 +10388,7 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     # claim, while the temporal "unchanged since" does not. Measured GREEN at #14623 review round 8.
     r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
     r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
-    r"|left\s+(?:alone|un\w+))\s*,\s*(?:as|per|according\s+to)\b"
+    r"|left\s+(?:alone|un\w+))(?:\s*,\s*as\b|,?\s*(?:per|according\s+to)\b)"
     r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
     # neither … nor, in EITHER conjunct order: the round-8 reviewer swapped the two nouns of this
     # very fixture and the claim shipped GREEN.
@@ -10412,6 +10412,21 @@ _H_14544_IMPERSONAL_NEGATION_RE = re.compile(
 #: 9 each did — measured), so they are filed rather than circled: the guard closes the classes a fold
 #: actually reintroduces, and #14715 carries the acceptance fixtures for the rest. What this arm does
 #: NOT do is certify the paragraph is true; the shapes that have shipped are fixtures here.
+#: …and the QUANTIFIER negator, a negation role this family had none for (#14623 review round 14,
+#: P3): "`#14544`'s cut changed none of the `durations` rows.", "None of the `durations` rows was
+#: changed by `#14544`." and "None of the `durations` rows changed in `#14544`." all shipped CLEAN.
+#: The OBJECT must be the row or its weight, so the paragraph's own TRUE claims — "changed none of
+#: the shard minutes", "touched none of the bins" — stay GREEN.
+_H_14544_QUANTIFIER_NEGATION_RE = re.compile(
+    r"(?:#14544|that\s+cut|the\s+cut)[^;.!?]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[^;.!?]{0,40}?\bnone\s+of\s+(?:the|these|those|its)\s+(?:[a-z]+\s+){0,2}"
+    # ⛔ NO `\b` AFTER THE BACKTICKED OPTION — a closing backtick is a non-word character, so
+    # `` `durations`\b `` could never match and the whole alternative was dead (measured here).
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweights?\b)"
+    r"|\bnone\s+of\s+(?:the|these|those|its)\s+(?:[a-z]+\s+){0,2}"
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweights?\b)[^;.!?]{0,40}?"
+    r"(?:was|were|is|are|has|had)?\s*" + _H_14544_CHANGE_VERB,
+    re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
 #: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
@@ -10470,6 +10485,8 @@ def _h_14544_banned_claim(block: str) -> str | None:
             return sentence.strip()
         if _H_14544_IMPERSONAL_NEGATION_RE.search(sentence):
             return sentence.strip()
+        if _H_14544_QUANTIFIER_NEGATION_RE.search(sentence):
+            return sentence.strip()
     return None
 
 
@@ -10490,15 +10507,25 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
 #: own subject reversed) left this arm GREEN, because nothing graded the sentence that scopes the
 #: exemption. Without this, the paragraph can grant the exemption to the row it exists to implicate.
+#: ⛔ THREE SPELLINGS, not one: a single-spelling POSITIVE pin is a lock that reds a TRUE rewording
+#: with a diagnostic asserting the opposite of what the paragraph says (#14623 review round 14, P3) —
+#: "The REGISTRATION alone is the only half exempt.", "Only the REGISTRATION half is exempt." and
+#: "The exempt half is the REGISTRATION, not the row." all RED before this. The polarity mutation
+#: (swap the half) still reds — see the fixture in the arm.
 _H_14544_SCOPE_RE = re.compile(
-    r"REGISTRATION\s+is\s+the\s+ONLY\s+half\b", re.IGNORECASE)
+    r"REGISTRATION(?:\s+alone)?\s+is\s+(?:the\s+)?ONLY\s+half"
+    r"|only\s+the\s+REGISTRATION(?:\s+half)?\s+is\s+exempt"
+    r"|the\s+exempt\s+half\s+is\s+the\s+REGISTRATION", re.IGNORECASE)
 #: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
 #: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
 #: cause this paragraph DOES exclude”, the exact reading `#14612` deletes) left this arm GREEN — it
 #: graded the anaphor ban and the provenance tokens and never the sentence that draws the
 #: conclusion, so a paragraph stating the OPPOSITE of the correction was certified clean.
+#: …and the same for the conclusion: `foreclose` and a `that`-cleft are the paragraph's own claim
+#: spelled another way, and both RED as one-spelling locks (#14623 review round 14, P3).
 _H_14544_CONCLUSION_RE = re.compile(
-    r"cause\s+this\s+paragraph\s+does\s+NOT\s+(?:exclude|rule\s+out)", re.IGNORECASE)
+    r"cause\s+(?:that\s+)?this\s+paragraph\s+does\s+NOT\s+(?:exclude|rule\s+out|foreclose)",
+    re.IGNORECASE)
 #: The FOURTH graded claim, which the docstring named while nothing graded it (#14623 review round
 #: 6, F3): the paragraph must not restate a per-file weight. It may name the row, its provenance and
 #: the commit; the figure lives in `durations`, graded there by `_carry_row_claim_violations`. The
@@ -10736,6 +10763,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544` touched neither its weight nor that row.",
             "That row was not touched by the commit that took the file off `core`, `#14544`.",
             "Nothing about that row changed in `#14544`.",
+            # round-14 P3: the QUANTIFIER negator, the claim with no adverb at all
+            "`#14544`'s cut changed none of the `durations` rows.",
+            "None of the `durations` rows was changed by `#14544`.",
+            "None of the `durations` rows changed in `#14544`.",
+            # …and the attribution form WITHOUT its comma
+            "The `durations` row is unchanged per `#14544`'s own note.",
             "The `durations` row's weight is unchanged, as that cut's own note records.",
             "The `durations` row was left alone, according to `#14544`'s cut.",
             "the `durations` entries were not touched by `#14544`",
@@ -10818,6 +10851,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The `durations` row is `#14544`'s own edit, and the `eval` registration was left alone "
             "by that cut.",
             "`#14544`'s cut does not move a bin since the bin is held by the `durations` row.",
+            # …and the TRUE siblings of the quantifier/attribution claims
+            "`#14544`'s cut changed none of the shard minutes.",
+            "`#14544` touched none of the bins.",
+            "The `durations` row is unchanged as the cut landed.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
