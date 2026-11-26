@@ -3020,12 +3020,16 @@ surfaces:
   core:
   - test_own_site_fragment_targets.py  # DUAL-REGISTERED with `onboarding` below, and BOTH rows
   # are needed: a named-surface match REPLACES the `core` fallback (`.github/workflows`/this map's
-  # own `:2146`, `:10741`), and a website-only diff (`website/docs.html`, `website/faq.html`,
-  # `website/apps/dashboard/src/*`, `website/functions/*`, the pasted `SKILL.md` copies) selects
-  # `onboarding`, NOT `core`. Measured at this head: `--changed-files website/docs.html` →
-  # `surfaces: ['onboarding']` with this file ABSENT from `test_files`. Without this row the guard
-  # never ran on the diffs that own its inputs, so deleting `id="appeal"` from `docs.html` in a
-  # website-only PR would merge green and only `main`'s push matrix would red afterwards.
+  # own `tools/ci_selection.py:1620` `#2938` note, restated at `tests/test_ci_selection.py:1545`),
+  # and a website-only
+  # diff (`website/docs.html`, `website/faq.html`, `website/apps/dashboard/src/*`,
+  # `website/functions/*`, the pasted `SKILL.md` copies) selects `onboarding`, NOT `core`. Measured
+  # with the `onboarding` row REMOVED — the counterfactual, not this head:
+  # `--changed-files website/docs.html` → `surfaces: ['onboarding']` with this file ABSENT from
+  # `test_files`. Without that row the guard never ran on the diffs that own its inputs, so deleting
+  # `id="appeal"` from `docs.html` in a website-only PR would merge green and only `main`'s push
+  # matrix would red afterwards. ⛔ Deleting the row again is caught, not silent:
+  # `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans` reds naming the tree.
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).

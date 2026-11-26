@@ -1592,6 +1592,54 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         assert r["slow_run"] is False, f"{asset} must not pull a slow leg"
 
 
+
+def test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans():
+    """PR #14726: the guard must RUN on the diffs that break it, not only on `core`.
+
+    `tests/test_own_site_fragment_targets.py` reads two families of file: the Python
+    trees (AST literals in `tortoise/**`) and the WEB trees (`website/*.html`,
+    `website/_redirects`, `website/functions/**`, the dashboard `src/**`, the two
+    SKILL.md copies, `tests/_html_links.py` for the id extractor). A website diff
+    selects `onboarding`, and a named-surface match REPLACES the `core` fallback — so
+    registering the guard on `core` alone means it never runs on exactly the diffs that
+    remove the id it checks. That was review round 2's BLOCKING finding, fixed by a
+    second `onboarding` row.
+
+    ⛔ THE FIX WAS UNPINNED UNTIL NOW, measured: deleting that second row left this
+    whole suite green (`--integrity` still passes, because the file is still classified
+    under `core`), while `select(["website/docs.html"])` returned the guard absent from
+    `test_files`. A green suite over a guard that does not run is the false pass this
+    file exists to catch, so the population is asserted per-file here.
+    """
+    # One representative per scan root the guard opens — enough that DELETING a
+    # surface row, or narrowing one, reds HERE rather than in production.
+    witnesses = (
+        "tortoise/abuse.py",                                   # AST literals, core
+        "tortoise/capacity_notice.py",                         # AST literals, core
+        "tortoise/onboarding/SKILL.md",                        # markdown links, onboarding
+        "website/docs.html",                                   # same-page hrefs, onboarding
+        "website/faq.html",                                    # 15 of the 24 same-page anchors
+        "website/_redirects",                                  # the resolution table's source
+        "website/functions/_middleware.ts",                    # the resolution table's source
+        "website/functions/contact/submit.ts",                 # CONTACT_AT_ROOT's source
+        "website/apps/dashboard/src/billingCta.js",            # quoted own-host URL, onboarding
+        "website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+        "tests/_html_links.py",                                # the id extractor it imports
+    )
+    for changed in witnesses:
+        assert (REPO / changed).is_file(), (
+            f"the file this pin guards is gone: {changed} — re-derive the witnesses"
+        )
+        r = _sel([changed])
+        assert "test_own_site_fragment_targets.py" in r["test_files"], (
+            f"{changed} selects {r['surfaces']} WITHOUT "
+            "test_own_site_fragment_targets.py — that tree is in the guard's scan "
+            "population, so a diff to it can remove an id the guard checks and never "
+            "run the check. Re-add the surface row (a named-surface match REPLACES the "
+            "`core` fallback, so `core` alone does not cover it)."
+        )
+
+
 def test_the_crawler_surface_selects_the_guard_that_reads_it():
     """#11615: `robots.txt` and the sitemaps must select the sitemap contract.
 

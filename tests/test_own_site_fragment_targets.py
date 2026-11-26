@@ -481,4 +481,12 @@ def test_a_host_that_does_not_resolve_is_refused_not_resolved():
     for host in UNSERVED_HOSTS:
         assert host in OWN_HOSTS, f"{host} must stay READ, not dropped from the scan"
         assert resolve(host, "/docs") is None, f"{host} resolved — it does not exist"
+    # ⛔ NOT a loop over whatever the tuple happens to hold: EMPTYING the tuple
+    # re-opens the false green and a bare `for` over it passes without running a
+    # single assertion — vacuous under exactly the mutant that reverts the fix.
+    assert "www.premiselabs.co" in UNSERVED_HOSTS, (
+        "the refusal list no longer names www.premiselabs.co, which has no DNS "
+        "record: a www. link would resolve through its redirect target and read "
+        "GREEN while being unreachable"
+    )
     assert resolve("premiselabs.co", "/docs") == "docs.html"
