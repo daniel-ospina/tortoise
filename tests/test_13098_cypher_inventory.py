@@ -4057,6 +4057,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # hardlink pair takes it to 103 (`test_a_render_through_a_HARDLINK_to_git_metadata_is_refused`
     # and `test_a_second_name_for_a_PLAIN_destination_is_refused_too`, also named in
     # `split_arms`, which moved 42 -> 44 with them).
+    # ⛔ AND THAT SENTENCE IS THE AUTHORITY, NOT THE COMMIT MESSAGE OF THE LANDING THAT
+    # MOVED THE SECOND PAIR. `865776d6ce`'s message states "`split_arms` (40 -> 42)" and
+    # "(99 -> 101)", which are its PARENT's (`4ee385ec10`'s) deltas: `git show
+    # 865776d6ce^:tests/test_13098_cypher_inventory.py` reads `== 42` and `== 101`, and
+    # `git show 865776d6ce -- tests/test_13098_cypher_inventory.py` moves them to `== 44`
+    # and `== 103`. Its stated suite count (118 passed / 15 skipped) is likewise the
+    # earlier landing's; at that commit's tree the suite reads **120 passed / 15
+    # skipped**, because the two trees differ only in comment lines. A lane applying the
+    # message's delta to a tree at 44/103 lands on a self-inconsistent literal.
     test_functions = {n for n in defined if n.startswith("test_")}
     assert len(test_functions) == 103, (
         f"expected EXACTLY 103 test functions in this module; got "
