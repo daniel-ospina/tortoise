@@ -104,25 +104,39 @@ version: 1
 # headroom before and after), which is exactly why this paragraph states the PARTITION and not just
 # the minute: an arithmetic check on `28 m` cannot see a carried figure, and the two-second row is
 # a real one that a reader comparing only minutes would call cosmetic.
+# reader of the prose can see. On THIS tree — `origin/main` `f2d4f2408cf5` folded in, plus THIS
+# lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k),
+# so `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's)
+# — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
+# ⛔ THIS FOLD COLLAPSED THE PARTITION, and it is the reason the sentence above states the PARTITION
+# and not only the minute: `origin/main` at this base splits NINE shards and TWO, and this tree packs
+# ALL ELEVEN together. The minute is 28 m on both sides and the headroom is 2.03 on both sides, so
+# arithmetic on the watchdog alone would have called the move cosmetic and let a figure nobody emits
+# stand. ⛔ The parent split is described here by COUNT and by direction on purpose: restating either
+# side as a shard-figure sentence would put a SECOND partition in a block whose guard reads ONE (the
+# `_EMISSION_UNREAD_SENTENCE_RE` arm reds a figure spelled where the clause parser cannot read it),
+# and the seconds each parent packed are already on the commits that measured them — this block's
+# standing rule is that the direction is kept and the figures are re-derived, never carried.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1340 files at this head against 1339 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's) — and the ONE addition THIS lane brings is
-# `tests/test_14691_structure_evidence.py`, the row registered by the commit that added the T6
-# bundle's falsifiers. With nothing `main` carries missing from this tree, that one row is the whole
-# delta: measured, `set(fast_pool(head)) - set(fast_pool(main))` returns exactly that file and the
-# reverse difference is empty. ⛔ An earlier revision of THIS paragraph said the same thing about
-# `tests/test_13450_ep_position_axis_participation.py` and quoted 1339/1338: that row is `main`'s at
-# this base (it landed with `#13450`'s own fold, and `fast_pool(main)` contains it), so reading it as
-# this lane's delta attributed a partition move to a row that had already merged — and its counts
-# were one short on both sides. Both corrected by measurement, not by editing a number into place.
-# ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
-# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
-# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
-# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
+# holds 1341 files at this head against 1340 on `origin/main` `f2d4f2408cf5`, read by running the
+# verb on one manifest per side (`origin/main`'s blob and this tree's), and the ONE addition THIS
+# lane brings is `tests/test_14691_structure_evidence.py`, the row registered by the commit that
+# added the T6 bundle's falsifiers. With nothing `main` carries missing from this tree, that one
+# row is the whole delta: measured, `set(fast_pool(head)) - set(fast_pool(main))` returns exactly
+# that file and the reverse difference is empty. ⛔ Two earlier revisions of this paragraph named a
+# row that was NOT this lane's — `tests/test_13450_ep_position_axis_participation.py` in this
+# branch's own copy, and `#14700`'s capture-refusal suite in the copy `main` folded in. At THIS base
+# both of those are `main`'s (each landed with its own fold, and `fast_pool(main)` contains both), so
+# reading either as this lane's delta attributes a partition move to a row that had already merged.
+# ⛔ Every OTHER row this tree carries is `main`'s at this head, NOT this lane's (`#14597`'s
+# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one
+# `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py`,
+# `#14700`'s capture-refusal suite, and the rest): each landed before this fold, and reading one of
+# them as this lane's delta would attribute a partition move to a row that did not cause it. The
 # name lists above are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
 # about THIS head — a fold re-derives them with the verb, it never carries them.
@@ -134,10 +148,17 @@ version: 1
 # describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
 # re-pointed.
-# ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb emits
-# here. Neither copy was picked either; the paragraph above is a third fresh re-derivation.
+# ⛔ IT HAS NOW ARRIVED SPLICED TWICE MORE, and both times the same way: on a rebase onto `origin/main`
+# `c1c8df1a3817` (the `#14700` lane) and again on THIS lane's rebase onto `origin/main`
+# `f2d4f2408cf5`. ⛔ The second one is worth reading, because `git rebase` reported SUCCESS and wrote
+# NO conflict: the `merge=union` driver applied both parents' hunks inside the rebase too, so a
+# conflicted-on-GitHub head rebased cleanly locally while the block it produced was a splice. Neither
+# copy described the tree either time — the first pair stated the earlier partition and a `1339`
+# pool against the `1340` the verb then emitted, and the second pair stated the nine/two partition
+# and `1340` against the eleven-at-one-figure and `1341` this tree emits. Neither side was picked
+# either time; the paragraph above is a fresh re-derivation each time, and the copies are deleted
+# rather than re-pointed. ⛔ A clean rebase is NOT evidence that this block is correct — run the verb
+# and the two header guards after every fold, not the git exit code.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
