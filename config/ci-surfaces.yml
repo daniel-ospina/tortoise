@@ -71,9 +71,11 @@ version: 1
 # ⛔ THE PARENT NAMED IN THAT CLAUSE IS THIS HEAD'S FOLD, not the `c1c8df1a` one the figure was
 # first read at (#14587 review P3): the `bbef0b88` fold re-derived the partition and the figure was
 # re-pointed WITHOUT the parent id, which left this clause (827.6, one bin) disagreeing with the
-# fifth-fold paragraph below (827.4/827.5, two bins, "at that head") over one and the same tree.
-# The rows listed are the `c1c8df1a` fold's because that is where they landed; the EMISSION is this
-# fold's, because the packer is greedy and one added row re-packs every bin.
+# REBASE paragraph below — "the 827.4/827.5 and 1340 the verb emitted at that head" — over the
+# very tree that paragraph names. The rows listed are the `c1c8df1a` fold's because that is where
+# they landed; the EMISSION is this fold's, because the packer is greedy and one added row re-packs
+# every bin. ⛔ The FIFTH-FOLD paragraph below is not the clause that disagreed: it states one bin
+# too, and says so of both parents' two-bin readings.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
