@@ -11377,7 +11377,28 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # this row, so a ban that read only `row` left the false claim reachable by renaming it.
             "The REGISTRATION is exempt; so is the `durations` entry",
             "The REGISTRATION is exempt, and the `durations` entry is too",
-            # ⛔ THE REVERSE ORDER OF THE SAME NOUN PHRASE (#14623 round 30, measured at round 29's
+            # ⛔ RULE 1's AUXILIARY SET and the coordination markers that name the row without
+            # restating the predicate (#14623 round 30): each of these was GREEN end-to-end at
+            # round 29's head, because the marker list carried only the copulas the paragraph
+            # happens to spell. ⛔ These were DROPPED by the round-33 merge onto round 32 and are
+            # restored here: without them the widened `_H_14544_AUX` and the `as well` /
+            # `included` / `the same goes for` branches are UNDRIVEN, which is the exact defect
+            # (a guard with no fixture) that let rounds 26-30 pass quietly.
+            "The REGISTRATION stayed exempt, as did the row",
+            "The REGISTRATION stays exempt, and so does the row",
+            "The REGISTRATION is exempt, and the row as well",
+            "The REGISTRATION is exempt, the row included",
+            "The REGISTRATION is exempt, and so is the weight it carries",
+            "The REGISTRATION is exempt, and so is its weight",
+            "The REGISTRATION is exempt, and the same goes for the row",
+            # ⛔ THE CLAUSE SCOPE, not a token count (#14623 round 30): a multi-WORD adverbial run
+            # and a comma-embedded one. Round 29's `{0,3}` bound refused both, and no fixture drove
+            # the bound — loosening it to `{0,9}` left the arm GREEN. Also dropped by the round-33
+            # merge and restored for the same reason.
+            "The REGISTRATION is exempt; the row is in every relevant respect exempt",
+            "The REGISTRATION is exempt; the row is more or less equally exempt",
+            "The REGISTRATION is exempt; the row is, all else equal, exempt",
+            # ⛔ THE REVERSE ORDER OF THE SAME NOUN PHRASE (#14623 round 31, measured at round 29's
             # head): the additive branch anchors the noun phrase AT the marker, and
             # `_H_14544_ROW_NOUN`'s determiner prefix stops one word short of `row` when `weight`
             # leads — so FIVE additive spellings returned `None` and the sentence shipped CLEAN
@@ -11448,6 +11469,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # ⛔ AN ADDITIVE MARKER WITH NO EXEMPTION — this block's own statement of fact:
             # `durations_floors` pins a declared value ALONGSIDE a row's weight.
             "`durations_floors` pins a declared value along with the row's measured weight.",
+            # ⛔ THE SAME TRUE STATEMENT WITH THE WEIGHT WORD THE PARAGRAPH ACTUALLY USES (#14623
+            # round 30, P2): the coordination `along with` carries its OWN subject, so it must not
+            # read the `exempt` in the sentence before it. Round 29 carried `previous`
+            # UNCONDITIONALLY and REFUSED this end-to-end; the branch-class test below is what
+            # drives the repair, and this fixture is the sentence it protects.
+            "`durations_floors` pins a declared value along with the row's weight.",
             # ⛔ AND THE LIVE BLOCK'S OWN SHAPE: the scope claim sharing a sentence with the row's
             # PROVENANCE clause. This is the case a whole-block co-occurrence test refuses.
             "The REGISTRATION is the ONLY half exempt: the bin is held by the "
@@ -11493,6 +11520,34 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     assert _h_14544_row_exempted("So is the row.", "The bin is held by that row in `durations`") is None, (
         "carrying the previous sentence must not manufacture an exemption that was never stated — "
         "a sentence about the row with no `exempt` in it cannot license `So is the row.`")
+    # ⛔ RULE 4's OTHER HALF (#14623 round 30, P2): which branch may read the previous sentence is a
+    # PROPERTY OF THE BRANCH. A COORDINATION carries its own subject, so it may NOT look one sentence
+    # back; carrying unconditionally refused this block's own TRUE statement of fact. Dropped by the
+    # round-33 merge and restored: without it the `anaph`/`ellip` group tagging is undriven, and a
+    # revert to the unconditional carry passes every other assertion here.
+    assert _h_14544_row_exempted(
+        "`durations_floors` pins a declared value along with the row's weight.",
+        "The REGISTRATION is the ONLY half exempt") is None, (
+        "a coordination marker read the previous sentence's `exempt` and refused TRUE prose — only "
+        "the anaphoric branches (named groups `anaph` / `ellip`) may look one sentence back")
+    # ⛔ RULE 2's WINDOW (#14623 round 30, P1): a negation OUTSIDE the window around the exemption
+    # must NOT switch the ban off. Every sentence of the live paragraph already contains one
+    # (`does NOT claim`, `cannot move`, `not restated`, `no-per-file-weight`), so round 29's
+    # sentence-wide veto left the ban OFF for the most realistic rewrite — folding the false claim
+    # into a live sentence as a clause. Dropped by the round-33 merge and restored: restoring the
+    # blanket veto passes every other assertion in this test.
+    # ⛔ THIS FIXTURE CARRIES A REAL NEGATION (`does NOT`) ON PURPOSE. A first restoration used the
+    # round-30 commit's own sentence, which contains no word `_H_14544_NEGATION_RE` matches — so it
+    # returned a hit on the PRE-FIX module too and graded nothing (measured against `c3f1c790d2`
+    # AND against this PR's own `1d34f80585`, both of which still veto sentence-wide). The negation
+    # is placed far enough before the marker that the window excludes it; that is what makes the
+    # assertion fail on a blanket veto instead of passing quietly under it.
+    assert _h_14544_row_exempted(
+        "`#14544` does NOT move a bin, and the pool entry is not restated; the REGISTRATION is "
+        "the ONLY half exempt, and so is the row.") is not None, (
+        "a negation elsewhere in a long clause licensed the row's exemption — Rule 2 is a WINDOW "
+        "around the exemption, never a sentence-wide veto, because every sentence of the graded "
+        "paragraph contains a negation of its own")
     assert _H_14544_INVERTED_RE.search(
         "both halves of this paragraph are graded by an arm each") is None, (
         "the inverted-claim pattern refuses the bare token pair with no exempt predicate near it, "
