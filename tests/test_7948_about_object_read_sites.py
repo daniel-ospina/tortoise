@@ -249,10 +249,11 @@ WHAT THIS PINS
    accepted-pair constant, so a predicate that breaks the other way also reds.
    ⛔ The floor is the ACCEPTED-PAIR count and NOT §13's cell-occurrence figure:
    measured at this head the arm accepts 28 pairs over 19 x SIXTEEN distinct table
-   doors (304 pairs), while §13 states 22 cell OCCURRENCES. Collapsing those two into
+   doors (304 pairs), while §13 states 23 cell OCCURRENCES. Collapsing those two into
    one number is how this paragraph came to cite 63 pairs of 340 with a floor of 29
    after the table grew. The
-   inputs are the TABLE's sixteen distinct doors, not the 99-tool registry, so adding a tool
+   inputs are the TABLE's sixteen distinct doors, not the tool REGISTRY — whose size
+   moves independently of the table — so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
@@ -1043,9 +1044,10 @@ def _site_fact_text(rel: str, line: int) -> str:
 
     The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the ten entries keep their Cypher in a
-    query CONSTANT their statement executes (`session_source_migration._DEGREE`
-    behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
+    was measured, not assumed: two of the TWELVE entries keep their Cypher in a query
+    CONSTANT their statement executes — three constants between them
+    (`session_source_migration._DEGREE` behind `_degree`, `_OUT_TYPES`/`_IN_TYPES`
+    behind `_rel_types`), and the
     derived SITE for those is the constant's own line. Without it the arm would
     have had to weaken those facts to the constant's NAME — a check that the
     entry still mentions a symbol, which is the unread claim it replaces.
@@ -3423,13 +3425,14 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: Measured at this head: how many of the table's own `(row, door)` pairs the
 #: attribution predicate accepts — 28, out of 19 x SIXTEEN distinct table doors = 304
 #: pairs — summed over the nineteen customer-callable rows, plus the worst single row.
-#: ⛔ THE `22` IN §13 IS NOT THIS NUMBER AND MUST NOT BE USED AS A DENOMINATOR HERE.
-#: §13 states 22 CELL OCCURRENCES over those 16 doors — the doors each row's own reach
+#: ⛔ THE `23` IN §13 IS NOT THIS NUMBER AND MUST NOT BE USED AS A DENOMINATOR HERE.
+#: §13 states 23 CELL OCCURRENCES over those 16 doors — the doors each row's own reach
 #: cell NAMES — while these constants pin the ACCEPTED PAIRS, which is a different and
-#: larger quantity: four rows accept more doors than their own cell names, and one of
-#: those four (row 45) is a documented OVER-COUNT rather than a door the cell omits.
+#: larger quantity: THREE rows accept more doors than their own cell names (rows 1, 2
+#: and 17), and every other customer-callable row accepts exactly the doors its cell
+#: names — row 45 included, whose cell names BOTH of its doors and both attribute.
 #: Inputs are the TABLE (whose doors change only when the
-#: document does) rather than the 99-tool registry, so a new tool does not move
+#: document does) rather than the tool REGISTRY, whose size moves on its own, so a new tool does not move
 #: these — which is what makes them pinnable.
 #: Re-derived 2026-10-21 when rows 34-37 landed: 63 -> 69. The added
 #: pairs are NEW rows with their own doors (`TortoiseSDK.traverse`,
@@ -3576,17 +3579,25 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # ⛔ `total` IS THE ACCEPTED-PAIR COUNT, NOT §13's CELL-OCCURRENCE FIGURE, and
     # the comment this replaces said "this figure IS that count" for as long as it
     # stood. Measured at this head through this arm's own path: `total` = 28 accepted
-    # (row, table-door) pairs; §13's 22 is the OCCURRENCE count, which `expected` in
-    # the door arm below is what actually grades. They differ on exactly four rows,
-    # and in TWO different ways — do not read the second as the first:
-    #   rows 1, 2 and 17 accept MORE doors than their cell names (cell count ->
-    #     accepted count): row 1 adds `SDK search_knowledge` (1 -> 2), rows 2 and 17
-    #     add `MCP tortoise_search` AND `SDK search_knowledge` (1 -> 3 each);
-    #   row 45 is the OVER-COUNT, not a missing door: its cell DOES name
-    #     `MCP tortoise_search`, precisely to refuse it ("naming it would be a FALSE
-    #     door … existence is not attribution"), and the predicate attributes it anyway
-    #     because a reference chain runs from the tool to the reader. Do NOT "fix"
-    #     that by adding the door the cell forbids.
+    # (row, table-door) pairs; §13's 23 is the OCCURRENCE count, which `expected` in
+    # the door arm below is what actually grades. They differ on exactly three rows,
+    # and in ONE way — those rows accept MORE doors than their cell names (cell count
+    # -> accepted count): row 1 adds `SDK search_knowledge` (1 -> 2), rows 2 and 17 add
+    # `MCP tortoise_search` AND `SDK search_knowledge` (1 -> 3 each).
+    # ⛔ ROW 45 USED TO BE THE OVER-COUNT IN THE OTHER DIRECTION, and the earlier cut of
+    # this comment said so: its cell refused `MCP tortoise_search` ("naming it would be
+    # a FALSE door … existence is not attribution") while the predicate attributed it
+    # anyway. That reading was REFUTED by measurement (`#14592`, and the door arm's note
+    # below records it): neither door FORWARDS an `ended_scope` the caller can set — the
+    # SDK door's `**filters` BINDS it and answers the wrong population silently, and the
+    # MCP door rejects it loudly, so "no surface accepts it" is wrong about the SDK half —
+    # and the scope is set INSIDE the shared `_tortoise_fts_query` by
+    # `state_intent.detect_state_question` — so `handler -> tortoise_fts_query ->
+    # enumerate_ended -> build_cypher` runs for either handler and the flag need not be
+    # passed at all. §13's row 45 therefore names BOTH doors, the row agrees with the
+    # predicate, and the discrepancy is GONE rather than papered over; do NOT "fix" it
+    # back by deleting the door the old cell forbade — that would restore a false claim
+    # about a door that answers the query.
     # So the floor names the CEILING's own constant: the arm is then exact in both
     # directions with ONE numeral to move when the table changes, and neither
     # direction can drift from the other. At the `21` this line carried on `main`,
@@ -3710,14 +3721,25 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It IS 22
+    # a derived floor would inherit exactly the blindness it is here to catch. It IS 23
     # at this head, and the chain that produced it starts here: the table lost its SDK
     # traversal row when that method was retired
     # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
     # MCP door with it (30 -> 29), #12901 retired the row's surviving SDK door
     # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
-    # (`ended.py::build_cypher`), whose ONE door is the SDK's (28 -> 29 — its MCP twin
-    # cannot pass `ended_scope`, so it is not a door; see that row's reach cell).
+    # (`ended.py::build_cypher`) with ONE door, the SDK's (28 -> 29).
+    # ⛔ The "its MCP twin cannot pass `ended_scope`, so it is not a door" reading of
+    # that row was refuted by measurement: NEITHER door FORWARDS `ended_scope` (the SDK
+    # door's `**filters` binds it and answers the wrong population silently; the MCP door
+    # rejects it loudly) — the
+    # scope is set INSIDE the shared `_tortoise_fts_query` when the query is a plain
+    # ending question (`state_intent.detect_state_question`), and both handlers forward
+    # the plain query with default knobs, so the router fires for either and the chain
+    # the arm follows IS the reach path. Row 45 therefore names BOTH doors and this
+    # numeral moved 22 -> 23 with that cell — a CELL-OCCURRENCE move only: no new
+    # DISTINCT door (`MCP tortoise_search` was already in the table's door set) and no
+    # new accepted PAIR (the predicate already accepted this one, so the 28-pair pin
+    # does not move).
     # ⛔ #13899 then retired ten SDK-door occurrences and re-pointed two (29 -> 21): the
     # six methods those cells named (`tortoise_fts_query`, `recall_state`,
     # `recall_subgraph`, `belief_timeline`, `topic_summarize`, `ingest`) all left the
@@ -3725,16 +3747,27 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # inside the hop budget (`search_knowledge` was measured and does NOT), so their cell
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
-    # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
-    # ⛔ `#14682`'s fix, landed on `main` in #14671 (`c1c8df1a3817`), registered row 46
-    # (`entity_reads.py::entity_relations`), whose ONE
-    # door is the REST route `GET /v1/entities/{entity_id}/relations` (21 -> 22): the
-    # route handler calls the reader directly, so it is one reference inside the
-    # default hop budget.
-    # A table change moves this numeral with the table.
-    assert attributed >= 22, (
+    # `search_knowledge` (measured to reach `ended.py::build_cypher` through the
+    # state-question router — NOT through an `ended_scope` keyword, which no public door
+    # forwards: the flag is set inside `_tortoise_fts_query` from the QUESTION itself).
+    # A table change moves this numeral with the table — 21 -> 22 where row 46
+    # (`entity_reads.py::entity_relations`) arrived naming ONE door, the REST route
+    # `GET /v1/entities/{entity_id}/relations` (`#14682`'s fix, landed on `main` in
+    # `#14671` at `c1c8df1a3817`: the route handler calls the reader directly, so it is
+    # one reference inside the default hop budget) — and 22 -> 23 where row 45's cell
+    # names its SECOND door (`MCP tortoise_search`; the note above records the
+    # measurement that refuted the "not a door" reading). Both moves are
+    # CELL-OCCURRENCE moves: the distinct door set is 16 either way and the
+    # accepted-PAIR pin is 28 either way. ⚠️ The `21 -> 22` move was made TWICE and
+    # INDEPENDENTLY — this branch first (row 46 registered in `84c2e91e7d15`,
+    # 2026-11-25 16:20 UTC), and `main` later through `#14671` (`c1c8df1a3817`,
+    # 2026-11-26 02:11 UTC). The earlier cut of this note attributed the move to
+    # `#14592`'s head alone; the reconcile then swung to attributing it to `main`
+    # alone. Both are half the story, and neither side owns it. This branch's additive
+    # moves are the `22 -> 23` bump above and the row-45 correction.
+    assert attributed >= 23, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 22 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 23 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
@@ -4133,11 +4166,10 @@ _13_8_ENUMERATION = (
     # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
     # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
     # retired row 32, and 17 -> 18 when #13448 added the `ended.py::build_cypher` row —
-    # NOT #8542, whose merged commit `8a04a96630` does not carry that row — and
-    # 18 -> 19 when this branch's `5a86688cf7` registered §13 row 46 for
-    # `entity_reads.py::entity_relations` — NOT `#14592`, which is the parent programme
-    # issue and carries no such registration), so
-    # this marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
+    # NOT #8542, whose merged commit `8a04a96630` does not carry that row), so this
+    # marker tracks it. 18 -> 19 at `#14592`'s head (`cy-14593`): `entity_reads.py::entity_relations`
+    # is §13 row 46, a customer-callable reader behind `GET /v1/entities/{entity_id}/relations`.
+    # The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
     "Outside this nineteen, two are default-ON on the ingestion path",
@@ -5774,17 +5806,18 @@ def test_the_module_filter_admits_a_split_traversal():
     # carries in those files — `_export_graph_snapshot`,
     # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
     # is PRE-EXISTING, so P7 added none of them.
-    # ⛔ 29/43 -> 30/45 with this branch's `5a86688cf7` ("fix(14682)"; the reader itself
-    # arrived from `#14593`, "read parity"):
-    # `tortoise/entity_reads.py` arrived carrying TWO untyped walks —
-    # `entity_relations`' outgoing `-[r]->` and its reverse `<-[r]-`, one site
-    # each — and `_resolve` inlines the `inner` statement into the
-    # `CALL { {inner} }` wrapper that executes it, so BOTH the `inner` statement
-    # and the `query` statement that spells the wrapper derive: the corpus gains
-    # exactly ONE symbol key and TWO rows. ⛔ The site DECLARES the read (§13
-    # row 46) rather than registering an exclusion, because it returns `type(r)`
-    # and the edge's `label`/`idx` — it asks what the referent says, which is the
-    # one thing an `EMPTY_PATTERN` entry asserts the walk cannot do.
+    # ⛔ 29/43 -> 30/45 at `#14592`'s head (`cy-14593`): `tortoise/entity_reads.py`
+    # arrived with ONE symbol (`entity_relations`, the relations preview) whose
+    # relations query is built in TWO string statements — `inner` (which carries the
+    # untyped hop in BOTH directions, `-[r]->` and its `UNION ALL` reverse) and the
+    # `CALL { … }` consumer that re-assembles it — and the derivation keys BOTH as
+    # sites, so the corpus gains exactly ONE key and TWO rows. ⚠️ The two rows are the
+    # two STATEMENTS, not the two directions: each statement is walked in both
+    # orientations, so deleting either direction would leave the count at 30/45, while
+    # dropping either statement moves it. It is declared as a §13 ROW (row 46)
+    # rather than an `EMPTY_PATTERN` entry for row 42's reason: the walk DOES read the
+    # edge for a referent (the mechanism IS part of the answer), so the honest
+    # declaration is a row, and the entry form would assert a fact that is not true.
     assert (len(sites), sum(len(lines) for lines in sites.values())) == (30, 45), (
         "the empty-pattern derivation moved off 30 symbol keys / 45 site rows "
         f"({len(sites)} keys, "
