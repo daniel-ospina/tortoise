@@ -1706,11 +1706,13 @@ _RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|
 # actually there") failed the "must keep its restart cue" assert (measured) and
 # silently stopped the paragraph being graded at all.
 _RESTART_CUE_RE = re.compile(_RESTART_CUE_TEXT, re.IGNORECASE)
-#: The restart WORD, for the prose anchor only — `\brestart` covers the imperative,
-#: the gerund AND the passive participle, so the anchor can ask "does a
-#: non-blockquote paragraph still instruct a restart?" without touching the cue set
-#: the ORDER grader positions against (see the note on `_RESTART_CUE_TEXT`).
-_RESTART_WORD_RE = re.compile(r"\brestart", re.IGNORECASE)
+#: The restart as a PASSIVE, for the prose anchor only — `After the client is
+#: restarted, confirm the tools are actually there.` is the same instruction with
+#: the client first, and it is not an imperative so it is not a cue (see the note
+#: on `_RESTART_CUE_TEXT`: a passive arm THERE steals the cue position from a
+#: pre-cue clause). The anchor asks only "is a restart instruction still in prose".
+_RESTART_PASSIVE_RE = re.compile(
+    r"\b(?:is|are|was|were|has been|have been)\s+restarted\b", re.IGNORECASE)
 
 
 def _cue_start(text: str) -> int:
@@ -4012,9 +4014,20 @@ _PAST_TIME_ADVERBIAL = (
     # claim, i.e. the inversion. The one exception is a QUALIFIED restart, which
     # names a past event rather than the one being ordered: `before the LAST
     # restart` is a past-time adverbial, `before THE RESTART` is the upcoming one.
+    # ⛔ AND THE QUALIFIER MAY BE FOLLOWED BY THE CLIENT NOUN, which is the same
+    # one-inserted-word defect one member over: the exclusion demanded
+    # `last|previous|earlier|first` IMMEDIATELY followed by `restart`, so
+    #     … before the last restart, …          GREEN  (pinned row)
+    #     … before the last CLIENT restart, …   RED    (measured at `724d094bd1e`)
+    #     … before YOUR FIRST client restart,…  RED
+    # — the verdict turned on inserting the very noun the instruction names, the
+    # "synonym decides the verdict" class this file forbids (#14679 review at
+    # `724d094bd1`). The noun set is the closed one `_RESTART_CUE_TEXT` uses.
     r"|(?:before|prior)(?:(?!\s+(?:\w+\s+){0,4}restart(?:ing|s|ed)?\b)"
     r"|\s+(?:the|a|an|this|that|your|my|its|their|our)\s+"
-    r"(?:last|previous|earlier|first)\s+restart(?:ing|s|ed)?\b)"
+    r"(?:last|previous|earlier|first)\s+"
+    r"(?:(?:client|app|IDE|editor|application|session|server|connector)\s+)?"
+    r"restart(?:ing|s|ed)?\b)"
     # ⛔ AND THE PREPOSITION+ARTICLE ARE OPTIONAL: `last session` / `last run` are
     # ordinary past-time prose, and requiring `in the` made the verdict turn on an
     # article — the one-synonym flip this file forbids (measured, review cycle 59).
@@ -4726,8 +4739,19 @@ def test_3232_generic_restart_lines_are_exact():
     # which is precisely what this file refuses elsewhere. Removed rather than
     # left in: a reader who believed it load-bearing would believe the wrong arm
     # was protecting the bound.
-    prose_cues = [p for p in quick.split("\n\n")
-                  if _RESTART_WORD_RE.search(_DECORATION_RE.sub(" ", p))
+    # ⛔ AND THE ANCHOR MUST TEST AN INSTRUCTION, NOT THE WORD. The first spelling of
+    # this fix used `_RESTART_WORD_RE` (`\brestart`) and was TOO WEAK, measured at
+    # `724d094bd1e`: `Confirm the tools are actually there first — the restart of the
+    # client comes after that, …` is a NOUN-PHRASED INVERSION and the suite stayed
+    # at 841 passed, as did `The restart happens after you confirm the tools …` and
+    # `A restart is needed after provisioning.` with `:135` deleted. Trading the
+    # false reds of cycle 61 for this false PASS is not a fix. The anchor therefore
+    # accepts an IMPERATIVE/gerund cue or a PASSIVE restart, both decoration-stripped:
+    # that keeps `**Restart** your client, …` and `After the client is restarted, …`
+    # GREEN while every noun phrasing above returns to RED.
+    stripped = {p: _DECORATION_RE.sub(" ", p) for p in quick.split("\n\n")}
+    prose_cues = [p for p, s in stripped.items()
+                  if (_RESTART_CUE_RE.search(s) or _RESTART_PASSIVE_RE.search(s))
                   and not p.lstrip().startswith(">")]
     assert prose_cues, (
         "docs/quickstart-cloud.md must keep a NON-blockquote paragraph that "
@@ -5007,6 +5031,8 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("However confirm the tools are actually there. Restart your client, then "
      "confirm the tools are actually there.", True),
     ("Nevertheless confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Nonetheless confirm the tools are actually there. Restart your client, then "
      "confirm the tools are actually there.", True),
     # …while an adversative in a FORWARD post-cue clause orders nothing: the
     # restart still comes first, so this must stay GREEN (it does with and
@@ -7403,6 +7429,15 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("If you confirmed the tools before the last restart, restart your client, "
      "then confirm the tools are actually there.", False),
     ("If you confirmed the tools before your previous restart, restart your "
+     "client, then confirm the tools are actually there.", False),
+    #    …and the QUALIFIER may carry the client noun: the exclusion demanded
+    #    `last|previous|…` IMMEDIATELY before `restart`, so inserting the very noun
+    #    the instruction names flipped the verdict GREEN→RED (measured at
+    #    `724d094bd1` — #14679 review). Same class as every other one-inserted-word
+    #    slot in this file; the noun set is `_RESTART_CUE_TEXT`'s.
+    ("If you confirmed the tools before the last client restart, restart your "
+     "client, then confirm the tools are actually there.", False),
+    ("If you confirmed the tools before your first app restart, restart your "
      "client, then confirm the tools are actually there.", False),
     #    (b) the would-a-form-grade-it gate is no longer nested inside the frame
     #    test, so a remainder with no recognised frame word reaches it too.
