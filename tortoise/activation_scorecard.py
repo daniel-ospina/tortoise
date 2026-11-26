@@ -387,8 +387,12 @@ FUNNEL_QUERY = (
 # place). Those 243 are exactly what the population lost: 150 above the pivot and
 # 93 below, which is why the citing-file count fell by one and nothing else moved.
 # So a reader who re-measures the old appendix gets 244/150/93 and a reader who
-# re-measures the tree gets 485/7/477: both are right, they count different trees,
-# and neither licenses typing a figure here.
+# re-measures the tree gets the live triple the note above states: both are right,
+# they count different trees, and neither licenses typing a figure here — ⛔ which is
+# why this paragraph types NEITHER. A live figure copied down here is an ungraded
+# duplicate of a graded one: `--refresh` rewrites the note and leaves the copy, so the
+# very base move that repairs one side re-opens the contradiction (#14625 review, P2,
+# measured by running the module's own refresh over a hypothetical next base).
 # ⛔ THE FOUR DERIVED FIGURES IN THE PARAGRAPH ABOVE ARE DELIBERATELY NOT IN A
 # `_NOTES` ROW, and that is a LIMIT rather than an omission: they describe a tree
 # that no longer exists (the pre-split appendix), so `--check` — which recomputes
@@ -397,7 +401,8 @@ FUNNEL_QUERY = (
 # `main` landed `#14592`, the base tree read **728** distinct targets over **208**
 # citing files, the appendix's 244 split 150 above / 93 below / 1 at the pivot, and
 # the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
-# not 242, and the tree reads **485/7/477**, not 483/7/475. ⛔ AND THE RECOUNT IS A BASE
+# not 242, and the tree's live reading is the note above's, not the 483/7/475 an
+# earlier cut of this sentence typed. ⛔ AND THE RECOUNT IS A BASE
 # CHANGE, NOT AN ERROR — state it that way, because `242` was CORRECT where it was
 # written. At `939e37f664` (the base the first version used) that base's OWN pivot was
 # `28477`, not this base's `29666`: on ITS pivot the appendix's 244 split 150 above it /
