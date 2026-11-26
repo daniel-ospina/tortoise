@@ -471,12 +471,12 @@ _CAPTURE_SESSIONS: dict[str, int] = {}
 # regression that predicate exists to prevent.
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
-# #14700: this was the ONLY refusal on `POST /v1/sessions` carrying no `code=`,
-# so a client could not tell it from the SIBLING 409 the same route answers —
-# "Session recording is disabled for this team/graph", an org-policy state that
-# no amount of waiting clears. Measured cost (2026-11-25): `reflect-hook` logged
-# `HTTP 409 retry_after=30s` for both, retried the policy one exactly like a
-# capacity refusal, and neither the log nor any surface said which fault it was.
+# #14700: NEITHER of this route's two `409`s carried a `code` — this one, and its
+# SIBLING "Session recording is disabled for this team/graph", an org policy no
+# amount of waiting clears — so no log line said which fault it was. Measured cost
+# (2026-11-25): `reflect-hook` logged `HTTP 409 retry_after=30s`, which names no
+# class — the client re-arms on its own `30 s x 2^(n-1)` backoff and reads no
+# `Retry-After` (the #12992 note below), so WHICH `409` it was is NOT determined.
 # The `code` is the branch key; the message stays byte-identical so a legacy
 # reader that matches prose keeps matching (#12992's rule for the 429).
 _CAPTURE_SESSION_IN_FLIGHT_CODE = "capture_session_in_flight"

@@ -11,8 +11,8 @@ waiting:
 * "Session recording is disabled for this team/graph" — an org POLICY the user
   has to reverse, which no retry can clear.
 
-Until #14700 only the first was typed and **neither** carried a `code`, so the
-client could not tell them apart. Measured (`~/.tortoise/capture-retry.log`,
+Before #14700 **neither** `409` was typed (the capacity `429` was) and neither carried
+a `code`, so the client could not tell them apart. Measured (`~/.tortoise/capture-retry.log`,
 2026-11-25T21:29:44Z, session `0d568953-…`):
 
     [reflect-hook] capture retry STARTED (pid 39569, attempt 2/4, last: HTTP 409 retry_after=30s)
